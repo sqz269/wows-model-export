@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wows-model-export"
+version = "0.1.0a0"
+description = "Extraction pipeline for World of Warships assets (producer for Unity / Blender / web consumers)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Zong" }]
+keywords = ["world-of-warships", "wows", "gltf", "asset-pipeline", "wargaming"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+]
+
+# Runtime deps audited from `tools/` imports survey (2026-05-13):
+#   numpy   — bw_geometry, rig_normalize_bones, compare_skin_meshes, synth_emission
+#   scipy   — compare_skin_meshes (cKDTree only; could later drop in favour of a
+#             small custom kd-tree if scipy footprint matters)
+#   pillow  — synth_emission (DDS round-trip via numpy + PIL)
+#   ijson   — compare_exterior_swaps (streams the 2.8 GB GameParams cache)
+#
+# Everything else (json, struct, subprocess, pathlib, xml.etree, dataclasses,
+# argparse, hashlib, gettext-style .mo decoder) is stdlib.
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pillow>=10.0",
+    "ijson>=3.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4",
+    "mypy>=1.8",
+]
+
+# CLI entry points — populated as composers land. The scaffold ships none;
+# uncommenting follows the rollout order in migration/PIPELINE_REFACTOR.md.
+[project.scripts]
+# wows-ingest-ship          = "wows_model_export.cli.ingest_ship:main"
+# wows-scaffold-ship        = "wows_model_export.cli.scaffold_ship:main"
+# wows-skel-ext-resolve     = "wows_model_export.cli.skel_ext_resolve:main"
+# wows-build-accessory-lib  = "wows_model_export.cli.build_accessory_library:main"
+# wows-build-projectile-lib = "wows_model_export.cli.build_projectile_library:main"
+# wows-build-decal-lib      = "wows_model_export.cli.build_decal_library:main"
+# wows-build-ammo-profiles  = "wows_model_export.cli.build_ammo_profiles:main"
+# wows-ingest-skin-pack     = "wows_model_export.cli.ingest_skin_pack:main"
+# wows-find-ship-variants   = "wows_model_export.cli.find_ship_variants:main"
+# wows-teardown-ship        = "wows_model_export.cli.teardown_ship:main"
+# wows-publish              = "wows_model_export.cli.publish:main"
+# wows-snapshot             = "wows_model_export.cli.snapshot:main"
+
+[project.urls]
+Homepage = "https://github.com/sqz269/wows-model-export"
+Repository = "https://github.com/sqz269/wows-model-export"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["wows_model_export*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",  # line length — formatter handles
+]

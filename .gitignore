@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.venv/
+venv/
+env/
+.coverage
+htmlcov/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Type-check stubs from setuptools-scm if used later
+_version.py
+
+# Local config — users set WOWS_WORKSPACE / WOWS_GAME_DIR / WOWS_TOOLKIT_BIN
+# via env vars or a personal config file; the file itself is not committed.
+wows_model_export.toml
+.env
+.env.local
+
+# Workspace data must never enter the public mirror. Even though the
+# convention puts workspace at $WOWS_WORKSPACE (default outside the repo),
+# guard against accidental in-repo workspace dirs from local experiments.
+/workspace/
+/.cache/
+/libraries/
+/maps/
+
+# Scratch / ad-hoc work
+scratch/
+tmp/
+*.tmp
+
+# Webview build artifacts (webview/.gitignore handles its own subtree;
+# this catches in case a build leaks up).
+/webview/dist/
+/webview/node_modules/
