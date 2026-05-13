@@ -82,8 +82,12 @@
         <span>{progress}</span>
         {#if loadStats}
           <span class="muted">
-            · {loadStats.placementsRendered}/{loadStats.placementsRequested} placements · {loadStats.hullMeshCount}
-            hull meshes
+            · {loadStats.placementsRendered}/{loadStats.placementsRequested} placements · {loadStats.attachmentsRendered}
+            attached
+            {#if loadStats.attachmentsFilteredByMisc > 0}
+              ({loadStats.attachmentsFilteredByMisc} miscFilter-dropped)
+            {/if}
+            · {loadStats.hullMeshCount} hull meshes
             {#if loadStats.unresolvedAssets.size > 0}
               · <span class="warn">{loadStats.unresolvedAssets.size} unresolved</span>
             {/if}

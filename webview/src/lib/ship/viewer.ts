@@ -43,15 +43,26 @@ import {
 import { applyAllStates } from './damage_cascade';
 import { classifyHullScene, type ClassifiedHull } from './classify_hull';
 import { defaultSeamStates } from './visibility';
-import { applyPlacementMatrix, tagAndIndexInstance, type LodPolicy } from './placement';
+import {
+  applyAttachedMatrix,
+  applyPlacementMatrix,
+  tagAndIndexInstance,
+  type LodPolicy,
+} from './placement';
 import { AccessoryCache } from './accessory_loader';
+import { AttachedDocCache } from './attached_loader';
 import { TextureManager } from './textures';
+import { LOD_RE } from './visibility';
 
 export interface ShipLoadStats {
   ship: ShipSummary;
   hullMeshCount: number;
   placementsRequested: number;
   placementsRendered: number;
+  /** Attached children (WG-runtime-composed bundled miscs) rendered. */
+  attachmentsRendered: number;
+  /** Attached entries dropped by the per-HP miscFilter whitelist. */
+  attachmentsFilteredByMisc: number;
   loadMs: number;
   unresolvedAssets: Map<string, number>;
   skinCount: number;
@@ -67,9 +78,10 @@ export class ShipViewer {
   private hullRoot: THREE.Object3D | null = null;
   private sectionGroups: Record<ShipSectionKey, THREE.Group>;
 
-  // GLB loaders + accessory cache
+  // GLB loaders + accessory caches
   private hullLoader = new GLTFLoader();
   private accessoryCache = new AccessoryCache();
+  private attachedDocCache = new AttachedDocCache();
 
   // Hull classification (rebuilt per ship)
   private classified: ClassifiedHull = {
@@ -197,6 +209,36 @@ export class ShipViewer {
     }
     const placementsDoc = (await placementsRes.json()) as ShipPlacementsDoc;
 
+    // Build the per-HP miscFilter lookup from sidecar mounts. WG runtime
+    // treats miscFilter as a WHITELIST (verified 2026-05-08 from
+    // MiscsController._getMiscsForLoading) — three states:
+    //   - undefined         → render every attached_live (no filter info)
+    //   - []                → drop every non-isStyle attachment (gates
+    //                          Halloween/Skin bleed-through like JD124
+    //                          → MP_XM410_Skin_Director on base ships)
+    //   - [<placement_id>…] → render only listed entries
+    // Keyed by instance_id since hp_name is only unique within a typed
+    // group, not across them.
+    const miscFilterByInstanceId = new Map<string, string[]>();
+    if (sidecar) {
+      const groups: (typeof sidecar.turrets)[] = [
+        sidecar.turrets,
+        sidecar.secondaries,
+        sidecar.antiair,
+        sidecar.torpedoes,
+        sidecar.accessories,
+      ];
+      for (const grp of groups) {
+        if (!grp) continue;
+        for (const m of grp) {
+          if (!m.instance_id) continue;
+          if (m.misc_filter !== undefined) {
+            miscFilterByInstanceId.set(m.instance_id, m.misc_filter);
+          }
+        }
+      }
+    }
+
     // Flatten typed sections into one queue.
     const queue: { section: ShipSectionKey; placement: ShipPlacement }[] = [];
     for (const section of SHIP_SECTIONS) {
@@ -215,6 +257,8 @@ export class ShipViewer {
 
     let loadedAssets = 0;
     let renderedPlacements = 0;
+    let attachmentsRendered = 0;
+    let attachmentsFilteredByMisc = 0;
     const unresolved = new Map<string, number>();
     const tasks = Array.from(byAsset.entries());
     let cursor = 0;
@@ -229,25 +273,53 @@ export class ShipViewer {
           unresolved.set(assetId, places.length);
           loadedAssets++;
           report(
-            `Loaded ${loadedAssets}/${tasks.length} accessory types · ${renderedPlacements} placements`,
+            `Loaded ${loadedAssets}/${tasks.length} types · ${renderedPlacements} placements · ${attachmentsRendered} attached`,
           );
           continue;
         }
 
-        const tpl = await this.accessoryCache.load(libEntry.glb);
+        // Load host template + attached_accessories.json in parallel.
+        // For hosts without a bundle (~most assets) the doc resolves to
+        // null; the inner loop short-circuits.
+        const [tpl, attachedDoc] = await Promise.all([
+          this.accessoryCache.load(libEntry.glb),
+          this.attachedDocCache.load(libEntry),
+        ]);
         if (!tpl) {
           unresolved.set(assetId, places.length);
           loadedAssets++;
           report(
-            `Loaded ${loadedAssets}/${tasks.length} accessory types · ${renderedPlacements} placements`,
+            `Loaded ${loadedAssets}/${tasks.length} types · ${renderedPlacements} placements · ${attachmentsRendered} attached`,
           );
           continue;
         }
 
-        // Bind THIS asset's texture sets before cloning so the
-        // per-material-vs-asset-level key fallback in registerAccessoryMesh
+        // Bind host's texture sets before cloning so registerAccessoryMesh
         // sees populated schemes.
         this.textures.bindLibraryAsset(assetId, libEntry, sidecar, hullBaseUrl);
+
+        // Pre-warm every distinct attached-child template + bind its
+        // texture sets. The accessoryCache dedupes across hosts so a
+        // child bundled by N main turrets is fetched once. Resolved
+        // templates are stashed locally so the per-placement loop below
+        // can clone them synchronously.
+        const attachedChildTpls = new Map<string, THREE.Object3D | null>();
+        if (attachedDoc && attachedDoc.attachments_live.length > 0) {
+          const childIds = new Set<string>();
+          for (const att of attachedDoc.attachments_live) childIds.add(att.asset_id);
+          const childPromises = Array.from(childIds).map(async (cid) => {
+            const childLib = library.assets[cid];
+            if (!childLib) {
+              attachedChildTpls.set(cid, null);
+              unresolved.set(cid, (unresolved.get(cid) ?? 0) + 1);
+              return;
+            }
+            this.textures.bindLibraryAsset(cid, childLib, sidecar, hullBaseUrl);
+            const tpl = await this.accessoryCache.load(childLib.glb);
+            attachedChildTpls.set(cid, tpl);
+          });
+          await Promise.all(childPromises);
+        }
 
         for (const e of places) {
           const inst = tpl.clone(true);
@@ -264,7 +336,6 @@ export class ShipViewer {
           );
           this.placementColorEntries.push(...colorEntries);
           this.placementLowLodMeshes.push(...lowLodMeshes);
-          // Register each placement mesh in the texture pipeline.
           inst.traverse((obj) => {
             const m = obj as THREE.Mesh;
             if (!m.isMesh) return;
@@ -272,11 +343,66 @@ export class ShipViewer {
           });
           this.sectionGroups[e.section].add(inst);
           renderedPlacements++;
+
+          // Attached accessories. Resolve HP-side miscFilter (sidecar
+          // Phase 6 autofill takes precedence over any value the
+          // placements JSON might carry).
+          if (attachedDoc && attachedDoc.attachments_live.length > 0) {
+            const filterList: string[] | null =
+              miscFilterByInstanceId.get(e.placement.instance_id) ??
+              e.placement.misc_filter ??
+              null;
+            const filterSet = filterList && filterList.length > 0 ? new Set(filterList) : null;
+            const dropAll = filterList !== null && filterList.length === 0;
+
+            for (const att of attachedDoc.attachments_live) {
+              if (dropAll) {
+                attachmentsFilteredByMisc++;
+                continue;
+              }
+              if (filterSet !== null && !filterSet.has(att.placement_id)) {
+                attachmentsFilteredByMisc++;
+                continue;
+              }
+              const childTpl = attachedChildTpls.get(att.asset_id);
+              if (!childTpl) continue;
+
+              const childInst = childTpl.clone(true);
+              applyAttachedMatrix(childInst, att.transform.matrix);
+              childInst.userData.attached_to_instance_id = e.placement.instance_id;
+              childInst.userData.attached_placement_id = att.placement_id;
+              childInst.userData.attached_asset_id = att.asset_id;
+              childInst.userData.section = e.section;
+              inst.add(childInst);
+
+              // Build a per-child placement so camo classification reads
+              // the child's own scope/category (catches misc/plane/float
+              // routing for catapults, rangefinders, ammo boxes).
+              const childLib = library.assets[att.asset_id];
+              const childPlacement: ShipPlacement = {
+                ...e.placement,
+                asset_id: att.asset_id,
+                scope: childLib?.scope ?? e.placement.scope,
+                category: childLib?.category ?? e.placement.category,
+                subcategory: childLib?.subcategory ?? e.placement.subcategory,
+              };
+              childInst.traverse((obj) => {
+                const cm = obj as THREE.Mesh;
+                if (!cm.isMesh) return;
+                if (LOD_RE.test(cm.name || '')) {
+                  this.placementLowLodMeshes.push(cm);
+                  if (this.lodPolicy === 'lod0') cm.visible = false;
+                }
+                this.textures.registerAccessoryMesh(cm, childPlacement);
+              });
+              attachmentsRendered++;
+            }
+          }
         }
 
         loadedAssets++;
         report(
-          `Loaded ${loadedAssets}/${tasks.length} accessory types · ${renderedPlacements} placements`,
+          `Loaded ${loadedAssets}/${tasks.length} types · ${renderedPlacements} placements · ${attachmentsRendered} attached`,
         );
       }
     };
@@ -299,6 +425,8 @@ export class ShipViewer {
       hullMeshCount,
       placementsRequested: queue.length,
       placementsRendered: renderedPlacements,
+      attachmentsRendered,
+      attachmentsFilteredByMisc,
       loadMs,
       unresolvedAssets: unresolved,
       skinCount: this.textures.getSkins().length,
@@ -334,6 +462,7 @@ export class ShipViewer {
     this.placementLowLodMeshes.length = 0;
     this.seamStates = defaultSeamStates();
     this.textures.clearShip();
+    this.attachedDocCache.clear();
   }
 
   setSectionVisible(section: ShipSectionKey, visible: boolean): void {
