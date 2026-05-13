@@ -1,0 +1,75 @@
+/* Foundational styles: variables, layout, typography.
+ * Route-specific styling lives inside the corresponding .svelte file
+ * (scoped automatically by Svelte). This file owns only what every page
+ * sees: the color palette, the page shell, link/button defaults. */
+
+:root {
+  color-scheme: dark;
+  --bg: #0e1015;
+  --bg-side: #161922;
+  --bg-elev: #1c2030;
+  --bg-elev-2: #242a3b;
+  --fg: #d8dde8;
+  --fg-dim: #9199ab;
+  --fg-muted: #6b7284;
+  --accent: #6ea8fe;
+  --accent-bg: #2b4470;
+  --border: #2e3345;
+  --danger: #ff6b6b;
+  --warn: #ffc061;
+
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+
+  font-family: var(--font-sans);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+body {
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 0;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--bg-elev);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+.muted {
+  color: var(--fg-muted);
+}

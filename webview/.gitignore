@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.vite/
+*.log
+*.tsbuildinfo
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Local env (workspace location, etc) — `.env.example` is checked in.
+.env
+.env.local
+.env.*.local
