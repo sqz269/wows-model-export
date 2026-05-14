@@ -6,11 +6,49 @@ location is resolved via `PipelineConfig.toolkit_bin` (env var
 `WOWS_TOOLKIT_BIN`, then `shutil.which("wowsunpack")`, then a build-time
 default).
 
-Public symbols are added here as the corresponding lift lands. The
-scaffold ships an empty namespace; see `migration/PIPELINE_API.md` §"Layer
-2: toolkit" for the planned shape.
+Public surface — one function per `wowsunpack` subcommand we care about:
+
+    Ship / asset export:
+        export_ship          — full ship → single GLB + side files
+        export_model         — single accessory / sub-model → GLB
+        batch_export_model   — many sub-models in one invocation
+
+    Data dumps:
+        armor_json           — armor materials_table + zones
+        ammo_json            — per-shell ballistic profiles
+        dump_gameparams      — GameParams JSON dump
+        dump_bones           — asset bone tree → JSON
+        fetch_bones          — asset bone tree → parsed dict
+        metadata_json        — VFS manifest
+
+    File ops:
+        extract              — pull files from VFS by glob
+        swizzle_dir          — emit glTF-conformant DDS siblings
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from .ammo import ammo_json
+from .armor import armor_json
+from .bones import dump_bones, fetch_bones
+from .gameparams import dump_gameparams
+from .ship import batch_export_model, export_model, export_ship
+from .swizzle import swizzle_dir
+from .vfs import extract, metadata_json
+
+__all__ = [
+    # Ship / asset export
+    "export_ship",
+    "export_model",
+    "batch_export_model",
+    # Data dumps
+    "armor_json",
+    "ammo_json",
+    "dump_gameparams",
+    "dump_bones",
+    "fetch_bones",
+    "metadata_json",
+    # File ops
+    "extract",
+    "swizzle_dir",
+]

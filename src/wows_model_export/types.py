@@ -94,11 +94,17 @@ class ToolkitResult:
     `export_model --raw-dds-dir`, etc. `stderr` is captured even on
     success (the toolkit prints diagnostics there); consumers can
     surface or discard it.
+
+    `data` is an optional structured payload for subcommands that emit
+    parseable summary information beyond a file write — `swizzle_dir`
+    fills it with `{"processed": N, "siblings_written": M}` for
+    example. Most subcommands leave it `None`.
     """
 
     output_paths: tuple[Path, ...]
     stderr:       str
     elapsed_ms:   float
+    data:         dict | None = None
 
 
 # ---------------------------------------------------------------------------
