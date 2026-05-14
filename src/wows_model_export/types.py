@@ -93,7 +93,9 @@ class ToolkitResult:
     a single GLB for `export_ship`, the (glb, dds-dir) tuple for
     `export_model --raw-dds-dir`, etc. `stderr` is captured even on
     success (the toolkit prints diagnostics there); consumers can
-    surface or discard it.
+    surface or discard it. `stdout` is captured for the same reason —
+    some subcommands (`swizzle-dir`) print their summary line to
+    stdout, and callers that parse it need to scan both streams.
 
     `data` is an optional structured payload for subcommands that emit
     parseable summary information beyond a file write — `swizzle_dir`
@@ -105,6 +107,7 @@ class ToolkitResult:
     stderr:       str
     elapsed_ms:   float
     data:         dict | None = None
+    stdout:       str = ""
 
 
 # ---------------------------------------------------------------------------

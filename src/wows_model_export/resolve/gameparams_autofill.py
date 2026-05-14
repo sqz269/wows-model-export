@@ -446,6 +446,18 @@ _COMPONENT_KEYS: tuple[str, ...] = (
     "pinger",
 )
 
+# (ucType, slot) pairs where the override is the *intended* design: _Hull
+# carries stock defaults for these slots and the dedicated ucType chain is
+# meant to replace them. The override warning skips these to avoid drowning
+# real anomalies (e.g. a future patch shipping _Suo with an `artillery`
+# slot) in thousands of benign lines.
+_EXPECTED_OVERRIDES: frozenset[tuple[str, str]] = frozenset({
+    ("_Artillery", "artillery"),
+    ("_Torpedoes", "torpedoes"),
+    ("_Engine", "engine"),
+    ("_Suo", "fireControl"),
+})
+
 
 def resolve_components(
     ship: dict[str, Any],
@@ -517,12 +529,15 @@ def resolve_components(
             continue
         for k, v in comps.items():
             if v:
-                if k in components_src:
-                    # Surface the override — usually benign (ucType
-                    # iteration is intentionally last-wins) but a future
-                    # WG patch shipping a `_Suo` with an `artillery` slot
-                    # would silently clobber `_Hull`'s artillery without
-                    # this signal.
+                if (
+                    k in components_src
+                    and (uc_type, k) not in _EXPECTED_OVERRIDES
+                ):
+                    # Surface only *unexpected* overrides. The expected
+                    # pairings (see _EXPECTED_OVERRIDES) are the design;
+                    # this branch catches a future WG patch shipping e.g.
+                    # `_Suo` with an `artillery` slot, which would silently
+                    # clobber `_Hull`'s artillery without this signal.
                     print(
                         f"  warn: resolve_components: {uc_type} entry "
                         f"{pick!r} overrides existing {k!r} from "

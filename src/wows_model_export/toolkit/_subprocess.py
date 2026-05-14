@@ -70,8 +70,9 @@ def run_toolkit(
 
     Returns:
         `ToolkitResult` with `output_paths` = `expect_outputs`,
-        `stderr` = captured stderr (even on success — wowsunpack prints
-        diagnostics there), `elapsed_ms` = wall time.
+        `stderr` / `stdout` = captured streams (both kept — wowsunpack
+        prints diagnostics on stderr and summary lines for some
+        subcommands on stdout), `elapsed_ms` = wall time.
 
     Raises:
         ToolkitError: non-zero exit, timeout, missing expected outputs,
@@ -150,6 +151,7 @@ def run_toolkit(
         output_paths=tuple(expect_outputs),
         stderr=proc.stderr or "",
         elapsed_ms=elapsed_ms,
+        stdout=proc.stdout or "",
     )
 
 

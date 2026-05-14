@@ -150,6 +150,7 @@ def export_ship(
         output_paths=result.output_paths,
         stderr=result.stderr,
         elapsed_ms=result.elapsed_ms + flip_ms,
+        stdout=result.stdout,
     )
 
 

@@ -74,10 +74,10 @@ def swizzle_dir(
     # files; we trust exit code 0 + summary parse.
     result = run_toolkit(argv, config=cfg)
 
-    # Try to parse the toolkit's summary line. The summary lands on
-    # either stdout or stderr depending on toolkit version; check both.
-    out_text = result.stderr  # run_toolkit only captures stderr in result
-    m = _SUMMARY_RE.search(out_text)
+    # Parse the toolkit's summary line. wowsunpack prints it to stdout,
+    # but scan stderr too in case a future toolkit build routes it
+    # there.
+    m = _SUMMARY_RE.search(result.stdout) or _SUMMARY_RE.search(result.stderr)
     if m:
         processed, siblings_written = int(m.group(1)), int(m.group(2))
         return ToolkitResult(
@@ -85,6 +85,7 @@ def swizzle_dir(
             stderr=result.stderr,
             elapsed_ms=result.elapsed_ms,
             data={"processed": processed, "siblings_written": siblings_written},
+            stdout=result.stdout,
         )
 
     # Regex miss — fall back to counting files on disk.
@@ -114,6 +115,7 @@ def swizzle_dir(
         stderr=result.stderr,
         elapsed_ms=result.elapsed_ms,
         data={"processed": sources, "siblings_written": siblings, "fallback": True},
+        stdout=result.stdout,
     )
 
 
