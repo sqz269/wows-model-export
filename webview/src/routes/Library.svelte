@@ -8,6 +8,7 @@
   import { onMount } from 'svelte';
   import { navigate } from '$lib/router';
   import { fetchLibrary } from '$lib/api';
+  import { settingsHref } from '$lib/nav_state.svelte';
   import { navState } from '$lib/nav_state.svelte';
   import type { LibraryFilter, LibraryIndex } from '$lib/types';
   import AssetList from '$components/AssetList.svelte';
@@ -87,7 +88,16 @@
       <strong>Failed to load library:</strong>
       <code class="mx-1">{loadError}</code>
       <p class="text-muted-foreground m-0 max-w-[50ch]">
-        Run <code>wows-build-accessory-library</code> against your workspace, then refresh.
+        The accessory library index doesn't exist yet. Open
+        <a
+          href={settingsHref()}
+          onclick={(e) => {
+            e.preventDefault();
+            navigate(settingsHref());
+          }}
+          class="text-foreground underline hover:no-underline"
+        >Settings → Workspace artifacts</a>
+        and click <em>Build</em> next to “Accessory library index”.
       </p>
     </div>
   {:else if !index}

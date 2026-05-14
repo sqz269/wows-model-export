@@ -34,12 +34,12 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 JobState = Literal["running", "done", "failed", "cancelled"]
-JobKind = Literal["extract", "skin"]
+JobKind = Literal["extract", "skin", "bootstrap"]
 
 # 1 hour. Match the Node side exactly — the client polls completed jobs
 # for a while after they finish to render the final log tail.
@@ -376,10 +376,28 @@ def job_to_dict(job: Job) -> dict[str, Any]:
     side and FastAPI side both emit snake_case ``started_at`` /
     ``finished_at`` / ``exit_code``, so the dataclass field names map
     directly.
+
+    Hand-rolled instead of :func:`dataclasses.asdict` because
+    ``asdict`` deep-copies every field BEFORE the consumer can strip
+    ``proc``. While the job is running ``proc`` is a live
+    :class:`subprocess.Popen` carrying an internal ``threading.Lock``,
+    and ``copy.deepcopy`` chokes on the lock (``TypeError: cannot
+    pickle '_thread.lock' object``). Only completed jobs ever had
+    ``proc=None``, so the bug only surfaced once a poller hammered
+    GET on a still-running job.
     """
-    d = asdict(job)
-    d.pop("proc", None)
-    return d
+    return {
+        "id": job.id,
+        "kind": job.kind,
+        "label": job.label,
+        "state": job.state,
+        "cmd": list(job.cmd),
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "exit_code": job.exit_code,
+        "stdout": job.stdout,
+        "stderr": job.stderr,
+    }
 
 
 def job_to_summary(job: Job) -> dict[str, Any]:

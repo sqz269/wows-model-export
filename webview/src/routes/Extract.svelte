@@ -17,7 +17,7 @@
   import { onMount, untrack } from 'svelte';
   import { toast } from 'svelte-sonner';
   import { navigate } from '$lib/router';
-  import { navState } from '$lib/nav_state.svelte';
+  import { navState, settingsHref } from '$lib/nav_state.svelte';
   import { hasModifier, isTypingContext } from '$lib/shortcuts';
   import {
     cancelExtractJob,
@@ -367,6 +367,19 @@
       <div class="text-destructive flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
         <strong>Failed to load snapshot:</strong>
         <code class="font-mono text-xs">{loadError}</code>
+        <p class="text-muted-foreground m-0 max-w-[60ch] text-xs">
+          The GameParams snapshot hasn't been built yet (or game_dir /
+          toolkit_bin aren't configured). Open
+          <a
+            href={settingsHref()}
+            onclick={(e) => {
+              e.preventDefault();
+              navigate(settingsHref());
+            }}
+            class="text-foreground underline hover:no-underline"
+          >Settings → Workspace artifacts</a>
+          and click <em>Build</em> next to “GameParams + snapshot cache”.
+        </p>
       </div>
     {:else if loading}
       <div class="text-muted-foreground flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center text-xs">

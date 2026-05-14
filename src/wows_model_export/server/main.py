@@ -19,7 +19,7 @@ import logging
 from fastapi import FastAPI
 
 from ..config import PipelineConfig
-from .routes import extract, gameparams, library, repo, settings, ships
+from .routes import bootstrap, extract, gameparams, jobs, library, repo, settings, ships
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,8 @@ def create_app(config: PipelineConfig) -> FastAPI:
     app.include_router(gameparams.make_router(config), prefix="/api")
     app.include_router(extract.make_router(config), prefix="/api")
     app.include_router(settings.make_router(config), prefix="/api")
+    app.include_router(bootstrap.make_router(config), prefix="/api")
+    app.include_router(jobs.make_router(), prefix="/api")
 
     # /repo/* static workspace file service. Mounted at /repo so the
     # path parameter captures the remainder.

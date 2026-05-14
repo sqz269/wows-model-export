@@ -13,8 +13,13 @@
   import { onMount } from 'svelte';
   import { Button } from '$lib/components/ui/button';
   import {
+    buildBootstrapTarget,
+    fetchBootstrap,
     fetchSettings,
     saveSettings,
+    waitForJob,
+    type BootstrapStatus,
+    type BootstrapTarget,
     type SettingsPatch,
     type SettingsResponse,
     type SettingSource,
@@ -22,8 +27,14 @@
   import { toast } from 'svelte-sonner';
 
   let data = $state<SettingsResponse | null>(null);
+  let bootstrap = $state<BootstrapStatus | null>(null);
   let loadError = $state<string | null>(null);
   let saving = $state(false);
+  /** Map target → in-flight job_id; truthy disables that target's button. */
+  let building = $state<Record<BootstrapTarget, string | null>>({
+    snapshot: null,
+    library: null,
+  });
 
   // Form state. Initialised from `data.fields[k].value`, but `null` on
   // the wire maps to empty string in the input so the textbox renders
@@ -45,8 +56,11 @@
   async function load() {
     loadError = null;
     try {
-      const res = await fetchSettings();
+      // Settings + bootstrap are independent calls; firing them in
+      // parallel halves the first-paint latency.
+      const [res, boot] = await Promise.all([fetchSettings(), fetchBootstrap()]);
       data = res;
+      bootstrap = boot;
       const next = {
         game_dir: res.fields.game_dir.value ?? '',
         toolkit_bin: res.fields.toolkit_bin.value ?? '',
@@ -59,6 +73,17 @@
       initial = { ...next };
     } catch (err) {
       loadError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  /** Refresh just the bootstrap section — used after a Build job
+   *  finishes so the presence/mtime stamps update without re-fetching
+   *  the settings form (which would clobber unsaved edits). */
+  async function reloadBootstrap() {
+    try {
+      bootstrap = await fetchBootstrap();
+    } catch (err) {
+      console.warn('bootstrap reload failed:', err);
     }
   }
 
@@ -117,6 +142,71 @@
 
   function onReset() {
     form = { ...initial };
+  }
+
+  /** Kick off the matching CLI as a job, poll until it terminates,
+   *  surface progress through a sticky toast, refresh the bootstrap
+   *  status on done. */
+  async function onBuild(target: BootstrapTarget) {
+    if (building[target]) return;
+    const targetLabel = bootstrap?.targets[target].label ?? target;
+    const tid = toast.loading(`Starting ${targetLabel}…`, {
+      duration: Number.POSITIVE_INFINITY,
+    });
+    try {
+      const { job_id } = await buildBootstrapTarget(target);
+      building[target] = job_id;
+      const final = await waitForJob(job_id, (j) => {
+        // Show only the last-line tail to keep the toast compact; the
+        // full log will be reachable from a future Jobs panel.
+        const tail = (j.stdout || '').split('\n').filter(Boolean).slice(-1)[0] ?? '';
+        toast.loading(`${targetLabel}…`, {
+          id: tid,
+          description: tail.slice(0, 140),
+          duration: Number.POSITIVE_INFINITY,
+        });
+      });
+      if (final.state === 'done') {
+        toast.success(`${targetLabel} built`, {
+          id: tid,
+          description: final.cmd.join(' '),
+          duration: 5000,
+        });
+      } else {
+        // Failed / cancelled — surface the stderr tail. The user can
+        // copy it from the toast description.
+        const tail =
+          (final.stderr || final.stdout || '')
+            .split('\n')
+            .filter(Boolean)
+            .slice(-3)
+            .join('\n') || `exit ${final.exit_code ?? '?'}`;
+        toast.error(`${targetLabel} ${final.state}`, {
+          id: tid,
+          description: tail,
+          duration: 12000,
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`Build failed`, { id: tid, description: msg, duration: 8000 });
+    } finally {
+      building[target] = null;
+      await reloadBootstrap();
+    }
+  }
+
+  function fmtMtime(ms: number | null): string {
+    if (!ms) return 'never built';
+    const d = new Date(ms);
+    return d.toLocaleString();
+  }
+
+  function fmtSize(bytes: number | null): string {
+    if (bytes === null) return '';
+    const kb = bytes / 1024;
+    if (kb < 1024) return `${kb.toFixed(1)} KB`;
+    return `${(kb / 1024).toFixed(1)} MB`;
   }
 
   function sourceLabel(s: SettingSource): string {
@@ -291,6 +381,75 @@
           backend to pick up the new values.
         </span>
       </div>
+
+      <!--
+        Workspace artifacts. The Library and Extract tabs depend on
+        files this section builds; without them they 404 / 503 even
+        when game_dir / toolkit_bin are correctly configured.
+        Build buttons are disabled when `requires_config` lists a
+        field that isn't resolved yet.
+      -->
+      {#if bootstrap}
+        <section class="flex flex-col gap-3 border-t border-border pt-5">
+          <div
+            class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold"
+          >
+            Workspace artifacts
+          </div>
+          <p class="text-muted-foreground text-xs m-0 max-w-[60ch]">
+            Builds the per-workspace files the rest of the app depends on.
+            Run these once after pointing at a fresh workspace; re-run when
+            GameParams changes (patch day) or after extracting a new ship.
+          </p>
+
+          {#each Object.entries(bootstrap.targets) as [key, t] (key)}
+            {@const target = key as BootstrapTarget}
+            {@const blockedBy = t.requires_config.filter((f) =>
+              bootstrap?.missing_config.includes(f),
+            )}
+            {@const disabled = blockedBy.length > 0 || building[target] !== null}
+            <div
+              class="rounded border border-border bg-popover/40 px-3 py-2.5 flex flex-col gap-1.5"
+            >
+              <div class="flex items-baseline justify-between gap-3">
+                <span class="text-sm font-medium text-foreground">{t.label}</span>
+                <span
+                  class="text-[11px] {t.present
+                    ? 'text-emerald-400'
+                    : 'text-rose-400'}"
+                >
+                  {t.present ? `built ${fmtMtime(t.mtime_ms)}` : 'not built'}
+                  {#if t.present && t.size_bytes !== null}
+                    <span class="text-muted-foreground ml-1">
+                      ({fmtSize(t.size_bytes)})
+                    </span>
+                  {/if}
+                </span>
+              </div>
+              <p class="text-muted-foreground text-[11px] m-0 max-w-[60ch]">
+                {t.description}
+              </p>
+              <div class="text-muted-foreground text-[11px] font-mono break-all">
+                <code>{t.cmd.join(' ')}</code>
+              </div>
+              <div class="flex items-center gap-3 pt-1">
+                <Button
+                  size="sm"
+                  {disabled}
+                  onclick={() => onBuild(target)}
+                >
+                  {building[target] ? 'Building…' : t.present ? 'Rebuild' : 'Build'}
+                </Button>
+                {#if blockedBy.length > 0}
+                  <span class="text-amber-400 text-[11px]">
+                    needs {blockedBy.join(' + ')} configured first
+                  </span>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </section>
+      {/if}
     {/if}
   </div>
 </section>
