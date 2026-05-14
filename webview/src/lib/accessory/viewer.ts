@@ -17,7 +17,17 @@ import { createSceneEnvironment, type SceneEnvironment } from '$lib/three/scene'
 import { observeResize } from '$lib/three/resize';
 import { startRenderLoop } from '$lib/three/render_loop';
 import { TextureManager } from '$lib/ship/textures';
-import type { LibraryAsset, ShipPlacement } from '$lib/types';
+import type {
+  LibraryAsset,
+  PieceInfo,
+  RigCategory,
+  RigPivots,
+  ShipPlacement,
+} from '$lib/types';
+
+import { DebugSceneController, type DebugSceneLoadResult } from './debug_scene';
+import { RigPivotOverlay } from './rig_pivots';
+import { flipWindingIndex, resetWindingIndex } from './winding';
 
 export type SideMode = 'front' | 'back' | 'double';
 
@@ -78,10 +88,27 @@ export class AccessoryViewer {
     side: 'double' as SideMode,
     wireframe: false,
     lodFilter: null as number | null,
+    flipWinding: false,
   };
 
   private texturesOn = true;
   private helpersVisible = true;
+
+  // Rig pivot overlay. Lives in the scene from construction; visibility
+  // and contents are mutated via setRigPivots / setRigPivotsVisible.
+  // Living in the scene (rather than per-load) means the flip-180°
+  // toggle keeps its rotation across asset swaps.
+  private rigOverlay: RigPivotOverlay;
+
+  // Debug-scene picker. Lazily attaches DOM listeners on first
+  // setPickerMode call so we don't pay the cost on assets that never
+  // open the rig editor.
+  private debugScene: DebugSceneController | null = null;
+
+  /** True while a `<asset>.rig.debug.glb` is loaded (vs a regular GLB).
+   *  Used so `setFlipWinding` etc. don't fight the picker's material
+   *  state. */
+  private debugSceneActive = false;
 
   constructor(container: HTMLElement) {
     // Default container bg is a touch lighter than ShipViewer so single
@@ -117,6 +144,9 @@ export class AccessoryViewer {
       renderer: this.env.renderer,
       camera: this.env.camera,
     });
+
+    this.rigOverlay = new RigPivotOverlay();
+    this.env.scene.add(this.rigOverlay.group);
 
     this.stopLoop = startRenderLoop(() => {
       this.env.controls.update();
@@ -160,6 +190,13 @@ export class AccessoryViewer {
     // the GLB's source material from being mutated.
     this.applyMaterialState();
     this.applyLodFilter();
+    // Re-apply the persistent flip-winding toggle to freshly-loaded
+    // meshes. The setting outlives individual loads, so a user who
+    // flipped winding on asset A and clicks asset B expects B to come
+    // up already flipped.
+    if (this.state.flipWinding) {
+      for (const t of this.tracked) flipWindingIndex(t.mesh);
+    }
     this.bounds = new THREE.Box3().setFromObject(r);
     this.frame();
 
@@ -230,6 +267,95 @@ export class AccessoryViewer {
     t.mesh.visible = visible && this.passesLod(t.info.lod);
   }
 
+  /** Reverse triangle winding live — preview the persisted-flip effect
+   *  without touching the GLB on disk. Toggle off restores the original
+   *  index buffer. Persisting is a separate API call. */
+  setFlipWinding(on: boolean): void {
+    this.state.flipWinding = on;
+    for (const t of this.tracked) {
+      if (on) flipWindingIndex(t.mesh);
+      else resetWindingIndex(t.mesh);
+    }
+  }
+
+  getFlipWinding(): boolean {
+    return this.state.flipWinding;
+  }
+
+  // ── Rig pivots overlay ───────────────────────────────────────────────
+
+  /** Replace the rig-pivot markers from a freshly-fetched
+   *  `<asset>.rig_pivots.json`. Pass `null` to clear. Marker sizes
+   *  scale to the current load's bbox. */
+  setRigPivots(pivots: RigPivots | null): void {
+    this.rigOverlay.setPivots(pivots, this.bounds);
+  }
+
+  setRigPivotsVisible(show: boolean): void {
+    this.rigOverlay.setVisible(show);
+  }
+
+  /** Rotate the overlay 180° around the yaw axis. Local-only — the
+   *  pivot JSON on disk is unchanged. */
+  setRigFlip180(on: boolean): void {
+    this.rigOverlay.setFlip180(on);
+  }
+
+  // ── Debug-scene picker (rig editor) ──────────────────────────────────
+
+  /** Load a `<asset>.rig.debug.glb` produced by the rigger's
+   *  --debug-scene path. Replaces the current root, sets up picker
+   *  tracking, and returns the per-piece info the editor renders. */
+  async loadDebugSceneGlb(url: string): Promise<DebugSceneLoadResult> {
+    this.disposeRoot();
+    this.rigOverlay.setPivots(null, this.bounds);
+    const gltf = await this.loader.loadAsync(url);
+    const r = gltf.scene;
+    this.env.scene.add(r);
+    this.root = r;
+
+    const ctrl = this.ensureDebugSceneController();
+    const pieces = ctrl.ingestRoot(r);
+    this.debugSceneActive = true;
+
+    this.bounds = new THREE.Box3().setFromObject(r);
+    this.frame();
+    return { bounds: this.bounds.clone(), pieces };
+  }
+
+  setPickerMode(enabled: boolean): void {
+    const ctrl = this.ensureDebugSceneController();
+    ctrl.setPickerMode(enabled);
+  }
+
+  onPiecePicked(handler: ((piece: PieceInfo) => void) | null): void {
+    const ctrl = this.ensureDebugSceneController();
+    ctrl.onPiecePicked(handler);
+  }
+
+  setPieceCategoryColor(idx: number, category: RigCategory | 'face' | 'auto'): void {
+    this.debugScene?.setPieceCategoryColor(idx, category);
+  }
+
+  setSelectedPiece(idx: number | null): void {
+    this.debugScene?.setSelectedPiece(idx);
+  }
+
+  /** True while a debug scene is loaded (vs a regular asset GLB).
+   *  Useful for the rig editor's "exit" path — caller can ask before
+   *  reloading the regular GLB. */
+  isDebugSceneActive(): boolean {
+    return this.debugSceneActive;
+  }
+
+  private ensureDebugSceneController(): DebugSceneController {
+    if (this.debugScene) return this.debugScene;
+    const canvas = this.env.renderer.domElement;
+    this.debugScene = new DebugSceneController(canvas, this.env.camera);
+    this.debugScene.attach();
+    return this.debugScene;
+  }
+
   /** Toggle the DDS texture pipeline. Off shows the GLB's bundled
    *  materials only (flat-shaded WG defaults). */
   async setShowTextures(on: boolean): Promise<void> {
@@ -261,6 +387,9 @@ export class AccessoryViewer {
     this.stopLoop();
     this.stopResize();
     this.disposeRoot();
+    this.rigOverlay.dispose();
+    this.debugScene?.dispose();
+    this.debugScene = null;
     this.textures.dispose();
     this.env.dispose();
   }
@@ -291,6 +420,20 @@ export class AccessoryViewer {
   }
 
   private disposeRoot(): void {
+    if (this.debugSceneActive) {
+      // The debug-scene controller owns the materials + geometries for
+      // its pieces; let it clean them up rather than the generic walk
+      // below (which would double-dispose).
+      this.debugScene?.disposePieces();
+      if (this.root) {
+        this.env.scene.remove(this.root);
+      }
+      this.root = null;
+      this.tracked = [];
+      this.debugSceneActive = false;
+      this.clonedMaterials = new WeakSet();
+      return;
+    }
     if (!this.root) return;
     this.env.scene.remove(this.root);
     this.root.traverse((obj) => {

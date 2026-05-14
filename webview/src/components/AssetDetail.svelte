@@ -7,10 +7,12 @@
   // across asset swaps for a smoother feel.
 
   import AccessoryViewerCmp from './AccessoryViewer.svelte';
+  import RigEditorPanel from './RigEditorPanel.svelte';
   import type { AccessoryViewer, LoadResult, MeshInfo, SideMode } from '$lib/accessory';
-  import type { LibraryAsset } from '$lib/types';
-  import { repoUrl } from '$lib/api';
+  import type { LibraryAsset, RigPivots, WindingAuditEntry } from '$lib/types';
+  import { fetchRigPivots, postFlipWinding, repoUrl } from '$lib/api';
   import { fmtBytes } from '$lib/util/html';
+  import { onMount } from 'svelte';
 
   // Shared utility classes — mirror the labelled-dropdown idiom used in
   // ShipControls.svelte so the Library and Ships pages read identically.
@@ -23,9 +25,15 @@
     /** Asset_id (key in LibraryIndex.assets). */
     id: string;
     asset: LibraryAsset;
+    /** Audit verdict for this asset's GLB. `null` when the audit JSON
+     *  is missing or this asset isn't in the audit (e.g. unscored). */
+    windingAudit?: WindingAuditEntry | null;
+    /** Notify the parent to refetch the audit after a successful flip
+     *  so list-level badges + counts stay in sync without a reload. */
+    onWindingAuditChange?: () => void;
   }
 
-  const { id, asset }: Props = $props();
+  const { id, asset, windingAudit = null, onWindingAuditChange }: Props = $props();
 
   let viewer: AccessoryViewer | null = $state(null);
   let result: LoadResult | null = $state(null);
@@ -40,6 +48,25 @@
   let meshVisibility = $state<boolean[]>([]);
   let showTextures = $state(true);
 
+  // Rig pivot overlay state. `pivots` is null when the sidecar JSON
+  // isn't on disk (asset hasn't been rigged) — verdict chip + toggles
+  // degrade gracefully.
+  let pivots = $state<RigPivots | null>(null);
+  let showRigPivots = $state(false);
+  let rigFlip180 = $state(false);
+
+  // Per-asset winding flip state. The "Flip winding" button rewrites
+  // the GLB on disk (via /api/flip-winding) and toggles the asset's
+  // entry in flip_overrides.json. Trivially reversible — click again
+  // to undo. Distinct from the rigFlip180 viewer-only A/B toggle.
+  let flipPending = $state(false);
+  let flipMsg = $state<{ cls: 'ok' | 'fail' | 'working'; text: string } | null>(null);
+
+  // Rig editor open/closed. When open, the AccessoryViewer is loaded
+  // with the asset's `.rig.debug.glb` instead of the regular GLB, and
+  // the picker is wired up. Closing reloads the regular GLB.
+  let rigEditorOpen = $state(false);
+
   // Library context for the TextureManager. Same `asset` object the
   // page already has — passing it makes the viewer apply the DDS texture
   // pipeline on load. `variant` mirrors `showingDead` so the manager
@@ -52,15 +79,43 @@
     variant: (showingDead && asset.glb_dead ? 'dead' : 'main') as 'main' | 'dead',
   });
 
-  // Reset side state whenever the asset changes — different assets have
-  // different LOD layouts, mesh counts, and dead variants.
+  // Asset-change reset. The AssetDetail instance now survives asset
+  // switches (Library.svelte dropped the {#key activeId} wrapper) so
+  // user-preference state — helpers, wireframe, side, textures, LOD
+  // filter, Show pivots, Flip 180° — sticks across clicks.
+  //
+  // Only reset what's bound to the asset being unloaded:
+  //   - geometry-shaped state (result, meshVisibility, loadError)
+  //   - per-asset toggles (dead variant)
+  //   - per-asset sidecar data (rig pivots — refetched in onLoaded)
+  //   - in-flight UI feedback (flipMsg, rigEditorOpen, cacheBust)
+  //
+  // lodFilter is clamped separately once the new asset's result lands
+  // — see the next $effect — so a "LOD 2 only" filter on an asset
+  // without LOD 2 doesn't end up hiding every mesh.
   $effect(() => {
     void id;
     showingDead = false;
-    lodFilter = null;
     meshVisibility = [];
     loadError = null;
     result = null;
+    pivots = null;
+    rigEditorOpen = false;
+    flipMsg = null;
+    cacheBust = 0;
+  });
+
+  // Clamp the sticky LOD filter once the new asset's meshes have
+  // arrived. If the persisted choice (e.g. "LOD 2 only") doesn't
+  // match any LOD on the freshly-loaded asset, fall back to "all".
+  // Keeps the filter sticky in the common case while preventing the
+  // empty-scene surprise on assets that don't have the chosen level.
+  $effect(() => {
+    if (!result) return;
+    if (lodFilter !== null && !lods.includes(lodFilter)) {
+      lodFilter = null;
+      viewer?.setLodFilter(null);
+    }
   });
 
   // Re-apply controls when the viewer comes online or after a reload.
@@ -72,9 +127,23 @@
     viewer.setLodFilter(lodFilter);
   });
 
+  // Re-apply the rig overlay state when the viewer comes online and
+  // when toggles flip. Pivot JSON is fetched on `onLoaded`, so this
+  // is the central place to push the latest state into the viewer.
+  $effect(() => {
+    if (!viewer) return;
+    viewer.setRigPivots(pivots);
+    viewer.setRigPivotsVisible(showRigPivots);
+    viewer.setRigFlip180(rigFlip180);
+  });
+
   const url = $derived.by(() => {
     const rel = showingDead && asset.glb_dead ? asset.glb_dead : asset.glb;
-    return repoUrl(`libraries/accessories/${rel}`);
+    const base = repoUrl(`libraries/accessories/${rel}`);
+    // Append the cache-buster on every persist-flip so the viewer
+    // re-fetches the rewritten GLB. Default 0 leaves the URL clean
+    // for the initial load.
+    return cacheBust ? `${base}?t=${cacheBust}` : base;
   });
 
   // LOD bucketing for the LOD-filter buttons + info section.
@@ -108,6 +177,13 @@
     result = res;
     meshVisibility = res.meshes.map(() => true);
     loadError = null;
+    // Fire-and-forget pivot fetch. Pivots apply even when the toggle
+    // is off so flipping it on is instant — the JSON parse cost is
+    // amortised here rather than on toggle.
+    void (async () => {
+      const next = await fetchRigPivots(asset.glb);
+      pivots = next;
+    })();
   }
 
   function onError(err: unknown) {
@@ -153,6 +229,130 @@
 
   function meshes(): MeshInfo[] {
     return result?.meshes ?? [];
+  }
+
+  async function flipWinding() {
+    if (flipPending || rigEditorOpen) return;
+    const rel = showingDead && asset.glb_dead ? asset.glb_dead : asset.glb;
+    flipPending = true;
+    flipMsg = { cls: 'working', text: 'Flipping…' };
+    try {
+      const res = await postFlipWinding(rel);
+      if (!res.ok) {
+        flipMsg = {
+          cls: 'fail',
+          text: `Flip failed: ${res.error || res.stderr || 'unknown'}`,
+        };
+        return;
+      }
+      // GLB on disk has been rewritten. Reload it with a cache-bust
+      // so the browser fetches the new bytes. The viewer's onLoaded
+      // re-fetches pivots, so everything stays in sync.
+      const flipped = res.override?.flipped ?? true;
+      flipMsg = {
+        cls: 'ok',
+        text: flipped
+          ? 'Flipped (persisted). Click again to undo.'
+          : 'Un-flipped (persisted).',
+      };
+      // Bump the audit so the badge updates without a page reload.
+      onWindingAuditChange?.();
+      // Force-reload the viewer by re-triggering the load effect with a
+      // cache-buster. `url` is derived from `asset` + `showingDead` —
+      // we can't mutate `asset.glb` so we use a separate cache-bust
+      // counter (added below).
+      cacheBust = Date.now();
+    } catch (err) {
+      flipMsg = { cls: 'fail', text: `Flip failed: ${err}` };
+    } finally {
+      flipPending = false;
+    }
+  }
+
+  // Per-asset cache-buster bumped on every persist-flip so the viewer
+  // re-fetches the rewritten GLB.
+  let cacheBust = $state(0);
+
+  // F-key shortcut for "flip winding". No-op while typing in an input
+  // / textarea / contenteditable, while any modifier is held (keeps
+  // Ctrl+F → browser find free), or while a persist is in flight.
+  onMount(() => {
+    function onKey(ev: KeyboardEvent) {
+      if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+      const t = ev.target as HTMLElement | null;
+      if (t) {
+        const tag = t.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        if (t.isContentEditable) return;
+      }
+      if (ev.key.toLowerCase() !== 'f') return;
+      if (flipPending || rigEditorOpen) return;
+      ev.preventDefault();
+      void flipWinding();
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
+  /** Verdict chip metadata for the rig-pivots panel. Buckets the four
+   *  geometric_check states + the `auto_flipped_180_around_yaw` flag
+   *  into colour-coded chips with explanatory tooltips. */
+  const verdictChip = $derived.by(() => {
+    if (!pivots) return null;
+    const geo = pivots.geometric_check;
+    const flipped = pivots.auto_flipped_180_around_yaw === true;
+    if (!geo) return null;
+    const v = geo.verdict;
+    if (flipped || v === 'needs_flip') {
+      return {
+        label: 'auto-flipped 180°',
+        cls: 'bg-sky-900/40 text-sky-300',
+        title:
+          'turret_autorig detected the pre-aim-rotation pose and baked a Ry(180°) into the emitted pivots. ' +
+          'The displayed pivots are already corrected — toggling "flip 180°" would un-correct them.',
+      };
+    }
+    if (v === 'ok') {
+      return {
+        label: 'mesh-aligned',
+        cls: 'bg-emerald-900/40 text-emerald-300',
+        title:
+          'Geometric check: every muzzle landed on the alive library mesh under the as-extracted pose. No flip needed.',
+      };
+    }
+    if (v === 'ambiguous') {
+      const vs = geo.votes;
+      return {
+        label: 'ambiguous',
+        cls: 'bg-amber-900/40 text-amber-300',
+        title:
+          `Geometric check could not discriminate (votes ok=${vs?.ok ?? 0}, ` +
+          `flip=${vs?.flip ?? 0}, tie=${vs?.tie ?? 0}). ` +
+          'Verify manually with the "flip 180°" toggle.',
+      };
+    }
+    return {
+      label: 'no mesh check',
+      cls: 'bg-muted text-muted-foreground',
+      title: geo.error
+        ? `Geometric check skipped: ${geo.error}`
+        : 'Geometric check skipped: library GLB unavailable when pivots were extracted.',
+    };
+  });
+
+  /** Per-barrel ok-vs-flip distance rows. Smaller distance = better. */
+  const distRows = $derived.by(() => {
+    const geo = pivots?.geometric_check;
+    if (!geo?.muzzle_dists?.length || !geo?.muzzle_dists_flip?.length) return [];
+    return geo.muzzle_dists.map((d, i) => {
+      const f = geo.muzzle_dists_flip?.[i] ?? NaN;
+      const okBetter = d <= f;
+      return { i, d, f, okBetter };
+    });
+  });
+
+  function fmtDist(n: number): string {
+    return Number.isFinite(n) ? `${n.toFixed(4)} m` : '—';
   }
 </script>
 
@@ -276,6 +476,182 @@
               {/each}
             </select>
           </label>
+        {/if}
+      </div>
+
+      <!--
+        Winding section: persist-flip button + F-shortcut hint, plus
+        the audit verdict line when scoring is available. The button
+        is disabled while a flip is in flight or while the rig editor
+        is open (the debug scene has its own materials/winding state).
+      -->
+      <div class="flex flex-col gap-1.5">
+        <div
+          class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold"
+        >
+          winding
+        </div>
+        <button
+          type="button"
+          disabled={flipPending || rigEditorOpen}
+          onclick={flipWinding}
+          title="Reverse triangle winding and rewrite the GLB on disk. Click again to undo. Shortcut: F"
+          class="rounded border border-border bg-popover px-2 py-1 text-xs hover:bg-accent disabled:opacity-60 text-left"
+        >
+          Flip winding <span class="text-muted-foreground">F</span>
+        </button>
+        {#if windingAudit}
+          {@const w = windingAudit}
+          {@const label =
+            w.in_overrides && w.verdict === 'keep'
+              ? 'manual'
+              : w.in_overrides && w.verdict === 'flip'
+                ? 'dispute'
+                : w.verdict}
+          <div
+            class="rounded bg-popover/50 px-2 py-1 text-[11px]"
+            title={`Joint A+B winding heuristic — correctness ${w.correctness.toFixed(3)} ` +
+              `(B=${w.signal_b.toFixed(3)} geom·outward, A=${w.signal_a.toFixed(3)} geom·stored). ` +
+              `>0.5 = correct, <0.5 = inverted.`}
+          >
+            auto-detect:
+            <strong
+              class:text-rose-400={label === 'flip' || label === 'dispute'}
+              class:text-amber-400={label === 'ambiguous'}
+              class:text-emerald-400={label === 'manual' || label === 'keep'}
+            >{label}</strong>
+            <span class="text-muted-foreground"> {w.correctness.toFixed(2)}</span>
+            <span class="text-muted-foreground"
+              > B{w.signal_b.toFixed(2)} A{w.signal_a.toFixed(2)}</span
+            >
+          </div>
+        {/if}
+        {#if flipMsg}
+          <div
+            class="text-[11px] leading-tight"
+            class:text-emerald-400={flipMsg.cls === 'ok'}
+            class:text-destructive={flipMsg.cls === 'fail'}
+            class:text-muted-foreground={flipMsg.cls === 'working'}
+          >
+            {flipMsg.text}
+          </div>
+        {/if}
+      </div>
+
+      <!--
+        Rig pivots: yaw / elev / muzzle markers from the
+        `<asset>.rig_pivots.json` sidecar. Hidden entirely when no
+        sidecar exists on disk. Verdict chip + per-barrel distances
+        only render when the rigger emitted a `geometric_check`.
+      -->
+      <div class="flex flex-col gap-1.5">
+        <div
+          class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold"
+        >
+          rig pivots
+        </div>
+        {#if !pivots}
+          <div class="text-muted-foreground text-[11px]">
+            no <code>rig_pivots.json</code>
+          </div>
+        {:else}
+          <label class={rowCls}>
+            <input
+              type="checkbox"
+              checked={showRigPivots}
+              onchange={(e) => (showRigPivots = e.currentTarget.checked)}
+            />
+            Show pivots
+          </label>
+          <label
+            class={rowCls}
+            title="Rotate the rig 180° around the yaw axis. Quick A/B for forward-axis mismatches with the mesh. Not saved."
+          >
+            <input
+              type="checkbox"
+              checked={rigFlip180}
+              onchange={(e) => (rigFlip180 = e.currentTarget.checked)}
+            />
+            Flip 180°
+          </label>
+          <div class="text-[11px]">
+            {pivots.barrel_count} barrel{pivots.barrel_count === 1 ? '' : 's'}
+            · {pivots.shared_elev ? 'shared elev' : 'indep. elev'}
+          </div>
+          {#if verdictChip}
+            <span
+              class="self-start rounded px-1.5 py-[1px] text-[10px] {verdictChip.cls}"
+              title={verdictChip.title}
+            >
+              {verdictChip.label}
+            </span>
+          {/if}
+          {#if distRows.length > 0}
+            <table class="w-full text-[10px] tabular-nums">
+              <thead>
+                <tr class="text-muted-foreground">
+                  <th class="text-left"></th>
+                  <th class="text-right">ok</th>
+                  <th class="text-right">flip</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each distRows as r (r.i)}
+                  <tr>
+                    <td class="text-muted-foreground">b{r.i}</td>
+                    <td
+                      class="text-right"
+                      class:text-emerald-400={r.okBetter}
+                      class:text-muted-foreground={!r.okBetter}>{fmtDist(r.d)}</td
+                    >
+                    <td
+                      class="text-right"
+                      class:text-emerald-400={!r.okBetter}
+                      class:text-muted-foreground={r.okBetter}>{fmtDist(r.f)}</td
+                    >
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+          {#if pivots.warnings?.length}
+            <ul class="m-0 list-disc pl-4 text-[10px] text-amber-300">
+              {#each pivots.warnings as w (w)}<li>{w}</li>{/each}
+            </ul>
+          {/if}
+        {/if}
+      </div>
+
+      <!--
+        Rig editor toggle. The picker lives inside RigEditorPanel which
+        owns the debug-scene load + override-staging state. Opening
+        the editor swaps the viewer's loaded GLB so `onLoaded` fires
+        again on close; that re-fetches pivots and resets the toggles.
+      -->
+      <div class="flex flex-col gap-1.5">
+        <div
+          class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold"
+        >
+          rig editor
+        </div>
+        <label
+          class={rowCls}
+          title="Swap viewer to the pre-merge debug scene with each piece colour-coded by category. Click pieces to override their category or set as the mantlet face-plate."
+        >
+          <input
+            type="checkbox"
+            checked={rigEditorOpen}
+            onchange={(e) => (rigEditorOpen = e.currentTarget.checked)}
+          />
+          Edit rig
+        </label>
+        {#if rigEditorOpen && viewer}
+          <RigEditorPanel
+            assetId={id}
+            assetGlb={asset.glb}
+            {viewer}
+            onClose={() => (rigEditorOpen = false)}
+          />
         {/if}
       </div>
 
