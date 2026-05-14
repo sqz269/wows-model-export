@@ -23,8 +23,12 @@
 
   interface Props {
     param: string | null;
+    /** True iff this is the active route. Page-local keydown handlers
+     *  short-circuit when false so a `/` on the Library page doesn't
+     *  steal focus from the asset search to a hidden ship picker. */
+    active: boolean;
   }
-  const { param }: Props = $props();
+  const { param, active }: Props = $props();
 
   let ships = $state<ShipSummary[]>([]);
   let library = $state<LibraryIndex | null>(null);
@@ -83,9 +87,11 @@
       }
     })();
 
-    // Page-local shortcuts. Bound here (not in App.svelte) so navigating
-    // away from the Ships page cleanly drops the listeners.
+    // Page-local shortcuts. The router keeps every route mounted (see
+    // App.svelte), so we gate on `active` instead of relying on
+    // mount/unmount lifecycle to scope the listener to this page only.
     const onKey = (e: KeyboardEvent) => {
+      if (!active) return;
       if (hasModifier(e)) return;
       if (isTypingContext(e)) return;
       switch (e.key) {

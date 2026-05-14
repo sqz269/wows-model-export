@@ -7,11 +7,17 @@
   // across asset swaps for a smoother feel.
 
   import AccessoryViewerCmp from './AccessoryViewer.svelte';
-  import { Button } from '$lib/components/ui/button';
   import type { AccessoryViewer, LoadResult, MeshInfo, SideMode } from '$lib/accessory';
   import type { LibraryAsset } from '$lib/types';
   import { repoUrl } from '$lib/api';
   import { fmtBytes } from '$lib/util/html';
+
+  // Shared utility classes — mirror the labelled-dropdown idiom used in
+  // ShipControls.svelte so the Library and Ships pages read identically.
+  const labelCls = 'flex flex-col gap-0.5 text-[11px] text-muted-foreground';
+  const inputBoxCls =
+    'h-7 rounded border border-border bg-popover px-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30 focus:border-ring';
+  const rowCls = 'flex items-center gap-1.5 text-xs text-foreground';
 
   interface Props {
     /** Asset_id (key in LibraryIndex.assets). */
@@ -32,6 +38,14 @@
   let side = $state<SideMode>('double');
   let lodFilter = $state<number | null>(null);
   let meshVisibility = $state<boolean[]>([]);
+  let showTextures = $state(true);
+
+  // Library context for the TextureManager. Same `asset` object the
+  // page already has — passing it makes the viewer apply the DDS texture
+  // pipeline on load. Reactive: a change to `asset` (rare; only when the
+  // index refetches) re-triggers texture binding via the child's
+  // load effect.
+  const libContext = $derived({ assetId: id, asset });
 
   // Reset side state whenever the asset changes — different assets have
   // different LOD layouts, mesh counts, and dead variants.
@@ -119,6 +133,14 @@
   function toggleVariant(dead: boolean) {
     showingDead = dead;
   }
+  async function toggleTextures(v: boolean) {
+    showTextures = v;
+    try {
+      await viewer?.setShowTextures(v);
+    } catch (err) {
+      console.warn('[assetdetail] setShowTextures failed:', err);
+    }
+  }
 
   function truncate(s: string, n: number) {
     return s.length <= n ? s : s.slice(0, n - 1) + '…';
@@ -128,17 +150,6 @@
     return result?.meshes ?? [];
   }
 </script>
-
-{#snippet toggleButton(label: string, active: boolean, onclick: () => void)}
-  <Button
-    variant={active ? 'secondary' : 'outline'}
-    size="xs"
-    {onclick}
-    class="text-[11px] {active ? '' : ''}"
-  >
-    {label}
-  </Button>
-{/snippet}
 
 <section class="flex flex-1 min-w-0 flex-col overflow-hidden">
   <header
@@ -174,6 +185,7 @@
   <div class="flex flex-1 min-h-0 overflow-hidden">
     <AccessoryViewerCmp
       {url}
+      lib={libContext}
       bindHandle={(v) => {
         viewer = v;
       }}
@@ -184,76 +196,87 @@
     <aside
       class="bg-card border-border flex w-[260px] flex-none flex-col gap-3 overflow-y-auto border-l p-3.5"
     >
-      <div class="flex flex-col gap-1">
+      <!--
+        View section: matches ShipControls.svelte's idiom — checkboxes for
+        binary toggles, labelled <select>s for n-of-many. Replaces the
+        earlier toggle-button groups (faces / variant / LOD filter) so the
+        Library and Ships pages share one visual + interaction vocabulary.
+      -->
+      <div class="flex flex-col gap-2">
         <div
-          class="text-muted-foreground text-[11px] uppercase tracking-wider"
+          class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold"
         >
           view
         </div>
-        <label class="flex items-center gap-1.5 text-xs">
+        <label class={rowCls}>
           <input
             type="checkbox"
             checked={helpers}
             onchange={(e) => toggleHelpers(e.currentTarget.checked)}
           />
-          grid + axes
+          Helpers (grid + axes)
         </label>
-        <label class="flex items-center gap-1.5 text-xs">
+        <label class={rowCls}>
           <input
             type="checkbox"
             checked={wireframe}
             onchange={(e) => toggleWireframe(e.currentTarget.checked)}
           />
-          wireframe
+          Wireframe
         </label>
-      </div>
-
-      <div class="flex flex-col gap-1">
-        <div
-          class="text-muted-foreground text-[11px] uppercase tracking-wider"
-        >
-          faces
-        </div>
-        <div class="flex flex-wrap gap-1">
-          {#each ['double', 'front', 'back'] as s (s)}
-            {@render toggleButton(s, side === s, () => setSide(s as SideMode))}
-          {/each}
-        </div>
-      </div>
-
-      {#if asset.glb_dead}
-        <div class="flex flex-col gap-1">
-          <div
-            class="text-muted-foreground text-[11px] uppercase tracking-wider"
+        <label class={rowCls}>
+          <input
+            type="checkbox"
+            checked={showTextures}
+            onchange={(e) => toggleTextures(e.currentTarget.checked)}
+          />
+          Textures
+        </label>
+        {#if asset.glb_dead}
+          <label class={rowCls}>
+            <input
+              type="checkbox"
+              checked={showingDead}
+              onchange={(e) => toggleVariant(e.currentTarget.checked)}
+            />
+            Show destroyed variant
+          </label>
+        {/if}
+        <label class={labelCls}>
+          Faces
+          <select
+            value={side}
+            onchange={(e) => setSide(e.currentTarget.value as SideMode)}
+            class={inputBoxCls}
           >
-            variant
-          </div>
-          <div class="flex flex-wrap gap-1">
-            {@render toggleButton('intact', !showingDead, () => toggleVariant(false))}
-            {@render toggleButton('dead', showingDead, () => toggleVariant(true))}
-          </div>
-        </div>
-      {/if}
-
-      {#if lods.length > 1}
-        <div class="flex flex-col gap-1">
-          <div
-            class="text-muted-foreground text-[11px] uppercase tracking-wider"
-          >
+            <option value="double">Double-sided</option>
+            <option value="front">Front only</option>
+            <option value="back">Back only</option>
+          </select>
+        </label>
+        {#if lods.length > 1}
+          <label class={labelCls}>
             LOD filter
-          </div>
-          <div class="flex flex-wrap gap-1">
-            {@render toggleButton('all', lodFilter === null, () => setLod(null))}
-            {#each lods as lod (lod)}
-              {@render toggleButton(`lod${lod}`, lodFilter === lod, () => setLod(lod))}
-            {/each}
-          </div>
-        </div>
-      {/if}
+            <select
+              value={lodFilter === null ? 'all' : String(lodFilter)}
+              onchange={(e) => {
+                const v = e.currentTarget.value;
+                setLod(v === 'all' ? null : Number(v));
+              }}
+              class={inputBoxCls}
+            >
+              <option value="all">All LODs</option>
+              {#each lods as lod (lod)}
+                <option value={String(lod)}>LOD {lod} only</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
+      </div>
 
       <div class="flex flex-col gap-1">
         <div
-          class="text-muted-foreground text-[11px] uppercase tracking-wider"
+          class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold"
         >
           meshes
         </div>

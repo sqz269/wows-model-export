@@ -16,8 +16,11 @@
 
   interface Props {
     param: string | null;
+    /** True iff this is the active route. Reserved for the asset
+     *  search `/` shortcut when it lands. */
+    active: boolean;
   }
-  const { param }: Props = $props();
+  const { param, active: _active }: Props = $props();
 
   let index = $state<LibraryIndex | null>(null);
   let loadError = $state<string | null>(null);

@@ -104,14 +104,27 @@
   </Button>
 </header>
 
-<main class="flex flex-1 min-h-0 overflow-hidden">
-  {#if route.page === 'library'}
-    <Library param={route.param} />
-  {:else if route.page === 'ships'}
-    <Ships param={route.param} />
-  {:else if route.page === 'extract'}
-    <Extract param={route.param} />
-  {/if}
+<!--
+  Keep every route mounted; toggle visibility via `hidden`. Mount-once
+  semantics mean a tab switch preserves filter state, scroll position,
+  3D viewer cameras, and texture-decode caches that would otherwise be
+  thrown away on unmount. Inactive routes get `display: none` so their
+  ResizeObservers settle to 0×0 and the renderer skips real work.
+
+  Each route receives `active` so its page-local keydown listener
+  (Ships' `/`/R/F/Esc; Library's future `/` for asset search) only
+  fires when the user is actually looking at that page.
+-->
+<main class="relative flex flex-1 min-h-0 overflow-hidden">
+  <div class={route.page === 'library' ? 'flex flex-1 min-w-0' : 'hidden'}>
+    <Library param={route.param} active={route.page === 'library'} />
+  </div>
+  <div class={route.page === 'ships' ? 'flex flex-1 min-w-0' : 'hidden'}>
+    <Ships param={route.param} active={route.page === 'ships'} />
+  </div>
+  <div class={route.page === 'extract' ? 'flex flex-1 min-w-0' : 'hidden'}>
+    <Extract param={route.param} active={route.page === 'extract'} />
+  </div>
 </main>
 
 <HelpDialog open={helpOpen} onOpenChange={(v) => (helpOpen = v)} />

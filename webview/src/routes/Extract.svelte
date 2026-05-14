@@ -3,7 +3,7 @@
   // wows-ingest-skin-pack. Stub for now; will lift the current
   // tools/webview/src/extract.ts behavior once the backend exposes the
   // job-runner endpoints.
-  let { param: _param }: { param: string | null } = $props();
+  let { param: _param, active: _active }: { param: string | null; active: boolean } = $props();
 </script>
 
 <section class="flex-1 overflow-auto p-6">
