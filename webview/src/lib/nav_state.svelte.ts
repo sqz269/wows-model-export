@@ -22,6 +22,7 @@
 class NavState {
   lastShipName = $state<string | null>(null);
   lastAssetId = $state<string | null>(null);
+  lastVehicleId = $state<string | null>(null);
 }
 
 export const navState = new NavState();
@@ -42,9 +43,10 @@ export function libraryHref(): string {
     : '#/library';
 }
 
-/** Topnav href for the Extract tab. Reserved for future param-carrying
- *  state (selected vehicle / variant); for now there's no inner state
- *  to remember. */
+/** Topnav href for the Extract tab. Falls back to `#/extract` when no
+ *  Vehicle has been opened this session. */
 export function extractHref(): string {
-  return '#/extract';
+  return navState.lastVehicleId
+    ? `#/extract/${encodeURIComponent(navState.lastVehicleId)}`
+    : '#/extract';
 }

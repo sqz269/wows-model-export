@@ -17,6 +17,7 @@ import { resolveWorkspace } from './workspace';
 import { mountRepoStatic } from './endpoints/repo';
 import { mountShipsApi } from './endpoints/ships';
 import { mountLibraryApi } from './endpoints/library';
+import { mountExtractApi } from './endpoints/extract';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -31,6 +32,7 @@ export function devApiPlugin(): Plugin {
       mountRepoStatic(server, workspace);
       mountShipsApi(server, workspace);
       mountLibraryApi(server, workspace);
+      mountExtractApi(server, workspace);
     },
   };
 }

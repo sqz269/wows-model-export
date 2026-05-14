@@ -18,6 +18,7 @@
 
 import type { ColorMode, LodPolicy } from './ship';
 import type { SeamKey, SeamState, ShipSectionKey } from './types';
+import type { RunOptions } from './types/extract';
 
 const STORE_KEY = 'wows-model-export-webview.v1';
 
@@ -57,6 +58,9 @@ export interface PersistedState {
   panelOpen: Record<PanelSection, boolean>;
   /** Ship picker search text. */
   shipSearch: string;
+  /** Extract page run-options checkboxes. Persisted so each session
+   *  resumes with the user's preferred CLI flags. */
+  extractRunOptions: RunOptions;
 }
 
 export function defaultState(): PersistedState {
@@ -90,6 +94,12 @@ export function defaultState(): PersistedState {
       skin: true,
     },
     shipSearch: '',
+    extractRunOptions: {
+      skip_legacy: true,
+      build_library: true,
+      and_publish: false,
+      publish_force: false,
+    },
   };
 }
 
@@ -153,5 +163,6 @@ function mergeWithDefaults(parsed: Partial<PersistedState>): PersistedState {
     sectionVisible: { ...d.sectionVisible, ...(parsed.sectionVisible ?? {}) },
     seamStates: { ...d.seamStates, ...(parsed.seamStates ?? {}) },
     panelOpen: { ...d.panelOpen, ...(parsed.panelOpen ?? {}) },
+    extractRunOptions: { ...d.extractRunOptions, ...(parsed.extractRunOptions ?? {}) },
   };
 }
