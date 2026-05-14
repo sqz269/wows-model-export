@@ -30,14 +30,14 @@ reference one.
 - **World of Warships** installed (any branch — Steam or WG launcher).
 - **Python 3.11+** on your `PATH`.
 - **wowsunpack** — a Rust binary from the
-  [wows-toolkit fork](https://github.com/<owner>/wows-toolkit). Build
+  [wows-toolkit fork](https://github.com/sqz269/wows-toolkit). Build
   once with `cargo build --release --bin wowsunpack`; the Settings
   page will let you point at the resulting `.exe`.
 
 ## Install
 
 Grab the latest wheel from
-[GitHub Releases](https://github.com/<owner>/wows-model-export/releases/latest),
+[GitHub Releases](https://github.com/sqz269/wows-model-export/releases/latest),
 then:
 
 ```bash
