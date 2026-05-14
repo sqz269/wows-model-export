@@ -4,11 +4,12 @@
   import { Toaster } from '$lib/components/ui/sonner';
   import { Button } from '$lib/components/ui/button';
   import { readRoute, onRouteChange, navigate, type RouteState } from '$lib/router';
-  import { extractHref, libraryHref, shipsHref } from '$lib/nav_state.svelte';
+  import { extractHref, libraryHref, settingsHref, shipsHref } from '$lib/nav_state.svelte';
   import { hasModifier, isTypingContext } from '$lib/shortcuts';
   import Library from '$routes/Library.svelte';
   import Ships from '$routes/Ships.svelte';
   import Extract from '$routes/Extract.svelte';
+  import Settings from '$routes/Settings.svelte';
   import HelpDialog from '$components/HelpDialog.svelte';
 
   let route = $state<RouteState>(readRoute());
@@ -51,6 +52,10 @@
           navigate(extractHref());
           e.preventDefault();
           return;
+        case '4':
+          navigate(settingsHref());
+          e.preventDefault();
+          return;
       }
     };
     window.addEventListener('keydown', onKey);
@@ -70,6 +75,7 @@
     { page: 'library', href: libraryHref(), label: 'Library', keyHint: '1' },
     { page: 'ships', href: shipsHref(), label: 'Ships', keyHint: '2' },
     { page: 'extract', href: extractHref(), label: 'Extract', keyHint: '3' },
+    { page: 'settings', href: settingsHref(), label: 'Settings', keyHint: '4' },
   ]);
 
   function go(e: MouseEvent, href: string) {
@@ -151,6 +157,9 @@
       vehicleId={route.page === 'extract' ? route.vehicleId : null}
       active={route.page === 'extract'}
     />
+  </div>
+  <div class={route.page === 'settings' ? 'flex flex-1 min-w-0' : 'hidden'}>
+    <Settings />
   </div>
 </main>
 

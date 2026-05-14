@@ -36,7 +36,12 @@ export type ExtractRoute = {
   vehicleId: string | null;
 };
 
-export type RouteState = LibraryRoute | ShipsRoute | ExtractRoute;
+export type SettingsRoute = {
+  page: 'settings';
+  path: string;
+};
+
+export type RouteState = LibraryRoute | ShipsRoute | ExtractRoute | SettingsRoute;
 
 function parseHash(hash: string): RouteState {
   const path = hash.replace(/^#\/?/, '');
@@ -47,6 +52,9 @@ function parseHash(hash: string): RouteState {
   }
   if (head === 'ships' || head === 'ship') {
     return { page: 'ships', path, shipName: rest ?? null };
+  }
+  if (head === 'settings') {
+    return { page: 'settings', path };
   }
   // Default + `library` + `asset/...` all route to the library page.
   return { page: 'library', path, assetId: rest ?? null };

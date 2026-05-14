@@ -50,3 +50,9 @@ export function extractHref(): string {
     ? `#/extract/${encodeURIComponent(navState.lastVehicleId)}`
     : '#/extract';
 }
+
+/** Topnav href for the Settings tab. No sub-routes today — kept as a
+ *  helper so the topnav reads identically to the other tabs. */
+export function settingsHref(): string {
+  return '#/settings';
+}
