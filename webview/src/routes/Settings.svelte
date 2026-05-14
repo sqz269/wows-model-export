@@ -43,14 +43,28 @@
   let form = $state({
     game_dir: '',
     toolkit_bin: '',
+    workspace: '',
     toolkit_timeout_s: '',
   });
-  let initial = $state({ game_dir: '', toolkit_bin: '', toolkit_timeout_s: '' });
+  let initial = $state({
+    game_dir: '',
+    toolkit_bin: '',
+    workspace: '',
+    toolkit_timeout_s: '',
+  });
 
   const dirty = $derived(
     form.game_dir !== initial.game_dir ||
       form.toolkit_bin !== initial.toolkit_bin ||
+      form.workspace !== initial.workspace ||
       form.toolkit_timeout_s !== initial.toolkit_timeout_s,
+  );
+
+  /** True when the persisted (or env-overridden) workspace diverges
+   *  from what the running backend booted with — i.e. saving any
+   *  field will need a restart to take effect for workspace too. */
+  const workspaceDrift = $derived(
+    data !== null && data.fields.workspace.value !== data.running_workspace,
   );
 
   async function load() {
@@ -64,6 +78,7 @@
       const next = {
         game_dir: res.fields.game_dir.value ?? '',
         toolkit_bin: res.fields.toolkit_bin.value ?? '',
+        workspace: res.fields.workspace.value ?? '',
         toolkit_timeout_s:
           res.fields.toolkit_timeout_s.value !== null
             ? String(res.fields.toolkit_timeout_s.value)
@@ -98,6 +113,7 @@
     const patch: SettingsPatch = {};
     patch.game_dir = form.game_dir.trim() || null;
     patch.toolkit_bin = form.toolkit_bin.trim() || null;
+    patch.workspace = form.workspace.trim() || null;
     if (form.toolkit_timeout_s.trim() === '') {
       patch.toolkit_timeout_s = null;
     } else {
@@ -268,15 +284,16 @@
       <div class="text-muted-foreground text-xs">Loading…</div>
     {:else}
       <!--
-        Read-only "where things live" section. Workspace is the bootstrap
-        key — flagging it here so the user understands why it's not in
-        the form below.
+        Read-only "running snapshot" section. These reflect what the
+        backend BOOTED with — useful when the persisted workspace
+        (editable below) diverges from the running one, so the user
+        can see the restart-required gap.
       -->
       <section class="flex flex-col gap-2">
         <div
           class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold"
         >
-          Paths the backend resolved
+          Backend running with
         </div>
         <dl
           class="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs [&_dt]:text-muted-foreground [&_dd]:m-0 [&_dd]:break-all [&_code]:font-mono [&_code]:text-[11px]"
@@ -285,14 +302,16 @@
           <dd><code>{data.config_path}</code></dd>
           <dt>Workspace</dt>
           <dd>
-            <code>{data.workspace}</code>
-            <span class="text-muted-foreground ml-1">
-              (set via <code>--workspace</code> or <code>$WOWS_WORKSPACE</code>)
-            </span>
+            <code>{data.running_workspace}</code>
+            {#if workspaceDrift}
+              <span class="text-amber-400 ml-1">
+                — persisted value below differs; restart to apply
+              </span>
+            {/if}
           </dd>
-          {#if data.cache_dir}
+          {#if data.running_cache_dir}
             <dt>Cache dir</dt>
-            <dd><code>{data.cache_dir}</code></dd>
+            <dd><code>{data.running_cache_dir}</code></dd>
           {/if}
         </dl>
       </section>
@@ -343,6 +362,27 @@
             Path to the <code>wowsunpack</code> executable. Falls back to
             <code>PATH</code> when neither this file nor
             <code>${data.fields.toolkit_bin.env_var}</code> is set.
+          </span>
+        </label>
+
+        <label class={labelCls}>
+          <span class={labelTopCls}>
+            <span class="text-foreground">Workspace (output directory)</span>
+            <span class={sourceColor(data.fields.workspace.source)}>
+              {sourceLabel(data.fields.workspace.source)}
+            </span>
+          </span>
+          <input
+            type="text"
+            placeholder={data.running_workspace}
+            bind:value={form.workspace}
+            class={inputCls}
+          />
+          <span class="text-muted-foreground text-[11px]">
+            Where ship extracts, libraries, and caches land. Leave blank
+            to fall back to <code>${data.fields.workspace.env_var}</code> or
+            the directory <code>wows-webview-serve</code> was launched from.
+            <code>--workspace</code> on the CLI still overrides this.
           </span>
         </label>
 

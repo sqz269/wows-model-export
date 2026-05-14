@@ -23,12 +23,15 @@ export interface SettingsField<T> {
 export interface SettingsResponse {
   /** Absolute filesystem path the PUT writes to. Shown for transparency. */
   config_path: string;
-  /** Bootstrap-only — set via `--workspace` / $WOWS_WORKSPACE. Read-only. */
-  workspace: string;
-  cache_dir: string | null;
+  /** Snapshot of the workspace the backend BOOTED with. A user-config
+   *  PUT changing `fields.workspace` won't move this — surface the gap
+   *  to the user as "restart required". */
+  running_workspace: string;
+  running_cache_dir: string | null;
   fields: {
     game_dir: SettingsField<string>;
     toolkit_bin: SettingsField<string>;
+    workspace: SettingsField<string>;
     toolkit_timeout_s: SettingsField<number>;
   };
 }
@@ -37,6 +40,7 @@ export interface SettingsPatch {
   /** `null` / empty string clears the override; falls back to env or auto. */
   game_dir?: string | null;
   toolkit_bin?: string | null;
+  workspace?: string | null;
   toolkit_timeout_s?: number | null;
 }
 

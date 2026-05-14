@@ -17,16 +17,17 @@ Resolution order, picked at `PipelineConfig.load()` time:
                 ← shutil.which("wowsunpack")
                 ← (no default — required for any toolkit op)
     workspace    ← WOWS_WORKSPACE env var
+                ← user-config file
                 ← cwd (so a checkout used as the workspace "just works")
     cache_dir    ← (not configurable directly — derived from workspace)
 
 The user-config file (`%APPDATA%/wows-model-export/config.json` on
 Windows, `~/.config/wows-model-export/config.json` elsewhere) lets the
-webview Settings page persist `game_dir` / `toolkit_bin` /
-`toolkit_timeout_s` once instead of asking users to wrangle env vars on
-every shell. Env vars still win — the file is a fallback layer, not an
-override. `workspace` stays env/CLI-only because it's the bootstrap key
-(the rest of the config tree depends on it).
+webview Settings page persist every knob once instead of asking users
+to wrangle env vars on every shell. Env vars still win — the file is a
+fallback layer, not an override. Note that the user-config file lives
+in the platform user-data dir (not under workspace), so persisting
+workspace from there is not circular.
 
 `load()` does **not** raise on missing values; it returns a config with
 the field unresolved (`None`). Layer 2 / Layer 4 entries that actually
@@ -60,6 +61,7 @@ logger = logging.getLogger(__name__)
 _USER_SETTINGS_KEYS: tuple[str, ...] = (
     "game_dir",
     "toolkit_bin",
+    "workspace",
     "toolkit_timeout_s",
 )
 
@@ -110,7 +112,11 @@ class PipelineConfig:
             found = shutil.which("wowsunpack") or shutil.which("wowsunpack.exe")
             toolkit_bin = Path(found) if found else None
 
-        workspace = _path_from_env(e, "WOWS_WORKSPACE") or Path.cwd()
+        workspace = (
+            _path_from_env(e, "WOWS_WORKSPACE")
+            or _path_from_dict(user_settings, "workspace")
+            or Path.cwd()
+        )
 
         cache_dir = workspace / ".cache"
 

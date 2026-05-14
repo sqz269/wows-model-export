@@ -53,6 +53,7 @@ class SettingsPatch(BaseModel):
 
     game_dir: str | None = None
     toolkit_bin: str | None = None
+    workspace: str | None = None
     toolkit_timeout_s: float | None = None
 
 
@@ -63,7 +64,7 @@ class SettingsPatch(BaseModel):
 def _validate(key: str, raw: Any) -> tuple[Any, str | None]:
     if raw is None or raw == "":
         return (None, None)
-    if key in ("game_dir", "toolkit_bin"):
+    if key in ("game_dir", "toolkit_bin", "workspace"):
         if not isinstance(raw, str):
             return (None, f"{key} must be a string path")
         p = Path(raw).expanduser()
@@ -71,6 +72,8 @@ def _validate(key: str, raw: Any) -> tuple[Any, str | None]:
             return (None, f"{key}: path does not exist: {p}")
         if key == "toolkit_bin" and p.is_dir():
             return (None, f"{key}: expected an executable file, got a directory")
+        if key in ("game_dir", "workspace") and not p.is_dir():
+            return (None, f"{key}: expected a directory, got a file")
         return (str(p), None)
     if key == "toolkit_timeout_s":
         if isinstance(raw, bool):
@@ -126,11 +129,13 @@ def make_router(config: PipelineConfig) -> APIRouter:
         file_settings = load_user_settings()
         return {
             "config_path": str(user_config_path()),
-            # Workspace + cache_dir are read-only metadata; the page
-            # renders them with a "set via --workspace / $WOWS_WORKSPACE"
-            # hint.
-            "workspace": str(config.workspace),
-            "cache_dir": str(config.cache_dir) if config.cache_dir else None,
+            # `running_*` snapshots the values the FastAPI process
+            # booted with. A field's `value` reflects what
+            # PipelineConfig.load() returns RIGHT NOW (env + file),
+            # which can diverge after a Settings PUT — the UI uses
+            # the gap to nudge the user to restart the backend.
+            "running_workspace": str(config.workspace),
+            "running_cache_dir": str(config.cache_dir) if config.cache_dir else None,
             "fields": {
                 "game_dir": {
                     "value": str(live.game_dir) if live.game_dir else None,
@@ -152,6 +157,14 @@ def make_router(config: PipelineConfig) -> APIRouter:
                         ),
                     ),
                     "env_var": "WOWS_TOOLKIT_BIN",
+                },
+                "workspace": {
+                    "value": str(live.workspace),
+                    "source": _field_source(
+                        "WOWS_WORKSPACE",
+                        file_settings.get("workspace"),
+                    ),
+                    "env_var": "WOWS_WORKSPACE",
                 },
                 "toolkit_timeout_s": {
                     "value": live.toolkit_timeout_s,
