@@ -493,12 +493,8 @@ def _extract_material_manifest(
             glb_path,
             textures_dir=png_dir if png_dir.is_dir() else None,
             textures_dds_dir=dds_dir if dds_dir.is_dir() else None,
+            material_mappings_json=mm_path if mm_path.is_file() else None,
         )
-        if mm_path.is_file() and rec.materials:
-            resolve_sidecar._apply_material_mappings_json(
-                rec.materials, mm_path, dds_dir,
-                dds_uri_prefix="textures_dds/",
-            )
         rec.texture_sets = (
             resolve_sidecar.texture_sets_from_dir(dds_dir)
             if dds_dir.is_dir() else {}
