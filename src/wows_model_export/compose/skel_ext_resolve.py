@@ -13,19 +13,11 @@ inputs:
 and emits ``<Ship>_accessories.json`` -- the canonical sidecar input
 consumed by :mod:`wows_model_export.compose.scaffold_ship`.
 
-Mode ``"hash"`` is the default (and the only path actively maintained
-for new ships, as of 2026-05-10). It resolves each candidate's
-``p0_hash`` via :func:`wows_model_export.resolve.skel_ext_hashes.resolve_candidates`
+Resolves each candidate's ``p0_hash`` via
+:func:`wows_model_export.resolve.skel_ext_hashes.resolve_candidates`
 against a Murmur3_32 lookup table built from ``assets.bin``'s
 ``MP_*`` / ``SP_*`` string corpus, catching the full set of WG
-decoratives (5-10x more entries than legacy gmconvert).
-
-Legacy modes (``"legacy-direct"`` / ``"legacy-anchor"``) were retired
-2026-05-10 once every in-tree ship had been migrated to hash mode and
-are not lifted here -- callers passing those modes raise
-:class:`StepError` immediately. The mode parameter is preserved on
-the public signature so the orchestrator can detect old call sites
-deliberately.
+decoratives.
 
 Canonical :class:`StepEvent` names emitted at step boundaries:
 
@@ -45,7 +37,7 @@ import struct
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from .. import toolkit
 from ..config import PipelineConfig
@@ -952,7 +944,6 @@ def _resolve_hash_mode(
                 sorted(emitted_by_category.items(), key=lambda x: -x[1])
             },
         }
-        out.pop("unmatched_legacy", None)
 
         output_json.parent.mkdir(parents=True, exist_ok=True)
         _save_json(output_json, out)
@@ -975,9 +966,7 @@ def resolve_decorative_placements(
     *,
     candidates_json: Path,
     output_json: Path,
-    mode: Literal["hash", "legacy-direct", "legacy-anchor"] = "hash",
     keep_record_offsets: tuple[str, ...] | None = ("0x0",),
-    legacy_scan: Path | None = None,
     manifest_path: Path | None = None,
     hull_glb: Path | None = None,
     accessories_lib: Path | None = None,
@@ -1004,15 +993,9 @@ def resolve_decorative_placements(
             (``wowsunpack export-ship --skel-ext-candidates-json``).  Carries
             decorative placement candidates resolved via their ``p0_hash``.
         output_json
-            Final merged accessories JSON.  Sidecar (and Unity / webview
-            consumers) all read this file rather than the raw placements.
-        mode
-            ``"hash"`` (default) -- resolve every candidate's ``p0_hash``
-            via :func:`wows_model_export.resolve.skel_ext_hashes.resolve_candidates`.
-            Legacy modes (``"legacy-direct"`` / ``"legacy-anchor"``) were
-            retired 2026-05-10 and raise :class:`StepError`; ``legacy_scan``
-            is accepted on the signature for future re-introduction but
-            is currently unused.
+            Final merged accessories JSON.  Sidecar (and webview /
+            other downstream consumers) all read this file rather than
+            the raw placements.
         keep_record_offsets
             Tuple of ``.skel_ext`` record-offset hex strings to keep.  Default
             ``("0x0",)`` retains only the base ship's record block.  Pass
@@ -1020,8 +1003,7 @@ def resolve_decorative_placements(
             blocks.  Cherry-pick specific variants via e.g.
             ``("0x0", "0x14080")``.
 
-    Filtering parameters mirror the legacy CLI's flags one-to-one;
-    see the I:-side module docstring for the full semantics of each
+    See the I:-side module docstring for the full semantics of each
     filter (off-hull, cross-nation, dock, skinned-mesh bone,
     degenerate-matrix, near-origin).
     """
@@ -1030,32 +1012,9 @@ def resolve_decorative_placements(
     candidates_json = Path(candidates_json)
     output_json = Path(output_json)
 
-    if mode != "hash":
-        # Surface a clear error rather than silently producing nothing --
-        # callers that genuinely need the legacy mode should re-introduce
-        # the I:-side implementation via git history.
-        raise StepError(
-            step="resolve_hashes",
-            underlying=NotImplementedError(
-                f"mode={mode!r} (legacy-direct / legacy-anchor) was retired "
-                f"2026-05-10; only mode='hash' is supported.  Recover via "
-                f"git history if a pre-migration ship needs it."
-            ),
-            detail=f"unsupported mode {mode!r}",
-        )
-
     runner = StepRunner(on_event)
     warnings: list[str] = []
     manifest = manifest_path or toolkit.default_manifest_path(cfg)
-
-    # ``legacy_scan`` is accepted for API stability but unused by the
-    # hash-mode pathway.  Surface a warning so a stray legacy call site
-    # doesn't get silently ignored.
-    if legacy_scan is not None:
-        warnings.append(
-            f"legacy_scan={legacy_scan} ignored in hash mode "
-            f"(only used by retired legacy-direct / legacy-anchor modes)"
-        )
 
     try:
         _resolve_hash_mode(

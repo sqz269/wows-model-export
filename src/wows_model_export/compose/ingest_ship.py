@@ -3,7 +3,7 @@
 Lifted from ``tools/ship/ingest_ship.py`` on the I:-side warships repo.
 This is the Layer 4 capstone orchestrator: it chains every per-ship
 operation into a single callable, walking the RUNBOOK §§1 + 3.5 workflow
-from raw ship name -> publishable Unity bundle.
+from raw ship name -> publishable consumer-side bundle.
 
 Stepwise the composer is:
 
@@ -12,22 +12,8 @@ Stepwise the composer is:
                                    toolkit reports ambiguity and
                                    ``interactive=True``, the user is
                                    prompted on stdin to pick a model_dir.
-  2. ``prep_dirs``              -- create ``<workspace>/<label>/models/``
-                                   and ``<workspace>/<label>/legacy_models/``
-                                   (or the off-tree ``<legacy_root>/...``
-                                   variant when ``legacy_root`` is set).
-  3. ``acquire_legacy_glb``     -- copy the legacy
-                                   ``<label>_visual.glb`` into place when
-                                   ``legacy_glb_path`` is set, or prompt
-                                   the user on stdin under
-                                   ``interactive=True``.  Skipped when
-                                   ``skip_legacy=True``.
-  4. ``accessories_scan``       -- invoke
-                                   :func:`wows_model_export.compose.accessories_scan.scan_legacy_glb`
-                                   on the legacy GLB.  Skipped when no
-                                   legacy GLB is on hand or the scan
-                                   already exists.
-  5. ``scaffold``               -- invoke
+  2. ``prep_dirs``              -- create ``<workspace>/<label>/models/``.
+  3. ``scaffold``               -- invoke
                                    :func:`wows_model_export.compose.scaffold_ship.scaffold_ship`,
                                    the export-ship + armor + ammo +
                                    sidecar sub-composer.  Sub-composer
@@ -35,7 +21,7 @@ Stepwise the composer is:
                                    ``on_event`` callback verbatim; the
                                    ``step`` field uniquely identifies
                                    each.
-  6. ``resolve_decoratives``    -- invoke
+  4. ``resolve_decoratives``    -- invoke
                                    :func:`wows_model_export.compose.skel_ext_resolve.resolve_decorative_placements`
                                    to merge the toolkit-emitted skel_ext
                                    candidates JSON into
@@ -45,7 +31,7 @@ Stepwise the composer is:
                                    the merged decoratives back into the
                                    sidecar.  Skipped when no candidates
                                    JSON is on disk (HP_-only sidecar).
-  7. ``build_library``          -- invoke
+  5. ``build_library``          -- invoke
                                    :func:`wows_model_export.compose.accessory_library.build_accessory_library`
                                    when ``build_library=True`` or
                                    ``rebuild_library=True``.  Additive
@@ -55,12 +41,11 @@ Stepwise the composer is:
                                    post-library scaffold refresh so the
                                    variant-swap bone-mismatch correction
                                    sees the freshly-built variant GLBs.
-  8. ``publish``                -- invoke
+  6. ``publish``                -- invoke
                                    :func:`wows_model_export.compose.publish.publish`
                                    when ``and_publish=True``.  Generic
                                    publisher; pass ``publish_target`` to
-                                   point at a Unity ``Assets/Ships/Pipeline``
-                                   folder (or any consumer-side root).
+                                   point at any consumer-side root.
 
 Sub-composer error handling: a child composer's :class:`StepError`
 propagates up wrapped in the parent's
@@ -74,8 +59,8 @@ Refactor notes vs the I:-side ``ingest(*, ship_input=, out_root=, ...)``:
 * ``game_dir`` + ``wowsunpack_path`` -> resolved via :class:`PipelineConfig`.
 * ``IngestStepError`` dropped; package-level :class:`StepError` covers
   the same use case with a richer payload.
-* ``publish_target`` replaces the hard-coded ``H:/Unity`` path the old
-  ``publish_to_unity.py`` carried -- the new ``compose.publish`` requires
+* ``publish_target`` replaces the hard-coded consumer path the old
+  publish script carried -- the new ``compose.publish`` requires
   a ``target_dir``.
 * Returns :class:`IngestResult` (frozen dataclass) instead of a
   free-form dict.
@@ -87,8 +72,6 @@ Refactor notes vs the I:-side ``ingest(*, ship_input=, out_root=, ...)``:
 from __future__ import annotations
 
 import re
-import shutil
-import sys
 import tempfile
 from pathlib import Path
 
@@ -97,7 +80,6 @@ from ..errors import StepError, ToolkitError
 from ..resolve import sidecar as _sidecar
 from ..toolkit import armor_json as _toolkit_armor_json
 from ..types import IngestResult, OnEvent, ScaffoldResult
-from . import accessories_scan as _accessories_scan_mod
 from . import accessory_library as _accessory_library_mod
 from . import publish as _publish_mod
 from . import scaffold_ship as _scaffold_ship_mod
@@ -261,52 +243,6 @@ def resolve_ship_identity(
 
 
 # ---------------------------------------------------------------------------
-# Legacy GLB acquisition (lifted)
-# ---------------------------------------------------------------------------
-
-
-def _prompt_for_legacy_glb(
-    expected_path: Path,
-    *,
-    interactive: bool,
-    label: str,
-) -> bool:
-    """Wait for the legacy GLB to appear at ``expected_path``.
-
-    Returns ``True`` if the file arrived, ``False`` if the user
-    indicated they don't have one (``interactive=False`` -> immediate
-    ``False`` when the path is missing).
-    """
-    if expected_path.is_file():
-        return True
-
-    if not interactive:
-        return False
-
-    print(f"\nPlace {label}_visual.glb at:", file=sys.stderr)
-    print(f"  {expected_path}", file=sys.stderr)
-    print(
-        "\nThen press Enter to continue. Type 's' + Enter to skip the\n"
-        "legacy merge (sidecar will only have HP_ hardpoints, ~10-15% of\n"
-        "placements); type 'q' to abort.",
-        file=sys.stderr,
-    )
-    while True:
-        choice = input("> ").strip().lower()
-        if choice == "q":
-            raise StepError(
-                step="acquire_legacy_glb",
-                underlying=KeyboardInterrupt("aborted by user"),
-                detail="user aborted legacy-GLB prompt",
-            )
-        if choice == "s":
-            return False
-        if expected_path.is_file():
-            return True
-        print(f"  not found -- still expected at {expected_path}", file=sys.stderr)
-
-
-# ---------------------------------------------------------------------------
 # Public composer entry
 # ---------------------------------------------------------------------------
 
@@ -316,10 +252,7 @@ def ingest_ship(
     *,
     workspace: Path | None = None,
     config: PipelineConfig | None = None,
-    legacy_root: Path | None = None,
     forced_label: str | None = None,
-    legacy_glb_path: Path | None = None,
-    skip_legacy: bool = False,
     interactive: bool = False,
     class_override: str | None = None,
     ship_key_suffix: str | None = None,
@@ -337,9 +270,9 @@ def ingest_ship(
     """Run the full per-ship ingest pipeline end-to-end.
 
     The composer chains every per-ship operation: identity resolution,
-    working-directory prep, optional legacy-GLB acquisition + scan,
-    scaffold (export-ship + armor + ammo + sidecar), decorative-placement
-    merge, optional accessory-library refresh, and optional publish.
+    working-directory prep, scaffold (export-ship + armor + ammo +
+    sidecar), decorative-placement merge, optional accessory-library
+    refresh, and optional publish.
 
     Parameters:
         ship_input
@@ -353,25 +286,13 @@ def ingest_ship(
             Pre-resolved :class:`PipelineConfig`; loaded on demand when
             ``None``.  Replaces the I:-side ``game_dir`` /
             ``wowsunpack_path`` kwargs.
-        legacy_root
-            Optional off-tree root for the legacy ``<label>_visual.glb``.
-            When set, the legacy GLB + scan live at
-            ``<legacy_root>/<label>/<MODELS_SUBDIR>/``; otherwise at
-            ``<workspace>/<label>/<LEGACY_MODELS_SUBDIR>/`` (the default).
         forced_label
             Filesystem folder label override (e.g. ``Baltimore_Old``).
             Default: the input name, or the user's choice on ambiguity.
-        legacy_glb_path
-            Path to a legacy ``<Ship>_visual.glb``; copied into the
-            legacy folder when set.  Otherwise the legacy-GLB acquisition
-            step prompts (when ``interactive=True``) or skips.
-        skip_legacy
-            Skip the legacy-scan merge entirely.  Sidecar then carries
-            only HP_ hardpoints.
         interactive
-            Allow prompting on stdin (ambiguous identity, missing
-            legacy GLB).  Default ``False`` (CI / scripted use); the
-            composer raises :class:`StepError` rather than blocking.
+            Allow prompting on stdin (ambiguous identity).  Default
+            ``False`` (CI / scripted use); the composer raises
+            :class:`StepError` rather than blocking.
         class_override
             Override toolkit species mapping
             (``CA``/``CL``/``BB``/``DD``/``CV``/``SS``/...).
@@ -394,8 +315,7 @@ def ingest_ship(
             After ingest (and library build, if any), publish this
             ship's outputs.  Requires ``publish_target`` to be set.
         publish_target
-            Consumer-side destination root (Unity
-            ``Assets/Ships/Pipeline/`` historically).  Required when
+            Consumer-side destination root.  Required when
             ``and_publish=True``.
         publish_force
             Implies ``and_publish=True``; passes ``force=True`` to the
@@ -422,8 +342,8 @@ def ingest_ship(
 
     Returns:
         :class:`IngestResult` wrapping the inner :class:`ScaffoldResult`
-        plus the follow-up paths (legacy scan, merged accessories JSON,
-        library refresh flag, publish target).
+        plus the follow-up paths (merged accessories JSON, library
+        refresh flag, publish target).
 
     Raises:
         :class:`StepError`
@@ -440,10 +360,6 @@ def ingest_ship(
     if workspace is None:
         workspace = cfg.workspace
     workspace = Path(workspace).resolve()
-    if legacy_root is not None:
-        legacy_root = Path(legacy_root).resolve()
-    if legacy_glb_path is not None:
-        legacy_glb_path = Path(legacy_glb_path)
     if publish_target is not None:
         publish_target = Path(publish_target).resolve()
 
@@ -471,7 +387,6 @@ def ingest_ship(
     timer = StepRunner(on_event)
     warnings: list[str] = []
 
-    legacy_scan_path: Path | None = None
     accessories_json_path: Path | None = None
     library_refreshed = False
     published_to: Path | None = None
@@ -518,17 +433,11 @@ def ingest_ship(
         ship_dir = (workspace / label).resolve()
         ship_models = ship_dir / _sidecar.MODELS_SUBDIR
         ship_models.mkdir(parents=True, exist_ok=True)
-        if legacy_root is None:
-            legacy_models = (ship_dir / _sidecar.LEGACY_MODELS_SUBDIR).resolve()
-        else:
-            legacy_models = (legacy_root / label / _sidecar.MODELS_SUBDIR).resolve()
-        legacy_models.mkdir(parents=True, exist_ok=True)
         timer.complete(
             detail=f"{ship_dir}",
             data={
                 "ship_dir":         str(ship_dir),
                 "ship_models":      str(ship_models),
-                "legacy_models":    str(legacy_models),
             },
         )
     except Exception as e:
@@ -538,88 +447,6 @@ def ingest_ship(
             underlying=e,
             detail=f"failed to prepare working dirs for {label!r}",
         ) from e
-
-    legacy_glb = legacy_models / f"{label}_visual.glb"
-    legacy_scan = legacy_models / f"{label}_accessories_scan.json"
-
-    # ------------------------------------------------------------------
-    # Step: acquire_legacy_glb
-    # ------------------------------------------------------------------
-    have_legacy = False
-    if skip_legacy:
-        timer.skip("acquire_legacy_glb", detail="--skip-legacy")
-    else:
-        timer.start("acquire_legacy_glb", detail=str(legacy_glb.name))
-        try:
-            if legacy_glb_path is not None:
-                if not legacy_glb_path.is_file():
-                    raise FileNotFoundError(
-                        f"legacy_glb_path not found: {legacy_glb_path}"
-                    )
-                if legacy_glb_path.resolve() != legacy_glb.resolve():
-                    shutil.copyfile(legacy_glb_path, legacy_glb)
-                    detail = f"copied {legacy_glb_path.name} -> {legacy_glb}"
-                else:
-                    detail = f"in place at {legacy_glb}"
-                have_legacy = True
-            else:
-                have_legacy = _prompt_for_legacy_glb(
-                    legacy_glb,
-                    interactive=interactive,
-                    label=label,
-                )
-                detail = (
-                    f"acquired {legacy_glb}"
-                    if have_legacy
-                    else "no legacy GLB available (HP_-only sidecar)"
-                )
-            timer.complete(detail=detail, data={"have_legacy": have_legacy})
-        except StepError:
-            timer.fail("acquire_legacy_glb")
-            raise
-        except Exception as e:
-            timer.fail("acquire_legacy_glb", detail=f"{type(e).__name__}: {e}")
-            raise StepError(
-                step="acquire_legacy_glb",
-                underlying=e,
-                detail=f"failed to acquire legacy GLB for {label!r}",
-            ) from e
-
-    # ------------------------------------------------------------------
-    # Step: accessories_scan
-    # ------------------------------------------------------------------
-    if not have_legacy:
-        timer.skip("accessories_scan", detail="no legacy GLB on hand")
-    elif legacy_scan.is_file():
-        timer.skip(
-            "accessories_scan",
-            detail=f"scan already present: {legacy_scan.name}",
-        )
-        legacy_scan_path = legacy_scan
-    else:
-        timer.start("accessories_scan", detail=legacy_glb.name)
-        try:
-            legacy_scan_path = _accessories_scan_mod.scan_legacy_glb(
-                legacy_glb,
-                output_json=legacy_scan,
-                config=cfg,
-                on_event=on_event,
-            )
-            timer.complete(detail=str(legacy_scan_path.name))
-        except StepError as e:
-            timer.fail("accessories_scan", detail=f"sub-composer failed: step={e.step!r}")
-            raise StepError(
-                step="accessories_scan",
-                underlying=e,
-                detail=f"sub-composer failed at step {e.step!r}",
-            ) from e
-        except Exception as e:
-            timer.fail("accessories_scan", detail=f"{type(e).__name__}: {e}")
-            raise StepError(
-                step="accessories_scan",
-                underlying=e,
-                detail=f"legacy-scan failed for {legacy_glb}",
-            ) from e
 
     # ------------------------------------------------------------------
     # Step: scaffold (the big sub-composer)
@@ -876,7 +703,6 @@ def ingest_ship(
         label=label,
         workspace_dir=ship_dir,
         scaffold=scaffold_result,
-        legacy_scan_path=legacy_scan_path,
         accessories_json_path=accessories_json_path,
         library_refreshed=library_refreshed,
         published_to=published_to,

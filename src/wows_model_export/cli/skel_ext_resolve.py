@@ -5,9 +5,8 @@ accessories JSON. Argv shape::
 
     wows-skel-ext-resolve <placements_json>
         --candidates <P> --output <P>
-        [--mode hash|legacy-direct|legacy-anchor]
         [--record-offsets 0x0,0x...]
-        [--legacy-scan P] [--manifest P] [--hull-glb P]
+        [--manifest P] [--hull-glb P]
         [--accessories-lib P]
         [--include-dock] [--keep-skinned]
         [--hull-margin-m F] [--ship-nation N]
@@ -61,26 +60,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output <Ship>_accessories.json path.",
     )
     ap.add_argument(
-        "--mode",
-        choices=("hash", "legacy-direct", "legacy-anchor"),
-        default="hash",
-        help="Decorative-resolution mode. 'hash' (default) uses the "
-             "hash-lookup path via accessory library; 'legacy-direct' / "
-             "'legacy-anchor' use gamemodels3d.com scan anchors.",
-    )
-    ap.add_argument(
         "--record-offsets",
         type=str,
         default="0x0",
         help="Comma-separated list of record-offset filters (default: "
              "0x0, the base ship). Pass an empty string to keep every "
              "variant record block.",
-    )
-    ap.add_argument(
-        "--legacy-scan",
-        type=Path,
-        default=None,
-        help="Path to <Ship>_accessories_scan.json (legacy modes only).",
     )
     ap.add_argument(
         "--manifest",
@@ -174,9 +159,7 @@ def main(argv: list[str] | None = None) -> int:
             args.placements_json,
             candidates_json=args.candidates_json,
             output_json=args.output,
-            mode=args.mode,
             keep_record_offsets=record_offsets,
-            legacy_scan=args.legacy_scan,
             manifest_path=args.manifest,
             hull_glb=args.hull_glb,
             accessories_lib=args.accessories_lib,

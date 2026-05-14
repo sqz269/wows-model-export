@@ -815,7 +815,7 @@ def _fill_gun_fields(
 
 def _fill_aa_fields(mount: dict[str, Any], out: dict[str, Any]) -> None:
     """AA mount fields. ``aa_range_km`` and ``aa_dps`` are the aura
-    coefficients — Unity scales them to per-frame DPS at ``AAMount``
+    coefficients — consumers scale them to per-frame DPS at ``AAMount``
     instantiation. Yaw / elev arcs are also exposed where present."""
     barrel_d = _safe_float(mount.get("barrelDiameter"))
     if barrel_d is not None and barrel_d > 0:
@@ -944,10 +944,11 @@ def torpedo_profile_extras(ammo_id: str, *, refresh: bool = False) -> dict[str, 
 # ---------------------------------------------------------------------------
 # Per-projectile visual + effects extras (schema v3.2)
 #
-# Pulls render-pipeline hints out of GameParams Projectile entities so Unity
-# can tint shells per-ammo (HE orange / AP pale-blue), drive tracer
-# length/thickness/opacity from the data, and route impact-effect particle
-# scripts by hit category. Source XML / DDS paths are kept as VFS strings —
+# Pulls render-pipeline hints out of GameParams Projectile entities so
+# downstream consumers can tint shells per-ammo (HE orange / AP pale-blue),
+# drive tracer length/thickness/opacity from the data, and route impact-
+# effect particle scripts by hit category. Source XML / DDS paths are kept
+# as VFS strings —
 # no extraction here; consumers resolve via VFS at use time.
 # ---------------------------------------------------------------------------
 

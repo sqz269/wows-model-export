@@ -5,7 +5,6 @@ Extract turret rig pivots for a single library asset. Argv shape::
     wows-turret-autorig <asset_id>
         [--library-root P]
         [--output P]
-        [--use-legacy --legacy-glb P --legacy-scan P]
         [common flags ...]
 """
 
@@ -52,27 +51,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override the output JSON path (default: "
              "<asset_dir>/<asset_id>.rig_pivots.json).",
     )
-    ap.add_argument(
-        "--use-legacy",
-        action="store_true",
-        help="Use the deprecated gamemodels3d.com hardpoint-tree walker "
-             "instead of the toolkit dump-bones --json path. Requires "
-             "--legacy-glb + --legacy-scan.",
-    )
-    ap.add_argument(
-        "--legacy-glb",
-        type=Path,
-        default=None,
-        help="Path to the legacy <Ship>_visual.glb (only with "
-             "--use-legacy).",
-    )
-    ap.add_argument(
-        "--legacy-scan",
-        type=Path,
-        default=None,
-        help="Path to the legacy accessories scan JSON (only with "
-             "--use-legacy).",
-    )
     add_common_args(ap)
     return ap
 
@@ -93,9 +71,6 @@ def main(argv: list[str] | None = None) -> int:
             config=cfg,
             library_root=args.library_root,
             output_path=args.output,
-            use_legacy=args.use_legacy,
-            legacy_glb=args.legacy_glb,
-            legacy_scan=args.legacy_scan,
             on_event=printer,
         )
     except StepError as e:

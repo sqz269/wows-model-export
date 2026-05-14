@@ -257,10 +257,6 @@ def make_router(config: PipelineConfig) -> APIRouter:
         ]
         if permoflage is not None:
             args += ["--variant-permoflage", permoflage]
-        # Defaults match the Node side: skip_legacy true unless
-        # explicitly false; the other three default to false.
-        if body.get("skip_legacy", True) is not False:
-            args.append("--skip-legacy")
         if body.get("build_library"):
             args.append("--build-library")
         if body.get("and_publish"):

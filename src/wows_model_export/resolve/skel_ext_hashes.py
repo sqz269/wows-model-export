@@ -11,8 +11,8 @@ we know:
 where the suffix is one of:
     ""                  - single-instance placement
     "_INDEX_<n>"        - N-th of multiple instances (1-based)
-    ".<NNN>"            - Maya/Blender duplicate-naming convention
-                          (alternative to _INDEX_, observed in WG data)
+    ".<NNN>"            - DCC duplicate-naming convention (alternative
+                          to _INDEX_, observed in WG data)
 
 This module builds an exhaustive lookup table by walking every ``MP_*``
 literal in the game's ``assets.bin`` (35k+ strings on the current
@@ -92,7 +92,7 @@ def murmur3_32(key: str | bytes, seed: int = 0) -> int:
 
 # `_INDEX_<digits>` at end (1-based; saw 1..hundreds on Scharnhorst etc.)
 _INDEX_RE = re.compile(r"^(.*)_INDEX_(\d+)$")
-# `.<NNN>` Maya/Blender duplicate suffix (3+ digits at end)
+# `.<NNN>` DCC duplicate suffix (3+ digits at end)
 _DOT_RE = re.compile(r"^(.*)\.(\d{3,})$")
 
 # Filter strings like "MP_3_HDR.dds" - these are texture filenames, not
@@ -126,7 +126,7 @@ def parse_placement_string(s: str) -> dict | None:
             "suffix": f"_INDEX_{m.group(2)}",
         } if _ASSET_ID_RE.match(m.group(1)) else None
 
-    # Maya/Blender `.NNN` form.
+    # DCC `.NNN` form.
     if (m := _DOT_RE.match(body)) is not None:
         return {
             "prefix": prefix,

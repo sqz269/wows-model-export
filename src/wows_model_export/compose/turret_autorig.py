@@ -5,30 +5,19 @@ Lifted from ``tools/ship/turret_autorig.py`` on the I:-side warships repo
 accessory library composer's ``build_rigs`` step previously shelled out
 to the I:-side script via subprocess).
 
-Layer 4 (composer): chains :mod:`wows_model_export.toolkit.bones`
-(default toolkit-driven path) or a self-contained legacy GLB walker
-(opt-in via ``use_legacy=True``) and emits one
-``<asset_id>.rig_pivots.json`` next to the library asset GLB. The
-intermediate JSON is consumed by ``tools/turret_rig_blender.py`` to
-build the actual armature.
+Layer 4 (composer): chains :mod:`wows_model_export.toolkit.bones` and
+emits one ``<asset_id>.rig_pivots.json`` next to the library asset GLB.
+The intermediate JSON is consumed by the downstream rigger to build the
+actual armature.
 
-Two extraction paths, one public entry point:
-
-* **Toolkit-driven (default since 2026-05-10).** Reads pivots from the
-  asset's ``.visual`` node tree via ``wowsunpack dump-bones --json``
-  (wrapped by :func:`wows_model_export.toolkit.bones.fetch_bones`).
-  WG's universal naming convention (``Rotate_Y`` → ``Rotate_X`` →
-  ``Roll_Back<N>`` → ``HP_gunFire<N>``) lets us pick pivots by name; no
-  per-ship legacy gamemodels3d.com GLB required. AA mounts (Bofors /
-  Oerlikon — no ``Rotate_Y``) emit yaw=identity and surface only muzzle
-  hardpoints; their rotation is driven by the parent ship's AA
-  controller.
-
-* **Legacy walker (opt-in).** The original gamemodels3d.com walker,
-  kept for parity checks and any pre-2026-05-10 ship that still has its
-  ``<Ship>/legacy_models/*_visual.glb`` + ``*_accessories_scan.json``
-  pair on disk. Walks the hardpoint subtree (BigWorld empty-node
-  chain) and infers topology from split points.
+Extraction path: reads pivots from the asset's ``.visual`` node tree via
+``wowsunpack dump-bones --json`` (wrapped by
+:func:`wows_model_export.toolkit.bones.fetch_bones`). WG's universal
+naming convention (``Rotate_Y`` → ``Rotate_X`` → ``Roll_Back<N>`` →
+``HP_gunFire<N>``) lets us pick pivots by name. AA mounts (Bofors /
+Oerlikon — no ``Rotate_Y``) emit yaw=identity and surface only muzzle
+hardpoints; their rotation is driven by the parent ship's AA
+controller.
 
 Coordinate convention:
   Pivots are recorded in TURRET-LOCAL space, with the turret's ship-
@@ -54,8 +43,6 @@ import json
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
-
 from ..config import PipelineConfig
 from ..errors import StepError, ToolkitError
 from ..toolkit.bones import fetch_bones
@@ -63,25 +50,9 @@ from ..types import OnEvent, TurretRigResult
 from ._step_runner import StepRunner
 
 # ---------------------------------------------------------------------------
-# GLB parsing — minimal JSON-chunk extractor used by the legacy walker and
-# the geometric validation pass.
+# GLB parsing — minimal JSON+BIN extractor used by the geometric validation
+# pass.
 # ---------------------------------------------------------------------------
-
-
-def parse_glb_json(path: Path) -> dict:
-    """Read a GLB's JSON chunk only (no BIN buffer needed)."""
-    data = path.read_bytes()
-    if data[:4] != b"glTF":
-        raise ValueError(f"not a GLB: {path}")
-    pos = 12
-    while pos + 8 <= len(data):
-        chunk_len, chunk_type = struct.unpack_from("<I4s", data, pos)
-        pos += 8
-        payload = data[pos:pos + chunk_len]
-        pos += chunk_len
-        if chunk_type == b"JSON":
-            return json.loads(payload)
-    raise ValueError(f"no JSON chunk in {path}")
 
 
 def parse_glb_full(path: Path) -> tuple[dict, bytes]:
@@ -267,212 +238,6 @@ def add(
 
 
 # ---------------------------------------------------------------------------
-# Legacy hardpoint subtree walker — ported from
-# ``archive/wows_pipeline/turret_rigger.py``. Kept for ``use_legacy=True``
-# parity checks.
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class HardpointNode:
-    idx: int
-    translation: tuple[float, float, float]        # relative to PARENT
-    world_translation: tuple[float, float, float]  # accumulated from subtree root
-    children: list[int]
-    has_mesh: bool
-
-
-def build_subtree(
-    gltf: dict,
-    root_idx: int,
-    parent_world: tuple[float, float, float] = (0, 0, 0),
-) -> dict[int, HardpointNode]:
-    """Build a ``{idx → HardpointNode}`` for every node in the subtree
-    rooted at ``root_idx``, with ``world_translation`` accumulated from
-    the root.
-
-    The root's own transform is FOLDED INTO the world offset — we want
-    turret-local coords with the ship-placement transform stripped.
-    """
-    nodes = gltf["nodes"]
-    out: dict[int, HardpointNode] = {}
-
-    def walk(nid: int, parent_world_: tuple[float, float, float]) -> None:
-        node = nodes[nid]
-        t_local = mat_translation(node.get("matrix")) if "matrix" in node \
-            else tuple(node.get("translation", [0.0, 0.0, 0.0]))
-        t_world = add(parent_world_, t_local)
-        kids = list(node.get("children", []) or [])
-        out[nid] = HardpointNode(
-            idx=nid,
-            translation=t_local,
-            world_translation=t_world,
-            children=kids,
-            has_mesh=node.get("mesh") is not None,
-        )
-        for c in kids:
-            walk(c, t_world)
-
-    # Root: its own local translation is NOT added to world, so descendants
-    # come out in turret-local coords (ship-placement offset stripped).
-    root = nodes[root_idx]
-    _ = mat_translation(root.get("matrix"))  # confirm we can read it
-    out[root_idx] = HardpointNode(
-        idx=root_idx,
-        translation=(0, 0, 0),
-        world_translation=(0, 0, 0),
-        children=list(root.get("children", []) or []),
-        has_mesh=root.get("mesh") is not None,
-    )
-    for c in root.get("children", []) or []:
-        walk(c, (0, 0, 0))
-    return out
-
-
-def find_pivots(subtree: dict[int, HardpointNode], root_idx: int) -> dict[str, Any]:
-    """Port of archive ``turret_rigger._find_pivots_glb``.
-
-    Walks the hardpoint chain:
-
-    - root → chain of single-child empties → SPLIT point
-    - SPLIT with multiple empty children → main-style
-      (independent elev per barrel)
-    - SPLIT with only leaves → secondary-style
-      (shared elev; leaves are muzzle positions)
-
-    Only considers EMPTY nodes (``has_mesh=False``). Mesh siblings like
-    the asset's display mesh are skipped from the chain.
-    """
-    empties = {i: n for i, n in subtree.items() if not n.has_mesh}
-
-    def empty_children_of(nid: int) -> list[int]:
-        return [c for c in subtree[nid].children if c in empties]
-
-    def empty_leaves_of(nid: int) -> list[int]:
-        return [c for c in empty_children_of(nid) if not empties[c].children]
-
-    def empty_non_leaves_of(nid: int) -> list[int]:
-        return [c for c in empty_children_of(nid) if empties[c].children]
-
-    # Walk single-child empty chain from root.
-    chain = [root_idx]
-    node_idx = root_idx
-    while True:
-        wrappers = empty_non_leaves_of(node_idx)
-        if len(wrappers) == 0:
-            break
-        if len(wrappers) >= 2:
-            break  # split point
-        # Exactly one non-leaf empty child — descend.
-        node_idx = wrappers[0]
-        chain.append(node_idx)
-
-    wrappers = empty_non_leaves_of(node_idx)
-    leaves = empty_leaves_of(node_idx)
-
-    yaw_world = subtree[root_idx].world_translation
-
-    if len(wrappers) >= 2:
-        # Main-style topology. Current node is the ELEV pivot; each wrapper
-        # is a barrel base whose farthest-from-yaw leaf is the muzzle
-        # marker. BigWorld's hardpoint trees often carry an "inverse
-        # transform" leaf alongside the useful one (sends the world pos
-        # back to origin for some engine-internal reason); ignoring leaves
-        # near the yaw position filters those out automatically.
-        elev_idx = node_idx
-        # Sort by world-X ascending so barrel index order is canonical
-        # (leftmost first → L, C, R for 3-barrel turrets). WG stores
-        # children in whatever order it authored them; we normalise here.
-        barrel_bases: list[int] = sorted(
-            wrappers,
-            key=lambda b: subtree[b].world_translation[0],
-        )
-        muzzles: list[int] = []
-        for bb in barrel_bases:
-            m = _farthest_leaf_from(subtree, bb, yaw_world)
-            muzzles.append(m if m is not None else bb)
-        shared_elev = False
-    else:
-        # Secondary-style: leaves are the barrel muzzles; current node's
-        # PARENT in the chain is the elev pivot.
-        if len(chain) >= 2:
-            elev_idx = chain[-2]
-        else:
-            elev_idx = root_idx
-        # Drop leaves coincident with yaw (centre markers + inverse-transform
-        # markers both land at/near the yaw origin).
-        candidates = [
-            leaf for leaf in leaves
-            if _dist(subtree[leaf].world_translation, yaw_world) > 0.01
-        ]
-        if len(candidates) >= 3:
-            xs = sorted(subtree[leaf].world_translation[0] for leaf in candidates)
-            lateral_span = xs[-1] - xs[0]
-            if lateral_span > 0.05:
-                mean_x = sum(xs) / len(xs)
-                # Drop a "most-central" leaf that's clearly a shared muzzle
-                # marker rather than a barrel hardpoint.
-                sorted_by_dist = sorted(
-                    candidates,
-                    key=lambda leaf: abs(subtree[leaf].world_translation[0] - mean_x),
-                )
-                if abs(subtree[sorted_by_dist[0]].world_translation[0] - mean_x) * 3 \
-                        < abs(subtree[sorted_by_dist[1]].world_translation[0] - mean_x):
-                    candidates.remove(sorted_by_dist[0])
-        # Sort by ascending world-X so order is stable L→R.
-        candidates.sort(key=lambda leaf: subtree[leaf].world_translation[0])
-        barrel_bases = candidates
-        muzzles = candidates
-        shared_elev = True
-
-    return {
-        "yaw_idx": root_idx,
-        "yaw_world": subtree[root_idx].world_translation,  # (0, 0, 0) by construction
-        "elev_idx": elev_idx,
-        "elev_world": subtree[elev_idx].world_translation,
-        "barrel_indices": barrel_bases,
-        "barrel_worlds": [subtree[b].world_translation for b in barrel_bases],
-        "muzzle_indices": muzzles,
-        "muzzle_worlds": [subtree[m].world_translation for m in muzzles],
-        "shared_elev": shared_elev,
-        "chain_depth": len(chain),
-    }
-
-
-def _farthest_leaf_from(
-    subtree: dict[int, HardpointNode],
-    start: int,
-    ref: tuple[float, float, float],
-) -> int | None:
-    """Return the leaf in the subtree rooted at ``start`` that's farthest
-    from the reference point (typically the yaw origin).
-
-    Rationale: BigWorld hardpoint chains often include an "inverse
-    transform" sibling leaf that lands back at the yaw origin, alongside
-    the useful muzzle/hardpoint marker. Picking the leaf with maximum
-    distance from yaw reliably selects the useful one.
-    """
-    best_idx: int | None = None
-    best_dist = -1.0
-    stack = [start]
-    while stack:
-        cur = stack.pop()
-        node = subtree[cur]
-        if not node.children:
-            d = _dist(node.world_translation, ref)
-            if d > best_dist:
-                best_dist = d
-                best_idx = cur
-        else:
-            stack.extend(node.children)
-    return best_idx
-
-
-def _dist(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
-    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
-
-
-# ---------------------------------------------------------------------------
 # Coordinate conversion — BigWorld to pipeline convention.
 # ---------------------------------------------------------------------------
 
@@ -486,61 +251,20 @@ def bw_to_pipeline(p: tuple[float, float, float]) -> tuple[float, float, float]:
     metric, +Z forward (raw BW native handedness, just scaled).
 
     Historical note: an earlier version of this function also Z-negated
-    to match ``skel_ext_resolve.legacy_to_toolkit_matrix``. That transform
-    is correct for the HULL path (``export-ship`` applies
-    ``negate_z_transform`` in the toolkit), but the ACCESSORY path
-    (``export-model``, which emits the library GLBs this rig is for)
-    does NOT apply Z-flip — the mesh ships in raw BW frame scaled to
-    metres. Applying Z-negation at the pivot side landed pivots at -Z
-    while the mesh barrels are at +Z. Visually discovered in the
-    three.js webview where the two don't get the compensating Blender
-    axis-swap that masked the bug in the Blender-side verify tool.
-
-    Downstream consumers (Blender rigger + Unity) must handle the
-    left-handed-at-rest frame of the library GLBs — same situation as
-    the mesh itself. See ``rig.json.bind.forward_axis = "+Z"``.
+    to match the toolkit's HULL path (``export-ship`` applies
+    ``negate_z_transform``). The ACCESSORY path (``export-model``, which
+    emits the library GLBs this rig is for) does NOT apply Z-flip — the
+    mesh ships in raw BW frame scaled to metres. Z-negation at the pivot
+    side landed pivots at -Z while the mesh barrels are at +Z. Downstream
+    consumers must handle the left-handed-at-rest frame of the library
+    GLBs — same situation as the mesh itself. See
+    ``rig.json.bind.forward_axis = "+Z"``.
     """
     return (
         p[0] * NATIVE_TO_METRES,
         p[1] * NATIVE_TO_METRES,
         p[2] * NATIVE_TO_METRES,
     )
-
-
-# ---------------------------------------------------------------------------
-# Legacy source discovery
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class LegacySource:
-    """Pivot data sourced from a per-ship ``<Ship>/legacy_models/*_visual.glb``
-    + companion ``*_accessories_scan.json``. Only used when
-    ``autorig_asset(use_legacy=True, legacy_glb=..., legacy_scan=...)``.
-    """
-
-    ship_dir: Path
-    scan_path: Path
-    glb_path: Path
-    instance: dict  # matching entry from scan['instances']
-
-
-def _override_source(asset_id: str, glb: Path, scan: Path) -> LegacySource | None:
-    """Build a :class:`LegacySource` from explicit override paths.
-
-    Returns ``None`` when the scan doesn't carry this ``asset_id``.
-    """
-    target = asset_id.lower()
-    doc = json.loads(scan.read_text(encoding="utf-8"))
-    for inst in doc.get("instances", []):
-        if (inst.get("asset_id") or "").lower() == target:
-            return LegacySource(
-                ship_dir=glb.parent.parent,
-                scan_path=scan,
-                glb_path=glb,
-                instance=inst,
-            )
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -600,14 +324,12 @@ def _rollback_index(name: str) -> int | None:
 def extract_pivots_from_bones(bones_doc: dict) -> dict:
     """Pure-data pivot extraction from ``wowsunpack dump-bones --json`` output.
 
-    Produces the same shape as the legacy walker's :func:`find_pivots`:
-    ``yaw_world``, ``elev_world``, ``barrel_worlds``, ``muzzle_worlds``,
-    ``shared_elev``, ``chain_depth`` (synthetic; just ``len(name → parent)``
-    chain to yaw).
+    Returns ``yaw_world``, ``elev_world``, ``barrel_worlds``,
+    ``muzzle_worlds``, ``shared_elev``, ``chain_depth`` (synthetic;
+    ``len(name → parent)`` chain to yaw).
 
     Coordinates are in raw BigWorld native units (1 unit ≈ 15 m). The
-    caller applies :func:`bw_to_pipeline` to scale to metres, same as
-    the legacy path.
+    caller applies :func:`bw_to_pipeline` to scale to metres.
     """
     nodes = bones_doc.get("nodes") or []
     by_name: dict[str, dict] = {n["name"]: n for n in nodes}
@@ -643,22 +365,18 @@ def extract_pivots_from_bones(bones_doc: dict) -> dict:
 
     # Modern WG content always shares Rotate_X across all barrels; per-
     # barrel elev is encoded only via the BlendBone animation helpers we
-    # ignore. Keep the field for output-schema parity with the legacy path.
+    # ignore. Keep the field for output-schema documentation.
     shared_elev = True
 
     # When fewer Roll_Back nodes than HP_gunFire (e.g. twin secondaries
     # share one Roll_Back across both barrels) — or none at all (AA
-    # mounts) — promote each muzzle to also serve as a barrel-base. This
-    # mirrors the legacy walker's "secondary-style" handling where leaf
-    # hardpoints doubled as both barrel base and muzzle tip, and keeps
-    # downstream consumers (Blender rigger, Unity) seeing one barrel
-    # entry per gun.
+    # mounts) — promote each muzzle to also serve as a barrel-base, so
+    # downstream consumers see one barrel entry per gun.
     if len(barrel_worlds) < len(muzzle_worlds):
         barrel_worlds = list(muzzle_worlds)
 
     # Synthetic chain depth: yaw → elev → barrel → muzzle = 4 for full
-    # turret rigs, 1 for static AA mounts. Mirrors the legacy heuristic
-    # that warns when the chain looks too shallow.
+    # turret rigs, 1 for static AA mounts.
     if yaw_node and elev_node and rollbacks and muzzles:
         chain_depth = 4
     elif yaw_node and elev_node:
@@ -687,10 +405,7 @@ def extract_pivots_from_bones(bones_doc: dict) -> dict:
 
 @dataclass
 class ToolkitSource:
-    """Pivot data sourced from ``wowsunpack dump-bones --json``.
-
-    Replaces :class:`LegacySource` for the no-legacy-GLB pipeline.
-    """
+    """Pivot data sourced from ``wowsunpack dump-bones --json``."""
 
     asset_id: str
     vfs_geometry_path: str
@@ -734,7 +449,7 @@ def vfs_geometry_path_for_asset(asset_id: str, library_root: Path) -> str | None
 
 
 # ---------------------------------------------------------------------------
-# Per-asset extraction (toolkit + legacy paths converge on ExtractionResult)
+# Per-asset extraction → ExtractionResult
 # ---------------------------------------------------------------------------
 
 
@@ -756,21 +471,15 @@ class ExtractionResult:
     # library GLB hasn't been built yet (validation is best-effort).
     geometric_check: dict | None = None
     auto_flipped: bool = False
-    # Source kind: 'legacy' (gamemodels3d walker) or 'toolkit'
-    # (dump-bones --json). Stamped into the output so consumers can tell
-    # which extraction path produced the rig.
-    source_kind: str = "legacy"
     rig_kind: str = "turret"   # 'turret' / 'aa_mount' / 'minimal'
 
 
-def extract_for_asset_from_toolkit(
+def extract_for_asset(
     asset_id: str,
     src: ToolkitSource,
     library_glb: Path | None = None,
 ) -> ExtractionResult:
-    """Toolkit-driven counterpart to :func:`extract_for_asset`.
-
-    Reads pivots from the bones JSON the toolkit emits via
+    """Reads pivots from the bones JSON the toolkit emits via
     ``dump-bones --json``.
     """
     pivots = extract_pivots_from_bones(src.bones_doc)
@@ -835,85 +544,7 @@ def extract_for_asset_from_toolkit(
         warnings=warns,
         geometric_check=geo,
         auto_flipped=auto_flipped,
-        source_kind="toolkit",
         rig_kind=rig_kind,
-    )
-
-
-def extract_for_asset(
-    asset_id: str,
-    src: LegacySource,
-    library_glb: Path | None = None,
-) -> ExtractionResult:
-    """Legacy gamemodels3d.com hardpoint-tree walker.
-
-    Reads pivots from a per-ship ``*_visual.glb`` + scan-JSON instance
-    pair. Used only when ``autorig_asset(use_legacy=True)``.
-    """
-    gltf = parse_glb_json(src.glb_path)
-    root_idx = src.instance["node_idx"]
-    subtree = build_subtree(gltf, root_idx)
-    pivots = find_pivots(subtree, root_idx)
-
-    warns: list[str] = []
-    if pivots["chain_depth"] < 2:
-        warns.append(
-            f"suspicious chain_depth={pivots['chain_depth']} "
-            f"(expected ≥3 for yaw→…→elev→barrels)"
-        )
-    n = len(pivots["barrel_worlds"])
-    if n == 0:
-        warns.append("no barrels detected")
-    elif n > 16:
-        warns.append(f"unusual barrel_count={n} (sanity check the split heuristic)")
-
-    pivots_pipe = {
-        "yaw":     bw_to_pipeline(pivots["yaw_world"]),
-        "elev":    bw_to_pipeline(pivots["elev_world"]),
-        "barrels": [bw_to_pipeline(p) for p in pivots["barrel_worlds"]],
-        "muzzles": [bw_to_pipeline(p) for p in pivots["muzzle_worlds"]],
-    }
-
-    # Geometric validation + auto-flip (OI-6). For each muzzle, compare
-    # its distance to the nearest mesh vertex against the same distance
-    # if we 180°-flipped around Y. If the flipped pose lands closer at
-    # every barrel, WG's pre-aim-rotation pose was extracted; bake the
-    # 180° fix into the emitted pivots so consumers don't need to know.
-    geo: dict | None = None
-    auto_flipped = False
-    if library_glb is not None:
-        geo = validate_against_mesh(pivots_pipe, library_glb)
-        if geo.get("verdict") == "needs_flip":
-            pivots_pipe = apply_y_flip_to_pivots(pivots_pipe)
-            auto_flipped = True
-            warns.append(
-                "auto-flipped 180° around yaw based on geometric "
-                "validation against the alive library mesh"
-            )
-        elif geo.get("verdict") == "ambiguous":
-            warns.append(
-                f"geometric validation ambiguous "
-                f"(votes={geo.get('votes')}); pivots left as-extracted, "
-                f"verify manually in the webview"
-            )
-
-    return ExtractionResult(
-        asset_id=asset_id,
-        source_ship=src.ship_dir.name,
-        source_glb=str(src.glb_path.relative_to(src.ship_dir.parent)).replace("\\", "/"),
-        source_node_idx=root_idx,
-        pivots_bw={
-            "yaw":     pivots["yaw_world"],
-            "elev":    pivots["elev_world"],
-            "barrels": pivots["barrel_worlds"],
-            "muzzles": pivots["muzzle_worlds"],
-        },
-        pivots_pipeline=pivots_pipe,
-        shared_elev=pivots["shared_elev"],
-        barrel_count=n,
-        warnings=warns,
-        geometric_check=geo,
-        auto_flipped=auto_flipped,
     )
 
 
@@ -925,7 +556,7 @@ def extract_for_asset(
 def write_intermediate(res: ExtractionResult, out_path: Path) -> None:
     """Emit the ``wows_turret_rig_pivots/v1`` JSON next to the library GLB.
 
-    Consumed by the Blender-side rigger that builds the actual armature
+    Consumed by the downstream rigger that builds the actual armature
     and exports the rigged GLB.
     """
     def v(p: tuple[float, float, float]) -> list[float]:
@@ -935,7 +566,7 @@ def write_intermediate(res: ExtractionResult, out_path: Path) -> None:
         "schema": "wows_turret_rig_pivots/v1",
         "asset_id": res.asset_id,
         "source": {
-            "kind": res.source_kind,         # 'toolkit' or 'legacy'
+            "kind": "toolkit",
             "ship": res.source_ship,
             "glb":  res.source_glb,
             "node_idx": res.source_node_idx,
@@ -949,9 +580,9 @@ def write_intermediate(res: ExtractionResult, out_path: Path) -> None:
                 "Accessory-library GLB frame: metric, +Z forward (raw "
                 "BigWorld native handedness scaled to metres). Matches "
                 "<asset_id>.glb vertex positions directly — apply with "
-                "no additional transform in Three.js. Blender's glTF "
-                "import applies Rx(+90°), so Blender-side consumers "
-                "place empties at (x, -z, y) relative to the raw pivot."
+                "no additional transform in Three.js. Consumers whose "
+                "glTF import applies Rx(+90°) should place empties at "
+                "(x, -z, y) relative to the raw pivot."
             ),
         },
         "shared_elev":  res.shared_elev,
@@ -1022,9 +653,6 @@ def autorig_asset(
     config: PipelineConfig | None = None,
     library_root: Path | None = None,
     output_path: Path | None = None,
-    use_legacy: bool = False,
-    legacy_glb: Path | None = None,
-    legacy_scan: Path | None = None,
     on_event: OnEvent | None = None,
 ) -> Path:
     """Extract turret rig pivots for a single library asset.
@@ -1036,16 +664,6 @@ def autorig_asset(
         output_path     Defaults to ``<asset_dir>/<asset_id>.rig_pivots.json``
                         (or ``<workspace>/<asset_id>.rig_pivots.json`` when
                         the asset isn't in the library index yet).
-        use_legacy      When ``True``, run the deprecated gamemodels3d.com
-                        hardpoint-tree walker instead of the toolkit
-                        ``dump-bones --json`` path. Kept for parity checks
-                        and any pre-2026-05-10 ship that still has its
-                        ``legacy_models/`` artifacts on disk. Requires
-                        ``legacy_glb`` + ``legacy_scan``.
-        legacy_glb      Path to ``<Ship>/legacy_models/*_visual.glb``.
-                        Required with ``use_legacy=True``.
-        legacy_scan     Path to ``<Ship>/legacy_models/*_accessories_scan.json``.
-                        Required with ``use_legacy=True``.
         on_event        Optional progress callback receiving
                         :class:`StepEvent` notifications. Canonical step
                         names: ``"resolve_asset"``, ``"fetch_bones"``,
@@ -1068,9 +686,6 @@ def autorig_asset(
         config=config,
         library_root=library_root,
         output_path=output_path,
-        use_legacy=use_legacy,
-        legacy_glb=legacy_glb,
-        legacy_scan=legacy_scan,
         on_event=on_event,
     ).rig_pivots_path
 
@@ -1081,13 +696,10 @@ def autorig_asset_full(
     config: PipelineConfig | None = None,
     library_root: Path | None = None,
     output_path: Path | None = None,
-    use_legacy: bool = False,
-    legacy_glb: Path | None = None,
-    legacy_scan: Path | None = None,
     on_event: OnEvent | None = None,
 ) -> TurretRigResult:
     """Same as :func:`autorig_asset` but returns the full
-    :class:`TurretRigResult` (rig kind, barrel count, source kind, etc.).
+    :class:`TurretRigResult` (rig kind, barrel count, etc.).
 
     See :func:`autorig_asset` for parameter semantics.
     """
@@ -1098,7 +710,6 @@ def autorig_asset_full(
 
     # ── Step: resolve_asset ───────────────────────────────────────────
     src_toolkit: ToolkitSource | None = None
-    src_legacy: LegacySource | None = None
     out_dir: Path | None = None
     library_glb: Path | None = None
     try:
@@ -1109,93 +720,59 @@ def autorig_asset_full(
                 if candidate.is_file():
                     library_glb = candidate
 
-            if use_legacy:
-                if legacy_glb is None or legacy_scan is None:
-                    raise ValueError(
-                        "use_legacy=True requires both legacy_glb and "
-                        "legacy_scan paths"
-                    )
-                src_legacy = _override_source(asset_id, legacy_glb, legacy_scan)
-                if src_legacy is None:
-                    raise FileNotFoundError(
-                        f"{asset_id} not found in legacy scan {legacy_scan}"
-                    )
-                st.annotate(
-                    f"legacy: {src_legacy.glb_path.name}",
-                    data={
-                        "mode": "legacy",
-                        "glb": str(src_legacy.glb_path),
-                        "scan": str(src_legacy.scan_path),
-                    },
+            vfs_path = vfs_geometry_path_for_asset(asset_id, lib_root)
+            if vfs_path is None:
+                raise FileNotFoundError(
+                    f"{asset_id} not in library index at {lib_root / 'index.json'} "
+                    f"— run build_accessory_library first"
                 )
-            else:
-                vfs_path = vfs_geometry_path_for_asset(asset_id, lib_root)
-                if vfs_path is None:
-                    raise FileNotFoundError(
-                        f"{asset_id} not in library index at {lib_root / 'index.json'} "
-                        f"— run build_accessory_library first"
-                    )
-                src_toolkit = ToolkitSource(
-                    asset_id=asset_id,
-                    vfs_geometry_path=vfs_path,
-                    bones_doc={},  # filled in by the fetch_bones step
-                )
-                st.annotate(
-                    f"toolkit: {vfs_path}",
-                    data={"mode": "toolkit", "vfs_path": vfs_path},
-                )
+            src_toolkit = ToolkitSource(
+                asset_id=asset_id,
+                vfs_geometry_path=vfs_path,
+                bones_doc={},  # filled in by the fetch_bones step
+            )
+            st.annotate(
+                f"toolkit: {vfs_path}",
+                data={"mode": "toolkit", "vfs_path": vfs_path},
+            )
     except StepError:
         raise
     except Exception as e:
         raise StepError(step="resolve_asset", underlying=e, detail=str(e)) from e
 
     # ── Step: fetch_bones ─────────────────────────────────────────────
-    if use_legacy:
-        # Legacy path uses the per-ship GLB directly — no toolkit call.
-        runner.emit(
-            "fetch_bones", "skipped",
-            detail="legacy walker reads the per-ship visual.glb directly",
-        )
-        runner.step_timings_ms["fetch_bones"] = 0.0
-    else:
-        try:
-            with runner.step(
-                "fetch_bones",
-                detail=src_toolkit.vfs_geometry_path,  # type: ignore[union-attr]
-            ) as st:
-                bones_doc = fetch_bones(
-                    src_toolkit.vfs_geometry_path,  # type: ignore[union-attr]
-                    config=cfg,
-                )
-                src_toolkit.bones_doc = bones_doc  # type: ignore[union-attr]
-                nodes = bones_doc.get("nodes") or []
-                st.annotate(
-                    f"{len(nodes)} bone(s)",
-                    data={"node_count": len(nodes)},
-                )
-        except StepError:
-            raise
-        except ToolkitError as e:
-            raise StepError(
-                step="fetch_bones", underlying=e,
-                detail=f"dump-bones failed for {asset_id}: {e}",
-            ) from e
-        except Exception as e:
-            raise StepError(step="fetch_bones", underlying=e, detail=str(e)) from e
+    try:
+        with runner.step(
+            "fetch_bones",
+            detail=src_toolkit.vfs_geometry_path,
+        ) as st:
+            bones_doc = fetch_bones(
+                src_toolkit.vfs_geometry_path,
+                config=cfg,
+            )
+            src_toolkit.bones_doc = bones_doc
+            nodes = bones_doc.get("nodes") or []
+            st.annotate(
+                f"{len(nodes)} bone(s)",
+                data={"node_count": len(nodes)},
+            )
+    except StepError:
+        raise
+    except ToolkitError as e:
+        raise StepError(
+            step="fetch_bones", underlying=e,
+            detail=f"dump-bones failed for {asset_id}: {e}",
+        ) from e
+    except Exception as e:
+        raise StepError(step="fetch_bones", underlying=e, detail=str(e)) from e
 
     # ── Step: extract_pivots ──────────────────────────────────────────
     try:
         with runner.step("extract_pivots", detail=asset_id) as st:
-            if use_legacy:
-                res = extract_for_asset(
-                    asset_id, src_legacy,  # type: ignore[arg-type]
-                    library_glb=None,  # validation runs in its own step
-                )
-            else:
-                res = extract_for_asset_from_toolkit(
-                    asset_id, src_toolkit,  # type: ignore[arg-type]
-                    library_glb=None,  # validation runs in its own step
-                )
+            res = extract_for_asset(
+                asset_id, src_toolkit,
+                library_glb=None,  # validation runs in its own step
+            )
             st.annotate(
                 f"{res.rig_kind}, barrels={res.barrel_count}, "
                 f"shared_elev={res.shared_elev}",
@@ -1274,7 +851,6 @@ def autorig_asset_full(
         asset_id=asset_id,
         rig_pivots_path=out,
         rig_kind=res.rig_kind,  # type: ignore[arg-type]
-        source_kind=res.source_kind,  # type: ignore[arg-type]
         barrel_count=res.barrel_count,
         shared_elev=res.shared_elev,
         auto_flipped=res.auto_flipped,
@@ -1289,12 +865,10 @@ __all__ = [
     # Re-exported sources + pivots data structures (mostly for the
     # accessory_library composer and any future per-asset CLI wrapper).
     "ExtractionResult",
-    "LegacySource",
     "ToolkitSource",
     # Pure helpers (useful in tests + parity checks)
     "extract_pivots_from_bones",
     "extract_for_asset",
-    "extract_for_asset_from_toolkit",
     "validate_against_mesh",
     "apply_y_flip_to_pivots",
     "bw_to_pipeline",

@@ -286,11 +286,12 @@ def teardown_ship(
     Raises :class:`StepError` on any per-step failure.
 
     Notes:
-        * The Unity-side mirror (the publish target of
+        * The consumer-side mirror (the publish target of
           :func:`wows_model_export.compose.publish`) is **not** touched
-          here — Unity owns its own .meta files and projects often want
-          to retain the mirror after a pipeline-side teardown. Use the
-          consumer's own delete mechanism instead.
+          here — the consumer owns its own metadata sidecars and
+          projects often want to retain the mirror after a pipeline-
+          side teardown. Use the consumer's own delete mechanism
+          instead.
         * ``.rig_pivots.json`` files that name this ship as the pivot
           source are reported (so the caller can re-run
           ``turret_autorig`` to refresh provenance) but are NOT removed:

@@ -142,8 +142,8 @@ class IngestResult:
     """Outcome of `compose.ingest_ship` — the top-level per-ship op.
 
     Wraps a `ScaffoldResult` (the sidecar + GLB write) plus the followup
-    passes (legacy scan, skel_ext resolve, accessory-library refresh,
-    optional publish). `library_refreshed` is `True` when the post-ingest
+    passes (skel_ext resolve, accessory-library refresh, optional
+    publish). `library_refreshed` is `True` when the post-ingest
     accessory-library rebuild ran.
     """
 
@@ -151,7 +151,6 @@ class IngestResult:
     label:                    str
     workspace_dir:            Path
     scaffold:                 ScaffoldResult
-    legacy_scan_path:         Path | None
     accessories_json_path:    Path | None
     library_refreshed:        bool = False
     published_to:             Path | None = None
@@ -222,7 +221,7 @@ class NormalizeStats:
 class TurretRigResult:
     """Outcome of `compose.turret_autorig.autorig_asset`.
 
-    `rig_pivots_path` is the on-disk JSON the Blender-side rigger
+    `rig_pivots_path` is the on-disk JSON the downstream rigger
     consumes. `rig_kind` distinguishes a full turret rig (yaw + elev +
     per-barrel rollback + muzzles) from an AA mount (muzzle hardpoints
     only — yaw/elev are parent-driven) or a minimal asset that lacks
@@ -234,7 +233,6 @@ class TurretRigResult:
     asset_id:        str
     rig_pivots_path: Path
     rig_kind:        Literal["turret", "aa_mount", "minimal"]
-    source_kind:     Literal["toolkit", "legacy"]
     barrel_count:    int = 0
     shared_elev:     bool = True
     auto_flipped:    bool = False
@@ -271,12 +269,11 @@ class PublishCounts:
 
 @dataclass(frozen=True)
 class PublishResult:
-    """Outcome of `compose.publish` (was `publish_to_unity.py`).
+    """Outcome of `compose.publish`.
 
     Generic publisher — `target_dir` is the consumer-side destination
-    (Unity `Assets/Ships/Pipeline/` historically; configurable now). The
-    per-domain counts let the caller assert e.g. "exactly one ship
-    refreshed, library untouched."
+    (configurable). The per-domain counts let the caller assert e.g.
+    "exactly one ship refreshed, library untouched."
     """
 
     target_dir:   Path

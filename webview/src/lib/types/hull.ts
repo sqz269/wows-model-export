@@ -2,9 +2,9 @@
 //
 // Independent of any Three.js scene state — these are pure data
 // describing WG's per-ship axial split. The four-piece axial split
-// (Bow / MidFront / MidBack / Stern) is shared with the Unity-side
-// `HullDamageState`; see `docs/contracts/damage-state.md` (TODO) for
-// the cross-language contract.
+// (Bow / MidFront / MidBack / Stern) is shared with consumer-side
+// hull-damage resolvers; see `docs/contracts/damage-state.md` (TODO)
+// for the cross-language contract.
 
 export type HullSectionKey = 'Bow' | 'MidFront' | 'MidBack' | 'Stern' | 'Full';
 

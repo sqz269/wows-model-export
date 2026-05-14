@@ -32,7 +32,7 @@ def make_pipeline(
     *,
     version: str | None = None,
     stages_completed: Iterable[int] = (),
-    blender_version: str = "",
+    dcc_version: str = "",
     toolkit_version: str = "",
     native_scale_m: float = 1.0,
     tool_commits: dict[str, str] | None = None,
@@ -42,16 +42,16 @@ def make_pipeline(
     """Build a ``pipeline`` section.
 
     ``native_scale_m`` defaults to ``1.0`` for the new pipeline: the toolkit
-    emits metric-scaled placements and Blender exports FBX with
+    emits metric-scaled placements and the DCC exports FBX with
     ``global_scale=15`` so the sidecar is in metres. Set to ``15.0`` only if
-    you're exporting the FBX in native WoWS units and letting Unity apply
-    the 15× at import.
+    you're exporting the FBX in native WoWS units and letting the consumer
+    apply the 15× at import.
     """
     return {
         "version": version or _today_iso_date(),
         "exported_at": exported_at or _now_iso(),
         "exported_by": exported_by or _default_exporter(),
-        "blender_version": blender_version,
+        "dcc_version": dcc_version,
         "toolkit_version": toolkit_version,
         "stages_completed": sorted({int(s) for s in stages_completed}),
         "tool_commits": dict(tool_commits or {}),
@@ -255,9 +255,9 @@ def make_armor(
 
     ``materials_table`` is keyed by the integer-as-string ``material_id``
     the toolkit emits per armor triangle; values carry
-    ``{thickness_mm, layers, zones[, hidden]}``. Unity resolves
-    ``RaycastHit.triangleIndex`` → per-vertex ``_MATERIAL_ID`` → this
-    table at runtime.
+    ``{thickness_mm, layers, zones[, hidden]}``. The downstream consumer
+    resolves ``RaycastHit.triangleIndex`` → per-vertex ``_MATERIAL_ID`` →
+    this table at runtime.
 
     ``mount_armor`` is keyed by hardpoint name (``HP_AGM_1``); values are
     ``{material_id_str: thickness_mm}`` from GameParams ``A_*.HP_*.armor``.
@@ -562,8 +562,8 @@ def make_accessory(
     radar, catapults, rangefinders, bollards, vents, hatches, misc).
 
     Minimum placement shape. No gameplay fields. ``attach_to`` parents the
-    accessory under a turret's Yaw transform at Unity import time (Phase 2
-    feature) — always preserved across merges, never auto-set.
+    accessory under a turret's Yaw transform at consumer import time
+    (Phase 2 feature) — always preserved across merges, never auto-set.
     """
     return _make_placement_common(
         instance_id=instance_id, asset_id=asset_id, hp_name=hp_name,
@@ -881,9 +881,9 @@ def make_skin(
         out["asset_overrides"] = dict(asset_overrides)
     out["overrides"] = list(overrides or [])
     # Per-skin V-flip override. ``None`` (the default) leaves the
-    # decision to consumers — Unity-side `ShipMaterialBuilder` and
-    # `SkinControllerBuilder` derive the flip from `source` (loose
-    # mods → off, vanilla / VFS extracts → on). Setting ``True`` /
+    # decision to consumers — typical consumers derive the flip from
+    # `source` (loose mods → off, vanilla / VFS extracts → on).
+    # Setting ``True`` /
     # ``False`` explicitly forces the convention regardless of source
     # — useful when a loose mod is authored top-down (rare but
     # possible if the artist used a tool that preserves DDS row

@@ -5,8 +5,8 @@ Local dev dashboard for the `wows-model-export` pipeline.
 The webview is the **reference consumer** for the pipeline's artifacts: it
 renders hulls + accessories + damage states straight off the sidecar +
 GLB the Python pipeline emits. New sidecar fields land here first so we
-can visually verify them before the Unity / Blender consumers pick them
-up.
+can visually verify them before any other downstream consumer picks
+them up.
 
 ## Quickstart
 
@@ -131,7 +131,7 @@ webview/
 │       │   ├── placement.ts
 │       │   ├── color_mode.ts
 │       │   ├── damage_cascade.ts
-│       │   ├── visibility.ts   ← pure resolvers; mirrors C# contract
+│       │   ├── visibility.ts   ← pure resolvers; mirrors consumer-side contract
 │       │   └── index.ts        ← public barrel
 │       ├── types/              ← shared types (split by concern)
 │       │   ├── hull.ts         ← HullSectionKey / SeamKey / seamFor
@@ -169,9 +169,8 @@ straight across; only the `.svelte` files change.
 
 **Pure resolvers separated from scene state.** `visibility.ts` is plain
 functions over data (seam states, mesh names) — no Three.js imports.
-This mirrors the C# contract in
-`H:\UnityProjects\ProjectWB\Assets\Scripts\Ships\HullDamageState.cs`;
-keeping the webview port pure makes it easy to compare side-by-side.
+This mirrors the consumer-side hull-damage contract; keeping the
+webview port pure makes it easy to compare side-by-side.
 
 **Two-sided binding pattern (texture pipeline, not yet ported).** When
 textures lift in, they'll follow the existing pattern: meshes register

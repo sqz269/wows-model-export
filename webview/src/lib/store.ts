@@ -95,7 +95,6 @@ export function defaultState(): PersistedState {
     },
     shipSearch: '',
     extractRunOptions: {
-      skip_legacy: true,
       build_library: true,
       and_publish: false,
       publish_force: false,

@@ -50,8 +50,8 @@ def _glb_json_chunk(glb_path: str | Path) -> dict[str, Any]:
 
 # Ordered glTF mip-suffix preferences for WG's split-mip DDS convention.
 # `.dd0` = top mip (highest resolution); `.dd1`, `.dd2` are intermediate;
-# `.dds` is the bundled low-res mip tail. Unity consumers pick the best
-# available set for their streaming quality tier. Ordering is high-to-low.
+# `.dds` is the bundled low-res mip tail. Streaming-aware consumers pick
+# the best available set for their quality tier. Ordering is high-to-low.
 
 def _png_stem_to_dds_candidates(png_stem: str) -> list[str]:
     """Given a glTF PNG stem (no extension), produce DDS-side stem candidates.
@@ -279,13 +279,12 @@ def materials_from_glb(
     The glTF file is read only for material names + PBR slot → image URI
     mappings + scalar factors + alpha/cull state. Each slot's manifest
     then carries BOTH the PNG reference (what the glTF spec allows) AND
-    the raw WG DDS mip chain (for Unity Texture Streaming).
+    the raw WG DDS mip chain (for streaming-aware consumers).
 
-    Consumers (Unity's AccessoryLibraryImporter, ShipAccessoryRig) read
-    this manifest and build materials programmatically instead of parsing
-    the glTF's internal material section. That makes the Unity side
-    robust against glTF-importer quirks and gives every mesh access to
-    the full BC-compressed mip pyramid.
+    Consumers read this manifest and build materials programmatically
+    instead of parsing the glTF's internal material section. That makes
+    the consumer side robust against glTF-importer quirks and gives
+    every mesh access to the full BC-compressed mip pyramid.
 
     Returns a list of material entries shaped per :func:`make_material`,
     with ``textures`` populated as a dict of slot → manifest:
@@ -435,7 +434,7 @@ def materials_from_glb(
             uniq = sorted(set(unresolved))
             print(
                 f"[sidecar] WARNING: {len(uniq)} material(s) unresolved — "
-                f"no matching DDS stem. These will render untextured in Unity: "
+                f"no matching DDS stem. These will render untextured downstream: "
                 f"{', '.join(uniq)}",
                 file=sys.stderr,
             )
@@ -1069,8 +1068,8 @@ def _bind_dds_textures_by_name(
             _merge_multi_targets(mat, [stem_index[lib_target]], existing_main)
             # Library materials ship through the GLB as alphaMode=OPAQUE even
             # though the underlying WG shader (0x00010000) is alpha-tested /
-            # blended. Override based on the entry's classification so Unity
-            # picks the right Standard-shader mode.
+            # blended. Override based on the entry's classification so the
+            # downstream consumer picks the right shader mode.
             if lib_intent is not None:
                 mat["shader_intent"] = lib_intent
                 mat["render_queue"]  = lib_intent

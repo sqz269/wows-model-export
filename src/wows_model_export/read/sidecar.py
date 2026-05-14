@@ -18,7 +18,6 @@ from __future__ import annotations
 from ..resolve.sidecar import (
     DDS_MIP_SUFFIXES,
     HITBOX_TOKEN_MAP,
-    LEGACY_MODELS_SUBDIR,
     MODELS_SUBDIR,
     PLACEMENT_SECTIONS,
     SCHEMA_VERSION,
@@ -48,7 +47,6 @@ __all__ = [
     "SCHEMA_VERSION",
     "SIDECAR_SUFFIX",
     "MODELS_SUBDIR",
-    "LEGACY_MODELS_SUBDIR",
     # Vocabularies / constants
     "SPECIES_TO_SECTION",
     "SECTION_TO_SPECIES",

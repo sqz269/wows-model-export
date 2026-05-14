@@ -4,10 +4,10 @@
 //
 // `applyAttachedMatrix` post-multiplies by `diag(-1, 1, 1, 1)` to mirror
 // local-X. This is the gltFast parity fix: gltFast X-negates glTF vertex
-// positions on Unity import, three.js doesn't. Asymmetric attached meshes
+// positions on import, three.js doesn't. Asymmetric attached meshes
 // (e.g. AM6068_Cartridges_Hoshino, X 0 → +0.72) render inward-clipping in
-// three.js without it; Unity already gets the correct rendering for free.
-// See migration/SHIP_TS_INVENTORY.md C.21 + memory
+// three.js without it; the gltFast pipeline already gets correct rendering
+// for free. See migration/SHIP_TS_INVENTORY.md C.21 + memory
 // `project_webview_xflip_asymmetric_meshes`.
 //
 // DO NOT re-add the conditional pre-Ry(180°) on `attached_y_flip`. That

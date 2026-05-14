@@ -349,7 +349,7 @@ function makeRgtcDataTexture(
  * does NOT V-flip UVs the way gltFast does, and WebGL ignores `flipY` on
  * compressed textures — UVs passed through unchanged + DDS bytes unflipped
  * makes the raw DDS atlas land right-side-up under a native sample. Do NOT
- * copy the Unity `scale=(1,-1)` flip here — see
+ * copy the `scale=(1,-1)` V-flip some other consumers apply — see
  * `tools/reference/shared/texture_orientation_investigation.md`.
  */
 export async function loadDdsTexture(

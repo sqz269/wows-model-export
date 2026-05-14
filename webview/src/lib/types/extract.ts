@@ -94,7 +94,6 @@ export interface GpStatus {
 }
 
 export interface RunOptions {
-  skip_legacy: boolean;
   build_library: boolean;
   and_publish: boolean;
   publish_force: boolean;

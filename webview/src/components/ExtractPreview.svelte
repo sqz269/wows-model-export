@@ -64,7 +64,7 @@
   {#if vfsBadge}
     {@const flavour =
       vfsBadge.vs === 'no_splash'
-        ? "The hull GLB will export, but with no hitbox / damage-zone data — Unity will see the model but raycasts won't resolve damage."
+        ? "The hull GLB will export, but with no hitbox / damage-zone data — consumers will see the model but raycasts won't resolve damage."
         : 'Extraction will fail at the toolkit step.'}
     <div
       class="mb-3 rounded border px-3 py-2 text-xs {vfsBadge.sev === 'warn'

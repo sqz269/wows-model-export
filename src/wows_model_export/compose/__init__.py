@@ -10,7 +10,7 @@ submodule remains reachable via full-path `from .. import ...` imports).
 
     from wows_model_export.compose import (
         ingest_ship, scaffold_ship, build_accessory_library, ingest_skin_pack,
-        autorig_asset, resolve_decorative_placements, scan_legacy_glb,
+        autorig_asset, resolve_decorative_placements,
         find_ship_variants, publish, snapshot, teardown_ship,
         build_projectile_library, build_decal_library, build_ammo_profiles,
     )
@@ -47,7 +47,6 @@ from . import (
 # Flat function re-exports. Submodules of the same name still exist
 # (importable as `from wows_model_export.compose.scaffold_ship import …`)
 # but get shadowed in the package binding by the function.
-from .accessories_scan import scan_legacy_glb
 from .accessory_library import build_accessory_library
 from .ammo_profiles import build_ammo_profiles
 from .decal_library import build_decal_library
@@ -76,7 +75,6 @@ __all__ = [
     "autorig_asset_full",
     "resolve_decorative_placements",
     "resolve_ship_identity",
-    "scan_legacy_glb",
     "find_ship_variants",
     "teardown_ship",
     # Fleet-wide composers

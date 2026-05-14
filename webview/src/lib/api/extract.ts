@@ -52,7 +52,6 @@ export interface RunExtractBody {
   vehicle: string;
   label: string;
   permoflage: string | null;
-  skip_legacy: boolean;
   build_library: boolean;
   and_publish: boolean;
   publish_force: boolean;

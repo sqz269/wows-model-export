@@ -13,10 +13,9 @@ Three callables:
 
 `export_ship` applies a post-process winding flip to `Armor_*` and
 `CM_SB_*` meshes in the output GLB — those are emitted by the toolkit
-with inverted triangle order, and downstream raycasters (Three.js
-backFaceCulling, Unity MeshCollider) expect the WG/glTF convention. The
-flip is local to ship exports; `export_model` does not run it (single-
-asset GLBs don't carry armor / hitbox meshes).
+with inverted triangle order, and downstream raycasters expect the
+WG/glTF convention. The flip is local to ship exports; `export_model`
+does not run it (single-asset GLBs don't carry armor / hitbox meshes).
 """
 
 from __future__ import annotations
@@ -336,10 +335,9 @@ def _flip_armor_hitbox_winding(glb_path: Path) -> None:
     hull GLB. Called from `export_ship` after a successful export.
 
     The toolkit emits armor + splash-box hitbox cubes with inverted
-    triangle winding; Three.js back-face culling and Unity
-    `MeshCollider` raycasts expect the standard glTF convention. Flip
-    in place so downstream consumers don't each implement the same
-    fixup.
+    triangle winding; downstream raycasters expect the standard glTF
+    convention. Flip in place so downstream consumers don't each
+    implement the same fixup.
 
     Same algorithm as the webview's runtime `flipWinding(mesh)`:
     index[1] ↔ index[2] per triangle.

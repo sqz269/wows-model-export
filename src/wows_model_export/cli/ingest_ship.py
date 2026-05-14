@@ -4,7 +4,6 @@ Drives the one-shot per-ship pipeline composer end-to-end. Argv shape::
 
     wows-ingest-ship <ship>
         [--workspace P] [--label LBL]
-        [--legacy-root P] [--legacy-glb P] [--skip-legacy]
         [--non-interactive]
         [--class-override CO] [--ship-key-suffix S]
         [--build-library] [--rebuild-library] [--no-auto-rig]
@@ -52,31 +51,9 @@ def _build_parser() -> argparse.ArgumentParser:
              "Default: the input name, or the user's choice on ambiguity.",
     )
     ap.add_argument(
-        "--legacy-root",
-        type=Path,
-        default=None,
-        help="Off-tree root for legacy <Ship>_visual.glb files. When "
-             "unset, legacy files live under <workspace>/<label>/legacy_models/.",
-    )
-    ap.add_argument(
-        "--legacy-glb",
-        type=Path,
-        default=None,
-        help="Path to the legacy <Ship>_visual.glb. Copied into place "
-             "when given; otherwise the script prompts (interactive) "
-             "or skips (--non-interactive).",
-    )
-    ap.add_argument(
-        "--skip-legacy",
-        action="store_true",
-        help="Skip the legacy-scan merge entirely. Sidecar will only "
-             "carry HP_ hardpoints (~10-15%% of placements).",
-    )
-    ap.add_argument(
         "--non-interactive",
         action="store_true",
-        help="Don't prompt. Fail on ambiguous identity or missing "
-             "legacy GLB.",
+        help="Don't prompt. Fail on ambiguous identity.",
     )
     ap.add_argument(
         "--class-override",
@@ -117,8 +94,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--publish-target",
         type=Path,
         default=None,
-        help="Consumer-side destination root (Unity Assets/Ships/"
-             "Pipeline/ historically). Required with --and-publish.",
+        help="Consumer-side destination root. Required with "
+             "--and-publish.",
     )
     ap.add_argument(
         "--publish-force",
@@ -184,10 +161,7 @@ def main(argv: list[str] | None = None) -> int:
             args.ship,
             workspace=cfg.workspace,
             config=cfg,
-            legacy_root=args.legacy_root,
             forced_label=args.label,
-            legacy_glb_path=args.legacy_glb,
-            skip_legacy=args.skip_legacy,
             interactive=not args.non_interactive,
             class_override=args.class_override,
             ship_key_suffix=args.ship_key_suffix,

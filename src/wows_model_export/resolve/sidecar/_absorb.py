@@ -107,9 +107,8 @@ def apply_variant_asset_swaps(
     accessory swaps (ARP gunmounts → JGM57x_Arpeggio, AzurLane Iowa
     main turrets → AGM652_..._Azur, Optimus secondaries →
     AGS533_..._Black, etc.), this rewrites every placement section's
-    asset references so downstream consumers (Unity, webview) bind the
-    variant library accessories instead of the base ship's gray
-    turrets.
+    asset references so downstream consumers bind the variant library
+    accessories instead of the base ship's gray turrets.
 
     Bone-mismatch correction (when ``library_root`` is provided): WG
     sometimes re-authors the variant's ``.geometry`` pre-flipped 180°
@@ -1015,7 +1014,7 @@ def absorb_ballistics_json(
     ``shells.<id>.<field>`` are overwritten by every absorb call (the toolkit
     re-reads from GameParams each run). To override values for downstream
     consumers (e.g. balance tweaks), apply them at the consumer layer
-    (Unity component, sim) — not in the sidecar. ``scaffold_ship.py``
+    (downstream component, sim) — not in the sidecar. ``scaffold_ship.py``
     additionally strips ``ballistics`` before re-absorbing so shells removed
     in a game patch don't linger as stale entries.
 

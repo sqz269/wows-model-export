@@ -1,16 +1,16 @@
-"""Strip Blender's bone-axis bake from a turret ``rig.glb``.
+"""Strip the DCC-side bone-axis bake from a turret ``rig.glb``.
 
 Lifted from the source pipeline's ``tools/ship/rig_normalize_bones.py``
-(private I:-side repo). Blender exports armature bones with a non-
-identity rest rotation that encodes the bone's head-to-tail axis
-(Blender's local ``+Y`` aligns to the bone direction). For mesh skinning
+(private I:-side repo). Some DCC tools export armature bones with a
+non-identity rest rotation that encodes the bone's head-to-tail axis
+(their local ``+Y`` aligns to the bone direction). For mesh skinning
 that's invisible; for runtime turret control it's catastrophic — the
 turret rig spec declares ``pivots.yaw.axis = "Y"`` with the convention
 that::
 
     yaw.localRotation = Quaternion.Euler(0, deg, 0)
 
-cleanly rotates the gun around the world up axis. With Blender's bake
+cleanly rotates the gun around the world up axis. With the DCC bake
 that line snaps the gun to a wrong orientation (overwriting the rest
 rotation); the only correct usage is to compose with the baked rest,
 which the spec doesn't describe and a TurretPivot consumer wouldn't do.
@@ -24,7 +24,7 @@ mechanism:
    set its NEW world rotation to identity, keep its world translation.
 3. For every other node: keep its world transform unchanged
    (so static MeshRenderers parented under joints — the ``_Rig_body`` /
-   ``_Rig_elev`` helpers Blender emits — get the bake propagated into
+   ``_Rig_elev`` helpers the DCC emits — get the bake propagated into
    their own local rotation).
 4. Recompute every node's local transform from its new world transform
    and its parent's new world transform.
@@ -321,7 +321,7 @@ def normalize_file(path: Path, *, output: Path | None = None) -> NormalizeStats:
     Args:
         path: Input ``.rig.glb`` to normalise.
         output: Optional output path. When ``None``, ``path`` is
-            overwritten (the common case after a Blender export).
+            overwritten (the common case after a DCC export).
 
     Returns:
         :class:`NormalizeStats` with per-pass counters.

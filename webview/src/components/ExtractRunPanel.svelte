@@ -48,7 +48,6 @@
     } else if (!permoflage) {
       out.push(`  --variant-permoflage none`);
     }
-    if (options.skip_legacy) out.push('  --skip-legacy');
     if (options.build_library) out.push('  --build-library');
     if (options.and_publish) out.push('  --and-publish');
     if (options.publish_force) out.push('  --publish-force');
@@ -63,14 +62,6 @@
     <label class="text-foreground flex items-center gap-2">
       <input
         type="checkbox"
-        checked={options.skip_legacy}
-        onchange={(e) => patchOption('skip_legacy', e.currentTarget.checked)}
-      />
-      skip legacy GLB merge (HP_-only sidecar fast path)
-    </label>
-    <label class="text-foreground flex items-center gap-2">
-      <input
-        type="checkbox"
         checked={options.build_library}
         onchange={(e) => patchOption('build_library', e.currentTarget.checked)}
       />
@@ -82,7 +73,7 @@
         checked={options.and_publish}
         onchange={(e) => patchOption('and_publish', e.currentTarget.checked)}
       />
-      also publish outputs to Unity
+      also publish outputs downstream
     </label>
     <label
       class="ml-5 flex items-center gap-2 transition-opacity {options.and_publish

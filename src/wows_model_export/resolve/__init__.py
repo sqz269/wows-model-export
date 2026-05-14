@@ -47,9 +47,9 @@ Lifted modules so far:
                            compare_skin_meshes.py library half).
     exterior_compare     — Exterior peculiarityModels diff helpers
                            (from compare_exterior_swaps.py library half).
-    rig_normalize_bones  — strip Blender's bone-axis bake from a turret
-                           rig.glb so consumers can drive bone rotations
-                           via plain Euler angles (from
+    rig_normalize_bones  — strip the DCC-side bone-axis bake from a
+                           turret rig.glb so consumers can drive bone
+                           rotations via plain Euler angles (from
                            rig_normalize_bones.py).
 """
 
@@ -192,7 +192,7 @@ from .synth_emission import (
     synth_emissive_dds,
 )
 
-# rig_normalize_bones — strip Blender's bone-axis bake from a rig.glb
+# rig_normalize_bones — strip the DCC-side bone-axis bake from a rig.glb
 from .rig_normalize_bones import normalize as normalize_rig
 from .rig_normalize_bones import normalize_file as normalize_rig_file
 

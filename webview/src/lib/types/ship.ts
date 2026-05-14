@@ -45,7 +45,7 @@ export interface ShipPlacement {
   hp_name: string;
   /**
    * Hull section the placement belongs to. Drives sectioning + sinking
-   * parenting in Unity. May be null on legacy data pre-2026-04-27.
+   * parenting downstream. May be null on data pre-2026-04-27.
    */
   parent_section?: HullSectionKey | null;
   /**

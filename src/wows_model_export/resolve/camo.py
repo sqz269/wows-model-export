@@ -36,8 +36,8 @@ over already-loaded data.
 Open consumer-side work (NOT in scope here): the producer side of the
 hybrid Path A + Path B path (596/3533 entries, ~17% of the camo
 corpus) is shipped + visually validated; the matching full Path B
-shader render in the downstream webview + Unity consumers still needs
-a ``catMgnMap`` uniform + per-channel mix.  See the user's memory
+shader render in the downstream consumers still needs a ``catMgnMap``
+uniform + per-channel mix.  See the user's memory
 ``project_camo_hybrid_path_ab`` for the consumer-side checklist.
 """
 
@@ -1629,8 +1629,8 @@ def mgn_params_to_json(p: MgnParams) -> dict:
     """Serialise ``MgnParams`` to a sidecar-friendly JSON dict.
 
     Field names use the snake_case form already canonicalised on the
-    dataclass; consumers (webview, Unity) can dispatch on
-    ``params.camo_mode`` and feed the rest verbatim into the
+    dataclass; consumers can dispatch on ``params.camo_mode`` and feed
+    the rest verbatim into the
     ``ship_camo_mgn_material.fx`` constant buffer (see
     ``tools/reference/shared/wg_camo_shader_reference.md`` Path B for
     the full mapping).

@@ -231,7 +231,6 @@
       vehicle: v.top_key || v.param_index,
       label,
       permoflage: p ? p.exterior_id : 'none',
-      skip_legacy: opts.skip_legacy,
       build_library: opts.build_library,
       and_publish: opts.and_publish,
       publish_force: opts.publish_force,

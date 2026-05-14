@@ -14,18 +14,15 @@ from __future__ import annotations
 SCHEMA_VERSION = 3
 SIDECAR_SUFFIX = ".meta.json"
 
-# Per-ship subdirectory names — kept centralised so renaming them later
+# Per-ship subdirectory name — kept centralised so renaming it later
 # (e.g. `gamemodels3d` → `models` in 2026-04-23) is a one-line change.
-# The MODELS subdir holds the toolkit-exported hull GLB, placements +
-# accessories JSON, and the raw DDS mip chain that Unity streams. The
-# LEGACY_MODELS subdir holds the per-ship gamemodels3d.com visual.glb
-# (used by `skel_ext_resolve.py` to recover decorative placements) plus
-# the scanner's `*_accessories_scan.json` output.
+# Holds the toolkit-exported hull GLB, placements + accessories JSON,
+# and the raw DDS mip chain that streaming consumers read.
 MODELS_SUBDIR = "models"
-LEGACY_MODELS_SUBDIR = "legacy_models"
 
-# FBX custom-property keys — the three keys Unity reads from the
-# ``_PipelineMetadata`` empty to locate + validate the sidecar.
+# FBX custom-property keys — the three keys the downstream consumer
+# reads from the ``_PipelineMetadata`` empty to locate + validate the
+# sidecar.
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +162,7 @@ _PIPELINE_ORDER: tuple[str, ...] = (
     "version",
     "exported_at",
     "exported_by",
-    "blender_version",
+    "dcc_version",
     "toolkit_version",
     "stages_completed",
     "tool_commits",
@@ -208,9 +205,9 @@ _ARMOR_ORDER: tuple[str, ...] = (
     "zones",
     "materials_table",
     # Per-mount armor pulled from GameParams ``A_*.<group>.HP_*.armor`` —
-    # ``{HP_AGM_1: {material_id: thickness_mm}}``. Lets Unity resolve
-    # turret/barbette penetration without having to invent a separate
-    # mounted-armor data path.
+    # ``{HP_AGM_1: {material_id: thickness_mm}}``. Lets the downstream
+    # consumer resolve turret/barbette penetration without having to
+    # invent a separate mounted-armor data path.
     "mount_armor",
     # ``A_Hull.barbettes`` (``{HP_AGM_*: [material_id, …]}``). Pairs with
     # ``hitbox.boxes.CM_SB_gk_*.owner_hp`` for shell → barbette → mount

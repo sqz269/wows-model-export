@@ -1,16 +1,13 @@
 // Hull-mesh visibility — pure functions, no Three.js dependency.
 //
-// SHARED CONTRACT with the Unity-side
-// `Assets/Scripts/Ships/HullDamageState.cs::ResolveVisibility`. The
+// SHARED CONTRACT with the consumer-side hull-damage resolver. The
 // webview's role is to be an independent verification view: identical
-// inputs MUST produce identical visibility output between this resolver
-// and Unity's. See `docs/contracts/damage-state.md` (TODO) for the full
-// truth table.
+// inputs MUST produce identical visibility output across consumers. See
+// `docs/contracts/damage-state.md` (TODO) for the full truth table.
 //
 // Tested by use rather than unit tests — load any ship, toggle a seam,
 // observe the right meshes hide. Future: when the schema is stable, lift
-// the resolver into a contracts package that both Unity (C# port) and
-// webview consume from one source of truth.
+// the resolver into a contracts package that every consumer shares.
 
 import { HULL_SECTIONS, seamFor } from '$lib/types';
 import type { HullSectionKey, SeamKey, SeamState } from '$lib/types';
@@ -35,8 +32,8 @@ export const HULL_HIDDEN_GROUPS = new Set(['Armor', 'Hitboxes']);
  *   gltFast:           `<Group>__<Mesh>`     (double-underscore)
  *   plain GLTFLoader:  `<Group> / <Mesh>`    (space-slash-space)
  * Try both. WG mesh names never contain `__` themselves, so the split
- * is unambiguous when it succeeds. Mirrors `HullDamageState.ShortMeshName`
- * on the C# side — keep them in sync if a third format appears.
+ * is unambiguous when it succeeds. Mirrors the consumer-side
+ * `ShortMeshName` — keep them in sync if a third format appears.
  */
 export function shortMeshName(raw: string): string {
   if (!raw) return raw;

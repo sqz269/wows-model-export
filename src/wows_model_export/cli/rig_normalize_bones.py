@@ -1,9 +1,9 @@
 """CLI wrapper for :func:`wows_model_export.resolve.rig_normalize_bones.normalize_file`.
 
-Strip Blender's bone-axis bake from one or more ``.rig.glb`` files so
-``yaw.localRotation = Quaternion.Euler(0, deg, 0)`` rotates the gun
+Strip the DCC-side bone-axis bake from one or more ``.rig.glb`` files
+so ``yaw.localRotation = Quaternion.Euler(0, deg, 0)`` rotates the gun
 around the world up axis exactly as the turret rig spec promises. Run
-this after every Blender rig export.
+this after every DCC rig export.
 
 Argv shape::
 
@@ -27,7 +27,7 @@ from ._args import EXIT_OK, EXIT_STEP_ERROR, EXIT_UNEXPECTED
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="wows-rig-normalize-bones",
-        description="Strip Blender's bone-axis bake from a turret rig.glb.",
+        description="Strip the DCC-side bone-axis bake from a turret rig.glb.",
     )
     ap.add_argument(
         "rig_glb",

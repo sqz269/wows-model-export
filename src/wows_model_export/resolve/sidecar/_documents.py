@@ -191,9 +191,9 @@ def ship_from_placements(
     wg_asset_id = model_dir.lower() if model_dir else None
     # display_name is preserved as WG emitted it (may carry the toolkit's
     # disambiguation parenthetical, e.g. "Baltimore (old)" / "U-2501 (old)").
-    # ship_key, however, ends up in filesystem paths, Unity asset IDs, and
-    # URL fragments — strip the trailing parenthetical + collapse spaces
-    # before deriving it. Any explicit `--ship-key-suffix` is appended in
+    # ship_key, however, ends up in filesystem paths, consumer asset
+    # IDs, and URL fragments — strip the trailing parenthetical +
+    # collapse spaces before deriving it. Any explicit `--ship-key-suffix` is appended in
     # `build_ship_key` after this sanitization.
     ship_key_name = _sanitize_for_ship_key(display_name)
     ship_key = build_ship_key(nation or None, cls, ship_key_name, suffix=ship_key_suffix)
@@ -219,9 +219,9 @@ def _sanitize_for_ship_key(name: str) -> str:
     Toolkit emits display_names like ``"Baltimore (old)"`` or
     ``"U-2501 (old)"`` when its fuzzy ship-name resolver disambiguates
     multiple candidates. Embedding the parenthetical into ship_key bleeds
-    spaces + parens into filesystem paths and Unity asset IDs. Display
-    name itself stays as WG emitted it (UIs need the original); only the
-    derived key is sanitized.
+    spaces + parens into filesystem paths and consumer asset IDs.
+    Display name itself stays as WG emitted it (UIs need the original);
+    only the derived key is sanitized.
 
     Examples:
         "Montana"            -> "Montana"

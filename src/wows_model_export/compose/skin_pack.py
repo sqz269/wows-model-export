@@ -1358,8 +1358,9 @@ def ingest_skin_pack(
             }
         except Exception as e:
             # Non-fatal: webview-side WG-pack uniforms still render
-            # correctly with raw `_n`/`_mg`; Unity-side rendering will
-            # be off until the swizzle lands but that's not a blocker.
+            # correctly with raw `_n`/`_mg`; standard-shader consumers
+            # will be off until the swizzle lands but that's not a
+            # blocker.
             warnings.append(
                 f"swizzle-dir failed ({e}) — continuing with raw _n/_mg only"
             )

@@ -1,7 +1,6 @@
 """CLI wrapper for :func:`wows_model_export.compose.publish.publish`.
 
-Copy pipeline artifacts to a consumer target (Unity Assets/Ships/
-Pipeline/ historically, but any destination works). Argv shape::
+Copy pipeline artifacts to a downstream consumer target. Argv shape::
 
     wows-publish --target <dir>
         [--only <ship> ...]
@@ -41,8 +40,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         dest="target_dir",
-        help="Consumer-side destination root (e.g. Unity "
-             "Assets/Ships/Pipeline/).",
+        help="Consumer-side destination root.",
     )
     ap.add_argument(
         "--only",

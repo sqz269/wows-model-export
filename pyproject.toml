@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "wows-model-export"
 version = "0.1.0a0"
-description = "Extraction pipeline for World of Warships assets (producer for Unity / Blender / web consumers)"
+description = "Extraction pipeline for World of Warships assets (producer for downstream web / DCC consumers)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -61,7 +61,6 @@ wows-build-accessory-library = "wows_model_export.cli.build_accessory_library:ma
 wows-ingest-skin-pack        = "wows_model_export.cli.ingest_skin_pack:main"
 wows-turret-autorig          = "wows_model_export.cli.turret_autorig:main"
 wows-skel-ext-resolve        = "wows_model_export.cli.skel_ext_resolve:main"
-wows-accessories-scan        = "wows_model_export.cli.accessories_scan:main"
 wows-find-ship-variants      = "wows_model_export.cli.find_ship_variants:main"
 wows-teardown-ship           = "wows_model_export.cli.teardown_ship:main"
 wows-publish                 = "wows_model_export.cli.publish:main"

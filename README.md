@@ -1,13 +1,12 @@
 # wows-model-export
 
-Extraction pipeline for World of Warships assets — a producer that emits
-typed artifacts (sidecar JSON, hull GLB, accessory library) that
-downstream consumers (Unity, Blender, a web viewer) read directly.
+Extract ship and accessory models from World of Warships and render them
+in a local browser-based viewer. One install gets you both — the Python
+extraction pipeline and the Svelte 3D viewer ship in the same package.
 
 ```
 ┌──────────────────────────────┐
-│  PRODUCER (wows-model-export)│
-│  Python + Rust toolkit fork  │
+│  PRODUCER (Python + Rust)    │
 │                              │
 │  Reads:  WoWS install        │
 │  Writes: GLB + sidecar +     │
@@ -15,41 +14,148 @@ downstream consumers (Unity, Blender, a web viewer) read directly.
 │          attached_accessories│
 └──────────────┬───────────────┘
                │
-       ┌───────┼─────────┐
-       ▼       ▼         ▼
-   ┌───────┐ ┌─────────┐ ┌───────┐
-   │webview│ │ Blender │ │ Unity │
-   │  (TS) │ │ add-on  │ │  (C#) │
-   └───────┘ └─────────┘ └───────┘
+               ▼
+        ┌──────────────┐
+        │   webview    │ ← reference consumer; bundled in the wheel
+        │  (Svelte 5)  │
+        └──────────────┘
 ```
 
-Three independent consumers, each in its own ecosystem. The **webview**
-in this repo is the reference consumer: every new sidecar field gets
-visually verified here first.
+The pipeline emits typed JSON artifacts (sidecar v3, library index,
+placements) that any consumer can read; the bundled webview is the
+reference one.
+
+## Prerequisites
+
+- **World of Warships** installed (any branch — Steam or WG launcher).
+- **Python 3.11+** on your `PATH`.
+- **wowsunpack** — a Rust binary from the
+  [wows-toolkit fork](https://github.com/<owner>/wows-toolkit). Build
+  once with `cargo build --release --bin wowsunpack`; the Settings
+  page will let you point at the resulting `.exe`.
+
+## Install
+
+Grab the latest wheel from
+[GitHub Releases](https://github.com/<owner>/wows-model-export/releases/latest),
+then:
+
+```bash
+pip install "./wows_model_export-<version>-py3-none-any.whl[webview]"
+```
+
+This drops the `wows-*` console scripts (`wows-webview-serve`,
+`wows-ingest-ship`, `wows-build-accessory-library`, …) on your `PATH`.
+The Svelte UI ships pre-built inside the wheel — no Node toolchain
+required to use it.
+
+## First run
+
+1. Launch the UI:
+   ```bash
+   wows-webview-serve
+   ```
+   Open <http://localhost:5180>.
+
+2. Click **Settings** in the top nav. Fill in:
+   - **Game directory** — the folder containing `WorldOfWarships.exe`.
+   - **Toolkit binary** — path to `wowsunpack.exe`.
+   - **Workspace (output directory)** — wherever you want extracted
+     ships and the accessory library to land. Defaults to the directory
+     you launched `wows-webview-serve` from; pick something stable
+     instead.
+
+   Click **Save**, then restart `wows-webview-serve` (Ctrl-C and
+   re-run) so the new paths take effect.
+
+3. Still on the Settings page, under **Workspace artifacts**, click
+   **Build** next to:
+   - **GameParams + snapshot cache** — ~30 s. Required by Extract.
+   - **Accessory library index** — instant; populates as you extract
+     ships.
+
+4. Open the **Extract** tab, pick a ship, click **Extract**. When it
+   finishes, the ship appears in **Ships** and its accessories appear
+   in **Library**.
+
+## What lands where
+
+```
+<workspace>/
+├── .cache/
+│   ├── gameparams.json            ← ~2.8 GB; the toolkit's GameParams dump
+│   └── snapshot.json              ← Vehicles + Permoflages summary
+├── ships/
+│   └── <Ship>/
+│       ├── <Ship>.meta.json       ← sidecar (typed schema)
+│       └── models/
+│           ├── <Ship>_hull.glb
+│           ├── <Ship>_accessories.json
+│           └── textures_dds/      ← per-ship DDS mip chains
+└── libraries/
+    └── accessories/
+        ├── index.json             ← fleet-wide accessory index
+        └── <asset_id>/            ← GLB + DDS per shared accessory
+```
+
+Re-build the accessory library (`Build → Accessory library index` on
+the Settings page) after extracting new ships so they surface in the
+Library tab.
+
+## CLI reference
+
+`wows-webview-serve` is the only command most users need. The rest are
+also available if you'd rather script extractions.
+
+| Command | What it does |
+| --- | --- |
+| `wows-webview-serve` | Launch the local UI on `127.0.0.1:5180`. |
+| `wows-ingest-ship <vehicle>` | Extract one ship from the game install. |
+| `wows-build-accessory-library` | Rebuild the fleet-wide accessory index. |
+| `wows-snapshot` | Dump GameParams + Vehicles/Permoflages cache. |
+| `wows-find-ship-variants` | Enumerate ship variants from GameParams. |
+
+Each accepts `--help` for the full argument list. Run `wows-` then Tab
+in a modern shell to discover the rest.
+
+## Configuration
+
+Settings persist to a JSON file the backend reads at startup:
+
+- **Windows:** `%APPDATA%\wows-model-export\config.json`
+- **macOS:** `~/Library/Application Support/wows-model-export/config.json`
+- **Linux:** `$XDG_CONFIG_HOME/wows-model-export/config.json`
+  (defaults to `~/.config/...`)
+
+Precedence (highest first):
+
+1. CLI flag on `wows-webview-serve` (only `--workspace` today).
+2. Environment variable — `WOWS_GAME_DIR`, `WOWS_TOOLKIT_BIN`,
+   `WOWS_WORKSPACE`, `WOWS_TOOLKIT_TIMEOUT`.
+3. The persisted config file (the Settings page writes here).
+4. Auto-discovery (`wowsunpack` on `PATH`) / sensible defaults.
+
+The Settings page shows a per-field source badge so you can see which
+layer is winning at a glance.
 
 ## Status
 
-Alpha — the Python pipeline and the webview are both in-tree.
-Public API still moving while we shake out drift; once stable, this
-will tag v0.1.0.
+Alpha. The public artifact schemas are still moving; once they stabilise
+this will tag `v0.1.0` and start cutting GitHub Releases.
 
-### What's here
+## Development
 
-- `src/wows_model_export/` — Python pipeline package, layered into
-  `read` / `toolkit` / `resolve` / `compose` / `cli`. See
-  `src/wows_model_export/__init__.py` for the layer rationale.
-- `pyproject.toml` — `pip install -e .` lands the `wows-*` console
-  entry points (`wows-ingest-ship`, `wows-scaffold-ship`,
-  `wows-build-accessory-library`, `wows-publish`, …).
-- `webview/` — local dev dashboard (Svelte 5 + Three.js + Vite + TS).
-  See [webview/README.md](webview/README.md) for setup.
+```bash
+git clone <repo>
+cd wows-model-export
+pip install -e ".[webview]"
+cd webview && npm install && npm run dev
+```
 
-### What's coming
-
-- `docs/contracts/` — public artifact schemas (sidecar v3,
-  attached-accessories v2, library index).
-- A first batch of smoke tests against the schema authority in
-  `resolve.sidecar`.
+`npm run dev` runs the FastAPI backend AND the Vite dev server with
+HMR. The frontend dev guide is in [`webview/README.md`](webview/README.md);
+the Python package layout is documented at the top of
+[`src/wows_model_export/__init__.py`](src/wows_model_export/__init__.py).
 
 ## License
 

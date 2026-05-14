@@ -19,8 +19,8 @@ colour at intensity ``emissivePower`` (default 1.8 across all tested
 ARP / AL ships).
 
 This module bakes the ARP-style emission as a standalone DDS that any
-glTF / Unity / three.js material can bind directly via ``emissiveMap``
-with ``emissiveIntensity = 1.0``. The runtime shader's mask-color
+glTF / three.js / standard PBR material can bind directly via
+``emissiveMap`` with ``emissiveIntensity = 1.0``. The runtime shader's mask-color
 animation (cyan↔teal cycling on ARP ships) is OUT OF SCOPE — for
 static rendering we treat the emission as a frozen frame.
 
@@ -46,7 +46,7 @@ from PIL import Image
 from ..config import PipelineConfig
 
 
-# 8-bit sRGB ↔ linear LUTs — standard glTF / Unity / three.js convention.
+# 8-bit sRGB ↔ linear LUTs — standard glTF / three.js / PBR convention.
 def _srgb_to_linear(c: float) -> float:
     if c <= 0.04045:
         return c / 12.92

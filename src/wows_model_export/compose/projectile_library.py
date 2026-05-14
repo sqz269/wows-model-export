@@ -229,8 +229,8 @@ def mark_effect_render_sets(
     ``tracer``, …) and:
 
       * Renames node + mesh + material with an ``effect_`` prefix so
-        downstream consumers (Unity ShipMaterialBuilder, the web
-        viewer) can filter them or route them to a particles/trails
+        downstream consumers (the web viewer, any external material
+        builder) can filter them or route them to a particles/trails
         shader.
       * Sets ``alphaMode: BLEND`` + low ``baseColorFactor`` alpha so
         naive glTF viewers show them as translucent overlays instead
@@ -585,8 +585,8 @@ def populate_material_manifest(
 ) -> None:
     """For each successfully-built record, extract per-material metadata
     from its GLB and a per-variant texture-set manifest from its
-    ``textures_dds/`` directory. Joined at runtime by Unity to bind
-    materials to DDS files.
+    ``textures_dds/`` directory. Joined at runtime by the downstream
+    consumer to bind materials to DDS files.
 
     Mirrors the accessory library's ``_extract_material_manifest`` with
     one important difference: projectile shaders
@@ -596,7 +596,7 @@ def populate_material_manifest(
     ``texture_sets``. Without intervention, every material would carry
     an empty ``texture_sets["main"]`` block — the GLB's mesh primitives
     would resolve to material 0 with ``baseColorFactor=[1,1,1,1]`` and
-    no textures, rendering as flat white in Unity.
+    no textures, rendering as flat white downstream.
 
     The fix: for any material whose ``texture_sets["main"]`` came back
     empty, copy the asset-level ``texture_sets["main"]`` (built by
@@ -640,8 +640,8 @@ def populate_material_manifest(
                 # body textures — their MFMs reference particle/trail DDS
                 # files (Trail_GK.dds, Trail_Shell_Hat.dds) that aren't in
                 # this asset's textures_dds/ dir. Skip the asset-fallback
-                # so Unity binds nothing and falls back to baseColorFactor
-                # + alphaMode=BLEND from the GLB.
+                # so the consumer binds nothing and falls back to
+                # baseColorFactor + alphaMode=BLEND from the GLB.
                 if "HEAD" in mat_id_raw.upper():
                     # Bow shock: route through the emissive shader path.
                     mat["shader_intent"] = "emissive"
@@ -740,8 +740,8 @@ def write_index(
         "assets": assets,
     }
     # Atomic write: an interrupt mid-write would otherwise produce
-    # invalid JSON that breaks both the next library run and Unity's
-    # import.
+    # invalid JSON that breaks both the next library run and the
+    # downstream consumer's import.
     tmp = out.with_suffix(out.suffix + ".tmp")
     tmp.write_text(
         json.dumps(doc, indent=2, ensure_ascii=False) + "\n",

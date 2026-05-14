@@ -1,12 +1,9 @@
-"""Copy pipeline artifacts to a consumer target (Unity, Blender, etc.).
+"""Copy pipeline artifacts to a downstream consumer target.
 
-Lifted from ``tools/publish_to_unity.py`` (private I:-side warships repo).
 Layer 4 (composer) — does disk I/O only; idempotent mtime+size compare so
 re-runs are cheap.
 
-The original module hard-coded its destination to
-``H:/UnityProjects/ProjectWB/Assets/Ships/Pipeline``. This version takes
-``target_dir`` as a required keyword argument so it works for any
+``target_dir`` is a required keyword argument so it works for any
 consumer that wants the same on-disk shape: per-ship folders mirroring
 ``ships/<Ship>/``, plus the four fleet-shared libraries
 (``accessories/``, ``projectiles/``, ``camo_masks/``, ``camo_mat/``).
@@ -298,10 +295,9 @@ def publish(
     files. Pass ``force=True`` to copy every eligible file regardless.
 
     Parameters:
-        target_dir   Consumer-side destination root. Typically a Unity
-                     ``Assets/Ships/Pipeline/`` folder, but any path
-                     mirrors fine — the layout follows the I:-side
-                     workspace conventions.
+        target_dir   Consumer-side destination root. Any path mirrors
+                     fine — the layout follows the I:-side workspace
+                     conventions.
         workspace    Pipeline workspace; defaults to ``config.workspace``.
                      Per-ship dirs are read from ``<workspace>/ships/``,
                      libraries from ``<workspace>/libraries/``.

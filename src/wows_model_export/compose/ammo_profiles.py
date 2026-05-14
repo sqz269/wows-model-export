@@ -181,8 +181,8 @@ def write_profiles_file(
     """Write ``out_path`` containing the wrapped profiles document.
 
     The default form is compact (the file is a few MB; primary readers
-    are Unity). Pass ``pretty=True`` for an indented JSON suitable for
-    human inspection.
+    are downstream consumers). Pass ``pretty=True`` for an indented
+    JSON suitable for human inspection.
     """
     doc = {
         "version": time.strftime("%Y-%m-%d", time.gmtime()),
@@ -234,7 +234,7 @@ def build_ammo_profiles(
                               patch).
         pretty               When True, write indented JSON. Defaults
                               to compact (the file is a few MB; primary
-                              readers are Unity).
+                              readers are downstream consumers).
 
     Returns an :class:`AmmoProfilesResult` with the output path,
     profile count, warnings, and per-step timings.

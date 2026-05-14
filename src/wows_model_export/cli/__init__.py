@@ -20,7 +20,6 @@ Available entry points (also listed in ``pyproject.toml``):
   * ``wows-ingest-skin-pack``      -> :mod:`.ingest_skin_pack`
   * ``wows-turret-autorig``        -> :mod:`.turret_autorig`
   * ``wows-skel-ext-resolve``      -> :mod:`.skel_ext_resolve`
-  * ``wows-accessories-scan``      -> :mod:`.accessories_scan`
   * ``wows-find-ship-variants``    -> :mod:`.find_ship_variants`
   * ``wows-teardown-ship``         -> :mod:`.teardown_ship`
   * ``wows-publish``               -> :mod:`.publish`
