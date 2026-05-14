@@ -62,6 +62,7 @@ wows-snapshot                = "wows_model_export.cli.snapshot:main"
 wows-build-projectile-library = "wows_model_export.cli.build_projectile_library:main"
 wows-build-decal-library     = "wows_model_export.cli.build_decal_library:main"
 wows-build-ammo-profiles     = "wows_model_export.cli.build_ammo_profiles:main"
+wows-rig-normalize-bones     = "wows_model_export.cli.rig_normalize_bones:main"
 
 [project.urls]
 Homepage = "https://github.com/sqz269/wows-model-export"

@@ -28,6 +28,7 @@ Available entry points (also listed in ``pyproject.toml``):
   * ``wows-build-projectile-library`` -> :mod:`.build_projectile_library`
   * ``wows-build-decal-library``   -> :mod:`.build_decal_library`
   * ``wows-build-ammo-profiles``   -> :mod:`.build_ammo_profiles`
+  * ``wows-rig-normalize-bones``   -> :mod:`.rig_normalize_bones`
 """
 
 from __future__ import annotations
