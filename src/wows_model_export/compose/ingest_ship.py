@@ -12,7 +12,7 @@ Stepwise the composer is:
                                    toolkit reports ambiguity and
                                    ``interactive=True``, the user is
                                    prompted on stdin to pick a model_dir.
-  2. ``prep_dirs``              -- create ``<workspace>/<label>/models/``.
+  2. ``prep_dirs``              -- create ``<workspace>/ships/<label>/models/``.
   3. ``scaffold``               -- invoke
                                    :func:`wows_model_export.compose.scaffold_ship.scaffold_ship`,
                                    the export-ship + armor + ammo +
@@ -281,7 +281,7 @@ def ingest_ship(
         workspace
             Per-ship working-dir root.  Defaults to
             ``config.workspace`` (which defaults to ``cwd``).  Per-ship
-            working dir is ``<workspace>/<label>``.
+            working dir is ``<workspace>/ships/<label>``.
         config
             Pre-resolved :class:`PipelineConfig`; loaded on demand when
             ``None``.  Replaces the I:-side ``game_dir`` /
@@ -430,7 +430,7 @@ def ingest_ship(
     # ------------------------------------------------------------------
     timer.start("prep_dirs", detail=label)
     try:
-        ship_dir = (workspace / label).resolve()
+        ship_dir = (workspace / "ships" / label).resolve()
         ship_models = ship_dir / _sidecar.MODELS_SUBDIR
         ship_models.mkdir(parents=True, exist_ok=True)
         timer.complete(

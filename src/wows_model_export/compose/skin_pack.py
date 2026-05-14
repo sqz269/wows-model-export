@@ -1188,7 +1188,7 @@ def ingest_skin_pack(
         or any of the above as a string.
     ship_id
         Filesystem label of the ship whose sidecar gets the new
-        ``skins[]`` entry (matches ``<workspace>/<ship_id>/``).
+        ``skins[]`` entry (matches ``<workspace>/ships/<ship_id>/``).
     workspace
         Workspace root. Defaults to ``config.workspace``.
     config
@@ -1230,7 +1230,7 @@ def ingest_skin_pack(
         workspace = cfg.workspace
     workspace = Path(workspace)
 
-    ship_dir = (workspace / ship_id).resolve()
+    ship_dir = (workspace / "ships" / ship_id).resolve()
     sidecar_path = read_sidecar.sidecar_path_for(ship_dir, ship_id)
     if not sidecar_path.is_file():
         raise StepError(
