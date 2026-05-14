@@ -5,7 +5,9 @@
   "description": "Local dev dashboard for the wows-model-export pipeline. Renders ship hulls, accessories, and damage states against the artifacts the Python pipeline emits.",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently --names backend,frontend --kill-others-on-fail \"npm:dev:backend\" \"npm:dev:frontend\"",
+    "dev:frontend": "vite",
+    "dev:backend": "wows-webview-serve --port 5180 --reload",
     "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
@@ -31,6 +33,7 @@
     "@types/three": "^0.165.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
+    "concurrently": "^9.1.0",
     "eslint": "^9.0.0",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-svelte": "^2.45.0",

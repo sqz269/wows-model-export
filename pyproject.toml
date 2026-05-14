@@ -44,6 +44,13 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.8",
 ]
+# Webview backend (FastAPI + uvicorn). Opt-in — pipeline users who
+# don't run the Svelte dashboard locally shouldn't be forced to install
+# the HTTP server stack. Install with `pip install wows-model-export[webview]`.
+webview = [
+    "fastapi>=0.109",
+    "uvicorn[standard]>=0.27",
+]
 
 # CLI entry points — every composer is wrapped by a `wows-*` shell command.
 # See `src/wows_model_export/cli/__init__.py` for the full listing.
@@ -63,6 +70,7 @@ wows-build-projectile-library = "wows_model_export.cli.build_projectile_library:
 wows-build-decal-library     = "wows_model_export.cli.build_decal_library:main"
 wows-build-ammo-profiles     = "wows_model_export.cli.build_ammo_profiles:main"
 wows-rig-normalize-bones     = "wows_model_export.cli.rig_normalize_bones:main"
+wows-webview-serve           = "wows_model_export.cli.webview_serve:main"
 
 [project.urls]
 Homepage = "https://github.com/sqz269/wows-model-export"

@@ -1,43 +1,37 @@
 // Vite dev server for the webview.
 //
-// Two concerns:
-//   1. Build/dev plumbing (Svelte + TypeScript path aliases).
-//   2. A thin dev backend exposing three endpoints to the SPA:
-//      - GET /api/ships           — per-ship summaries (sidecar + hull GLB discovery)
-//      - GET /api/library         — accessory library index
-//      - GET /repo/<rel-path>     — static workspace files (hull GLB, DDS, JSON, …)
+// All `/api/*` and `/repo/*` requests are proxied to the FastAPI
+// backend at `http://localhost:5180` (the `wows-webview-serve` CLI). The
+// previous in-process Node middleware was deleted as part of Path A
+// Stage 1 of the integration plan — see `INTEGRATION_PLAN.md`.
 //
-// The 14 other endpoints from the legacy webview (extract jobs, winding audit,
-// rig rebuild, …) will come back as we lift the corresponding pages over.
-// Per migration/PIPELINE_API.md the endgame is a Python FastAPI backend; this
-// file is intentionally minimal so the eventual port has less to replace.
+// Dev workflow (npm scripts at webview/package.json):
+//   npm run dev          ← runs Vite + wows-webview-serve concurrently
+//   npm run dev:frontend ← Vite alone (use if you already have the
+//                          backend running in another shell)
+//   npm run dev:backend  ← wows-webview-serve alone
 //
-// Workspace resolution:
-//   $WOWS_WORKSPACE env var > probe candidate paths > error.
-//   The workspace holds per-ship dirs (Iowa/, Yamato/, …) and
-//   libraries/accessories/. It is user data — the public repo carries none of it.
+// Workspace resolution lives on the Python side now
+// (wows_model_export.config.PipelineConfig.load). `$WOWS_WORKSPACE`
+// still takes precedence; falling back to the CWD of the
+// wows-webview-serve invocation.
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import tailwindcss from '@tailwindcss/vite';
-import { defineConfig, loadEnv } from 'vite';
-import { devApiPlugin } from './src/server/dev_api';
+import { defineConfig } from 'vite';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-export default defineConfig(({ mode }) => {
-  // Forward WOWS_* from .env / .env.local into process.env so the dev
-  // backend's workspace resolver picks it up. Vite normally exposes env
-  // vars only to client code; the dev plugin runs server-side, so this
-  // bridge is the simplest way to let contributors drop a one-line
-  // .env.local in webview/ and forget about it.
-  const env = loadEnv(mode, here, 'WOWS_');
-  for (const [k, v] of Object.entries(env)) {
-    if (!process.env[k]) process.env[k] = v;
-  }
+// FastAPI backend address. Override with VITE_API_TARGET when running
+// the backend on a different port / host (e.g. against a remote dev
+// machine).
+const API_TARGET = process.env.VITE_API_TARGET || 'http://127.0.0.1:5180';
+
+export default defineConfig(() => {
   return {
-    plugins: [tailwindcss(), svelte(), devApiPlugin()],
+    plugins: [tailwindcss(), svelte()],
     resolve: {
       alias: {
         $lib: path.resolve(here, 'src/lib'),
@@ -46,12 +40,19 @@ export default defineConfig(({ mode }) => {
       },
     },
     server: {
-      fs: {
-        // Workspace lives outside the project root; resolved per-request by
-        // the /repo middleware, but Vite's static-asset guard still wants
-        // it on the allow-list when the URL is served as a module
-        // (shouldn't happen for /repo/*, but doesn't hurt).
-        strict: true,
+      proxy: {
+        '/api': {
+          target: API_TARGET,
+          changeOrigin: true,
+          // The backend serves chunked GLB responses for /repo/*.
+          // Keep ws off for /api — no SSE in Path A Stage 1.
+          ws: false,
+        },
+        '/repo': {
+          target: API_TARGET,
+          changeOrigin: true,
+          ws: false,
+        },
       },
     },
     build: {

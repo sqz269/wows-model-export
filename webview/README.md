@@ -13,28 +13,36 @@ up.
 ```bash
 cd webview
 npm install
+# from the repo root, in a sibling shell or once-only:
+pip install -e ".[webview]"        # installs wows-webview-serve
 npm run dev
 ```
 
 Then open <http://localhost:5173>.
 
-The dev server reads ship artifacts from a **workspace directory** —
+`npm run dev` starts **two processes** via `concurrently`:
+
+1. `wows-webview-serve --port 5180 --reload` — the FastAPI backend.
+2. `vite` — the dev frontend (proxies `/api/*` + `/repo/*` to 5180).
+
+If you'd rather run them in separate terminals:
+
+```bash
+npm run dev:backend   # wows-webview-serve alone
+npm run dev:frontend  # vite alone
+```
+
+The backend reads ship artifacts from a **workspace directory** —
 per-ship data lives on the user's disk, never in this repo. It resolves
 the workspace in this order:
 
-1. `$WOWS_WORKSPACE` env var, including via `.env.local` (preferred).
-2. Walks upward from the webview dir looking for `libraries/accessories/`.
-3. Falls back to `~/wows-workspace`.
+1. `--workspace PATH` flag on `wows-webview-serve` (highest priority).
+2. `$WOWS_WORKSPACE` env var.
+3. The current working directory when `wows-webview-serve` was invoked.
 
-The simplest setup:
-
-```bash
-cp .env.example .env.local         # then edit the path inside
-npm run dev
-```
-
-`.env.local` is gitignored. `vite.config.ts` reads `WOWS_*` keys from it
-and forwards them to `process.env` before the dev backend starts.
+The simplest setup is to set `WOWS_WORKSPACE` in your shell rc (or in a
+`.env` file your shell sources) so both pipeline CLIs (`wows-ingest-ship`
+et al.) and the webview backend pick it up.
 
 A working workspace contains:
 
@@ -93,7 +101,7 @@ Tooling: **Prettier** + **ESLint** + **svelte-check**.
 ```
 webview/
 ├── index.html                  ← SPA entry; mounts /src/main.ts
-├── vite.config.ts              ← Vite + dev API wiring
+├── vite.config.ts              ← Vite + /api/* + /repo/* proxy → FastAPI
 ├── svelte.config.js            ← Svelte 5 (runes-enabled)
 ├── tsconfig.json               ← strict TS + path aliases
 ├── src/
@@ -108,13 +116,6 @@ webview/
 │   │   ├── ShipPicker.svelte
 │   │   ├── ShipViewer.svelte   ← Three.js host (wraps lib/ship)
 │   │   └── ShipControls.svelte
-│   ├── server/                 ← Vite dev backend (Node, server-side)
-│   │   ├── dev_api.ts          ← plugin wiring (`apply: 'serve'`)
-│   │   ├── workspace.ts        ← workspace path resolver
-│   │   └── endpoints/
-│   │       ├── repo.ts         ← GET /repo/<path>
-│   │       ├── ships.ts        ← GET /api/ships
-│   │       └── library.ts      ← GET /api/library
 │   └── lib/                    ← framework-agnostic library code
 │       ├── api/                ← typed HTTP clients
 │       ├── router.ts           ← hash-driven route reader
@@ -196,17 +197,21 @@ to `src/lib/types/` first — drives type-safe code everywhere else.
 
 ## Adding a new dev-backend endpoint
 
-The Vite plugin lives in `src/server/dev_api.ts`. Each endpoint is its
-own file under `src/server/endpoints/`. To add one:
+The backend is a FastAPI app under
+`src/wows_model_export/server/` in the Python package. Each endpoint
+group lives in `routes/<name>.py` and is wired into
+`server/main.py::create_app`. To add one:
 
-1. New file `src/server/endpoints/<name>.ts` exporting
-   `mount<Name>Api(server: ViteDevServer, workspace: string)`.
-2. Call it from `dev_api.ts::configureServer`.
-3. Add a typed client in `src/lib/api/<name>.ts`.
+1. New file `src/wows_model_export/server/routes/<name>.py` exporting
+   `make_router(config: PipelineConfig) -> APIRouter`.
+2. Call `app.include_router(<name>.make_router(config), prefix="/api")`
+   in `server/main.py`.
+3. Add a typed client in `webview/src/lib/api/<name>.ts`.
 
-Per `migration/PIPELINE_API.md`, the end goal is FastAPI replacing the
-Node middleware. Keep endpoint handlers thin (≤10 lines of business
-logic; delegate to library functions) so the eventual port is mechanical.
+Keep endpoint handlers thin (≤10 lines of business logic; delegate to
+library functions in `wows_model_export.read` / `compose`). The FastAPI
+backend deliberately runs the existing `wows-*` CLIs as subprocesses
+for now — see `INTEGRATION_PLAN.md` for the path-to-in-process plan.
 
 ## Migration status
 
