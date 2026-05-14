@@ -52,8 +52,11 @@ degrade to warnings; the sidecar's stem classifier picks up any
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import sys
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -919,7 +922,7 @@ def scaffold_ship(
     what gets passed to ``wowsunpack``; defaults to ``ship``.
 
     ``workspace`` defaults to ``config.workspace`` (which itself defaults
-    to ``cwd``).  Per-ship working dir is ``<workspace>/<ship>``.
+    to ``cwd``).  Per-ship working dir is ``<workspace>/ships/<ship>``.
 
     ``variant_permoflage`` controls mesh-swap permoflage routing:
         * ``"auto"`` (default): after the toolkit's name resolution gives
@@ -950,7 +953,7 @@ def scaffold_ship(
     # ── Step: resolve_identity ─────────────────────────────────────────
     timer.start("resolve_identity", detail=ship)
     try:
-        ship_dir = (workspace / ship).resolve()
+        ship_dir = (workspace / "ships" / ship).resolve()
         gm3d_dir = ship_dir / sidecar.MODELS_SUBDIR
         gm3d_dir.mkdir(parents=True, exist_ok=True)
 
@@ -975,30 +978,45 @@ def scaffold_ship(
     variant_routed: bool = False
     variant_exterior_id: str | None = None
 
-    # ── Step: export_hull ─────────────────────────────────────────────
-    if skip_export:
-        timer.skip("export_hull")
-        # Pre-flight check for skip_export + variant_permoflage mismatch.
-        if (variant_permoflage is not None
-                and variant_permoflage != "auto"
-                and placements_json.is_file()):
-            try:
-                with open(placements_json, "rb") as f:
-                    _pl_check = json.loads(f.read().decode("utf-8"))
-                stamped = (_pl_check.get("ship") or {}).get("variant_permoflage")
-            except Exception:
-                stamped = None
-            if stamped and stamped != variant_permoflage:
-                raise StepError(
-                    step="export_hull",
-                    underlying=ValueError(
-                        f"--skip-export: --variant-permoflage={variant_permoflage!r} "
-                        f"disagrees with stamped {stamped!r} in {placements_json.name}"
-                    ),
-                    detail="variant_permoflage mismatch on skip-export path",
-                )
-    else:
-        timer.start("export_hull", detail=f"{toolkit_name} -> {hull_glb.name}")
+    # ── Parallel block: export_hull + (export_armor → export_ammo) ───
+    # All three wowsunpack subprocesses are independent, but each Rust
+    # process loads its own ~200 MB GameParams copy on startup. To keep
+    # peak memory bounded we cap parallelism at 2: hull runs in one
+    # worker, armor + ammo run sequentially in a second worker. Since
+    # armor + ammo (~12s + 12s) together still fit inside hull's ~64s
+    # window, the wall-clock is the same as a full 3-way fan-out
+    # (max(64, 12+12) = 64s) but peak wowsunpack processes drops from
+    # 3 to 2.
+    #
+    # Each task emits its own start/complete/fail StepEvents under a
+    # lock so on_event listeners see one full line per event, and
+    # records its own timing into ``timer.step_timings_ms``. We bypass
+    # StepRunner's single-active-step state machine because two
+    # concurrent tasks can't share it.
+    #
+    # Variant-permoflage routing and emissive synthesis ride inside the
+    # hull task because they read the placements JSON + textures dir
+    # that the initial subprocess produces; only the initial subprocess
+    # actually overlaps with armor/ammo.
+    _emit_lock = threading.Lock()
+
+    def _emit_locked(step: str, state: str, **kw: Any) -> None:
+        with _emit_lock:
+            timer.emit(step, state, **kw)
+
+    def _record_timing(step: str, ms: float) -> None:
+        with _emit_lock:
+            timer.step_timings_ms[step] = ms
+
+    def _hull_task() -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "variant_routed":       False,
+            "variant_exterior_id":  None,
+            "task_warnings":        [],
+        }
+        detail = f"{toolkit_name} -> {hull_glb.name}"
+        _emit_locked("export_hull", "started", detail=detail)
+        t0 = time.perf_counter()
         try:
             _toolkit_export_ship(
                 toolkit_name, hull_glb,
@@ -1034,7 +1052,7 @@ def scaffold_ship(
                         )
                     )
                 elif variant_permoflage is not None and variant_permoflage != "auto":
-                    warnings.append(
+                    out["task_warnings"].append(
                         f"--variant-permoflage={variant_permoflage!r} requested "
                         f"but no GameParams Vehicle ID resolvable; base ship used"
                     )
@@ -1058,8 +1076,8 @@ def scaffold_ship(
                             json.dumps(_pl_doc, indent=2, ensure_ascii=False)
                             .encode("utf-8")
                         )
-                    variant_routed = True
-                    variant_exterior_id = exterior_id
+                    out["variant_routed"] = True
+                    out["variant_exterior_id"] = exterior_id
 
             # Emissive synthesis — discovers ``*_emissive.mfm`` files in
             # the VFS, then synthesizes per-stem emissive DDS files next
@@ -1080,57 +1098,145 @@ def scaffold_ship(
                     ),
                 )
                 if synth_paths:
-                    timer.emit(
+                    _emit_locked(
                         "export_hull", "progress",
                         detail=f"synthesised {len(synth_paths)} emissive DDS file(s)",
                         data={"emissive_files": [str(p) for p in synth_paths]},
                     )
             except Exception as e:
-                warnings.append(
+                out["task_warnings"].append(
                     f"emissive synthesis skipped ({type(e).__name__}: {e})"
                 )
         except StepError:
+            step_ms = (time.perf_counter() - t0) * 1000.0
+            _record_timing("export_hull", step_ms)
+            _emit_locked("export_hull", "failed", step_ms=step_ms)
             raise
         except Exception as e:
-            timer.emit("export_hull", "failed")
+            step_ms = (time.perf_counter() - t0) * 1000.0
+            _record_timing("export_hull", step_ms)
+            _emit_locked("export_hull", "failed", step_ms=step_ms)
             raise StepError(
                 step="export_hull",
                 underlying=e,
                 detail=f"export-ship {toolkit_name!r} failed",
             ) from e
-        timer.complete()
+        step_ms = (time.perf_counter() - t0) * 1000.0
+        _record_timing("export_hull", step_ms)
+        _emit_locked("export_hull", "completed", detail=detail, step_ms=step_ms)
+        return out
 
-    # ── Step: export_armor ────────────────────────────────────────────
-    if skip_armor:
-        timer.skip("export_armor")
-    else:
-        timer.start("export_armor", detail=str(armor_json_path.name))
+    def _armor_task() -> None:
+        detail = str(armor_json_path.name)
+        _emit_locked("export_armor", "started", detail=detail)
+        t0 = time.perf_counter()
         try:
             _toolkit_armor_json(toolkit_name, armor_json_path, config=cfg)
         except Exception as e:
-            timer.emit("export_armor", "failed")
+            step_ms = (time.perf_counter() - t0) * 1000.0
+            _record_timing("export_armor", step_ms)
+            _emit_locked("export_armor", "failed", step_ms=step_ms)
             raise StepError(
                 step="export_armor",
                 underlying=e,
                 detail=f"armor {toolkit_name!r} failed",
             ) from e
-        timer.complete()
+        step_ms = (time.perf_counter() - t0) * 1000.0
+        _record_timing("export_armor", step_ms)
+        _emit_locked("export_armor", "completed", detail=detail, step_ms=step_ms)
 
-    # ── Step: export_ammo ─────────────────────────────────────────────
-    if skip_ammo:
-        timer.skip("export_ammo")
-    else:
-        timer.start("export_ammo", detail=str(ballistics_json.name))
+    def _ammo_task() -> None:
+        detail = str(ballistics_json.name)
+        _emit_locked("export_ammo", "started", detail=detail)
+        t0 = time.perf_counter()
         try:
             _toolkit_ammo_json(toolkit_name, ballistics_json, config=cfg)
         except Exception as e:
-            timer.emit("export_ammo", "failed")
+            step_ms = (time.perf_counter() - t0) * 1000.0
+            _record_timing("export_ammo", step_ms)
+            _emit_locked("export_ammo", "failed", step_ms=step_ms)
             raise StepError(
                 step="export_ammo",
                 underlying=e,
                 detail=f"ammo {toolkit_name!r} failed",
             ) from e
-        timer.complete()
+        step_ms = (time.perf_counter() - t0) * 1000.0
+        _record_timing("export_ammo", step_ms)
+        _emit_locked("export_ammo", "completed", detail=detail, step_ms=step_ms)
+
+    # Emit skip events for any disabled step.
+    if skip_export:
+        timer.skip("export_hull")
+        # Pre-flight check for skip_export + variant_permoflage mismatch.
+        if (variant_permoflage is not None
+                and variant_permoflage != "auto"
+                and placements_json.is_file()):
+            try:
+                with open(placements_json, "rb") as f:
+                    _pl_check = json.loads(f.read().decode("utf-8"))
+                stamped = (_pl_check.get("ship") or {}).get("variant_permoflage")
+            except Exception:
+                stamped = None
+            if stamped and stamped != variant_permoflage:
+                raise StepError(
+                    step="export_hull",
+                    underlying=ValueError(
+                        f"--skip-export: --variant-permoflage={variant_permoflage!r} "
+                        f"disagrees with stamped {stamped!r} in {placements_json.name}"
+                    ),
+                    detail="variant_permoflage mismatch on skip-export path",
+                )
+    if skip_armor:
+        timer.skip("export_armor")
+    if skip_ammo:
+        timer.skip("export_ammo")
+
+    # Bundle armor + ammo into one worker so the parallel block uses
+    # at most 2 concurrent wowsunpack processes. Order matches the
+    # original sequential chain (armor before ammo) — if armor raises,
+    # ammo is skipped, same as the pre-parallel behavior.
+    def _aux_task() -> None:
+        if not skip_armor:
+            _armor_task()
+        if not skip_ammo:
+            _ammo_task()
+
+    # Gather + run live tasks. Priority list determines which error
+    # surfaces first when both tasks fail in the same parallel batch
+    # (hull > aux, matching the original sequential order). The aux
+    # task already carries the right inner step name (export_armor or
+    # export_ammo) on its raised StepError.
+    tasks: list[tuple[str, Callable[[], Any]]] = []
+    if not skip_export:
+        tasks.append(("export_hull", _hull_task))
+    if not skip_armor or not skip_ammo:
+        tasks.append(("export_aux", _aux_task))
+
+    hull_result: dict[str, Any] | None = None
+    if tasks:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(tasks),
+            thread_name_prefix="scaffold-toolkit",
+        ) as ex:
+            futures: dict[str, concurrent.futures.Future[Any]] = {
+                name: ex.submit(fn) for name, fn in tasks
+            }
+            concurrent.futures.wait(futures.values())
+
+        for name, _fn in tasks:
+            exc = futures[name].exception()
+            if exc is not None:
+                # Tasks wrap their own exceptions in StepError; surface
+                # the first one in priority order so the most-
+                # significant failure wins.
+                raise exc
+            if name == "export_hull":
+                hull_result = futures[name].result()
+
+    if hull_result is not None:
+        warnings.extend(hull_result["task_warnings"])
+        variant_routed = hull_result["variant_routed"]
+        variant_exterior_id = hull_result["variant_exterior_id"]
 
     # ── Sidecar pipeline ──────────────────────────────────────────────
     if skip_sidecar:
