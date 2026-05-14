@@ -1,0 +1,468 @@
+"""Fleet-wide decal library mirror.
+
+Lifted from ``tools/build_decal_library.py`` (private I:-side repo).
+Layer 4 (composer): mirrors WG's ``dyndecals/`` directory into the
+curated subset under ``<workspace>/libraries/decals/`` with a
+``manifest.json`` describing the prototype layout (SHOT / GROUND /
+FIRE / HEAT classification, U-flip, technique, influence). The
+prototype tables are lifted verbatim from the decompiled
+``ClientDecals/DecalProperties.pyc``.
+
+Output layout::
+
+    <library_root>/
+      damage_dec_1_{d,p,e}.dds          # 7 damage prototype texture sets
+      damage_dec_2_{d,p,e}.dds          # damage_dec_2 + heat_dec_0 also
+      damage_dec_2_d.{dd0,dd1,dd2}      # carry WG's high-res mip-strip quartet
+      …
+      heat_dec_0_{d,p,e}.dds
+      heat_dec_0_d.{dd0,dd1,dd2}
+      heat_dec_0_e.{dd0,dd1}
+      heat_dec_0_p.{dd0,dd1}
+      manifest.json                     # decal-proto schema (see source dict)
+
+When the source ``dyndecals/`` directory isn't on disk, the composer
+falls back to ``toolkit.extract`` to pull the files out of the VFS.
+The ``extract_dyndecals`` step is skipped when the directory already
+exists.
+
+Idempotent — re-running mirrors only changed files (mtime + size).
+
+The composer emits the following canonical :class:`StepEvent` names:
+
+    "extract_dyndecals"   "discover_decals"   "copy_dds"   "write_manifest"
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import time
+from pathlib import Path
+
+from .. import toolkit
+from ..config import PipelineConfig
+from ..errors import StepError
+from ..types import DecalLibraryResult, OnEvent, StepEvent
+
+# ---------------------------------------------------------------------------
+# Prototype tables, lifted verbatim from ClientDecals/DecalProperties.py
+# ---------------------------------------------------------------------------
+#
+# Mirrors:
+#   SHOT_DECALS_PROTO_LIST   — decals 2..6, applied to STATIC (ships)
+#   GROUND_DECALS_PROTO_LIST — decal 1, decal 7, applied to TERRAIN
+#   FIRE_DECALS_PROTO_LIST   — decal 2 reused, applied to STATIC
+#   HEAT_DECALS_PROTO_LIST   — heat_dec_0, technique = EMISSIVE
+#
+# All prototypes set DECAL_FLIP.U (U-axis flip applied to texture
+# sampling).
+
+PROTOTYPE_LISTS = {
+    "shot":   ["damage_dec_2", "damage_dec_3", "damage_dec_4",
+               "damage_dec_5", "damage_dec_6"],
+    "ground": ["damage_dec_1", "damage_dec_7"],
+    "fire":   ["damage_dec_2"],
+    "heat":   ["heat_dec_0"],
+}
+
+TECHNIQUES = {
+    "shot": "DAMAGE", "ground": "DAMAGE",
+    "fire": "DAMAGE", "heat": "EMISSIVE",
+}
+
+INFLUENCE = {
+    "shot": "APPLY_TO_STATIC", "ground": "APPLY_TO_TERRAIN",
+    "fire": "APPLY_TO_STATIC", "heat": "APPLY_TO_STATIC",
+}
+
+# Per-decal-name parallax channel encoding. Empirically determined by
+# inspecting the .dds content (see ``wg_dyndecals.md``):
+#   - heat_dec_0_p is a true tangent-space normal map (rainbow pattern)
+#   - all damage_dec_*_p are dark grayscale-ish maps, likely parallax-
+#     height (encoded as grayscale RGB; values cluster near 0).
+PARALLAX_KIND = {
+    name: "tangent_normal" if name.startswith("heat_") else "grayscale_height"
+    for cat in PROTOTYPE_LISTS.values()
+    for name in cat
+}
+
+# Default WG install path (matches the I:-side convention). Overridable
+# via the ``source_dir`` parameter on the public entry.
+_DEFAULT_DYNDECALS_DIR = Path(
+    r"I:/SteamLibrary/steamapps/common/World of Warships/res_unpack/dyndecals"
+)
+
+# Default patch identifier stamped in the manifest.
+_DEFAULT_PATCH_ID = "12116141"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _file_changed(src: Path, dest: Path) -> bool:
+    if not dest.exists():
+        return True
+    s, d = src.stat(), dest.stat()
+    return s.st_mtime > d.st_mtime or s.st_size != d.st_size
+
+
+def _copy_if_changed(src: Path, dest: Path) -> bool:
+    """Copy ``src`` → ``dest`` if changed; return True if copied."""
+    if not _file_changed(src, dest):
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    return True
+
+
+def discover_decals(src_dir: Path) -> dict[str, dict]:
+    """Walk ``src_dir`` and group files into ``{decal_name: {channel: [files]}}``.
+
+    A decal name like ``damage_dec_2`` aggregates ``damage_dec_2_d.dds``,
+    ``damage_dec_2_d.dd0/.dd1/.dd2``, ``damage_dec_2_p.dds``, etc.
+    """
+    if not src_dir.is_dir():
+        raise FileNotFoundError(f"source dir not found: {src_dir}")
+
+    out: dict[str, dict] = {}
+    pat = re.compile(
+        r"^([a-z]+_dec_\d+)_([dpe])\.(dds|dd[012])$",
+        re.IGNORECASE,
+    )
+    for f in sorted(src_dir.iterdir()):
+        if not f.is_file() or f.suffix == ".bak":
+            continue
+        m = pat.match(f.name)
+        if not m:
+            continue
+        decal = m.group(1).lower()
+        channel = m.group(2).lower()
+        d = out.setdefault(decal, {
+            "diffuse": [], "parallax": [], "emissive": [],
+        })
+        slot = {"d": "diffuse", "p": "parallax", "e": "emissive"}[channel]
+        d[slot].append(f.name)
+    return out
+
+
+def build_manifest(decals: dict[str, dict], patch_id: str) -> dict:
+    out: dict = {
+        "patch_id": patch_id,
+        "u_flip": True,
+        "decals": {},
+        "prototype_lists": PROTOTYPE_LISTS,
+        "techniques": TECHNIQUES,
+        "influence": INFLUENCE,
+    }
+    for name, channels in sorted(decals.items()):
+        # Pick the canonical .dds (lowest mip, base file) and the WG
+        # mip-strip:
+        def _pick_canonical(files: list[str]) -> str | None:
+            dds = [f for f in files if f.endswith(".dds")]
+            return dds[0] if dds else (files[0] if files else None)
+
+        def _pick_mips(files: list[str]) -> list[str]:
+            return sorted(f for f in files if re.search(r"\.dd[012]$", f))
+
+        entry: dict = {
+            "diffuse":       _pick_canonical(channels["diffuse"]),
+            "parallax":      _pick_canonical(channels["parallax"]),
+            "emissive":      _pick_canonical(channels["emissive"]),
+            "diffuse_mips":  _pick_mips(channels["diffuse"]),
+            "parallax_mips": _pick_mips(channels["parallax"]),
+            "emissive_mips": _pick_mips(channels["emissive"]),
+            "parallax_kind": PARALLAX_KIND.get(name, "unknown"),
+        }
+        # Drop empty mip lists for cleanliness.
+        for k in ("diffuse_mips", "parallax_mips", "emissive_mips"):
+            if not entry[k]:
+                del entry[k]
+        out["decals"][name] = entry
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Step emitter
+# ---------------------------------------------------------------------------
+
+
+class _StepRunner:
+    """Helper that wraps `on_event` + step timing + StepError raising."""
+
+    def __init__(self, on_event: OnEvent | None) -> None:
+        self.on_event = on_event
+        self.t0 = time.monotonic()
+        self.step_timings_ms: dict[str, float] = {}
+
+    def _elapsed_ms(self) -> float:
+        return (time.monotonic() - self.t0) * 1000.0
+
+    def emit(
+        self,
+        step: str,
+        state: str,
+        *,
+        detail: str = "",
+        step_ms: float | None = None,
+        data: dict | None = None,
+    ) -> None:
+        if self.on_event is None:
+            return
+        ev = StepEvent(
+            step=step,
+            state=state,  # type: ignore[arg-type]
+            detail=detail,
+            elapsed_ms=self._elapsed_ms(),
+            step_ms=step_ms,
+            data=data,
+        )
+        try:
+            self.on_event(ev)
+        except Exception:
+            pass
+
+    def step(self, step: str, detail: str = "") -> _StepCtx:
+        return _StepCtx(self, step, detail)
+
+
+class _StepCtx:
+    def __init__(self, runner: _StepRunner, step: str, detail: str) -> None:
+        self.runner = runner
+        self.step = step
+        self.detail = detail
+        self.t_start = 0.0
+        self.completed_detail = ""
+        self.completed_data: dict | None = None
+
+    def __enter__(self) -> _StepCtx:
+        self.t_start = time.monotonic()
+        self.runner.emit(self.step, "started", detail=self.detail)
+        return self
+
+    def annotate(self, detail: str, data: dict | None = None) -> None:
+        self.completed_detail = detail
+        if data is not None:
+            self.completed_data = data
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        step_ms = (time.monotonic() - self.t_start) * 1000.0
+        self.runner.step_timings_ms[self.step] = step_ms
+        if exc is None:
+            self.runner.emit(
+                self.step, "completed",
+                detail=self.completed_detail or self.detail,
+                step_ms=step_ms, data=self.completed_data,
+            )
+            return False
+        self.runner.emit(
+            self.step, "failed",
+            detail=f"{type(exc).__name__}: {exc}",
+            step_ms=step_ms,
+        )
+        if isinstance(exc, StepError):
+            return False
+        raise StepError(
+            step=self.step,
+            underlying=exc,
+            detail=str(exc),
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Public composer entry
+# ---------------------------------------------------------------------------
+
+
+def build_decal_library(
+    *,
+    workspace: Path | None = None,
+    config: PipelineConfig | None = None,
+    library_root: Path | None = None,
+    force: bool = False,
+    on_event: OnEvent | None = None,
+    source_dir: Path | None = None,
+    patch_id: str | None = None,
+) -> DecalLibraryResult:
+    """Mirror WG's ``dyndecals/`` into ``<library_root>/`` with a manifest.
+
+    The composer copies every ``*_{d,p,e}.{dds,dd0,dd1,dd2}`` file from
+    ``source_dir`` (default: the WG install's pre-extracted
+    ``res_unpack/dyndecals/`` directory) into ``library_root``, skipping
+    files whose mtime + size match the destination. A ``manifest.json``
+    describing the prototype layout (SHOT / GROUND / FIRE / HEAT
+    classification + per-decal channel paths) is written alongside.
+
+    When ``source_dir`` doesn't exist on disk, the composer falls back
+    to ``toolkit.extract`` to pull the dyndecals directory out of the
+    VFS first. The fallback is skipped silently when the directory is
+    already populated.
+
+    Parameters:
+        workspace        ``PipelineConfig.workspace`` when None.
+        config           ``PipelineConfig.load()`` when None.
+        library_root     ``workspace / "libraries/decals"`` when None.
+        force            When True, re-copy every source file even when
+                          the destination is up to date.
+        on_event         Optional progress callback receiving
+                          :class:`StepEvent` notifications.
+        source_dir       Path to WG's pre-extracted ``dyndecals/``
+                          directory. Defaults to the conventional
+                          ``res_unpack/dyndecals`` under the WoWS
+                          install.
+        patch_id         Patch identifier stamped into the manifest.
+                          Defaults to the I:-side convention; override
+                          per game patch.
+
+    Returns a :class:`DecalLibraryResult` with the library root, copy
+    counts, manifest path, warnings, and per-step timings.
+
+    Raises :class:`StepError` (with ``step`` set to one of the canonical
+    step names) when any step fails. The original exception is
+    accessible via ``.underlying``.
+    """
+    cfg = config or PipelineConfig.load()
+    ws = (workspace or cfg.workspace).resolve()
+    lib_root = (library_root or (ws / "libraries" / "decals")).resolve()
+    src = (source_dir or _DEFAULT_DYNDECALS_DIR).resolve()
+    pid = patch_id or _DEFAULT_PATCH_ID
+
+    runner = _StepRunner(on_event)
+    warnings: list[str] = []
+
+    # ── Step: extract_dyndecals ───────────────────────────────────────
+    # If the source dir is missing on disk, pull it out of the VFS so
+    # later steps have something to walk. Skipped silently when the
+    # directory is already populated.
+    try:
+        with runner.step("extract_dyndecals") as st:
+            if src.is_dir() and any(src.iterdir()):
+                st.annotate(
+                    f"source dir already populated at {src}",
+                    data={"extracted": False, "source": str(src)},
+                )
+            else:
+                # VFS fallback: pull dyndecals into the source dir.
+                src.mkdir(parents=True, exist_ok=True)
+                try:
+                    toolkit.extract(
+                        ["**/dyndecals/**"],
+                        out_dir=src,
+                        config=cfg,
+                    )
+                    st.annotate(
+                        f"extracted dyndecals/ into {src}",
+                        data={"extracted": True, "source": str(src)},
+                    )
+                except Exception as e:
+                    warnings.append(
+                        f"extract_dyndecals fallback failed: {e}"
+                    )
+                    st.annotate(
+                        f"VFS extract failed; proceeding with empty {src}",
+                        data={"extracted": False, "source": str(src)},
+                    )
+    except StepError:
+        raise
+    except Exception as e:
+        raise StepError(
+            step="extract_dyndecals", underlying=e, detail=str(e),
+        ) from e
+
+    # ── Step: discover_decals ─────────────────────────────────────────
+    try:
+        with runner.step("discover_decals") as st:
+            try:
+                decals = discover_decals(src)
+            except FileNotFoundError as e:
+                # Convert the bare not-found into a proper step error.
+                raise StepError(
+                    step="discover_decals", underlying=e,
+                    detail=str(e),
+                ) from e
+            st.annotate(
+                f"found {len(decals)} decal(s) at {src}",
+                data={"decals": len(decals), "source": str(src)},
+            )
+    except StepError:
+        raise
+    except Exception as e:
+        raise StepError(
+            step="discover_decals", underlying=e, detail=str(e),
+        ) from e
+
+    # ── Step: copy_dds ────────────────────────────────────────────────
+    copied = 0
+    skipped = 0
+    try:
+        with runner.step("copy_dds") as st:
+            lib_root.mkdir(parents=True, exist_ok=True)
+            for f in src.iterdir():
+                if not f.is_file() or f.suffix == ".bak":
+                    continue
+                dest = lib_root / f.name
+                if force:
+                    # Force-copy unconditionally (overwrites identical
+                    # files too — useful when the destination got
+                    # corrupted somehow).
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(f, dest)
+                    copied += 1
+                    continue
+                if _copy_if_changed(f, dest):
+                    copied += 1
+                else:
+                    skipped += 1
+            st.annotate(
+                f"copied={copied} skipped={skipped}",
+                data={"copied": copied, "skipped": skipped},
+            )
+    except StepError:
+        raise
+    except Exception as e:
+        raise StepError(
+            step="copy_dds", underlying=e, detail=str(e),
+        ) from e
+
+    # ── Step: write_manifest ──────────────────────────────────────────
+    try:
+        with runner.step("write_manifest") as st:
+            manifest = build_manifest(decals, pid)
+            manifest_path = lib_root / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            st.annotate(
+                f"wrote {manifest_path.name}",
+                data={"manifest": str(manifest_path)},
+            )
+    except StepError:
+        raise
+    except Exception as e:
+        raise StepError(
+            step="write_manifest", underlying=e, detail=str(e),
+        ) from e
+
+    return DecalLibraryResult(
+        library_root=lib_root,
+        decals_copied=copied,
+        decals_skipped=skipped,
+        manifest_path=manifest_path,
+        warnings=tuple(warnings),
+        step_timings_ms=dict(runner.step_timings_ms),
+    )
+
+
+__all__ = [
+    "INFLUENCE",
+    "PARALLAX_KIND",
+    "PROTOTYPE_LISTS",
+    "TECHNIQUES",
+    "build_decal_library",
+    "build_manifest",
+    "discover_decals",
+]

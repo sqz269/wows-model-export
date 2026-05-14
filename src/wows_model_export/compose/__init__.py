@@ -9,12 +9,14 @@ of the same name win the package binding (function takes the name; the
 submodule remains reachable via full-path `from .. import ...` imports).
 
     from wows_model_export.compose import (
-        scaffold_ship, build_accessory_library, ingest_skin_pack,
+        ingest_ship, scaffold_ship, build_accessory_library, ingest_skin_pack,
         autorig_asset, resolve_decorative_placements, scan_legacy_glb,
         find_ship_variants, publish, snapshot, teardown_ship,
+        build_projectile_library, build_decal_library, build_ammo_profiles,
     )
-    result = scaffold_ship("Montana", config=cfg, on_event=printer)
+    result = ingest_ship("Montana", config=cfg, on_event=printer)
     lib    = build_accessory_library(config=cfg, on_event=printer)
+    pl     = build_projectile_library(config=cfg, on_event=printer)
 
 For the sidecar mutation API (write / apply_variant_asset_swaps /
 absorb_*), use the submodule namespace::
@@ -47,7 +49,11 @@ from . import (
 # but get shadowed in the package binding by the function.
 from .accessories_scan import scan_legacy_glb
 from .accessory_library import build_accessory_library
+from .ammo_profiles import build_ammo_profiles
+from .decal_library import build_decal_library
 from .find_ship_variants import find_ship_variants
+from .ingest_ship import ingest_ship, resolve_ship_identity
+from .projectile_library import build_projectile_library
 from .publish import publish
 from .scaffold_ship import scaffold_ship
 from .skel_ext_resolve import resolve_decorative_placements
@@ -61,17 +67,23 @@ __all__ = [
     "attached_accessories_library",
     "dead_variant_audit",
     "sidecar",
-    # Composer functions (also shadow same-named submodules in package
-    # namespace; the submodules remain importable via full-path)
+    # Per-ship composer functions (shadow same-named submodules)
+    "ingest_ship",
     "scaffold_ship",
     "build_accessory_library",
     "ingest_skin_pack",
     "autorig_asset",
     "autorig_asset_full",
     "resolve_decorative_placements",
+    "resolve_ship_identity",
     "scan_legacy_glb",
     "find_ship_variants",
+    "teardown_ship",
+    # Fleet-wide composers
+    "build_projectile_library",
+    "build_decal_library",
+    "build_ammo_profiles",
+    # Cross-cutting
     "publish",
     "snapshot",
-    "teardown_ship",
 ]

@@ -283,6 +283,61 @@ class SnapshotResult:
     cache_refreshed:     bool = False
 
 
+@dataclass(frozen=True)
+class ProjectileLibraryResult:
+    """Outcome of `compose.build_projectile_library`.
+
+    The fleet-wide projectile builder walks every ``typeinfo.type ==
+    "Projectile"`` entry in the VFS manifest and emits a per-projectile
+    GLB + DDS mip chain under ``library_root``. ``projectiles_built`` is
+    the count of GLBs freshly written this run; ``projectiles_audited``
+    is the total number of unique projectile asset_ids discovered (built
+    or skipped because already on disk).
+    """
+
+    library_root:        Path
+    projectiles_built:   int
+    projectiles_audited: int
+    warnings:            tuple[str, ...] = ()
+    step_timings_ms:     dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DecalLibraryResult:
+    """Outcome of `compose.build_decal_library`.
+
+    Mirrors the WG ``dyndecals/`` directory into the curated subset
+    under ``library_root`` with a ``manifest.json`` describing the
+    prototype layout (SHOT / GROUND / FIRE / HEAT classification, U-flip,
+    technique, influence). ``decals_copied`` counts files whose mtime +
+    size changed; ``decals_skipped`` counts files already up to date.
+    """
+
+    library_root:    Path
+    decals_copied:   int
+    decals_skipped:  int
+    manifest_path:   Path
+    warnings:        tuple[str, ...] = ()
+    step_timings_ms: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AmmoProfilesResult:
+    """Outcome of `compose.build_ammo_profiles`.
+
+    Emits ``<library_root>/ammo_profiles.json`` — one entry per
+    Projectile entity with its species, ammo type, asset_id link, and
+    visual + effects blocks pulled from GameParams. ``profiles_count``
+    matches the ``profile_count`` field inside the JSON, useful as a
+    smoke check.
+    """
+
+    output_path:     Path
+    profiles_count:  int
+    warnings:        tuple[str, ...] = ()
+    step_timings_ms: dict[str, float] = field(default_factory=dict)
+
+
 __all__ = [
     # Process types
     "StepEvent",
@@ -299,6 +354,9 @@ __all__ = [
     "PublishCounts",
     "PublishResult",
     "SnapshotResult",
+    "ProjectileLibraryResult",
+    "DecalLibraryResult",
+    "AmmoProfilesResult",
     # Config (re-exported from .config)
     "PipelineConfig",
 ]

@@ -1,0 +1,964 @@
+"""Compose `ingest_ship` -- one-shot per-ship pipeline composer.
+
+Lifted from ``tools/ship/ingest_ship.py`` on the I:-side warships repo.
+This is the Layer 4 capstone orchestrator: it chains every per-ship
+operation into a single callable, walking the RUNBOOK §§1 + 3.5 workflow
+from raw ship name -> publishable Unity bundle.
+
+Stepwise the composer is:
+
+  1. ``resolve_identity``       -- resolve the user input to a
+                                   ``(label, toolkit_name)`` pair.  If the
+                                   toolkit reports ambiguity and
+                                   ``interactive=True``, the user is
+                                   prompted on stdin to pick a model_dir.
+  2. ``prep_dirs``              -- create ``<workspace>/<label>/models/``
+                                   and ``<workspace>/<label>/legacy_models/``
+                                   (or the off-tree ``<legacy_root>/...``
+                                   variant when ``legacy_root`` is set).
+  3. ``acquire_legacy_glb``     -- copy the legacy
+                                   ``<label>_visual.glb`` into place when
+                                   ``legacy_glb_path`` is set, or prompt
+                                   the user on stdin under
+                                   ``interactive=True``.  Skipped when
+                                   ``skip_legacy=True``.
+  4. ``accessories_scan``       -- invoke
+                                   :func:`wows_model_export.compose.accessories_scan.scan_legacy_glb`
+                                   on the legacy GLB.  Skipped when no
+                                   legacy GLB is on hand or the scan
+                                   already exists.
+  5. ``scaffold``               -- invoke
+                                   :func:`wows_model_export.compose.scaffold_ship.scaffold_ship`,
+                                   the export-ship + armor + ammo +
+                                   sidecar sub-composer.  Sub-composer
+                                   step events flow through the parent's
+                                   ``on_event`` callback verbatim; the
+                                   ``step`` field uniquely identifies
+                                   each.
+  6. ``resolve_decoratives``    -- invoke
+                                   :func:`wows_model_export.compose.skel_ext_resolve.resolve_decorative_placements`
+                                   to merge the toolkit-emitted skel_ext
+                                   candidates JSON into
+                                   ``<label>_accessories.json``.  When
+                                   the candidates JSON exists, a
+                                   subsequent scaffold-refresh pass picks
+                                   the merged decoratives back into the
+                                   sidecar.  Skipped when no candidates
+                                   JSON is on disk (HP_-only sidecar).
+  7. ``build_library``          -- invoke
+                                   :func:`wows_model_export.compose.accessory_library.build_accessory_library`
+                                   when ``build_library=True`` or
+                                   ``rebuild_library=True``.  Additive
+                                   (existing library assets kept;
+                                   ``rebuild_library=True`` forces a full
+                                   regenerate).  Followed by an automatic
+                                   post-library scaffold refresh so the
+                                   variant-swap bone-mismatch correction
+                                   sees the freshly-built variant GLBs.
+  8. ``publish``                -- invoke
+                                   :func:`wows_model_export.compose.publish.publish`
+                                   when ``and_publish=True``.  Generic
+                                   publisher; pass ``publish_target`` to
+                                   point at a Unity ``Assets/Ships/Pipeline``
+                                   folder (or any consumer-side root).
+
+Sub-composer error handling: a child composer's :class:`StepError`
+propagates up wrapped in the parent's
+``StepError(step="<parent_step>", underlying=child_error)`` -- consumers
+that branch on ``.step`` get the parent's name; the original error chain
+is preserved via ``raise ... from`` and accessible at ``.underlying``.
+
+Refactor notes vs the I:-side ``ingest(*, ship_input=, out_root=, ...)``:
+
+* ``out_root`` -> ``workspace`` (defaults to ``config.workspace``).
+* ``game_dir`` + ``wowsunpack_path`` -> resolved via :class:`PipelineConfig`.
+* ``IngestStepError`` dropped; package-level :class:`StepError` covers
+  the same use case with a richer payload.
+* ``publish_target`` replaces the hard-coded ``H:/Unity`` path the old
+  ``publish_to_unity.py`` carried -- the new ``compose.publish`` requires
+  a ``target_dir``.
+* Returns :class:`IngestResult` (frozen dataclass) instead of a
+  free-form dict.
+* The ``_run_*`` thin subprocess wrappers from the original module are
+  replaced with direct in-process calls to the corresponding lifted
+  composers.  ``turret_autorig`` is no longer invoked from here --
+  ``build_accessory_library`` runs it per gun asset internally.
+"""
+from __future__ import annotations
+
+import re
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+from ..config import PipelineConfig
+from ..errors import StepError, ToolkitError
+from ..resolve import sidecar as _sidecar
+from ..toolkit import armor_json as _toolkit_armor_json
+from ..types import IngestResult, OnEvent, ScaffoldResult, StepEvent
+from . import accessories_scan as _accessories_scan_mod
+from . import accessory_library as _accessory_library_mod
+from . import publish as _publish_mod
+from . import scaffold_ship as _scaffold_ship_mod
+from . import skel_ext_resolve as _skel_ext_resolve_mod
+
+# ---------------------------------------------------------------------------
+# Ambiguity probe regexes (lifted verbatim from I:-side)
+# ---------------------------------------------------------------------------
+
+_AMBIGUITY_MARKER = "Multiple ships match"
+_CANDIDATE_RE = re.compile(
+    r"^\s+(?P<display>.+?)\s+\((?P<idx>[A-Z]+\d+)\)\s*->\s*(?P<model_dir>\S+)\s*$"
+)
+
+_FS_SAFE_RE = re.compile(r"[^A-Za-z0-9_\-]")
+
+
+# ---------------------------------------------------------------------------
+# Step emitter (mirrors the convention in the other compose modules)
+# ---------------------------------------------------------------------------
+
+
+class _StepTimer:
+    """Records wall time per step + emits ``StepEvent``s.
+
+    A no-op when ``on_event`` is ``None`` so consumers that don't care
+    about progress pay zero per-step overhead.
+    """
+
+    def __init__(self, on_event: OnEvent | None) -> None:
+        self.on_event = on_event
+        self.spans: dict[str, float] = {}
+        self._t_run = time.perf_counter()
+        self._t_step: float | None = None
+        self._step: str | None = None
+
+    def _emit(
+        self,
+        step: str,
+        state: str,
+        *,
+        detail: str = "",
+        step_ms: float | None = None,
+        data: dict | None = None,
+    ) -> None:
+        if self.on_event is None:
+            return
+        elapsed_ms = (time.perf_counter() - self._t_run) * 1000.0
+        try:
+            self.on_event(
+                StepEvent(
+                    step=step,
+                    state=state,  # type: ignore[arg-type]
+                    detail=detail,
+                    elapsed_ms=elapsed_ms,
+                    step_ms=step_ms,
+                    data=data,
+                )
+            )
+        except Exception:
+            # A misbehaving consumer callback must not blow up the
+            # orchestrator. Same convention as the other compose modules.
+            pass
+
+    def start(self, step: str, *, detail: str = "") -> None:
+        self._step = step
+        self._t_step = time.perf_counter()
+        self._emit(step, "started", detail=detail)
+
+    def complete(self, *, detail: str = "", data: dict | None = None) -> None:
+        if self._step is None or self._t_step is None:
+            return
+        step_ms = (time.perf_counter() - self._t_step) * 1000.0
+        self.spans[self._step] = step_ms
+        self._emit(self._step, "completed", detail=detail, step_ms=step_ms, data=data)
+        self._step = None
+        self._t_step = None
+
+    def fail(self, *, detail: str = "") -> None:
+        if self._step is None or self._t_step is None:
+            return
+        step_ms = (time.perf_counter() - self._t_step) * 1000.0
+        self._emit(self._step, "failed", detail=detail, step_ms=step_ms)
+        self._step = None
+        self._t_step = None
+
+    def skip(self, step: str, *, detail: str = "") -> None:
+        self._emit(step, "skipped", detail=detail)
+
+
+# ---------------------------------------------------------------------------
+# Identity resolution (lifted)
+# ---------------------------------------------------------------------------
+
+
+def _probe_ship(
+    name: str,
+    *,
+    config: PipelineConfig | None,
+) -> tuple[bool, str]:
+    """Run a light toolkit call to check whether ``name`` resolves
+    unambiguously. Returns ``(is_unambiguous, stderr_text)``.
+
+    Uses ``armor-json`` because it goes through the same ``find_ship``
+    code path as ``export-ship`` but fails fast on ambiguity without
+    writing anything we care about. Output goes to a temp file we
+    delete immediately.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+        tmp_path = Path(tf.name)
+    try:
+        _toolkit_armor_json(name, tmp_path, config=config)
+        return True, ""
+    except ToolkitError as e:
+        # ToolkitError carries stderr as a structured field; fall back to
+        # the rendered message when the wrapped subprocess died before
+        # printing anything.
+        text = e.stderr if e.stderr else str(e)
+        return False, text
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _parse_ambiguity(stderr_text: str) -> list[tuple[str, str, str]]:
+    """Parse the toolkit's 'Multiple ships match' error message.
+
+    Returns a list of ``(display_name, param_index, model_dir)`` tuples
+    in the order the toolkit listed them.
+    """
+    out: list[tuple[str, str, str]] = []
+    for line in stderr_text.splitlines():
+        m = _CANDIDATE_RE.match(line)
+        if m:
+            out.append((m["display"].strip(), m["idx"].strip(), m["model_dir"].strip()))
+    return out
+
+
+def _sanitize_for_fs(s: str) -> str:
+    """Turn a display name into a filesystem-safe label.
+
+    ``Baltimore (Old)`` -> ``Baltimore_Old``; collapses runs of ``_``.
+    """
+    cleaned = _FS_SAFE_RE.sub("_", s).strip("_")
+    while "__" in cleaned:
+        cleaned = cleaned.replace("__", "_")
+    return cleaned
+
+
+def resolve_ship_identity(
+    user_input: str,
+    *,
+    config: PipelineConfig | None = None,
+    interactive: bool = False,
+    forced_label: str | None = None,
+) -> tuple[str, str]:
+    """Return ``(label, toolkit_name)`` for the ship.
+
+    * If the toolkit resolves ``user_input`` unambiguously, both values
+      are the input (or ``forced_label`` if set for ``label``).
+    * If ambiguous and ``interactive`` is True, prompts the user to
+      pick a model_dir from the listing and (if no ``forced_label``
+      given) accepts a folder label with a sanitized-display-name
+      default.
+    * If ambiguous and ``interactive`` is False, raises :class:`StepError`
+      with the candidate listing in ``detail``.
+    """
+    ok, err = _probe_ship(user_input, config=config)
+    if ok:
+        label = forced_label or user_input
+        return label, user_input
+
+    if _AMBIGUITY_MARKER not in err:
+        raise StepError(
+            step="resolve_identity",
+            underlying=RuntimeError(err),
+            detail=f"toolkit error resolving {user_input!r}",
+        )
+
+    cands = _parse_ambiguity(err)
+    if not cands:
+        raise StepError(
+            step="resolve_identity",
+            underlying=RuntimeError(err),
+            detail=f"couldn't parse ambiguity listing for {user_input!r}",
+        )
+
+    if not interactive:
+        listing = "\n".join(
+            f"  {disp}  ({idx})  ->  {mdir}" for disp, idx, mdir in cands
+        )
+        raise StepError(
+            step="resolve_identity",
+            underlying=ValueError(
+                f"multiple ships match {user_input!r}; pass a model_dir "
+                f"directly or interactive=True"
+            ),
+            detail=f"ambiguous {user_input!r}; candidates:\n{listing}",
+            data={
+                "candidates": [
+                    {"display": d, "param_index": i, "model_dir": m}
+                    for d, i, m in cands
+                ],
+            },
+        )
+
+    print(f"\nMultiple ships match {user_input!r}. Pick one:", file=sys.stderr)
+    for i, (disp, idx, mdir) in enumerate(cands):
+        print(f"  [{i}] {disp}  ({idx})  ->  {mdir}", file=sys.stderr)
+    while True:
+        raw = input(f"Select [0..{len(cands) - 1}]: ").strip()
+        try:
+            pick = int(raw)
+        except ValueError:
+            print("  not a number, try again", file=sys.stderr)
+            continue
+        if 0 <= pick < len(cands):
+            break
+        print(f"  out of range [0..{len(cands) - 1}], try again", file=sys.stderr)
+
+    disp, idx, mdir = cands[pick]
+
+    if forced_label:
+        label = forced_label
+    else:
+        default_label = _sanitize_for_fs(disp) or mdir
+        raw = input(f"Folder label [default: {default_label}]: ").strip()
+        label = raw or default_label
+
+    return label, mdir
+
+
+# ---------------------------------------------------------------------------
+# Legacy GLB acquisition (lifted)
+# ---------------------------------------------------------------------------
+
+
+def _prompt_for_legacy_glb(
+    expected_path: Path,
+    *,
+    interactive: bool,
+    label: str,
+) -> bool:
+    """Wait for the legacy GLB to appear at ``expected_path``.
+
+    Returns ``True`` if the file arrived, ``False`` if the user
+    indicated they don't have one (``interactive=False`` -> immediate
+    ``False`` when the path is missing).
+    """
+    if expected_path.is_file():
+        return True
+
+    if not interactive:
+        return False
+
+    print(f"\nPlace {label}_visual.glb at:", file=sys.stderr)
+    print(f"  {expected_path}", file=sys.stderr)
+    print(
+        "\nThen press Enter to continue. Type 's' + Enter to skip the\n"
+        "legacy merge (sidecar will only have HP_ hardpoints, ~10-15% of\n"
+        "placements); type 'q' to abort.",
+        file=sys.stderr,
+    )
+    while True:
+        choice = input("> ").strip().lower()
+        if choice == "q":
+            raise StepError(
+                step="acquire_legacy_glb",
+                underlying=KeyboardInterrupt("aborted by user"),
+                detail="user aborted legacy-GLB prompt",
+            )
+        if choice == "s":
+            return False
+        if expected_path.is_file():
+            return True
+        print(f"  not found -- still expected at {expected_path}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Public composer entry
+# ---------------------------------------------------------------------------
+
+
+def ingest_ship(
+    ship_input: str,
+    *,
+    workspace: Path | None = None,
+    config: PipelineConfig | None = None,
+    legacy_root: Path | None = None,
+    forced_label: str | None = None,
+    legacy_glb_path: Path | None = None,
+    skip_legacy: bool = False,
+    interactive: bool = False,
+    class_override: str | None = None,
+    ship_key_suffix: str | None = None,
+    build_library: bool = False,
+    rebuild_library: bool = False,
+    auto_rig: bool = True,
+    and_publish: bool = False,
+    publish_target: Path | None = None,
+    publish_force: bool = False,
+    variant_permoflage: str | None = "auto",
+    toolkit_ship_override: str | None = None,
+    gameparams_ship_id: str | None = None,
+    on_event: OnEvent | None = None,
+) -> IngestResult:
+    """Run the full per-ship ingest pipeline end-to-end.
+
+    The composer chains every per-ship operation: identity resolution,
+    working-directory prep, optional legacy-GLB acquisition + scan,
+    scaffold (export-ship + armor + ammo + sidecar), decorative-placement
+    merge, optional accessory-library refresh, and optional publish.
+
+    Parameters:
+        ship_input
+            Display name (``Montana``), model_dir
+            (``ASB017_Montana_1945``), or GameParams Vehicle id.
+        workspace
+            Per-ship working-dir root.  Defaults to
+            ``config.workspace`` (which defaults to ``cwd``).  Per-ship
+            working dir is ``<workspace>/<label>``.
+        config
+            Pre-resolved :class:`PipelineConfig`; loaded on demand when
+            ``None``.  Replaces the I:-side ``game_dir`` /
+            ``wowsunpack_path`` kwargs.
+        legacy_root
+            Optional off-tree root for the legacy ``<label>_visual.glb``.
+            When set, the legacy GLB + scan live at
+            ``<legacy_root>/<label>/<MODELS_SUBDIR>/``; otherwise at
+            ``<workspace>/<label>/<LEGACY_MODELS_SUBDIR>/`` (the default).
+        forced_label
+            Filesystem folder label override (e.g. ``Baltimore_Old``).
+            Default: the input name, or the user's choice on ambiguity.
+        legacy_glb_path
+            Path to a legacy ``<Ship>_visual.glb``; copied into the
+            legacy folder when set.  Otherwise the legacy-GLB acquisition
+            step prompts (when ``interactive=True``) or skips.
+        skip_legacy
+            Skip the legacy-scan merge entirely.  Sidecar then carries
+            only HP_ hardpoints.
+        interactive
+            Allow prompting on stdin (ambiguous identity, missing
+            legacy GLB).  Default ``False`` (CI / scripted use); the
+            composer raises :class:`StepError` rather than blocking.
+        class_override
+            Override toolkit species mapping
+            (``CA``/``CL``/``BB``/``DD``/``CV``/``SS``/...).
+        ship_key_suffix
+            Trailing ``ship_key`` segment (e.g. ``B`` for hull
+            variants).
+        build_library
+            After ingest, refresh the fleet-wide accessory library.
+            Additive -- existing assets are kept.
+        rebuild_library
+            Implies ``build_library=True``; passes
+            ``rebuild=True`` to the library builder (regenerate every
+            asset GLB + DDS from scratch).
+        auto_rig
+            Reserved for parity with the I:-side flag.  The lifted
+            ``accessory_library.build_accessory_library`` invokes
+            ``turret_autorig`` per gun asset internally, so this
+            parameter is currently a no-op.
+        and_publish
+            After ingest (and library build, if any), publish this
+            ship's outputs.  Requires ``publish_target`` to be set.
+        publish_target
+            Consumer-side destination root (Unity
+            ``Assets/Ships/Pipeline/`` historically).  Required when
+            ``and_publish=True``.
+        publish_force
+            Implies ``and_publish=True``; passes ``force=True`` to the
+            publisher (ignore mtime/size cache).
+        variant_permoflage
+            Mesh-swap permoflage routing mode.  ``"auto"`` (default)
+            picks ``Vehicle.nativePermoflage`` automatically when an
+            Exterior carries a full hull mesh swap.  Pass an Exterior
+            id (e.g. ``PJES478_RED_TAKAO``) to scaffold a non-default
+            variant; ``"none"`` to disable.
+        toolkit_ship_override
+            Override the name passed to ``wowsunpack export-ship`` /
+            ``armor-json`` / ``ammo``.  Useful when disambiguation
+            forced a model_dir like ``ASC017_Baltimore_1944`` but the
+            folder should stay friendly.
+        gameparams_ship_id
+            Override the GameParams Vehicle id used for autofill +
+            permoflage discovery.  Required when multiple Vehicles
+            share one model_dir.
+        on_event
+            Optional progress callback.  Receives :class:`StepEvent`s
+            at the canonical step boundaries listed in the module
+            docstring; sub-composers' events flow through verbatim.
+
+    Returns:
+        :class:`IngestResult` wrapping the inner :class:`ScaffoldResult`
+        plus the follow-up paths (legacy scan, merged accessories JSON,
+        library refresh flag, publish target).
+
+    Raises:
+        :class:`StepError`
+            On any step failure.  ``.step`` is the canonical step name
+            (one of those listed in the module docstring).
+            ``.underlying`` holds the original exception; sub-composer
+            errors are wrapped so the parent step name surfaces while
+            the chain is preserved.
+    """
+    # ------------------------------------------------------------------
+    # Config / paths
+    # ------------------------------------------------------------------
+    cfg = config or PipelineConfig.load()
+    if workspace is None:
+        workspace = cfg.workspace
+    workspace = Path(workspace).resolve()
+    if legacy_root is not None:
+        legacy_root = Path(legacy_root).resolve()
+    if legacy_glb_path is not None:
+        legacy_glb_path = Path(legacy_glb_path)
+    if publish_target is not None:
+        publish_target = Path(publish_target).resolve()
+
+    # `rebuild_library` and `publish_force` imply the parent flag.
+    if rebuild_library:
+        build_library = True
+    if publish_force:
+        and_publish = True
+
+    if and_publish and publish_target is None:
+        raise StepError(
+            step="publish",
+            underlying=ValueError(
+                "and_publish=True requires publish_target to be set"
+            ),
+            detail="publish_target is unset",
+        )
+
+    # `auto_rig` is accepted on the signature for parity with the I:-side
+    # CLI but the lifted ``build_accessory_library`` runs turret_autorig
+    # per gun asset internally; explicitly touching the value keeps the
+    # lint rule for unused-arguments quiet.
+    _ = auto_rig
+
+    timer = _StepTimer(on_event)
+    warnings: list[str] = []
+
+    legacy_scan_path: Path | None = None
+    accessories_json_path: Path | None = None
+    library_refreshed = False
+    published_to: Path | None = None
+
+    # ------------------------------------------------------------------
+    # Step: resolve_identity
+    # ------------------------------------------------------------------
+    timer.start("resolve_identity", detail=ship_input)
+    try:
+        if toolkit_ship_override:
+            toolkit_name = toolkit_ship_override
+            label = forced_label or toolkit_ship_override
+            timer.complete(
+                detail=f"override toolkit={toolkit_name!r} label={label!r}",
+                data={"toolkit_name": toolkit_name, "label": label, "override": True},
+            )
+        else:
+            label, toolkit_name = resolve_ship_identity(
+                ship_input,
+                config=cfg,
+                interactive=interactive,
+                forced_label=forced_label,
+            )
+            timer.complete(
+                detail=f"label={label!r} toolkit={toolkit_name!r}",
+                data={"toolkit_name": toolkit_name, "label": label, "override": False},
+            )
+    except StepError:
+        timer.fail(detail=f"identity resolution failed for {ship_input!r}")
+        raise
+    except Exception as e:
+        timer.fail(detail=f"{type(e).__name__}: {e}")
+        raise StepError(
+            step="resolve_identity",
+            underlying=e,
+            detail=f"identity resolution failed for {ship_input!r}",
+        ) from e
+
+    # ------------------------------------------------------------------
+    # Step: prep_dirs
+    # ------------------------------------------------------------------
+    timer.start("prep_dirs", detail=label)
+    try:
+        ship_dir = (workspace / label).resolve()
+        ship_models = ship_dir / _sidecar.MODELS_SUBDIR
+        ship_models.mkdir(parents=True, exist_ok=True)
+        if legacy_root is None:
+            legacy_models = (ship_dir / _sidecar.LEGACY_MODELS_SUBDIR).resolve()
+        else:
+            legacy_models = (legacy_root / label / _sidecar.MODELS_SUBDIR).resolve()
+        legacy_models.mkdir(parents=True, exist_ok=True)
+        timer.complete(
+            detail=f"{ship_dir}",
+            data={
+                "ship_dir":         str(ship_dir),
+                "ship_models":      str(ship_models),
+                "legacy_models":    str(legacy_models),
+            },
+        )
+    except Exception as e:
+        timer.fail(detail=f"{type(e).__name__}: {e}")
+        raise StepError(
+            step="prep_dirs",
+            underlying=e,
+            detail=f"failed to prepare working dirs for {label!r}",
+        ) from e
+
+    legacy_glb = legacy_models / f"{label}_visual.glb"
+    legacy_scan = legacy_models / f"{label}_accessories_scan.json"
+
+    # ------------------------------------------------------------------
+    # Step: acquire_legacy_glb
+    # ------------------------------------------------------------------
+    have_legacy = False
+    if skip_legacy:
+        timer.skip("acquire_legacy_glb", detail="--skip-legacy")
+    else:
+        timer.start("acquire_legacy_glb", detail=str(legacy_glb.name))
+        try:
+            if legacy_glb_path is not None:
+                if not legacy_glb_path.is_file():
+                    raise FileNotFoundError(
+                        f"legacy_glb_path not found: {legacy_glb_path}"
+                    )
+                if legacy_glb_path.resolve() != legacy_glb.resolve():
+                    shutil.copyfile(legacy_glb_path, legacy_glb)
+                    detail = f"copied {legacy_glb_path.name} -> {legacy_glb}"
+                else:
+                    detail = f"in place at {legacy_glb}"
+                have_legacy = True
+            else:
+                have_legacy = _prompt_for_legacy_glb(
+                    legacy_glb,
+                    interactive=interactive,
+                    label=label,
+                )
+                detail = (
+                    f"acquired {legacy_glb}"
+                    if have_legacy
+                    else "no legacy GLB available (HP_-only sidecar)"
+                )
+            timer.complete(detail=detail, data={"have_legacy": have_legacy})
+        except StepError:
+            timer.fail()
+            raise
+        except Exception as e:
+            timer.fail(detail=f"{type(e).__name__}: {e}")
+            raise StepError(
+                step="acquire_legacy_glb",
+                underlying=e,
+                detail=f"failed to acquire legacy GLB for {label!r}",
+            ) from e
+
+    # ------------------------------------------------------------------
+    # Step: accessories_scan
+    # ------------------------------------------------------------------
+    if not have_legacy:
+        timer.skip("accessories_scan", detail="no legacy GLB on hand")
+    elif legacy_scan.is_file():
+        timer.skip(
+            "accessories_scan",
+            detail=f"scan already present: {legacy_scan.name}",
+        )
+        legacy_scan_path = legacy_scan
+    else:
+        timer.start("accessories_scan", detail=legacy_glb.name)
+        try:
+            legacy_scan_path = _accessories_scan_mod.scan_legacy_glb(
+                legacy_glb,
+                output_json=legacy_scan,
+                config=cfg,
+                on_event=on_event,
+            )
+            timer.complete(detail=str(legacy_scan_path.name))
+        except StepError as e:
+            timer.fail(detail=f"sub-composer failed: step={e.step!r}")
+            raise StepError(
+                step="accessories_scan",
+                underlying=e,
+                detail=f"sub-composer failed at step {e.step!r}",
+            ) from e
+        except Exception as e:
+            timer.fail(detail=f"{type(e).__name__}: {e}")
+            raise StepError(
+                step="accessories_scan",
+                underlying=e,
+                detail=f"legacy-scan failed for {legacy_glb}",
+            ) from e
+
+    # ------------------------------------------------------------------
+    # Step: scaffold (the big sub-composer)
+    # ------------------------------------------------------------------
+    timer.start(
+        "scaffold",
+        detail=(
+            f"toolkit={toolkit_name!r}"
+            + (f" gp={gameparams_ship_id}" if gameparams_ship_id else "")
+        ),
+    )
+    try:
+        scaffold_result: ScaffoldResult = _scaffold_ship_mod.scaffold_ship(
+            label,
+            workspace=workspace,
+            config=cfg,
+            class_override=class_override,
+            ship_key_suffix=ship_key_suffix,
+            toolkit_ship=toolkit_name if toolkit_name != label else None,
+            gameparams_ship_id=gameparams_ship_id,
+            variant_permoflage=variant_permoflage,
+            on_event=on_event,
+        )
+        warnings.extend(scaffold_result.warnings)
+        timer.complete(
+            detail=str(scaffold_result.sidecar_path) if scaffold_result.sidecar_path else "",
+            data={
+                "variant_routed":       scaffold_result.variant_routed,
+                "variant_permoflage":   scaffold_result.variant_permoflage,
+                "warnings":             len(scaffold_result.warnings),
+            },
+        )
+    except StepError as e:
+        timer.fail(detail=f"sub-composer failed: step={e.step!r}")
+        raise StepError(
+            step="scaffold",
+            underlying=e,
+            detail=f"scaffold_ship({label!r}) failed at step {e.step!r}",
+        ) from e
+    except Exception as e:
+        timer.fail(detail=f"{type(e).__name__}: {e}")
+        raise StepError(
+            step="scaffold",
+            underlying=e,
+            detail=f"scaffold_ship({label!r}) failed",
+        ) from e
+
+    # Compute follow-up paths from the scaffold result.
+    placements_json = scaffold_result.placements_json or (
+        ship_models / f"{label}_placements.json"
+    )
+    candidates_json = scaffold_result.skel_ext_json or (
+        ship_models / f"{label}_skel_ext.json"
+    )
+    accessories_json = ship_models / f"{label}_accessories.json"
+
+    # ------------------------------------------------------------------
+    # Step: resolve_decoratives
+    # ------------------------------------------------------------------
+    if not candidates_json.is_file():
+        timer.skip(
+            "resolve_decoratives",
+            detail="no skel_ext candidates JSON (HP_-only)",
+        )
+    else:
+        timer.start(
+            "resolve_decoratives",
+            detail=f"{placements_json.name} + {candidates_json.name}",
+        )
+        try:
+            _skel_ext_resolve_mod.resolve_decorative_placements(
+                placements_json,
+                candidates_json=candidates_json,
+                output_json=accessories_json,
+                config=cfg,
+                on_event=on_event,
+            )
+            accessories_json_path = accessories_json
+            timer.complete(detail=str(accessories_json.name))
+        except StepError as e:
+            timer.fail(detail=f"sub-composer failed: step={e.step!r}")
+            raise StepError(
+                step="resolve_decoratives",
+                underlying=e,
+                detail=f"resolve_decorative_placements failed at step {e.step!r}",
+            ) from e
+        except Exception as e:
+            timer.fail(detail=f"{type(e).__name__}: {e}")
+            raise StepError(
+                step="resolve_decoratives",
+                underlying=e,
+                detail="skel_ext resolve failed",
+            ) from e
+
+        # Sidecar refresh now that accessories.json carries the merged
+        # decoratives. The refresh skips the expensive paths (export +
+        # armor + ammo + autofill + materials + geometry) and just folds
+        # the new decoratives into the sidecar via merge_preserving.
+        try:
+            refresh_result = _scaffold_ship_mod.scaffold_ship(
+                label,
+                workspace=workspace,
+                config=cfg,
+                class_override=class_override,
+                ship_key_suffix=ship_key_suffix,
+                toolkit_ship=toolkit_name if toolkit_name != label else None,
+                gameparams_ship_id=gameparams_ship_id,
+                skip_export=True,
+                skip_armor=True,
+                skip_ammo=True,
+                skip_gameparams_autofill=True,
+                skip_materials_skins=True,
+                skip_geometry_hitbox=True,
+                variant_permoflage=variant_permoflage,
+                on_event=on_event,
+            )
+            warnings.extend(refresh_result.warnings)
+            # Re-bind so the consumer sees the post-refresh ScaffoldResult.
+            scaffold_result = refresh_result
+        except StepError as e:
+            raise StepError(
+                step="resolve_decoratives",
+                underlying=e,
+                detail=(
+                    f"sidecar refresh after decoratives merge failed at "
+                    f"step {e.step!r}"
+                ),
+            ) from e
+        except Exception as e:
+            raise StepError(
+                step="resolve_decoratives",
+                underlying=e,
+                detail="sidecar refresh after decoratives merge failed",
+            ) from e
+
+    # ------------------------------------------------------------------
+    # Step: build_library
+    # ------------------------------------------------------------------
+    if not build_library:
+        timer.skip("build_library", detail="not requested")
+    else:
+        timer.start(
+            "build_library",
+            detail=("rebuild" if rebuild_library else "additive"),
+        )
+        try:
+            _accessory_library_mod.build_accessory_library(
+                workspace=workspace,
+                config=cfg,
+                rebuild=rebuild_library,
+                on_event=on_event,
+            )
+            library_refreshed = True
+            timer.complete()
+        except StepError as e:
+            timer.fail(detail=f"sub-composer failed: step={e.step!r}")
+            raise StepError(
+                step="build_library",
+                underlying=e,
+                detail=f"build_accessory_library failed at step {e.step!r}",
+            ) from e
+        except Exception as e:
+            timer.fail(detail=f"{type(e).__name__}: {e}")
+            raise StepError(
+                step="build_library",
+                underlying=e,
+                detail="build_accessory_library failed",
+            ) from e
+
+        # Post-library scaffold refresh -- closes the bone-mismatch race
+        # for mesh-swap permoflages (variant accessory GLBs only exist
+        # after the library build; the first scaffold pass therefore
+        # can't run the Ry(180°) correction against the target GLB
+        # extents). No-op for ships without variant swaps.
+        if candidates_json.is_file():
+            try:
+                refresh_result = _scaffold_ship_mod.scaffold_ship(
+                    label,
+                    workspace=workspace,
+                    config=cfg,
+                    class_override=class_override,
+                    ship_key_suffix=ship_key_suffix,
+                    toolkit_ship=toolkit_name if toolkit_name != label else None,
+                    gameparams_ship_id=gameparams_ship_id,
+                    skip_export=True,
+                    skip_armor=True,
+                    skip_ammo=True,
+                    skip_gameparams_autofill=True,
+                    skip_materials_skins=True,
+                    skip_geometry_hitbox=True,
+                    variant_permoflage=variant_permoflage,
+                    on_event=on_event,
+                )
+                warnings.extend(refresh_result.warnings)
+                scaffold_result = refresh_result
+            except StepError as e:
+                # Treat post-library refresh failures as warnings, not
+                # hard errors -- the library is built, the user can rerun
+                # scaffold_ship manually with the skip_* flags set.
+                warnings.append(
+                    f"post-library scaffold refresh failed at step "
+                    f"{e.step!r}: {e.detail or e}"
+                )
+            except Exception as e:
+                warnings.append(
+                    f"post-library scaffold refresh failed: "
+                    f"{type(e).__name__}: {e}"
+                )
+
+    # ------------------------------------------------------------------
+    # Step: publish
+    # ------------------------------------------------------------------
+    if not and_publish:
+        timer.skip("publish", detail="not requested")
+    else:
+        # `publish_target is None` was already rejected in pre-flight,
+        # but assert again for the type checker.
+        assert publish_target is not None
+        timer.start("publish", detail=str(publish_target))
+        try:
+            _publish_mod.publish(
+                target_dir=publish_target,
+                workspace=workspace,
+                config=cfg,
+                only_ships=(label,),
+                force=publish_force,
+                on_event=on_event,
+            )
+            published_to = publish_target
+            timer.complete(detail=str(publish_target))
+        except StepError as e:
+            timer.fail(detail=f"sub-composer failed: step={e.step!r}")
+            raise StepError(
+                step="publish",
+                underlying=e,
+                detail=f"publish failed at step {e.step!r}",
+            ) from e
+        except Exception as e:
+            timer.fail(detail=f"{type(e).__name__}: {e}")
+            raise StepError(
+                step="publish",
+                underlying=e,
+                detail=f"publish to {publish_target} failed",
+            ) from e
+
+    # Re-bind accessories_json_path off the final scaffold output when
+    # the resolve_decoratives step didn't run (HP_-only sidecar) but
+    # scaffold itself absorbed an already-merged accessories JSON.
+    if accessories_json_path is None and accessories_json.is_file():
+        accessories_json_path = accessories_json
+
+    return IngestResult(
+        ship_id=toolkit_name,
+        label=label,
+        workspace_dir=ship_dir,
+        scaffold=scaffold_result,
+        legacy_scan_path=legacy_scan_path,
+        accessories_json_path=accessories_json_path,
+        library_refreshed=library_refreshed,
+        published_to=published_to,
+        warnings=tuple(warnings),
+        step_timings_ms=dict(timer.spans),
+    )
+
+
+__all__ = [
+    "ingest_ship",
+    "resolve_ship_identity",
+]
