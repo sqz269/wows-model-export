@@ -23,9 +23,9 @@
       scope: 'Global',
       rows: [
         { keys: ['?'], desc: 'Toggle this help' },
-        { keys: ['1'], desc: 'Library page' },
+        { keys: ['1'], desc: 'Extract page' },
         { keys: ['2'], desc: 'Ships page' },
-        { keys: ['3'], desc: 'Extract page' },
+        { keys: ['3'], desc: 'Library page' },
         { keys: ['Esc'], desc: 'Close dialogs / cancel' },
       ],
     },

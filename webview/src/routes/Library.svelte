@@ -7,10 +7,11 @@
 
   import { onMount } from 'svelte';
   import { navigate } from '$lib/router';
-  import { fetchLibrary } from '$lib/api';
+  import { fetchLibrary, invalidateLibrary } from '$lib/api';
+  import { extractEvents } from '$lib/extract_events.svelte';
   import { settingsHref } from '$lib/nav_state.svelte';
   import { navState } from '$lib/nav_state.svelte';
-  import type { LibraryFilter, LibraryIndex } from '$lib/types';
+  import type { LibraryAsset, LibraryFilter, LibraryIndex } from '$lib/types';
   import AssetList from '$components/AssetList.svelte';
   import AssetDetail from '$components/AssetDetail.svelte';
   import type { SortKey } from '$components/AssetList.svelte';
@@ -65,6 +66,39 @@
   // back here with the right asset open after a detour through Ships.
   $effect(() => {
     if (activeId) navState.lastAssetId = activeId;
+  });
+
+  // Smart-merge so unchanged LibraryAsset entries keep their object
+  // identity across refreshes. `AssetDetail` is wrapped in
+  // `{#key activeId}` so it survives prop-reference churn on the
+  // index itself, but reusing per-asset refs avoids needless prop
+  // diffs for downstream consumers.
+  function mergeLibrary(prev: LibraryIndex | null, next: LibraryIndex): LibraryIndex {
+    if (!prev) return next;
+    const mergedAssets: Record<string, LibraryAsset> = {};
+    for (const [id, n] of Object.entries(next.assets)) {
+      const old = prev.assets[id];
+      mergedAssets[id] = old && JSON.stringify(old) === JSON.stringify(n) ? old : n;
+    }
+    return { ...next, assets: mergedAssets };
+  }
+
+  // Re-fetch on extract/skin-pack completion. Mirrors the Ships route;
+  // see extract_events.svelte.ts for the cross-route signal contract.
+  let lastSeenRevision = extractEvents.completionRevision;
+  $effect(() => {
+    const rev = extractEvents.completionRevision;
+    if (rev === lastSeenRevision) return;
+    lastSeenRevision = rev;
+    void (async () => {
+      try {
+        invalidateLibrary();
+        const next = await fetchLibrary();
+        index = mergeLibrary(index, next);
+      } catch (err) {
+        console.warn('[library] refresh after extract failed:', err);
+      }
+    })();
   });
 
   onMount(async () => {

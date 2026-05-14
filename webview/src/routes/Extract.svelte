@@ -17,6 +17,7 @@
   import { onMount, untrack } from 'svelte';
   import { toast } from 'svelte-sonner';
   import { navigate } from '$lib/router';
+  import { extractEvents } from '$lib/extract_events.svelte';
   import { navState, settingsHref } from '$lib/nav_state.svelte';
   import { hasModifier, isTypingContext } from '$lib/shortcuts';
   import {
@@ -211,6 +212,24 @@
             void fetchExtractedShips()
               .then((ships) => (extractedShips = ships))
               .catch(() => undefined);
+          }
+          // Broadcast a successful completion so the Ships + Library
+          // routes re-fetch and the user sees the new ship / accessories
+          // without a manual reload. Skip failed/cancelled — the
+          // workspace state didn't change.
+          if (
+            wasRunning &&
+            next.state === 'done' &&
+            (next.kind === 'extract' || next.kind === 'skin')
+          ) {
+            extractEvents.lastCompletedLabel = next.label;
+            extractEvents.lastCompletedKind = next.kind;
+            extractEvents.completionRevision++;
+            const heading = next.kind === 'extract' ? 'Extract complete' : 'Skin pack complete';
+            toast.success(`${heading}: ${next.label}`, {
+              description: 'Ship list and library refreshed.',
+              duration: 4000,
+            });
           }
         }
       } catch (err) {

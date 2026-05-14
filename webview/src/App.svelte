@@ -41,7 +41,7 @@
           }
           return;
         case '1':
-          navigate(libraryHref());
+          navigate(extractHref());
           e.preventDefault();
           return;
         case '2':
@@ -49,7 +49,7 @@
           e.preventDefault();
           return;
         case '3':
-          navigate(extractHref());
+          navigate(libraryHref());
           e.preventDefault();
           return;
         case '4':
@@ -72,9 +72,9 @@
   const NAV = $derived<
     Array<{ page: RouteState['page']; href: string; label: string; keyHint: string }>
   >([
-    { page: 'library', href: libraryHref(), label: 'Library', keyHint: '1' },
+    { page: 'extract', href: extractHref(), label: 'Extract', keyHint: '1' },
     { page: 'ships', href: shipsHref(), label: 'Ships', keyHint: '2' },
-    { page: 'extract', href: extractHref(), label: 'Extract', keyHint: '3' },
+    { page: 'library', href: libraryHref(), label: 'Library', keyHint: '3' },
     { page: 'settings', href: settingsHref(), label: 'Settings', keyHint: '4' },
   ]);
 

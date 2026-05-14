@@ -12,6 +12,7 @@
   import XIcon from '@lucide/svelte/icons/x';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
   import { defaultFilterState, deriveFilterOptions, filterVehicles, groupByModelDir } from '$lib/extract/filters';
   import {
     COMMON_ARMAMENT,
@@ -38,6 +39,11 @@
   const { vehicles, peculiarityLabels, activeTopKey, onSelect }: Props = $props();
 
   let filterState = $state<ExtractFilterState>(defaultFilterState());
+
+  // Filter panel collapses by default — six chip rows otherwise crowd
+  // the ship list on short viewports. Auto-opens once the user sets a
+  // filter so the active criteria stay visible.
+  let filtersOpen = $state(false);
 
   // Group expansion is in-component memory only — auto-grows to include the
   // active selection's model_dir so the user always sees their pick.
@@ -131,6 +137,23 @@
   const counter = $derived(
     vehicles.length === filtered.length ? `${vehicles.length} ships` : `${filtered.length} / ${vehicles.length} ships`,
   );
+
+  // Count of *active* filters (excluding the show-in-test toggle, which
+  // defaults off and is more of a corpus switch than a filter).
+  const activeFilterCount = $derived(
+    (filterState.nation ? 1 : 0) +
+      filterState.classes.size +
+      filterState.tiers.size +
+      filterState.peculiarities.size +
+      filterState.armaments.size +
+      (filterState.native !== 'any' ? 1 : 0),
+  );
+
+  // Auto-open once a filter is set so users can see what they're applying;
+  // never auto-close (manual collapse is the whole point of the toggle).
+  $effect(() => {
+    if (activeFilterCount > 0) filtersOpen = true;
+  });
 </script>
 
 {#snippet chipBtn(active: boolean, onclick: () => void, title: string | null, label: string)}
@@ -229,6 +252,29 @@
     </div>
   </header>
 
+  <button
+    type="button"
+    onclick={() => (filtersOpen = !filtersOpen)}
+    class="border-border hover:bg-popover text-muted-foreground flex flex-none items-center gap-1.5 border-b px-3.5 py-1.5 text-left text-[11px]"
+    aria-expanded={filtersOpen}
+  >
+    <SlidersHorizontal class="size-3" />
+    <span class="font-semibold uppercase tracking-wide">Filters</span>
+    {#if activeFilterCount > 0}
+      <span class="bg-accent text-foreground rounded px-1.5 py-[1px] text-[10px] tabular-nums">
+        {activeFilterCount}
+      </span>
+    {/if}
+    <span class="ml-auto">
+      {#if filtersOpen}
+        <ChevronDown class="size-3" />
+      {:else}
+        <ChevronRight class="size-3" />
+      {/if}
+    </span>
+  </button>
+
+  {#if filtersOpen}
   <div class="border-border flex flex-none flex-col gap-2 border-b px-3.5 py-2.5 text-xs">
     <label class="text-muted-foreground flex flex-col gap-0.5 text-[11px]">
       Nation
@@ -325,6 +371,7 @@
       </button>
     </div>
   </div>
+  {/if}
 
   <ul class="m-0 flex-1 list-none overflow-y-auto p-0">
     {#if filtered.length === 0}

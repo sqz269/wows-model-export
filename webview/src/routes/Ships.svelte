@@ -12,7 +12,8 @@
   import { onMount } from 'svelte';
   import { toast } from 'svelte-sonner';
   import { navigate } from '$lib/router';
-  import { fetchLibrary, fetchShips } from '$lib/api';
+  import { fetchLibrary, fetchShips, invalidateLibrary, invalidateShips } from '$lib/api';
+  import { extractEvents } from '$lib/extract_events.svelte';
   import { navState } from '$lib/nav_state.svelte';
   import { hasModifier, isTypingContext } from '$lib/shortcuts';
   import type { LibraryIndex, ShipSummary } from '$lib/types';
@@ -96,6 +97,43 @@
   // even after a detour through Library / Extract.
   $effect(() => {
     if (activeShip) navState.lastShipName = activeShip.name;
+  });
+
+  // Smart-merge so unchanged ShipSummary entries keep their object
+  // identity across refreshes. `activeShip` is `ships.find(s => s.name
+  // === selectedShipName)` — retaining the same object reference for
+  // the currently viewed ship prevents ShipViewer's ship-prop $effect
+  // from reloading the GLB and tossing camera state.
+  function mergeShips(prev: ShipSummary[], next: ShipSummary[]): ShipSummary[] {
+    const byName = new Map(prev.map((s) => [s.name, s]));
+    return next.map((n) => {
+      const old = byName.get(n.name);
+      if (old && JSON.stringify(old) === JSON.stringify(n)) return old;
+      return n;
+    });
+  }
+
+  // Re-fetch on extract/skin-pack completion. The Extract page bumps
+  // `extractEvents.completionRevision` when a job transitions to
+  // `done`; we read it inside a tracked block so this effect fires on
+  // each bump. Skip the initial value so we don't double-fetch on
+  // mount (onMount already loaded both endpoints).
+  let lastSeenRevision = extractEvents.completionRevision;
+  $effect(() => {
+    const rev = extractEvents.completionRevision;
+    if (rev === lastSeenRevision) return;
+    lastSeenRevision = rev;
+    void (async () => {
+      try {
+        invalidateShips();
+        invalidateLibrary();
+        const [shipsRes, libRes] = await Promise.all([fetchShips(), fetchLibrary()]);
+        ships = mergeShips(ships, shipsRes);
+        library = libRes;
+      } catch (err) {
+        console.warn('[ships] refresh after extract failed:', err);
+      }
+    })();
   });
 
   onMount(() => {
