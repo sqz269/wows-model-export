@@ -36,19 +36,17 @@ Refactor notes vs the I:-side ``scaffold(ship, *, out_root=, ...)``:
 * The original module's ``print()`` calls are routed through ``on_event``
   for milestones; debug prints have been dropped.
 
-One dependency remains dangling:
-
-* ``synth_emission`` is now lifted at :mod:`wows_model_export.resolve.synth_emission`
-  but the emissive-DDS synthesis pass isn't yet rewired into this
-  composer.  ARP / Azur Lane / Sabaton crossover skins will silently
-  miss ``*_emissive.dd0`` slots until the wiring lands.  Tracked as a
-  follow-up.
-
-Native-permoflage auto-ingest now routes through
+Native-permoflage auto-ingest routes through
 :mod:`wows_model_export.compose.skin_pack` — the skin-pack composer is
 called directly when the Vehicle's ``nativePermoflage`` declares a
 non-default ``peculiarity`` (Arpeggio / Azur Lane / Sabaton /
 Kobayashi).
+
+Emissive-DDS synthesis (ARP / Azur Lane / Sabaton crossover skins)
+routes through :mod:`wows_model_export.resolve.synth_emission` — called
+inside the ``export_hull`` step on a best-effort basis. Failures
+degrade to warnings; the sidecar's stem classifier picks up any
+``*_emissive.dd0`` files that landed.
 """
 from __future__ import annotations
 
@@ -65,6 +63,7 @@ from ..read import localization as _localization
 from ..resolve import camo as wg_camo
 from ..resolve import gameparams_autofill as _gp_autofill
 from ..resolve import sidecar
+from ..resolve import synth_emission as _synth_emission
 from ..toolkit import ammo_json as _toolkit_ammo_json
 from ..toolkit import armor_json as _toolkit_armor_json
 from ..toolkit import export_ship as _toolkit_export_ship
@@ -1055,10 +1054,34 @@ def scaffold_ship(
                     variant_routed = True
                     variant_exterior_id = exterior_id
 
-            # TODO: emissive synthesis (ARP/Azur Lane crossover skins) —
-            # ``synth_emission`` module isn't lifted to the public
-            # package yet; sidecar's stem classifier will silently miss
-            # ``*_emissive.dd0`` slots until then.
+            # Emissive synthesis — discovers ``*_emissive.mfm`` files in
+            # the VFS, then synthesizes per-stem emissive DDS files next
+            # to the diffuse so the sidecar's stem classifier can route
+            # them into ``texture_sets[<scheme>]["emissive"]``. Best-
+            # effort: synth failures don't abort the scaffold, just
+            # surface as warnings. No-op for non-emissive ships (no
+            # ``*_emissive.mfm`` matches).
+            try:
+                synth_paths = _synth_emission.synthesize_emissive_textures(
+                    textures_dds_dir,
+                    config=cfg,
+                    label=ship,
+                    material_mappings_json=(
+                        material_mappings_json
+                        if material_mappings_json.is_file()
+                        else None
+                    ),
+                )
+                if synth_paths:
+                    timer.emit(
+                        "export_hull", "progress",
+                        detail=f"synthesised {len(synth_paths)} emissive DDS file(s)",
+                        data={"emissive_files": [str(p) for p in synth_paths]},
+                    )
+            except Exception as e:
+                warnings.append(
+                    f"emissive synthesis skipped ({type(e).__name__}: {e})"
+                )
         except StepError:
             raise
         except Exception as e:
