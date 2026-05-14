@@ -93,12 +93,6 @@ export interface GpStatus {
   hint?: string;
 }
 
-export interface RunOptions {
-  build_library: boolean;
-  and_publish: boolean;
-  publish_force: boolean;
-}
-
 export interface JobState {
   id: string;
   kind: 'extract' | 'skin';

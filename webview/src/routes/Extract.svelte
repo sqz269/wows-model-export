@@ -36,7 +36,6 @@
     JobState,
     PeculiarityLabel,
     Permoflage,
-    RunOptions,
     SkinPackForm,
     Vehicle,
   } from '$lib/types/extract';
@@ -222,7 +221,7 @@
     pollHandle = setInterval(tick, 1500);
   }
 
-  async function onRunExtract(opts: RunOptions) {
+  async function onRunExtract() {
     const v = selectedVehicle;
     if (!v) return;
     const p = selectedPermoflage;
@@ -231,9 +230,7 @@
       vehicle: v.top_key || v.param_index,
       label,
       permoflage: p ? p.exterior_id : 'none',
-      build_library: opts.build_library,
-      and_publish: opts.and_publish,
-      publish_force: opts.publish_force,
+      build_library: true,
     };
     let result;
     try {

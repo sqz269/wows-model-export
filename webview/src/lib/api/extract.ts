@@ -53,8 +53,6 @@ export interface RunExtractBody {
   label: string;
   permoflage: string | null;
   build_library: boolean;
-  and_publish: boolean;
-  publish_force: boolean;
 }
 
 export interface RunSkinBody {
