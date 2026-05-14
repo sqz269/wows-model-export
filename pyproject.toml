@@ -45,21 +45,23 @@ dev = [
     "mypy>=1.8",
 ]
 
-# CLI entry points — populated as composers land. The scaffold ships none;
-# uncommenting follows the rollout order in migration/PIPELINE_REFACTOR.md.
+# CLI entry points — every composer is wrapped by a `wows-*` shell command.
+# See `src/wows_model_export/cli/__init__.py` for the full listing.
 [project.scripts]
-# wows-ingest-ship          = "wows_model_export.cli.ingest_ship:main"
-# wows-scaffold-ship        = "wows_model_export.cli.scaffold_ship:main"
-# wows-skel-ext-resolve     = "wows_model_export.cli.skel_ext_resolve:main"
-# wows-build-accessory-lib  = "wows_model_export.cli.build_accessory_library:main"
-# wows-build-projectile-lib = "wows_model_export.cli.build_projectile_library:main"
-# wows-build-decal-lib      = "wows_model_export.cli.build_decal_library:main"
-# wows-build-ammo-profiles  = "wows_model_export.cli.build_ammo_profiles:main"
-# wows-ingest-skin-pack     = "wows_model_export.cli.ingest_skin_pack:main"
-# wows-find-ship-variants   = "wows_model_export.cli.find_ship_variants:main"
-# wows-teardown-ship        = "wows_model_export.cli.teardown_ship:main"
-# wows-publish              = "wows_model_export.cli.publish:main"
-# wows-snapshot             = "wows_model_export.cli.snapshot:main"
+wows-ingest-ship             = "wows_model_export.cli.ingest_ship:main"
+wows-scaffold-ship           = "wows_model_export.cli.scaffold_ship:main"
+wows-build-accessory-library = "wows_model_export.cli.build_accessory_library:main"
+wows-ingest-skin-pack        = "wows_model_export.cli.ingest_skin_pack:main"
+wows-turret-autorig          = "wows_model_export.cli.turret_autorig:main"
+wows-skel-ext-resolve        = "wows_model_export.cli.skel_ext_resolve:main"
+wows-accessories-scan        = "wows_model_export.cli.accessories_scan:main"
+wows-find-ship-variants      = "wows_model_export.cli.find_ship_variants:main"
+wows-teardown-ship           = "wows_model_export.cli.teardown_ship:main"
+wows-publish                 = "wows_model_export.cli.publish:main"
+wows-snapshot                = "wows_model_export.cli.snapshot:main"
+wows-build-projectile-library = "wows_model_export.cli.build_projectile_library:main"
+wows-build-decal-library     = "wows_model_export.cli.build_decal_library:main"
+wows-build-ammo-profiles     = "wows_model_export.cli.build_ammo_profiles:main"
 
 [project.urls]
 Homepage = "https://github.com/sqz269/wows-model-export"
