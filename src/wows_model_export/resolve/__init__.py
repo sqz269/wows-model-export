@@ -47,6 +47,10 @@ Lifted modules so far:
                            compare_skin_meshes.py library half).
     exterior_compare     — Exterior peculiarityModels diff helpers
                            (from compare_exterior_swaps.py library half).
+    rig_normalize_bones  — strip Blender's bone-axis bake from a turret
+                           rig.glb so consumers can drive bone rotations
+                           via plain Euler angles (from
+                           rig_normalize_bones.py).
 """
 
 from __future__ import annotations
@@ -58,6 +62,7 @@ from . import (
     exterior_compare,
     gameparams_autofill,
     mesh_compare,
+    rig_normalize_bones,
     sidecar,
     skel_ext_hashes,
     synth_emission,
@@ -187,6 +192,10 @@ from .synth_emission import (
     synth_emissive_dds,
 )
 
+# rig_normalize_bones — strip Blender's bone-axis bake from a rig.glb
+from .rig_normalize_bones import normalize as normalize_rig
+from .rig_normalize_bones import normalize_file as normalize_rig_file
+
 # winding — auto-detect heuristic for triangle winding orientation
 from .winding import (
     detect_winding_verdict,
@@ -202,6 +211,7 @@ __all__ = [
     "exterior_compare",
     "gameparams_autofill",
     "mesh_compare",
+    "rig_normalize_bones",
     "sidecar",
     "skel_ext_hashes",
     "synth_emission",
@@ -310,6 +320,9 @@ __all__ = [
     "synth_emissive",
     "synth_emissive_dds",
     "is_emissive_mask_pattern",
+    # rig_normalize_bones (renamed to avoid clashing with generic ``normalize``)
+    "normalize_rig",
+    "normalize_rig_file",
     # winding
     "detect_winding_verdict",
     "flip_normals",

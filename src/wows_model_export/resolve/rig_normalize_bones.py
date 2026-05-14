@@ -5,8 +5,8 @@ Lifted from the source pipeline's ``tools/ship/rig_normalize_bones.py``
 identity rest rotation that encodes the bone's head-to-tail axis
 (Blender's local ``+Y`` aligns to the bone direction). For mesh skinning
 that's invisible; for runtime turret control it's catastrophic — the
-rig spec at ``docs/contracts/turret-rig.md`` declares
-``pivots.yaw.axis = "Y"`` with the convention that::
+turret rig spec declares ``pivots.yaw.axis = "Y"`` with the convention
+that::
 
     yaw.localRotation = Quaternion.Euler(0, deg, 0)
 
@@ -15,9 +15,9 @@ that line snaps the gun to a wrong orientation (overwriting the rest
 rotation); the only correct usage is to compose with the baked rest,
 which the spec doesn't describe and a TurretPivot consumer wouldn't do.
 
-This post-processor rewrites a ``.rig.glb`` so every joint has identity
-local rotation while preserving the mesh's rest-pose appearance. The
-mechanism (verbatim from the source):
+This module rewrites a ``.rig.glb`` so every joint has identity local
+rotation while preserving the mesh's rest-pose appearance. The
+mechanism:
 
 1. Walk the node tree, recording each node's CURRENT world transform.
 2. For every joint (any node listed in any skin's ``joints``):
@@ -41,26 +41,30 @@ the parent yaw applies), and barrel muzzle world positions match
 
 Idempotent: running on an already-normalised rig is a no-op (every
 joint's local rotation is already identity, IBMs already correct).
+
+Layer: ``resolve`` — pure transform with optional file I/O. Matches the
+shape of :mod:`wows_model_export.resolve.winding` (also reads/writes
+GLBs via ``_glb`` byte helpers).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 from .._glb import parse_glb, write_glb
+from ..types import NormalizeStats
 
 
 # ---------------------------------------------------------------------------
-# Quaternion + transform helpers
+# Quaternion + transform helpers (private — used only by ``normalize``).
 # ---------------------------------------------------------------------------
 # Quaternions are (x, y, z, w) tuples — glTF convention. All math is
 # float64 to keep round-trips clean; we narrow to float32 only when
 # writing IBM data (glTF accessor is FLOAT).
 
 
-def quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Hamilton product (a * b) for unit quaternions in (x,y,z,w) order."""
     ax, ay, az, aw = a
     bx, by, bz, bw = b
@@ -72,19 +76,19 @@ def quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     ], dtype=np.float64)
 
 
-def quat_conj(q: np.ndarray) -> np.ndarray:
+def _quat_conj(q: np.ndarray) -> np.ndarray:
     return np.array([-q[0], -q[1], -q[2], q[3]], dtype=np.float64)
 
 
-def quat_rotate(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+def _quat_rotate(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     """Rotate vec3 v by quat q. v' = q * (v, 0) * conj(q), pulling the
     vec3 out of the result quaternion."""
     vq = np.array([v[0], v[1], v[2], 0.0], dtype=np.float64)
-    res = quat_mul(quat_mul(q, vq), quat_conj(q))
+    res = _quat_mul(_quat_mul(q, vq), _quat_conj(q))
     return res[:3]
 
 
-def transform_compose(parent_t: np.ndarray, parent_r: np.ndarray,
+def _transform_compose(parent_t: np.ndarray, parent_r: np.ndarray,
                        local_t: np.ndarray, local_r: np.ndarray
                        ) -> tuple[np.ndarray, np.ndarray]:
     """world = parent * local (TRS, ignoring scale — turret rigs don't use it).
@@ -93,21 +97,21 @@ def transform_compose(parent_t: np.ndarray, parent_r: np.ndarray,
         world_t = parent_t + parent_r * local_t
         world_r = parent_r * local_r
     """
-    world_t = parent_t + quat_rotate(parent_r, local_t)
-    world_r = quat_mul(parent_r, local_r)
+    world_t = parent_t + _quat_rotate(parent_r, local_t)
+    world_r = _quat_mul(parent_r, local_r)
     return world_t, world_r
 
 
-def transform_invert_compose(parent_new_t: np.ndarray, parent_new_r: np.ndarray,
+def _transform_invert_compose(parent_new_t: np.ndarray, parent_new_r: np.ndarray,
                               child_world_t: np.ndarray, child_world_r: np.ndarray
                               ) -> tuple[np.ndarray, np.ndarray]:
     """Find local s.t. parent_new * local = child_world.
     => local = inverse(parent_new) * child_world.
     """
-    inv_parent_r = quat_conj(parent_new_r)
-    local_r = quat_mul(inv_parent_r, child_world_r)
+    inv_parent_r = _quat_conj(parent_new_r)
+    local_r = _quat_mul(inv_parent_r, child_world_r)
     delta_t = child_world_t - parent_new_t
-    local_t = quat_rotate(inv_parent_r, delta_t)
+    local_t = _quat_rotate(inv_parent_r, delta_t)
     return local_t, local_r
 
 
@@ -119,7 +123,7 @@ def transform_invert_compose(parent_new_t: np.ndarray, parent_new_r: np.ndarray,
 
 
 def _replace_ibm_data(gltf: dict, bin_bytes: bytearray,
-                       skin_index: int, ibm_matrices: list[np.ndarray]) -> None:
+                      skin_index: int, ibm_matrices: list[np.ndarray]) -> None:
     """Replace the binary data for skin[skin_index].inverseBindMatrices.
 
     Each matrix is a (4,4) float64 in row-major numpy order; we transpose
@@ -167,31 +171,20 @@ def _replace_ibm_data(gltf: dict, bin_bytes: bytearray,
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class NormalizeStats:
-    """Counters returned by :func:`normalize`."""
-
-    joints: int
-    joints_normalised: int
-    non_joints_propagated: int
-    skins_updated: int
-
-    def to_dict(self) -> dict:
-        return {
-            "joints":               self.joints,
-            "joints_normalised":    self.joints_normalised,
-            "non_joints_propagated": self.non_joints_propagated,
-            "skins_updated":        self.skins_updated,
-        }
-
-
-def normalize(gltf: dict, bin_bytes: bytearray) -> NormalizeStats:
+def normalize(gltf: dict, bin_data: bytes) -> tuple[bytes, NormalizeStats]:
     """Identity-rotation every joint while preserving rest-pose visuals.
 
-    Mutates ``gltf`` (node ``translation`` / ``rotation`` fields) and
-    ``bin_bytes`` (inverseBindMatrices accessor data) in place. Returns
-    a :class:`NormalizeStats` for logging.
+    Mirrors the shape of :func:`wows_model_export._glb.flip_winding`:
+    accepts ``bytes`` (immutable), returns a fresh ``bytes`` with the
+    inverseBindMatrices accessor rewritten plus a :class:`NormalizeStats`
+    summary.
+
+    ``gltf`` is mutated in place (node ``translation`` / ``rotation``
+    fields rewritten). Callers that need to keep the original should
+    ``copy.deepcopy`` before calling.
     """
+    bin_bytes = bytearray(bin_data)
+
     nodes = gltf["nodes"]
     n_nodes = len(nodes)
 
@@ -232,7 +225,7 @@ def normalize(gltf: dict, bin_bytes: bytearray) -> NormalizeStats:
 
     def dfs_world(idx: int, parent_t: np.ndarray, parent_r: np.ndarray) -> None:
         lt, lr = get_local(idx)
-        wt, wr = transform_compose(parent_t, parent_r, lt, lr)
+        wt, wr = _transform_compose(parent_t, parent_r, lt, lr)
         world_t[idx] = wt
         world_r[idx] = wr
         for c in nodes[idx].get("children", []) or []:
@@ -276,7 +269,7 @@ def normalize(gltf: dict, bin_bytes: bytearray) -> NormalizeStats:
             parent_new_t = identity_t
             parent_new_r = identity_r
 
-        new_local_t, new_local_r = transform_invert_compose(
+        new_local_t, new_local_r = _transform_invert_compose(
             parent_new_t, parent_new_r,
             new_world_t[idx], new_world_r[idx])
 
@@ -313,12 +306,13 @@ def normalize(gltf: dict, bin_bytes: bytearray) -> NormalizeStats:
             ibm.append(mat)
         _replace_ibm_data(gltf, bin_bytes, skin_index, ibm)
 
-    return NormalizeStats(
+    stats = NormalizeStats(
         joints=len(joints),
         joints_normalised=joints_normalised,
         non_joints_propagated=others_propagated,
         skins_updated=len(gltf.get("skins", []) or []),
     )
+    return bytes(bin_bytes), stats
 
 
 def normalize_file(path: Path, *, output: Path | None = None) -> NormalizeStats:
@@ -332,22 +326,13 @@ def normalize_file(path: Path, *, output: Path | None = None) -> NormalizeStats:
     Returns:
         :class:`NormalizeStats` with per-pass counters.
     """
-    data = path.read_bytes()
-    gltf, bin_immutable = parse_glb(data)
-    bin_bytes = bytearray(bin_immutable)
-    stats = normalize(gltf, bin_bytes)
-    out_path = output if output is not None else path
-    write_glb(gltf, bytes(bin_bytes), out_path)
+    gltf, bin_data = parse_glb(path.read_bytes())
+    new_bin, stats = normalize(gltf, bin_data)
+    write_glb(gltf, new_bin, output if output is not None else path)
     return stats
 
 
 __all__ = [
-    "NormalizeStats",
     "normalize",
     "normalize_file",
-    "quat_mul",
-    "quat_conj",
-    "quat_rotate",
-    "transform_compose",
-    "transform_invert_compose",
 ]

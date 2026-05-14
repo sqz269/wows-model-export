@@ -1,10 +1,9 @@
-"""CLI wrapper for :func:`wows_model_export.compose.rig_normalize_bones.normalize_file`.
+"""CLI wrapper for :func:`wows_model_export.resolve.rig_normalize_bones.normalize_file`.
 
 Strip Blender's bone-axis bake from one or more ``.rig.glb`` files so
 ``yaw.localRotation = Quaternion.Euler(0, deg, 0)`` rotates the gun
 around the world up axis exactly as the turret rig spec promises. Run
-this after every Blender rig export; ``compose.turret_rig.build_rig``
-invokes it automatically on success.
+this after every Blender rig export.
 
 Argv shape::
 
@@ -21,7 +20,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from ..compose.rig_normalize_bones import normalize_file
+from ..resolve.rig_normalize_bones import normalize_file
 from ._args import EXIT_OK, EXIT_STEP_ERROR, EXIT_UNEXPECTED
 
 

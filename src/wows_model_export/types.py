@@ -200,6 +200,25 @@ class AccessoryLibraryResult:
 
 
 @dataclass(frozen=True)
+class NormalizeStats:
+    """Per-pass counters from `resolve.rig_normalize_bones.normalize`.
+
+    Returned alongside the rewritten BIN payload. ``joints`` is the
+    total joint count discovered across every skin; ``joints_normalised``
+    is how many had a non-identity rest rotation collapsed to identity;
+    ``non_joints_propagated`` is how many non-joint helper nodes
+    absorbed the rotation difference into their own local transform.
+    ``skins_updated`` is the number of skins whose inverseBindMatrices
+    accessor was rewritten.
+    """
+
+    joints:                  int = 0
+    joints_normalised:       int = 0
+    non_joints_propagated:   int = 0
+    skins_updated:           int = 0
+
+
+@dataclass(frozen=True)
 class TurretRigResult:
     """Outcome of `compose.turret_autorig.autorig_asset`.
 
@@ -349,6 +368,7 @@ __all__ = [
     "IngestResult",
     "AttachmentResolveStats",
     "AccessoryLibraryResult",
+    "NormalizeStats",
     "TurretRigResult",
     "SkinPackResult",
     "PublishCounts",
