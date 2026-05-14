@@ -13,6 +13,7 @@
   import { toast } from 'svelte-sonner';
   import { navigate } from '$lib/router';
   import { fetchLibrary, fetchShips } from '$lib/api';
+  import { navState } from '$lib/nav_state.svelte';
   import { hasModifier, isTypingContext } from '$lib/shortcuts';
   import type { LibraryIndex, ShipSummary } from '$lib/types';
   import type { PickResult, ShipLoadStats, ShipViewer } from '$lib/ship';
@@ -22,13 +23,17 @@
   import MeshInspector from '$components/MeshInspector.svelte';
 
   interface Props {
-    param: string | null;
+    /** Ship name from the URL (`#/ship/<name>`), or null when the user
+     *  is on a different page. Domain-typed by App.svelte's discriminated
+     *  union routing so an asset_id from `#/asset/<id>` can never be
+     *  passed in here. */
+    shipName: string | null;
     /** True iff this is the active route. Page-local keydown handlers
      *  short-circuit when false so a `/` on the Library page doesn't
      *  steal focus from the asset search to a hidden ship picker. */
     active: boolean;
   }
-  const { param, active }: Props = $props();
+  const { shipName, active }: Props = $props();
 
   let ships = $state<ShipSummary[]>([]);
   let library = $state<LibraryIndex | null>(null);
@@ -69,9 +74,28 @@
     selectedPick = pick;
   }
 
+  // Sticky internal selection. `shipName` carries the URL claim (`Iowa`
+  // from `#/ship/Iowa`). When the user switches tabs the URL changes to
+  // `#/library` / `#/asset/<id>` and `shipName` goes null — but we want
+  // the viewer + sidebar state to survive. Adopt `shipName` when
+  // non-null, hold the previous value when it goes away. The topnav's
+  // `shipsHref()` reads `navState.lastShipName` to restore the right
+  // URL on tab return.
+  let selectedShipName = $state<string | null>(null);
+  $effect(() => {
+    if (shipName) selectedShipName = decodeURIComponent(shipName);
+  });
+
   let activeShip = $derived.by(() => {
-    if (!param) return null;
-    return ships.find((s) => s.name === decodeURIComponent(param)) ?? null;
+    if (!selectedShipName) return null;
+    return ships.find((s) => s.name === selectedShipName) ?? null;
+  });
+
+  // Mirror the active selection into the cross-route nav memory so the
+  // topnav link to "Ships" lands back here with the right ship loaded
+  // even after a detour through Library / Extract.
+  $effect(() => {
+    if (activeShip) navState.lastShipName = activeShip.name;
   });
 
   onMount(() => {

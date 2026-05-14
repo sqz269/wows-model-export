@@ -3,7 +3,12 @@
   // wows-ingest-skin-pack. Stub for now; will lift the current
   // tools/webview/src/extract.ts behavior once the backend exposes the
   // job-runner endpoints.
-  let { param: _param, active: _active }: { param: string | null; active: boolean } = $props();
+  // `vehicleId` will carry the selected Vehicle from `#/extract/<id>`
+  // once the Vehicle picker lands; for now the route is a static stub.
+  let {
+    vehicleId: _vehicleId,
+    active: _active,
+  }: { vehicleId: string | null; active: boolean } = $props();
 </script>
 
 <section class="flex-1 overflow-auto p-6">

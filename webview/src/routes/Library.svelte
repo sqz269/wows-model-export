@@ -2,25 +2,28 @@
   // Accessory library route. Fetches /api/library, wires sidebar (filters
   // + list) and right-pane detail (viewer + controls + info).
   //
-  // Hash routing: `#/library` shows the picker; `#/asset/<id>` opens that
-  // asset. The router parses `<id>` into `param` for both cases — when
-  // `param` is non-null at the library page, it's an asset_id.
+  // Hash routing: `#/library` shows the picker; `#/asset/<id>` opens
+  // that asset. The router parses `<id>` into the typed `assetId` prop.
 
   import { onMount } from 'svelte';
   import { navigate } from '$lib/router';
   import { fetchLibrary } from '$lib/api';
+  import { navState } from '$lib/nav_state.svelte';
   import type { LibraryFilter, LibraryIndex } from '$lib/types';
   import AssetList from '$components/AssetList.svelte';
   import AssetDetail from '$components/AssetDetail.svelte';
   import type { SortKey } from '$components/AssetList.svelte';
 
   interface Props {
-    param: string | null;
+    /** Asset_id from the URL (`#/asset/<id>`), or null when the user
+     *  is on a different page or on bare `#/library`. Domain-typed by
+     *  App.svelte's discriminated union routing. */
+    assetId: string | null;
     /** True iff this is the active route. Reserved for the asset
      *  search `/` shortcut when it lands. */
     active: boolean;
   }
-  const { param, active: _active }: Props = $props();
+  const { assetId, active: _active }: Props = $props();
 
   let index = $state<LibraryIndex | null>(null);
   let loadError = $state<string | null>(null);
@@ -37,16 +40,31 @@
   });
   let sort = $state<SortKey>('id-asc');
 
-  // The active asset is derived from the hash (param) once the index has
-  // loaded. We don't pre-route — wait until we have data so deep links
-  // never hit a stale "asset not found" flash.
+  // Sticky internal selection (see Ships.svelte for the same pattern).
+  // `assetId` is the URL claim (`AGM034_…` from `#/asset/AGM034_…`);
+  // when the user navigates to another tab the URL changes and
+  // `assetId` goes null, but the selection should survive so coming
+  // back via the topnav restores exactly what was open.
+  let selectedAssetId = $state<string | null>(null);
+  $effect(() => {
+    if (assetId) selectedAssetId = decodeURIComponent(assetId);
+  });
+
+  // The active asset is derived from the index (once loaded) +
+  // selectedAssetId. We don't pre-route — wait until we have data so
+  // deep links never hit a stale "asset not found" flash.
   const activeId = $derived.by(() => {
-    if (!index || !param) return null;
-    const decoded = decodeURIComponent(param);
-    return index.assets[decoded] ? decoded : null;
+    if (!index || !selectedAssetId) return null;
+    return index.assets[selectedAssetId] ? selectedAssetId : null;
   });
 
   const activeAsset = $derived(activeId && index ? index.assets[activeId] : null);
+
+  // Mirror to cross-route nav memory so the topnav "Library" link lands
+  // back here with the right asset open after a detour through Ships.
+  $effect(() => {
+    if (activeId) navState.lastAssetId = activeId;
+  });
 
   onMount(async () => {
     try {
