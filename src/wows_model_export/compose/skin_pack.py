@@ -67,7 +67,6 @@ import json
 import shutil
 import sys
 import tempfile
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -83,7 +82,8 @@ from ..resolve import exterior_compare as ces
 from ..resolve import mesh_compare as csm
 from ..resolve import sidecar as resolve_sidecar
 from ..resolve import synth_emission
-from ..types import OnEvent, SkinPackResult, StepEvent
+from ..types import OnEvent, SkinPackResult
+from ._step_runner import StepRunner
 
 # ---------------------------------------------------------------------------
 # Channel → slot mapping for skin-pack DDS files
@@ -1162,66 +1162,6 @@ def _apply_plan(
 
 
 # ---------------------------------------------------------------------------
-# Step timer
-# ---------------------------------------------------------------------------
-
-
-class _StepTimer:
-    """Records wall time per step + emits :class:`StepEvent`s.
-
-    A no-op when ``on_event`` is ``None`` so consumers that don't care
-    about progress pay zero per-step overhead.
-    """
-
-    def __init__(self, on_event: OnEvent | None) -> None:
-        self.on_event = on_event
-        self.spans: dict[str, float] = {}
-        self._t_run = time.perf_counter()
-        self._t_step: float | None = None
-        self._step: str | None = None
-
-    def _emit(
-        self,
-        step: str,
-        state: str,
-        *,
-        detail: str = "",
-        step_ms: float | None = None,
-        data: dict | None = None,
-    ) -> None:
-        if self.on_event is None:
-            return
-        elapsed_ms = (time.perf_counter() - self._t_run) * 1000.0
-        self.on_event(
-            StepEvent(
-                step=step,
-                state=state,
-                detail=detail,
-                elapsed_ms=elapsed_ms,
-                step_ms=step_ms,
-                data=data,
-            )
-        )
-
-    def start(self, step: str, *, detail: str = "") -> None:
-        self._step = step
-        self._t_step = time.perf_counter()
-        self._emit(step, "started", detail=detail)
-
-    def complete(self, *, detail: str = "", data: dict | None = None) -> None:
-        if self._step is None or self._t_step is None:
-            return
-        step_ms = (time.perf_counter() - self._t_step) * 1000.0
-        self.spans[self._step] = step_ms
-        self._emit(self._step, "completed", detail=detail, step_ms=step_ms, data=data)
-        self._step = None
-        self._t_step = None
-
-    def skip(self, step: str, *, detail: str = "") -> None:
-        self._emit(step, "skipped", detail=detail)
-
-
-# ---------------------------------------------------------------------------
 # Top-level composer
 # ---------------------------------------------------------------------------
 
@@ -1301,7 +1241,7 @@ def ingest_skin_pack(
             detail=f"sidecar not found at {sidecar_path}",
         )
 
-    timer = _StepTimer(on_event)
+    timer = StepRunner(on_event)
     warnings: list[str] = []
     swizzled_flag = [False]
 
@@ -1345,7 +1285,7 @@ def ingest_skin_pack(
             if skin_id is None:
                 skin_id = exterior_id
     except Exception as e:
-        timer._emit("detect_source", "failed")
+        timer.emit("detect_source", "failed")
         raise StepError(
             step="detect_source",
             underlying=e,
@@ -1388,7 +1328,7 @@ def ingest_skin_pack(
             # build_skin_entry).
             timer.complete(detail=f"vfs variant {variant_asset_id}")
     except Exception as e:
-        timer._emit("extract_textures", "failed")
+        timer.emit("extract_textures", "failed")
         raise StepError(
             step="extract_textures",
             underlying=e,
@@ -1438,7 +1378,7 @@ def ingest_skin_pack(
             # the (potentially slow) GameParams-walk + swap enumeration.
             pass
         except Exception as e:
-            timer._emit("compare_exteriors", "failed")
+            timer.emit("compare_exteriors", "failed")
             raise StepError(
                 step="compare_exteriors",
                 underlying=e,
@@ -1476,7 +1416,7 @@ def ingest_skin_pack(
                 config=cfg,
             )
     except Exception as e:
-        timer._emit("build_skin_entry", "failed")
+        timer.emit("build_skin_entry", "failed")
         raise StepError(
             step="build_skin_entry",
             underlying=e,
@@ -1503,7 +1443,7 @@ def ingest_skin_pack(
         for v in verdicts.values():
             by_verdict[v["verdict"]] = by_verdict.get(v["verdict"], 0) + 1
     except Exception as e:
-        timer._emit("compare_meshes", "failed")
+        timer.emit("compare_meshes", "failed")
         raise StepError(
             step="compare_meshes",
             underlying=e,
@@ -1521,7 +1461,7 @@ def ingest_skin_pack(
             plan, ship_dir=ship_dir, sidecar_path=sidecar_path, verdicts=verdicts,
         )
     except Exception as e:
-        timer._emit("merge_sidecar", "failed")
+        timer.emit("merge_sidecar", "failed")
         raise StepError(
             step="merge_sidecar",
             underlying=e,

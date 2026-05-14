@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -70,7 +69,8 @@ from ..toolkit import ammo_json as _toolkit_ammo_json
 from ..toolkit import armor_json as _toolkit_armor_json
 from ..toolkit import export_ship as _toolkit_export_ship
 from ..toolkit.gameparams import ensure_dump as _ensure_gameparams_dump
-from ..types import OnEvent, ScaffoldResult, StepEvent
+from ..types import OnEvent, ScaffoldResult
+from ._step_runner import StepRunner
 
 # ---------------------------------------------------------------------------
 # Module-local caches + constants (lifted verbatim)
@@ -92,67 +92,6 @@ _TOPO_SKIP = "skip"
 _COLOR_SCHEME_PREFIX = "colorScheme"
 
 _PER_HULL_DIRNAME = "per_hull"
-
-
-# ---------------------------------------------------------------------------
-# Event helper
-# ---------------------------------------------------------------------------
-
-
-class _StepTimer:
-    """Records wall time per step + emits ``StepEvent``s.
-
-    A no-op when ``on_event`` is ``None`` so consumers that don't care
-    about progress pay zero per-step overhead.
-    """
-
-    def __init__(self, on_event: OnEvent | None) -> None:
-        self.on_event = on_event
-        self.spans: dict[str, float] = {}
-        self._t_run = time.perf_counter()
-        self._t_step: float | None = None
-        self._step: str | None = None
-
-    def _emit(
-        self,
-        step: str,
-        state: str,
-        *,
-        detail: str = "",
-        step_ms: float | None = None,
-        data: dict | None = None,
-    ) -> None:
-        if self.on_event is None:
-            return
-        elapsed_ms = (time.perf_counter() - self._t_run) * 1000.0
-        self.on_event(
-            StepEvent(
-                step=step,
-                state=state,
-                detail=detail,
-                elapsed_ms=elapsed_ms,
-                step_ms=step_ms,
-                data=data,
-            )
-        )
-
-    def start(self, step: str, *, detail: str = "") -> None:
-        self._step = step
-        self._t_step = time.perf_counter()
-        self._emit(step, "started", detail=detail)
-
-    def complete(self, *, detail: str = "", data: dict | None = None) -> None:
-        if self._step is None or self._t_step is None:
-            return
-        step_ms = (time.perf_counter() - self._t_step) * 1000.0
-        self.spans[self._step] = step_ms
-        self._emit(self._step, "completed", detail=detail, step_ms=step_ms, data=data)
-        self._step = None
-        self._t_step = None
-
-    def skip(self, step: str, *, detail: str = "") -> None:
-        self._emit(step, "skipped", detail=detail)
-        # No span recorded for skipped steps.
 
 
 # ---------------------------------------------------------------------------
@@ -999,7 +938,7 @@ def scaffold_ship(
     if variant_permoflage in ("none", ""):
         variant_permoflage = None
 
-    timer = _StepTimer(on_event)
+    timer = StepRunner(on_event)
     warnings: list[str] = []
 
     # ── Step: resolve_identity ─────────────────────────────────────────
@@ -1019,7 +958,7 @@ def scaffold_ship(
         textures_dir = gm3d_dir / "textures"
         textures_dds_dir = gm3d_dir / "textures_dds"
     except Exception as e:
-        timer._emit("resolve_identity", "failed")
+        timer.emit("resolve_identity", "failed")
         raise StepError(
             step="resolve_identity",
             underlying=e,
@@ -1123,7 +1062,7 @@ def scaffold_ship(
         except StepError:
             raise
         except Exception as e:
-            timer._emit("export_hull", "failed")
+            timer.emit("export_hull", "failed")
             raise StepError(
                 step="export_hull",
                 underlying=e,
@@ -1139,7 +1078,7 @@ def scaffold_ship(
         try:
             _toolkit_armor_json(toolkit_name, armor_json_path, config=cfg)
         except Exception as e:
-            timer._emit("export_armor", "failed")
+            timer.emit("export_armor", "failed")
             raise StepError(
                 step="export_armor",
                 underlying=e,
@@ -1155,7 +1094,7 @@ def scaffold_ship(
         try:
             _toolkit_ammo_json(toolkit_name, ballistics_json, config=cfg)
         except Exception as e:
-            timer._emit("export_ammo", "failed")
+            timer.emit("export_ammo", "failed")
             raise StepError(
                 step="export_ammo",
                 underlying=e,
@@ -1183,7 +1122,7 @@ def scaffold_ship(
             variant_routed=variant_routed,
             variant_permoflage=variant_exterior_id,
             warnings=tuple(warnings),
-            step_timings_ms=dict(timer.spans),
+            step_timings_ms=dict(timer.step_timings_ms),
         )
 
     if not placements_json.is_file():
@@ -1324,7 +1263,7 @@ def scaffold_ship(
             doc = sidecar.merge_preserving(doc, {"geometry": geom})
             doc["hitbox"] = hitbox
         except Exception as e:
-            timer._emit("geometry_hitbox", "failed")
+            timer.emit("geometry_hitbox", "failed")
             raise StepError(
                 step="geometry_hitbox",
                 underlying=e,
@@ -1348,7 +1287,7 @@ def scaffold_ship(
                 active_placements_json=placements_json,
             )
         except Exception as e:
-            timer._emit("gameparams_autofill", "failed")
+            timer.emit("gameparams_autofill", "failed")
             raise StepError(
                 step="gameparams_autofill",
                 underlying=e,
@@ -1419,7 +1358,7 @@ def scaffold_ship(
                     if universal_skins:
                         doc["skins"].extend(universal_skins)
         except Exception as e:
-            timer._emit("materials_skins", "failed")
+            timer.emit("materials_skins", "failed")
             raise StepError(
                 step="materials_skins",
                 underlying=e,
@@ -1584,7 +1523,7 @@ def scaffold_ship(
     try:
         sidecar.write(doc, sidecar_path)
     except Exception as e:
-        timer._emit("emit_sidecar", "failed")
+        timer.emit("emit_sidecar", "failed")
         raise StepError(
             step="emit_sidecar",
             underlying=e,
@@ -1696,7 +1635,7 @@ def scaffold_ship(
         variant_routed=variant_routed,
         variant_permoflage=variant_exterior_id,
         warnings=tuple(warnings),
-        step_timings_ms=dict(timer.spans),
+        step_timings_ms=dict(timer.step_timings_ms),
     )
 
 

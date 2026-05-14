@@ -90,19 +90,19 @@ import re
 import shutil
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 from ..config import PipelineConfig
 from ..errors import StepError, ToolkitError
 from ..resolve import sidecar as _sidecar
 from ..toolkit import armor_json as _toolkit_armor_json
-from ..types import IngestResult, OnEvent, ScaffoldResult, StepEvent
+from ..types import IngestResult, OnEvent, ScaffoldResult
 from . import accessories_scan as _accessories_scan_mod
 from . import accessory_library as _accessory_library_mod
 from . import publish as _publish_mod
 from . import scaffold_ship as _scaffold_ship_mod
 from . import skel_ext_resolve as _skel_ext_resolve_mod
+from ._step_runner import StepRunner
 
 # ---------------------------------------------------------------------------
 # Ambiguity probe regexes (lifted verbatim from I:-side)
@@ -114,79 +114,6 @@ _CANDIDATE_RE = re.compile(
 )
 
 _FS_SAFE_RE = re.compile(r"[^A-Za-z0-9_\-]")
-
-
-# ---------------------------------------------------------------------------
-# Step emitter (mirrors the convention in the other compose modules)
-# ---------------------------------------------------------------------------
-
-
-class _StepTimer:
-    """Records wall time per step + emits ``StepEvent``s.
-
-    A no-op when ``on_event`` is ``None`` so consumers that don't care
-    about progress pay zero per-step overhead.
-    """
-
-    def __init__(self, on_event: OnEvent | None) -> None:
-        self.on_event = on_event
-        self.spans: dict[str, float] = {}
-        self._t_run = time.perf_counter()
-        self._t_step: float | None = None
-        self._step: str | None = None
-
-    def _emit(
-        self,
-        step: str,
-        state: str,
-        *,
-        detail: str = "",
-        step_ms: float | None = None,
-        data: dict | None = None,
-    ) -> None:
-        if self.on_event is None:
-            return
-        elapsed_ms = (time.perf_counter() - self._t_run) * 1000.0
-        try:
-            self.on_event(
-                StepEvent(
-                    step=step,
-                    state=state,  # type: ignore[arg-type]
-                    detail=detail,
-                    elapsed_ms=elapsed_ms,
-                    step_ms=step_ms,
-                    data=data,
-                )
-            )
-        except Exception:
-            # A misbehaving consumer callback must not blow up the
-            # orchestrator. Same convention as the other compose modules.
-            pass
-
-    def start(self, step: str, *, detail: str = "") -> None:
-        self._step = step
-        self._t_step = time.perf_counter()
-        self._emit(step, "started", detail=detail)
-
-    def complete(self, *, detail: str = "", data: dict | None = None) -> None:
-        if self._step is None or self._t_step is None:
-            return
-        step_ms = (time.perf_counter() - self._t_step) * 1000.0
-        self.spans[self._step] = step_ms
-        self._emit(self._step, "completed", detail=detail, step_ms=step_ms, data=data)
-        self._step = None
-        self._t_step = None
-
-    def fail(self, *, detail: str = "") -> None:
-        if self._step is None or self._t_step is None:
-            return
-        step_ms = (time.perf_counter() - self._t_step) * 1000.0
-        self._emit(self._step, "failed", detail=detail, step_ms=step_ms)
-        self._step = None
-        self._t_step = None
-
-    def skip(self, step: str, *, detail: str = "") -> None:
-        self._emit(step, "skipped", detail=detail)
 
 
 # ---------------------------------------------------------------------------
@@ -541,7 +468,7 @@ def ingest_ship(
     # lint rule for unused-arguments quiet.
     _ = auto_rig
 
-    timer = _StepTimer(on_event)
+    timer = StepRunner(on_event)
     warnings: list[str] = []
 
     legacy_scan_path: Path | None = None
@@ -573,10 +500,10 @@ def ingest_ship(
                 data={"toolkit_name": toolkit_name, "label": label, "override": False},
             )
     except StepError:
-        timer.fail(detail=f"identity resolution failed for {ship_input!r}")
+        timer.fail("resolve_identity", detail=f"identity resolution failed for {ship_input!r}")
         raise
     except Exception as e:
-        timer.fail(detail=f"{type(e).__name__}: {e}")
+        timer.fail("resolve_identity", detail=f"{type(e).__name__}: {e}")
         raise StepError(
             step="resolve_identity",
             underlying=e,
@@ -605,7 +532,7 @@ def ingest_ship(
             },
         )
     except Exception as e:
-        timer.fail(detail=f"{type(e).__name__}: {e}")
+        timer.fail("prep_dirs", detail=f"{type(e).__name__}: {e}")
         raise StepError(
             step="prep_dirs",
             underlying=e,
@@ -648,10 +575,10 @@ def ingest_ship(
                 )
             timer.complete(detail=detail, data={"have_legacy": have_legacy})
         except StepError:
-            timer.fail()
+            timer.fail("acquire_legacy_glb")
             raise
         except Exception as e:
-            timer.fail(detail=f"{type(e).__name__}: {e}")
+            timer.fail("acquire_legacy_glb", detail=f"{type(e).__name__}: {e}")
             raise StepError(
                 step="acquire_legacy_glb",
                 underlying=e,
@@ -680,14 +607,14 @@ def ingest_ship(
             )
             timer.complete(detail=str(legacy_scan_path.name))
         except StepError as e:
-            timer.fail(detail=f"sub-composer failed: step={e.step!r}")
+            timer.fail("accessories_scan", detail=f"sub-composer failed: step={e.step!r}")
             raise StepError(
                 step="accessories_scan",
                 underlying=e,
                 detail=f"sub-composer failed at step {e.step!r}",
             ) from e
         except Exception as e:
-            timer.fail(detail=f"{type(e).__name__}: {e}")
+            timer.fail("accessories_scan", detail=f"{type(e).__name__}: {e}")
             raise StepError(
                 step="accessories_scan",
                 underlying=e,
@@ -726,14 +653,14 @@ def ingest_ship(
             },
         )
     except StepError as e:
-        timer.fail(detail=f"sub-composer failed: step={e.step!r}")
+        timer.fail("scaffold", detail=f"sub-composer failed: step={e.step!r}")
         raise StepError(
             step="scaffold",
             underlying=e,
             detail=f"scaffold_ship({label!r}) failed at step {e.step!r}",
         ) from e
     except Exception as e:
-        timer.fail(detail=f"{type(e).__name__}: {e}")
+        timer.fail("scaffold", detail=f"{type(e).__name__}: {e}")
         raise StepError(
             step="scaffold",
             underlying=e,
@@ -773,14 +700,14 @@ def ingest_ship(
             accessories_json_path = accessories_json
             timer.complete(detail=str(accessories_json.name))
         except StepError as e:
-            timer.fail(detail=f"sub-composer failed: step={e.step!r}")
+            timer.fail("resolve_decoratives", detail=f"sub-composer failed: step={e.step!r}")
             raise StepError(
                 step="resolve_decoratives",
                 underlying=e,
                 detail=f"resolve_decorative_placements failed at step {e.step!r}",
             ) from e
         except Exception as e:
-            timer.fail(detail=f"{type(e).__name__}: {e}")
+            timer.fail("resolve_decoratives", detail=f"{type(e).__name__}: {e}")
             raise StepError(
                 step="resolve_decoratives",
                 underlying=e,
@@ -848,14 +775,14 @@ def ingest_ship(
             library_refreshed = True
             timer.complete()
         except StepError as e:
-            timer.fail(detail=f"sub-composer failed: step={e.step!r}")
+            timer.fail("build_library", detail=f"sub-composer failed: step={e.step!r}")
             raise StepError(
                 step="build_library",
                 underlying=e,
                 detail=f"build_accessory_library failed at step {e.step!r}",
             ) from e
         except Exception as e:
-            timer.fail(detail=f"{type(e).__name__}: {e}")
+            timer.fail("build_library", detail=f"{type(e).__name__}: {e}")
             raise StepError(
                 step="build_library",
                 underlying=e,
@@ -924,14 +851,14 @@ def ingest_ship(
             published_to = publish_target
             timer.complete(detail=str(publish_target))
         except StepError as e:
-            timer.fail(detail=f"sub-composer failed: step={e.step!r}")
+            timer.fail("publish", detail=f"sub-composer failed: step={e.step!r}")
             raise StepError(
                 step="publish",
                 underlying=e,
                 detail=f"publish failed at step {e.step!r}",
             ) from e
         except Exception as e:
-            timer.fail(detail=f"{type(e).__name__}: {e}")
+            timer.fail("publish", detail=f"{type(e).__name__}: {e}")
             raise StepError(
                 step="publish",
                 underlying=e,
@@ -954,7 +881,7 @@ def ingest_ship(
         library_refreshed=library_refreshed,
         published_to=published_to,
         warnings=tuple(warnings),
-        step_timings_ms=dict(timer.spans),
+        step_timings_ms=dict(timer.step_timings_ms),
     )
 
 

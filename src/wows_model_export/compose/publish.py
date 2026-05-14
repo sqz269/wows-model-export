@@ -44,13 +44,12 @@ carries a ``<Name>.meta.json`` sidecar gets published.
 from __future__ import annotations
 
 import shutil
-import time
 from pathlib import Path
 
 from ..config import PipelineConfig
-from ..errors import StepError
 from ..read import sidecar as read_sidecar
-from ..types import OnEvent, PublishCounts, PublishResult, StepEvent
+from ..types import OnEvent, PublishCounts, PublishResult
+from ._step_runner import StepRunner
 
 # Extensions we consider "publishable" under textures_dds/ and the
 # library DDS roots. Matches the I:-side `DDS_EXTENSIONS` tuple.
@@ -64,98 +63,6 @@ _DOMAIN_STEPS: dict[str, str] = {
     "projectiles": "copy_projectiles",
     "decals":      "copy_decals",
 }
-
-
-# ---------------------------------------------------------------------------
-# Event helper (mirror of the accessory_library / scaffold_ship pattern)
-# ---------------------------------------------------------------------------
-
-
-class _StepRunner:
-    """Records per-step wall time + emits ``StepEvent`` boundaries.
-
-    A no-op when ``on_event`` is ``None`` so consumers that don't care
-    about progress pay zero per-step overhead.
-    """
-
-    def __init__(self, on_event: OnEvent | None) -> None:
-        self.on_event = on_event
-        self.t0 = time.monotonic()
-        self.spans: dict[str, float] = {}
-
-    def _elapsed_ms(self) -> float:
-        return (time.monotonic() - self.t0) * 1000.0
-
-    def emit(
-        self,
-        step: str,
-        state: str,
-        *,
-        detail: str = "",
-        step_ms: float | None = None,
-        data: dict | None = None,
-    ) -> None:
-        if self.on_event is None:
-            return
-        ev = StepEvent(
-            step=step,
-            state=state,  # type: ignore[arg-type]
-            detail=detail,
-            elapsed_ms=self._elapsed_ms(),
-            step_ms=step_ms,
-            data=data,
-        )
-        try:
-            self.on_event(ev)
-        except Exception:
-            # Caller callbacks must not kill the run.
-            pass
-
-    def step(self, name: str, detail: str = ""):
-        return _StepCtx(self, name, detail)
-
-
-class _StepCtx:
-    def __init__(self, runner: _StepRunner, step: str, detail: str) -> None:
-        self.runner = runner
-        self.step = step
-        self.detail = detail
-        self.t_start = 0.0
-        self.completed_detail = ""
-        self.completed_data: dict | None = None
-
-    def __enter__(self) -> _StepCtx:
-        self.t_start = time.monotonic()
-        self.runner.emit(self.step, "started", detail=self.detail)
-        return self
-
-    def annotate(self, detail: str, data: dict | None = None) -> None:
-        self.completed_detail = detail
-        if data is not None:
-            self.completed_data = data
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        step_ms = (time.monotonic() - self.t_start) * 1000.0
-        self.runner.spans[self.step] = step_ms
-        if exc is None:
-            self.runner.emit(
-                self.step, "completed",
-                detail=self.completed_detail or self.detail,
-                step_ms=step_ms, data=self.completed_data,
-            )
-            return False
-        self.runner.emit(
-            self.step, "failed",
-            detail=f"{type(exc).__name__}: {exc}",
-            step_ms=step_ms,
-        )
-        if isinstance(exc, StepError):
-            return False
-        raise StepError(
-            step=self.step,
-            underlying=exc,
-            detail=str(exc),
-        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +341,7 @@ def publish(
 
     domain_set = set(domains)
     warnings: list[str] = []
-    runner = _StepRunner(on_event)
+    runner = StepRunner(on_event)
 
     target_dir.mkdir(parents=True, exist_ok=True)
 

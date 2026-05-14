@@ -64,20 +64,19 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
 from ..config import PipelineConfig
-from ..errors import StepError
 from ..read import gameparams as _gp
 from ..read import localization as _localization
 from ..resolve import camo as wg_camo
 from ..resolve import gameparams_autofill as _gp_autofill
 from ..toolkit.gameparams import ensure_dump as _ensure_gameparams_dump
 from ..toolkit.vfs import metadata_json as _vfs_metadata_json
-from ..types import OnEvent, SnapshotResult, StepEvent
+from ..types import OnEvent, SnapshotResult
+from ._step_runner import StepRunner
 
 # Cached VFS metadata location (relative to PipelineConfig.cache_dir).
 _VFS_META_FILENAME = "vfs_meta.json"
@@ -147,91 +146,6 @@ _PECULIARITY_OVERRIDES: dict[str, str] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Event helper
-# ---------------------------------------------------------------------------
-
-
-class _StepRunner:
-    """Records per-step wall time + emits ``StepEvent`` boundaries."""
-
-    def __init__(self, on_event: OnEvent | None) -> None:
-        self.on_event = on_event
-        self.t0 = time.monotonic()
-        self.spans: dict[str, float] = {}
-
-    def _elapsed_ms(self) -> float:
-        return (time.monotonic() - self.t0) * 1000.0
-
-    def emit(
-        self,
-        step: str,
-        state: str,
-        *,
-        detail: str = "",
-        step_ms: float | None = None,
-        data: dict | None = None,
-    ) -> None:
-        if self.on_event is None:
-            return
-        ev = StepEvent(
-            step=step,
-            state=state,  # type: ignore[arg-type]
-            detail=detail,
-            elapsed_ms=self._elapsed_ms(),
-            step_ms=step_ms,
-            data=data,
-        )
-        try:
-            self.on_event(ev)
-        except Exception:
-            pass
-
-    def step(self, name: str, detail: str = ""):
-        return _StepCtx(self, name, detail)
-
-
-class _StepCtx:
-    def __init__(self, runner: _StepRunner, step: str, detail: str) -> None:
-        self.runner = runner
-        self.step = step
-        self.detail = detail
-        self.t_start = 0.0
-        self.completed_detail = ""
-        self.completed_data: dict | None = None
-
-    def __enter__(self) -> _StepCtx:
-        self.t_start = time.monotonic()
-        self.runner.emit(self.step, "started", detail=self.detail)
-        return self
-
-    def annotate(self, detail: str, data: dict | None = None) -> None:
-        self.completed_detail = detail
-        if data is not None:
-            self.completed_data = data
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        step_ms = (time.monotonic() - self.t_start) * 1000.0
-        self.runner.spans[self.step] = step_ms
-        if exc is None:
-            self.runner.emit(
-                self.step, "completed",
-                detail=self.completed_detail or self.detail,
-                step_ms=step_ms, data=self.completed_data,
-            )
-            return False
-        self.runner.emit(
-            self.step, "failed",
-            detail=f"{type(exc).__name__}: {exc}",
-            step_ms=step_ms,
-        )
-        if isinstance(exc, StepError):
-            return False
-        raise StepError(
-            step=self.step,
-            underlying=exc,
-            detail=str(exc),
-        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -628,7 +542,7 @@ def _safe_int(v: Any) -> int | None:
 def _build_snapshot(
     *,
     config: PipelineConfig,
-    runner: _StepRunner,
+    runner: StepRunner,
     refresh: bool,
 ) -> dict[str, Any]:
     """Walk the GameParams flat dict once; emit ships + permoflages."""
@@ -910,7 +824,7 @@ def snapshot(
     """
     cfg = config or PipelineConfig.load()
     output_path = Path(output_path)
-    runner = _StepRunner(on_event)
+    runner = StepRunner(on_event)
 
     payload = _build_snapshot(config=cfg, runner=runner, refresh=refresh)
     meta = payload.pop("_meta", {})

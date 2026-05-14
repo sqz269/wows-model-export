@@ -53,7 +53,8 @@ from ..config import PipelineConfig
 from ..errors import StepError, ToolkitError
 from ..resolve import sidecar as resolve_sidecar
 from ..resolve import synth_emission
-from ..types import OnEvent, ProjectileLibraryResult, StepEvent
+from ..types import OnEvent, ProjectileLibraryResult
+from ._step_runner import StepRunner
 
 # Default VFS manifest path (mirrors the I:-side convention). Override
 # via the ``WOWS_VFS_MANIFEST`` env var or the ``manifest_path``
@@ -755,101 +756,6 @@ def write_index(
 
 
 # ---------------------------------------------------------------------------
-# Step emitter
-# ---------------------------------------------------------------------------
-
-
-class _StepRunner:
-    """Helper that wraps `on_event` + step timing + StepError raising."""
-
-    def __init__(self, on_event: OnEvent | None) -> None:
-        self.on_event = on_event
-        self.t0 = time.monotonic()
-        self.step_timings_ms: dict[str, float] = {}
-
-    def _elapsed_ms(self) -> float:
-        return (time.monotonic() - self.t0) * 1000.0
-
-    def emit(
-        self,
-        step: str,
-        state: str,
-        *,
-        detail: str = "",
-        step_ms: float | None = None,
-        data: dict | None = None,
-    ) -> None:
-        if self.on_event is None:
-            return
-        ev = StepEvent(
-            step=step,
-            state=state,  # type: ignore[arg-type]
-            detail=detail,
-            elapsed_ms=self._elapsed_ms(),
-            step_ms=step_ms,
-            data=data,
-        )
-        try:
-            self.on_event(ev)
-        except Exception:
-            # Caller-supplied callbacks shouldn't kill the run.
-            pass
-
-    def step(self, step: str, detail: str = "") -> _StepCtx:
-        """Context manager for one step.
-
-        Emits ``started`` on entry, ``completed`` on success (with
-        ``step_ms`` set), ``failed`` then re-raises wrapped in
-        :class:`StepError` on exception.
-        """
-        return _StepCtx(self, step, detail)
-
-
-class _StepCtx:
-    def __init__(self, runner: _StepRunner, step: str, detail: str) -> None:
-        self.runner = runner
-        self.step = step
-        self.detail = detail
-        self.t_start = 0.0
-        self.completed_detail = ""
-        self.completed_data: dict | None = None
-
-    def __enter__(self) -> _StepCtx:
-        self.t_start = time.monotonic()
-        self.runner.emit(self.step, "started", detail=self.detail)
-        return self
-
-    def annotate(self, detail: str, data: dict | None = None) -> None:
-        """Override the completion detail / data before the step ends."""
-        self.completed_detail = detail
-        if data is not None:
-            self.completed_data = data
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        step_ms = (time.monotonic() - self.t_start) * 1000.0
-        self.runner.step_timings_ms[self.step] = step_ms
-        if exc is None:
-            self.runner.emit(
-                self.step, "completed",
-                detail=self.completed_detail or self.detail,
-                step_ms=step_ms, data=self.completed_data,
-            )
-            return False
-        self.runner.emit(
-            self.step, "failed",
-            detail=f"{type(exc).__name__}: {exc}",
-            step_ms=step_ms,
-        )
-        if isinstance(exc, StepError):
-            return False
-        raise StepError(
-            step=self.step,
-            underlying=exc,
-            detail=str(exc),
-        ) from exc
-
-
-# ---------------------------------------------------------------------------
 # Public composer entry
 # ---------------------------------------------------------------------------
 
@@ -916,7 +822,7 @@ def build_projectile_library(
     manifest = (manifest_path or _DEFAULT_MANIFEST_PATH).resolve()
     only_ids = set(only) if only else None
 
-    runner = _StepRunner(on_event)
+    runner = StepRunner(on_event)
     warnings: list[str] = []
 
     # ── Step: discover_projectiles ────────────────────────────────────
