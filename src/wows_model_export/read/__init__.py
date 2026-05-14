@@ -1,14 +1,26 @@
 """Layer 1 — pure data readers.
 
 Operate on disk paths or already-loaded JSON dicts. Return typed
-dataclasses. No subprocess calls, no network, no file writes. Fast (μs to
-low-ms per call).
+dataclasses. No subprocess calls, no network, no file writes. Fast (μs
+to low-ms per call).
 
-Public symbols are added here as the corresponding lift lands. The
-scaffold ships an empty namespace; see `migration/PIPELINE_API.md` §"Layer
-1: read" for the planned shape.
+Lifted so far:
+
+    mfm                — .mfm MaterialPrototype reader (from wg_mfm.py)
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from .mfm import (
+    DEFAULT_EMISSIVE_POWER,
+    MaterialPrototype,
+    get_emissive_power,
+    parse_mfm,
+)
+
+__all__ = [
+    "MaterialPrototype",
+    "parse_mfm",
+    "get_emissive_power",
+    "DEFAULT_EMISSIVE_POWER",
+]
