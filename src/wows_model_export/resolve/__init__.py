@@ -8,12 +8,17 @@ Public surface — two access patterns:
 
 1. **Submodule namespaces** — for callers who want module-scoped names::
 
-       from wows_model_export.resolve import bone_orientation, skel_ext_hashes, gameparams_autofill, camo, sidecar
+       from wows_model_export.resolve import (
+           bone_orientation, skel_ext_hashes, gameparams_autofill,
+           camo, sidecar, winding, synth_emission,
+       )
        sign = bone_orientation.glb_forward_z_sign(glb_path)
        res  = skel_ext_hashes.resolve_candidates(candidates, table=tbl)
        swap = gameparams_autofill.resolve_variant_accessory_swaps(ship, exterior)
        cats = camo.categories_for_entry(entry, ...)
        doc  = sidecar.read(path)
+       verd = winding.detect_winding_verdict(glb_path)
+       emi  = synth_emission.synth_emissive_dds(diffuse_dds, mg_dds, ...)
 
 2. **Specific symbols** flattened — for distinctive names. See
    ``__all__`` for the full list.
@@ -27,18 +32,16 @@ Lifted modules so far:
     gameparams_autofill  — GameParams entity transforms for sidecar
                            autofill passes (from gameparams.py)
     camo                 — WG camo pipeline + CamouflageDb parser +
-                           sidecar adapters (from wg_camo.py). Two
-                           bridge functions cross to toolkit.extract
-                           for VFS-extraction of masks/atlases — they
-                           are the necessary side-effecting bridge for
-                           the otherwise-pure adapter family.
+                           sidecar adapters (from wg_camo.py).
     sidecar              — sidecar schema authority — every make_*
                            constructor, absorb_* pass, mutating
                            transform, and the GLB walkers
-                           (from tools/ship/sidecar.py). The thinnest
-                           reads/writes are re-exported via
-                           wows_model_export.read.sidecar and
-                           wows_model_export.compose.sidecar.
+                           (from tools/ship/sidecar.py).
+    winding              — auto-detect heuristic for triangle winding
+                           orientation (from glb_flip_winding.py).
+    synth_emission       — diffuse * mg.B emissive synthesis for
+                           ARP / Azur Lane / Sabaton crossover skins
+                           (from synth_emission.py).
 """
 
 from __future__ import annotations
@@ -50,6 +53,8 @@ from . import (
     gameparams_autofill,
     sidecar,
     skel_ext_hashes,
+    synth_emission,
+    winding,
 )
 
 # bone_orientation — pure math + GLB header read
@@ -168,6 +173,21 @@ from .skel_ext_hashes import (
     save_table,
 )
 
+# synth_emission — diffuse × mg.B emissive synthesis
+from .synth_emission import (
+    is_emissive_mask_pattern,
+    synth_emissive,
+    synth_emissive_dds,
+)
+
+# winding — auto-detect heuristic for triangle winding orientation
+from .winding import (
+    detect_winding_verdict,
+    flip_normals,
+    score_winding,
+    winding_correctness,
+)
+
 __all__ = [
     # Submodules
     "bone_orientation",
@@ -175,6 +195,8 @@ __all__ = [
     "gameparams_autofill",
     "sidecar",
     "skel_ext_hashes",
+    "synth_emission",
+    "winding",
     # bone_orientation
     "glb_forward_z_sign",
     "post_multiply_ry180",
@@ -275,4 +297,13 @@ __all__ = [
     "parse_placement_string",
     "resolve_candidates",
     "save_table",
+    # synth_emission
+    "synth_emissive",
+    "synth_emissive_dds",
+    "is_emissive_mask_pattern",
+    # winding
+    "detect_winding_verdict",
+    "flip_normals",
+    "score_winding",
+    "winding_correctness",
 ]
