@@ -58,17 +58,21 @@
   }
 </script>
 
-<div class="library-app">
+<div class="flex flex-1 min-w-0 h-full">
   {#if loadError}
-    <div class="placeholder error">
+    <div
+      class="text-destructive flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center"
+    >
       <strong>Failed to load library:</strong>
-      <code>{loadError}</code>
-      <p class="muted">
+      <code class="mx-1">{loadError}</code>
+      <p class="text-muted-foreground m-0 max-w-[50ch]">
         Run <code>wows-build-accessory-library</code> against your workspace, then refresh.
       </p>
     </div>
   {:else if !index}
-    <div class="placeholder">Loading library index…</div>
+    <div class="text-muted-foreground flex flex-1 items-center justify-center p-6 text-center">
+      Loading library index…
+    </div>
   {:else}
     <AssetList
       {index}
@@ -85,40 +89,9 @@
         <AssetDetail id={activeId} asset={activeAsset} />
       {/key}
     {:else}
-      <div class="placeholder detail-placeholder">Select an asset from the list.</div>
+      <div class="text-muted-foreground flex flex-1 items-center justify-center p-6 text-center">
+        Select an asset from the list.
+      </div>
     {/if}
   {/if}
 </div>
-
-<style>
-  .library-app {
-    flex: 1 1 auto;
-    min-width: 0;
-    display: flex;
-    height: 100%;
-  }
-  .placeholder {
-    flex: 1 1 auto;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--fg-muted);
-    padding: 24px;
-    text-align: center;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .placeholder.error {
-    color: var(--danger);
-  }
-  .placeholder code {
-    margin: 0 4px;
-  }
-  .placeholder p {
-    margin: 0;
-    max-width: 50ch;
-  }
-  .muted {
-    color: var(--fg-muted);
-  }
-</style>

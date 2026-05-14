@@ -2,7 +2,7 @@
 // internal modules import each other directly.
 
 export { ShipViewer } from './viewer';
-export type { ShipLoadStats } from './viewer';
+export type { ShipLoadStats, PickedAssetInfo, PickResult } from './viewer';
 export type { ColorMode } from './color_mode';
 export type { LodPolicy } from './placement';
 export {

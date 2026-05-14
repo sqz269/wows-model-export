@@ -102,68 +102,66 @@
   }
 </script>
 
-<aside class="sidebar">
-  <header>
-    <h1>Accessory library</h1>
-    <div class="counter">
+{#snippet selectBox(
+  value: string,
+  onchange: (v: string) => void,
+  options: string[],
+  emptyLabel: string,
+)}
+  <select
+    {value}
+    onchange={(e: Event & { currentTarget: HTMLSelectElement }) => onchange(e.currentTarget.value)}
+    class="bg-popover text-foreground border-border focus:border-ring focus:ring-ring/30 rounded border px-1.5 py-1 text-xs focus:outline-none focus:ring-2"
+  >
+    <option value="">{emptyLabel}</option>
+    {#each options as opt (opt)}
+      <option value={opt}>{opt}</option>
+    {/each}
+  </select>
+{/snippet}
+
+<aside
+  class="bg-card border-border flex w-[320px] flex-none flex-col border-r min-h-0"
+>
+  <header class="border-border border-b px-3.5 py-3 pb-2">
+    <h1 class="m-0 text-sm font-semibold">Accessory library</h1>
+    <div class="text-muted-foreground mt-1 text-[11px] tabular-nums">
       {entries.length} / {Object.keys(index.assets).length}
     </div>
   </header>
 
-  <div class="filters">
-    <label>
+  <div class="border-border flex flex-none flex-col gap-2 border-b px-3.5 py-2.5">
+    <label class="text-muted-foreground flex flex-col gap-0.5 text-[11px]">
       scope
-      <select
-        value={filter.scope ?? ''}
-        onchange={(e) => patch('scope', e.currentTarget.value || null)}
-      >
-        <option value="">all</option>
-        {#each facets.scopes as s (s)}
-          <option value={s}>{s}</option>
-        {/each}
-      </select>
+      {@render selectBox(filter.scope ?? '', (v) => patch('scope', v || null), facets.scopes, 'all')}
     </label>
 
-    <label>
+    <label class="text-muted-foreground flex flex-col gap-0.5 text-[11px]">
       category
-      <select
-        value={filter.category ?? ''}
-        onchange={(e) => patch('category', e.currentTarget.value || null)}
-      >
-        <option value="">all</option>
-        {#each facets.cats as s (s)}
-          <option value={s}>{s}</option>
-        {/each}
-      </select>
+      {@render selectBox(
+        filter.category ?? '',
+        (v) => patch('category', v || null),
+        facets.cats,
+        'all',
+      )}
     </label>
 
-    <label>
+    <label class="text-muted-foreground flex flex-col gap-0.5 text-[11px]">
       subcategory
-      <select
-        value={filter.subcategory ?? ''}
-        onchange={(e) => patch('subcategory', e.currentTarget.value || null)}
-      >
-        <option value="">all</option>
-        {#each facets.subs as s (s)}
-          <option value={s}>{s}</option>
-        {/each}
-      </select>
+      {@render selectBox(
+        filter.subcategory ?? '',
+        (v) => patch('subcategory', v || null),
+        facets.subs,
+        'all',
+      )}
     </label>
 
-    <label>
+    <label class="text-muted-foreground flex flex-col gap-0.5 text-[11px]">
       used by ship
-      <select
-        value={filter.ship ?? ''}
-        onchange={(e) => patch('ship', e.currentTarget.value || null)}
-      >
-        <option value="">any</option>
-        {#each facets.ships as s (s)}
-          <option value={s}>{s}</option>
-        {/each}
-      </select>
+      {@render selectBox(filter.ship ?? '', (v) => patch('ship', v || null), facets.ships, 'any')}
     </label>
 
-    <label class="inline">
+    <label class="text-foreground flex items-center gap-1.5 text-xs">
       <input
         type="checkbox"
         checked={filter.deadOnly}
@@ -172,7 +170,7 @@
       has dead variant
     </label>
 
-    <label class="inline">
+    <label class="text-foreground flex items-center gap-1.5 text-xs">
       <input
         type="checkbox"
         checked={filter.untexturedOnly}
@@ -186,11 +184,16 @@
       placeholder="search asset_id…"
       value={filter.query}
       oninput={(e) => patch('query', e.currentTarget.value)}
+      class="bg-popover text-foreground border-border placeholder:text-muted-foreground focus:border-ring focus:ring-ring/30 rounded border px-1.5 py-1 text-xs focus:outline-none focus:ring-2"
     />
 
-    <label>
+    <label class="text-muted-foreground flex flex-col gap-0.5 text-[11px]">
       sort
-      <select value={sort} onchange={(e) => onSortChange(e.currentTarget.value as SortKey)}>
+      <select
+        value={sort}
+        onchange={(e) => onSortChange(e.currentTarget.value as SortKey)}
+        class="bg-popover text-foreground border-border focus:border-ring focus:ring-ring/30 rounded border px-1.5 py-1 text-xs focus:outline-none focus:ring-2"
+      >
         {#each Object.entries(SORT_LABELS) as [k, lbl] (k)}
           <option value={k}>{lbl}</option>
         {/each}
@@ -198,22 +201,42 @@
     </label>
   </div>
 
-  <ul class="list">
+  <ul class="m-0 flex-1 list-none overflow-y-auto p-0">
     {#each entries as [id, a] (id)}
       <li>
         <button
           type="button"
-          class="row"
-          class:active={activeId === id}
           onclick={() => onSelect(id)}
+          class="border-border hover:bg-popover block w-full border-b border-l-[3px] border-l-transparent px-3.5 py-[7px] text-left {activeId ===
+          id
+            ? 'bg-accent border-l-primary'
+            : ''}"
         >
-          <div class="row-top">
-            <span class="aid">{id}</span>
-            {#if a.glb_dead}<span class="badge badge-dead">dead</span>{/if}
-            {#if !hasTextures(a)}<span class="badge badge-notex">no-tex</span>{/if}
-            {#if a.subcategory}<span class="badge">{a.subcategory}</span>{/if}
+          <div class="flex flex-wrap items-center gap-1.5">
+            <span class="font-mono text-xs font-medium">{id}</span>
+            {#if a.glb_dead}
+              <span
+                class="rounded px-1.5 py-[1px] text-[10px]"
+                style="background: #3e2127; color: #ffb3b3"
+              >
+                dead
+              </span>
+            {/if}
+            {#if !hasTextures(a)}
+              <span
+                class="rounded px-1.5 py-[1px] text-[10px]"
+                style="background: #2a2540; color: #c4b5fd"
+              >
+                no-tex
+              </span>
+            {/if}
+            {#if a.subcategory}
+              <span class="bg-secondary text-muted-foreground rounded px-1.5 py-[1px] text-[10px]">
+                {a.subcategory}
+              </span>
+            {/if}
           </div>
-          <div class="row-bot">
+          <div class="text-muted-foreground mt-0.5 text-[11px]">
             {a.scope}/{a.category}
             {#if a.used_by_ships.length}
               · used by {a.used_by_ships.length}
@@ -222,130 +245,7 @@
         </button>
       </li>
     {:else}
-      <li class="empty">No assets match.</li>
+      <li class="text-muted-foreground px-3.5 py-3.5 text-xs">No assets match.</li>
     {/each}
   </ul>
 </aside>
-
-<style>
-  .sidebar {
-    flex: 0 0 320px;
-    background: var(--bg-side);
-    border-right: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  header {
-    padding: 12px 14px 8px;
-    border-bottom: 1px solid var(--border);
-  }
-  h1 {
-    margin: 0;
-    font-size: 14px;
-    font-weight: 600;
-  }
-  .counter {
-    margin-top: 4px;
-    font-size: 11px;
-    color: var(--fg-muted);
-    font-variant-numeric: tabular-nums;
-  }
-  .filters {
-    padding: 10px 14px 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    border-bottom: 1px solid var(--border);
-    flex: 0 0 auto;
-  }
-  .filters label {
-    display: flex;
-    flex-direction: column;
-    font-size: 11px;
-    color: var(--fg-dim);
-    gap: 2px;
-  }
-  .filters label.inline {
-    flex-direction: row;
-    align-items: center;
-    gap: 6px;
-    color: var(--fg);
-    font-size: 12px;
-  }
-  .filters select,
-  .filters input[type='search'] {
-    background: var(--bg-elev);
-    color: var(--fg);
-    border: 1px solid var(--border);
-    padding: 5px 6px;
-    border-radius: 4px;
-    font-size: 12px;
-  }
-  .filters select:focus,
-  .filters input:focus {
-    outline: 1px solid var(--accent);
-  }
-  .list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    overflow-y: auto;
-    flex: 1 1 auto;
-  }
-  .row {
-    display: block;
-    width: 100%;
-    padding: 7px 14px;
-    background: transparent;
-    border: 0;
-    border-bottom: 1px solid var(--border);
-    border-left: 3px solid transparent;
-    text-align: left;
-    color: var(--fg);
-    cursor: pointer;
-  }
-  .row:hover {
-    background: var(--bg-elev);
-  }
-  .row.active {
-    background: var(--accent-bg);
-    border-left-color: var(--accent);
-  }
-  .row-top {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-  }
-  .row-bot {
-    margin-top: 2px;
-    font-size: 11px;
-    color: var(--fg-muted);
-  }
-  .aid {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    font-weight: 500;
-  }
-  .badge {
-    font-size: 10px;
-    padding: 1px 5px;
-    border-radius: 3px;
-    background: var(--bg-elev-2);
-    color: var(--fg-dim);
-  }
-  .badge-dead {
-    background: #3e2127;
-    color: #ffb3b3;
-  }
-  .badge-notex {
-    background: #2a2540;
-    color: #c4b5fd;
-  }
-  .empty {
-    padding: 14px;
-    color: var(--fg-muted);
-    font-size: 12px;
-  }
-</style>

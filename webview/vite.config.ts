@@ -20,6 +20,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import tailwindcss from '@tailwindcss/vite';
 import { defineConfig, loadEnv } from 'vite';
 import { devApiPlugin } from './src/server/dev_api';
 
@@ -36,7 +37,7 @@ export default defineConfig(({ mode }) => {
     if (!process.env[k]) process.env[k] = v;
   }
   return {
-    plugins: [svelte(), devApiPlugin()],
+    plugins: [tailwindcss(), svelte(), devApiPlugin()],
     resolve: {
       alias: {
         $lib: path.resolve(here, 'src/lib'),

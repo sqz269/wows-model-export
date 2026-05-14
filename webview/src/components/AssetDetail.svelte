@@ -7,6 +7,7 @@
   // across asset swaps for a smoother feel.
 
   import AccessoryViewerCmp from './AccessoryViewer.svelte';
+  import { Button } from '$lib/components/ui/button';
   import type { AccessoryViewer, LoadResult, MeshInfo, SideMode } from '$lib/accessory';
   import type { LibraryAsset } from '$lib/types';
   import { repoUrl } from '$lib/api';
@@ -128,15 +129,28 @@
   }
 </script>
 
-<section class="detail">
-  <header class="header">
-    <div class="title">
-      <h2><code>{id}</code></h2>
-      <div class="meta">
+{#snippet toggleButton(label: string, active: boolean, onclick: () => void)}
+  <Button
+    variant={active ? 'secondary' : 'outline'}
+    size="xs"
+    {onclick}
+    class="text-[11px] {active ? '' : ''}"
+  >
+    {label}
+  </Button>
+{/snippet}
+
+<section class="flex flex-1 min-w-0 flex-col overflow-hidden">
+  <header
+    class="bg-card border-border flex flex-none items-start justify-between gap-4 border-b px-5 py-3"
+  >
+    <div>
+      <h2 class="m-0 text-sm font-semibold"><code class="font-mono">{id}</code></h2>
+      <div class="text-muted-foreground mt-0.5 text-[11px]">
         {asset.scope}/{asset.category}{asset.subcategory ? `/${asset.subcategory}` : ''}
         {#if asset.species}· {asset.species}{/if}
       </div>
-      <div class="ships muted">
+      <div class="text-muted-foreground mt-1 max-w-[60ch] break-words text-[11px]">
         {#if asset.used_by_ships.length}
           used by {asset.used_by_ships.length}:
           <code>{asset.used_by_ships.join(', ')}</code>
@@ -145,9 +159,9 @@
         {/if}
       </div>
     </div>
-    <div class="status">
+    <div class="text-right text-[11px] tabular-nums text-foreground">
       {#if loadError}
-        <span class="error">{loadError}</span>
+        <span class="text-destructive">{loadError}</span>
       {:else if result}
         {result.meshes.length} mesh{result.meshes.length === 1 ? '' : 'es'} ·
         {totalTris.toLocaleString()} tris
@@ -157,7 +171,7 @@
     </div>
   </header>
 
-  <div class="viewer-wrap">
+  <div class="flex flex-1 min-h-0 overflow-hidden">
     <AccessoryViewerCmp
       {url}
       bindHandle={(v) => {
@@ -167,10 +181,16 @@
       {onError}
     />
 
-    <aside class="controls">
-      <div class="group">
-        <div class="label">view</div>
-        <label class="inline">
+    <aside
+      class="bg-card border-border flex w-[260px] flex-none flex-col gap-3 overflow-y-auto border-l p-3.5"
+    >
+      <div class="flex flex-col gap-1">
+        <div
+          class="text-muted-foreground text-[11px] uppercase tracking-wider"
+        >
+          view
+        </div>
+        <label class="flex items-center gap-1.5 text-xs">
           <input
             type="checkbox"
             checked={helpers}
@@ -178,7 +198,7 @@
           />
           grid + axes
         </label>
-        <label class="inline">
+        <label class="flex items-center gap-1.5 text-xs">
           <input
             type="checkbox"
             checked={wireframe}
@@ -188,86 +208,72 @@
         </label>
       </div>
 
-      <div class="group">
-        <div class="label">faces</div>
-        <div class="row">
+      <div class="flex flex-col gap-1">
+        <div
+          class="text-muted-foreground text-[11px] uppercase tracking-wider"
+        >
+          faces
+        </div>
+        <div class="flex flex-wrap gap-1">
           {#each ['double', 'front', 'back'] as s (s)}
-            <button
-              type="button"
-              class="tog"
-              class:active={side === s}
-              onclick={() => setSide(s as SideMode)}
-            >
-              {s}
-            </button>
+            {@render toggleButton(s, side === s, () => setSide(s as SideMode))}
           {/each}
         </div>
       </div>
 
       {#if asset.glb_dead}
-        <div class="group">
-          <div class="label">variant</div>
-          <div class="row">
-            <button
-              type="button"
-              class="tog"
-              class:active={!showingDead}
-              onclick={() => toggleVariant(false)}
-            >
-              intact
-            </button>
-            <button
-              type="button"
-              class="tog"
-              class:active={showingDead}
-              onclick={() => toggleVariant(true)}
-            >
-              dead
-            </button>
+        <div class="flex flex-col gap-1">
+          <div
+            class="text-muted-foreground text-[11px] uppercase tracking-wider"
+          >
+            variant
+          </div>
+          <div class="flex flex-wrap gap-1">
+            {@render toggleButton('intact', !showingDead, () => toggleVariant(false))}
+            {@render toggleButton('dead', showingDead, () => toggleVariant(true))}
           </div>
         </div>
       {/if}
 
       {#if lods.length > 1}
-        <div class="group">
-          <div class="label">LOD filter</div>
-          <div class="row">
-            <button
-              type="button"
-              class="tog"
-              class:active={lodFilter === null}
-              onclick={() => setLod(null)}
-            >
-              all
-            </button>
+        <div class="flex flex-col gap-1">
+          <div
+            class="text-muted-foreground text-[11px] uppercase tracking-wider"
+          >
+            LOD filter
+          </div>
+          <div class="flex flex-wrap gap-1">
+            {@render toggleButton('all', lodFilter === null, () => setLod(null))}
             {#each lods as lod (lod)}
-              <button
-                type="button"
-                class="tog"
-                class:active={lodFilter === lod}
-                onclick={() => setLod(lod)}
-              >
-                lod{lod}
-              </button>
+              {@render toggleButton(`lod${lod}`, lodFilter === lod, () => setLod(lod))}
             {/each}
           </div>
         </div>
       {/if}
 
-      <div class="group">
-        <div class="label">meshes</div>
-        <ul class="mesh-list">
+      <div class="flex flex-col gap-1">
+        <div
+          class="text-muted-foreground text-[11px] uppercase tracking-wider"
+        >
+          meshes
+        </div>
+        <ul class="m-0 flex max-h-[320px] flex-col gap-0.5 overflow-y-auto p-0 list-none">
           {#each meshes() as m, i (i)}
             <li>
-              <label title={m.name}>
+              <label
+                title={m.name}
+                class="grid grid-cols-[auto_1fr_auto_auto] items-center gap-1.5 text-[11px]"
+              >
                 <input
                   type="checkbox"
                   checked={meshVisibility[i] ?? true}
                   onchange={(e) => toggleMesh(i, e.currentTarget.checked)}
                 />
-                <span class="mesh-name">{truncate(m.name, 36)}</span>
-                <span class="mesh-lod">lod{m.lod}</span>
-                <span class="mesh-tri">{m.triangles.toLocaleString()}</span>
+                <span class="overflow-hidden text-ellipsis whitespace-nowrap text-foreground">
+                  {truncate(m.name, 36)}
+                </span>
+                <span class="text-muted-foreground">lod{m.lod}</span>
+                <span class="text-muted-foreground tabular-nums">{m.triangles.toLocaleString()}</span>
               </label>
             </li>
           {/each}
@@ -276,19 +282,27 @@
     </aside>
   </div>
 
-  <div class="info">
+  <div
+    class="bg-background border-border grid max-h-[30%] flex-none grid-cols-2 gap-6 overflow-y-auto border-t px-5 py-3"
+  >
     <section>
-      <h3>Library</h3>
-      <dl>
+      <h3
+        class="text-muted-foreground mb-1.5 text-[11px] font-semibold uppercase tracking-wider"
+      >
+        Library
+      </h3>
+      <dl
+        class="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs [&_dt]:text-muted-foreground [&_dd]:m-0 [&_dd]:break-words [&_code]:font-mono [&_code]:text-[11px]"
+      >
         <dt>GLB</dt>
         <dd>
-          <code>{asset.glb}</code> <span class="muted">({fmtBytes(asset.glb_bytes)})</span>
+          <code>{asset.glb}</code> <span class="text-muted-foreground">({fmtBytes(asset.glb_bytes)})</span>
         </dd>
         {#if asset.glb_dead}
           <dt>Dead GLB</dt>
           <dd>
             <code>{asset.glb_dead}</code>
-            <span class="muted">({fmtBytes(asset.glb_dead_bytes ?? 0)})</span>
+            <span class="text-muted-foreground">({fmtBytes(asset.glb_dead_bytes ?? 0)})</span>
           </dd>
         {/if}
         <dt>Textures</dt>
@@ -296,7 +310,7 @@
           {#if asset.textures}
             <code>{asset.textures}</code>
           {:else}
-            <span class="muted">(none)</span>
+            <span class="text-muted-foreground">(none)</span>
           {/if}
         </dd>
         <dt>Textures (DDS)</dt>
@@ -304,15 +318,21 @@
           {#if asset.textures_dds}
             <code>{asset.textures_dds}</code>
           {:else}
-            <span class="muted">(none)</span>
+            <span class="text-muted-foreground">(none)</span>
           {/if}
         </dd>
       </dl>
     </section>
 
     <section>
-      <h3>LOD breakdown</h3>
-      <table class="lod-table">
+      <h3
+        class="text-muted-foreground mb-1.5 text-[11px] font-semibold uppercase tracking-wider"
+      >
+        LOD breakdown
+      </h3>
+      <table
+        class="w-full border-collapse text-xs [&_th]:text-muted-foreground [&_th]:font-normal [&_th]:uppercase [&_th]:tracking-wider [&_th]:text-[10px] [&_th]:text-left [&_td]:py-0.5 [&_th]:py-0.5 [&_th]:pr-2 [&_td]:pr-2 [&_td:not(:first-child)]:text-right [&_th:not(:first-child)]:text-right [&_td:not(:first-child)]:tabular-nums [&_tfoot_td]:border-t [&_tfoot_td]:border-border [&_tfoot_td]:text-muted-foreground"
+      >
         <thead>
           <tr><th>level</th><th>meshes</th><th>triangles</th></tr>
         </thead>
@@ -336,192 +356,3 @@
     </section>
   </div>
 </section>
-
-<style>
-  .detail {
-    flex: 1 1 auto;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  .header {
-    flex: 0 0 auto;
-    padding: 12px 18px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 16px;
-    background: var(--bg-side);
-  }
-  .title h2 {
-    margin: 0;
-    font-size: 14px;
-    font-weight: 600;
-  }
-  .title code {
-    font-family: var(--font-mono);
-  }
-  .title .meta {
-    margin-top: 2px;
-    font-size: 11px;
-    color: var(--fg-dim);
-  }
-  .ships {
-    margin-top: 4px;
-    font-size: 11px;
-    max-width: 60ch;
-    word-break: break-word;
-  }
-  .status {
-    font-size: 11px;
-    color: var(--fg);
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-  }
-  .status .error {
-    color: var(--danger);
-  }
-  .viewer-wrap {
-    flex: 1 1 auto;
-    min-height: 0;
-    display: flex;
-    overflow: hidden;
-  }
-  .controls {
-    flex: 0 0 260px;
-    border-left: 1px solid var(--border);
-    background: var(--bg-side);
-    padding: 12px 14px;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-  .group {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .label {
-    font-size: 11px;
-    color: var(--fg-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-  }
-  .row {
-    display: flex;
-    gap: 4px;
-    flex-wrap: wrap;
-  }
-  .tog {
-    background: var(--bg-elev);
-    color: var(--fg-dim);
-    border: 1px solid var(--border);
-    padding: 4px 8px;
-    border-radius: 4px;
-    font-size: 11px;
-  }
-  .tog:hover {
-    background: var(--bg-elev-2);
-    color: var(--fg);
-  }
-  .tog.active {
-    background: var(--accent-bg);
-    color: var(--fg);
-    border-color: var(--accent);
-  }
-  .inline {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-  }
-  .mesh-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    max-height: 320px;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .mesh-list label {
-    display: grid;
-    grid-template-columns: auto 1fr auto auto;
-    align-items: center;
-    gap: 6px;
-    font-size: 11px;
-  }
-  .mesh-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--fg);
-  }
-  .mesh-lod {
-    color: var(--fg-muted);
-  }
-  .mesh-tri {
-    color: var(--fg-muted);
-    font-variant-numeric: tabular-nums;
-  }
-  .info {
-    flex: 0 0 auto;
-    max-height: 30%;
-    overflow-y: auto;
-    padding: 12px 18px;
-    border-top: 1px solid var(--border);
-    background: var(--bg);
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 24px;
-  }
-  .info h3 {
-    margin: 0 0 6px;
-    font-size: 11px;
-    color: var(--fg-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-weight: 600;
-  }
-  dl {
-    margin: 0;
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 4px 12px;
-    font-size: 12px;
-  }
-  dt {
-    color: var(--fg-dim);
-  }
-  dd {
-    margin: 0;
-    overflow-wrap: anywhere;
-  }
-  dd code {
-    font-family: var(--font-mono);
-    font-size: 11px;
-  }
-  .lod-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-  }
-  .lod-table th,
-  .lod-table td {
-    text-align: left;
-    padding: 3px 8px 3px 0;
-  }
-  .lod-table tfoot td {
-    border-top: 1px solid var(--border);
-    color: var(--fg-dim);
-  }
-  .lod-table td:not(:first-child),
-  .lod-table th:not(:first-child) {
-    font-variant-numeric: tabular-nums;
-    text-align: right;
-  }
-</style>

@@ -6,28 +6,11 @@
   let { param: _param }: { param: string | null } = $props();
 </script>
 
-<section class="page placeholder">
-  <h2>Extract</h2>
-  <p>
+<section class="flex-1 overflow-auto p-6">
+  <h2 class="text-foreground mb-3 text-lg">Extract</h2>
+  <p class="text-muted-foreground max-w-[60ch]">
     The Vehicle / permoflage picker is not yet ported. The pipeline still works from the CLI:
     <code>wows-ingest-ship &lt;Ship&gt;</code> and
     <code>wows-ingest-skin-pack &lt;path&gt;</code>.
   </p>
 </section>
-
-<style>
-  .page {
-    flex: 1 1 auto;
-    padding: 24px;
-    overflow: auto;
-  }
-  .placeholder h2 {
-    margin: 0 0 12px;
-    font-size: 18px;
-    color: var(--fg);
-  }
-  .placeholder p {
-    color: var(--fg-dim);
-    max-width: 60ch;
-  }
-</style>

@@ -3,15 +3,23 @@
   // ship picker + viewer + controls panel. The URL hash drives ship
   // selection so the back button + bookmarks work
   // (`#/ship/<name>` → opens that ship).
+  //
+  // Async load lifecycle is reported via a single sticky svelte-sonner
+  // toast per ship that promotes to success / warning / error on
+  // completion; the durable status bar below the viewer keeps the
+  // final-state summary so the user can scan it without a toast hover.
 
   import { onMount } from 'svelte';
+  import { toast } from 'svelte-sonner';
   import { navigate } from '$lib/router';
   import { fetchLibrary, fetchShips } from '$lib/api';
+  import { hasModifier, isTypingContext } from '$lib/shortcuts';
   import type { LibraryIndex, ShipSummary } from '$lib/types';
-  import type { ShipLoadStats, ShipViewer } from '$lib/ship';
+  import type { PickResult, ShipLoadStats, ShipViewer } from '$lib/ship';
   import ShipPicker from '$components/ShipPicker.svelte';
   import ShipViewerCmp from '$components/ShipViewer.svelte';
   import ShipControls from '$components/ShipControls.svelte';
+  import MeshInspector from '$components/MeshInspector.svelte';
 
   interface Props {
     param: string | null;
@@ -22,51 +30,180 @@
   let library = $state<LibraryIndex | null>(null);
   let loadError = $state<string | null>(null);
   let viewer = $state<ShipViewer | null>(null);
-  let progress = $state<string>('');
   let loadStats = $state<ShipLoadStats | null>(null);
   // Bumped each time the ship reloads so child controls can re-read state.
   let controlsRevision = $state(0);
+  // Active sticky loading toast id; promoted to success/warning/error on
+  // completion so each ship swap reuses one slot instead of stacking.
+  let shipLoadToastId: string | number | null = null;
+  // Picker binding for the `/` shortcut. Component instance exports
+  // (svelte 5 supports the v4 `export function` pattern via bind:this).
+  let pickerRef: ShipPicker | null = $state(null);
+  // Latest mesh-inspector pick + its local-x/y inside `.main`. Cleared by
+  // clicking empty space, the inspector's close button, or pressing ESC.
+  let selectedPick = $state<PickResult | null>(null);
+  let inspectorX = $state(0);
+  let inspectorY = $state(0);
+  let mainEl: HTMLElement | null = $state(null);
+
+  function handlePick(pick: PickResult | null, clientX: number, clientY: number) {
+    if (!pick || !mainEl) {
+      selectedPick = null;
+      return;
+    }
+    const rect = mainEl.getBoundingClientRect();
+    // Nudge a few px below-right of the click point so the card doesn't
+    // cover what was just picked. Clamp inside .main on the right + bottom
+    // edges so a click near the corner doesn't push the card offscreen.
+    const NUDGE = 12;
+    const PANEL_W = 280;
+    const PANEL_H = 220;
+    const localX = Math.min(clientX - rect.left + NUDGE, rect.width - PANEL_W - 8);
+    const localY = Math.min(clientY - rect.top + NUDGE, rect.height - PANEL_H - 8);
+    inspectorX = Math.max(8, localX);
+    inspectorY = Math.max(8, localY);
+    selectedPick = pick;
+  }
 
   let activeShip = $derived.by(() => {
     if (!param) return null;
     return ships.find((s) => s.name === decodeURIComponent(param)) ?? null;
   });
 
-  onMount(async () => {
-    try {
-      const [shipsRes, libRes] = await Promise.all([fetchShips(), fetchLibrary()]);
-      ships = shipsRes;
-      library = libRes;
-    } catch (err) {
-      loadError = err instanceof Error ? err.message : String(err);
-    }
+  onMount(() => {
+    // Fetch ships + library in the background. onMount's cleanup return
+    // must be sync, so we can't `await` here directly.
+    void (async () => {
+      try {
+        const [shipsRes, libRes] = await Promise.all([fetchShips(), fetchLibrary()]);
+        ships = shipsRes;
+        library = libRes;
+      } catch (err) {
+        loadError = err instanceof Error ? err.message : String(err);
+      }
+    })();
+
+    // Page-local shortcuts. Bound here (not in App.svelte) so navigating
+    // away from the Ships page cleanly drops the listeners.
+    const onKey = (e: KeyboardEvent) => {
+      if (hasModifier(e)) return;
+      if (isTypingContext(e)) return;
+      switch (e.key) {
+        case '/':
+          pickerRef?.focusSearch();
+          e.preventDefault();
+          return;
+        case 'Escape':
+          if (selectedPick) {
+            selectedPick = null;
+            e.preventDefault();
+          }
+          return;
+        case 'r':
+        case 'R':
+          viewer?.resetCamera();
+          e.preventDefault();
+          return;
+        case 'f':
+        case 'F': {
+          if (!viewer) return;
+          viewer.frameOn(selectedPick?.object ?? null);
+          e.preventDefault();
+          return;
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   });
 
   function selectShip(ship: ShipSummary) {
-    progress = '';
     loadStats = null;
     navigate(`#/ship/${encodeURIComponent(ship.name)}`);
+  }
+
+  function onShipProgress(msg: string) {
+    const ship = activeShip;
+    if (!ship) return;
+    if (shipLoadToastId === null) {
+      shipLoadToastId = toast.loading(msg, {
+        description: ship.display_name,
+        duration: Number.POSITIVE_INFINITY,
+      });
+    } else {
+      toast.loading(msg, {
+        id: shipLoadToastId,
+        description: ship.display_name,
+        duration: Number.POSITIVE_INFINITY,
+      });
+    }
   }
 
   function onViewerLoaded(stats: ShipLoadStats) {
     loadStats = stats;
     controlsRevision++;
+    const unresolved = stats.unresolvedAssets.size;
+    const summary =
+      `${stats.placementsRendered}/${stats.placementsRequested} placements` +
+      ` · ${stats.hullMeshCount} hull meshes` +
+      ` · ${(stats.loadMs / 1000).toFixed(1)}s`;
+    if (shipLoadToastId !== null) {
+      if (unresolved > 0) {
+        toast.warning(summary, {
+          id: shipLoadToastId,
+          description: `${stats.ship.display_name} · ${unresolved} unresolved`,
+          duration: 4500,
+        });
+      } else {
+        toast.success(summary, {
+          id: shipLoadToastId,
+          description: stats.ship.display_name,
+          duration: 3000,
+        });
+      }
+      shipLoadToastId = null;
+    }
+  }
+
+  function onViewerError(err: unknown) {
+    const ship = activeShip;
+    const label = ship ? `Failed to load ${ship.display_name}` : 'Ship load failed';
+    const msg = err instanceof Error ? err.message : String(err);
+    if (shipLoadToastId !== null) {
+      toast.error(label, {
+        id: shipLoadToastId,
+        description: msg,
+        duration: 8000,
+      });
+      shipLoadToastId = null;
+    } else {
+      toast.error(label, { description: msg, duration: 8000 });
+    }
   }
 </script>
 
-<div class="ships-app">
-  <ShipPicker {ships} activeName={activeShip?.name ?? null} onSelect={selectShip} />
+<div class="flex flex-1 min-w-0 h-full">
+  <ShipPicker
+    bind:this={pickerRef}
+    {ships}
+    activeName={activeShip?.name ?? null}
+    onSelect={selectShip}
+  />
 
-  <section class="main">
+  <section class="relative flex flex-1 min-w-0 flex-col" bind:this={mainEl}>
     {#if loadError}
-      <div class="placeholder error">
+      <div class="text-destructive flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
         <strong>Failed to load workspace:</strong>
-        <code>{loadError}</code>
+        <code class="ml-1.5">{loadError}</code>
       </div>
     {:else if !library}
-      <div class="placeholder">Loading library index…</div>
+      <div class="text-muted-foreground flex flex-1 items-center justify-center p-6 text-center">
+        Loading library index…
+      </div>
     {:else if !activeShip}
-      <div class="placeholder">Pick a ship from the left to load it.</div>
+      <div class="text-muted-foreground flex flex-1 items-center justify-center p-6 text-center">
+        Pick a ship from the left to load it.
+      </div>
     {:else}
       <ShipViewerCmp
         ship={activeShip}
@@ -74,24 +211,39 @@
         bindHandle={(v) => {
           viewer = v;
         }}
-        onProgress={(m) => (progress = m)}
+        onProgress={onShipProgress}
         onLoaded={onViewerLoaded}
-        onError={(err) => (progress = `Error: ${err instanceof Error ? err.message : String(err)}`)}
+        onError={onViewerError}
+        onPick={handlePick}
       />
-      <div class="status">
-        <span>{progress}</span>
+      {#if selectedPick}
+        <MeshInspector
+          info={selectedPick.info}
+          x={inspectorX}
+          y={inspectorY}
+          {library}
+          onClose={() => (selectedPick = null)}
+        />
+      {/if}
+      <div
+        class="bg-card border-border flex flex-none items-center gap-2 border-t px-3 py-1.5 text-[11px] text-foreground"
+      >
         {#if loadStats}
-          <span class="muted">
-            · {loadStats.placementsRendered}/{loadStats.placementsRequested} placements · {loadStats.attachmentsRendered}
+          <span>
+            {loadStats.placementsRendered}/{loadStats.placementsRequested} placements · {loadStats.attachmentsRendered}
             attached
             {#if loadStats.attachmentsFilteredByMisc > 0}
               ({loadStats.attachmentsFilteredByMisc} miscFilter-dropped)
             {/if}
             · {loadStats.hullMeshCount} hull meshes
             {#if loadStats.unresolvedAssets.size > 0}
-              · <span class="warn">{loadStats.unresolvedAssets.size} unresolved</span>
+              · <span class="text-warning">
+                {loadStats.unresolvedAssets.size} unresolved
+              </span>
             {/if}
           </span>
+        {:else}
+          <span class="text-muted-foreground">Loading…</span>
         {/if}
       </div>
     {/if}
@@ -101,51 +253,3 @@
     <ShipControls {viewer} hullGroups={viewer.getHullGroups()} revision={controlsRevision} />
   {/if}
 </div>
-
-<style>
-  .ships-app {
-    flex: 1 1 auto;
-    min-width: 0;
-    display: flex;
-    height: 100%;
-  }
-  .main {
-    flex: 1 1 auto;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    position: relative;
-  }
-  .placeholder {
-    flex: 1 1 auto;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--fg-muted);
-    padding: 24px;
-    text-align: center;
-  }
-  .placeholder.error {
-    color: var(--danger);
-  }
-  .placeholder code {
-    margin-left: 6px;
-  }
-  .status {
-    flex: 0 0 auto;
-    padding: 6px 12px;
-    font-size: 11px;
-    color: var(--fg);
-    background: var(--bg-side);
-    border-top: 1px solid var(--border);
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-  .muted {
-    color: var(--fg-muted);
-  }
-  .warn {
-    color: var(--warn);
-  }
-</style>

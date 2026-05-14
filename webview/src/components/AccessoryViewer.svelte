@@ -55,18 +55,11 @@
   });
 </script>
 
-<div class="viewer-host" bind:this={host}></div>
-
-<style>
-  .viewer-host {
-    flex: 1 1 auto;
-    min-width: 0;
-    min-height: 0;
-    position: relative;
-  }
-  .viewer-host :global(canvas) {
-    display: block;
-    width: 100%;
-    height: 100%;
-  }
-</style>
+<!--
+  Same arbitrary-child-selector trick as ShipViewer to size the
+  Three.js-injected <canvas> without a global `<style>` block.
+-->
+<div
+  bind:this={host}
+  class="relative flex-1 min-w-0 min-h-0 [&_canvas]:block [&_canvas]:w-full [&_canvas]:h-full"
+></div>

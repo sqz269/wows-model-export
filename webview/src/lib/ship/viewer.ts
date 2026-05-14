@@ -54,6 +54,95 @@ import { AttachedDocCache } from './attached_loader';
 import { TextureManager } from './textures';
 import { LOD_RE } from './visibility';
 
+/**
+ * Info resolved from `userData` on the clicked accessory instance. The
+ * pipeline stamps these in `tagAndIndexInstance` (live placements) and
+ * the attached-children loop in `loadShip` (bundled child meshes).
+ */
+export interface PickedAssetInfo {
+  /** The accessory root (the node carrying `asset_id` in userData). */
+  root: THREE.Object3D;
+  /** Library asset_id (joins to `LibraryIndex.assets`). */
+  asset_id: string;
+  /** Typed section the placement belongs to. */
+  section: string | null;
+  /** Sidecar instance_id (unique within a ship). May be missing on
+   *  attached children — those carry `attached_placement_id` instead. */
+  instance_id: string | null;
+  /** Hull section the placement is anchored to. */
+  parent_section: string | null;
+  /** Parent hull mesh name (drives the damage-state cascade). */
+  parent_mesh: string | null;
+  /** For attached children: the host's instance_id. */
+  attached_to_instance_id: string | null;
+  /** For attached children: WG-runtime placement_id within the bundle. */
+  attached_placement_id: string | null;
+}
+
+export interface PickResult {
+  object: THREE.Object3D;
+  point: THREE.Vector3;
+  distance: number;
+  info: PickedAssetInfo;
+}
+
+const pickRaycaster = new THREE.Raycaster();
+const pickPointer = new THREE.Vector2();
+
+function isVisibleChain(o: THREE.Object3D): boolean {
+  let n: THREE.Object3D | null = o;
+  while (n) {
+    if (!n.visible) return false;
+    n = n.parent;
+  }
+  return true;
+}
+
+/**
+ * Walk up the parent chain from the raycaster's hit until we find a
+ * node stamped with `userData.asset_id`. Returns null if we walk off
+ * the top without finding one (hull mesh hits, helper hits, etc.).
+ */
+function resolveAssetUserData(start: THREE.Object3D): PickedAssetInfo | null {
+  let n: THREE.Object3D | null = start;
+  while (n) {
+    const ud = n.userData;
+    // Accessory clones carry `asset_id`. Attached children carry both
+    // `attached_asset_id` (set by the loadShip attached loop) and inherit
+    // none of the placement's other ids; we prefer the more-specific
+    // attached_asset_id if present so the user sees the rangefinder /
+    // ammo box rather than the turret host.
+    if (typeof ud.attached_asset_id === 'string') {
+      return {
+        root: n,
+        asset_id: ud.attached_asset_id,
+        section: typeof ud.section === 'string' ? ud.section : null,
+        instance_id: null,
+        parent_section: null,
+        parent_mesh: null,
+        attached_to_instance_id:
+          typeof ud.attached_to_instance_id === 'string' ? ud.attached_to_instance_id : null,
+        attached_placement_id:
+          typeof ud.attached_placement_id === 'string' ? ud.attached_placement_id : null,
+      };
+    }
+    if (typeof ud.asset_id === 'string') {
+      return {
+        root: n,
+        asset_id: ud.asset_id,
+        section: typeof ud.section === 'string' ? ud.section : null,
+        instance_id: typeof ud.instance_id === 'string' ? ud.instance_id : null,
+        parent_section: typeof ud.parent_section === 'string' ? ud.parent_section : null,
+        parent_mesh: typeof ud.parent_mesh === 'string' ? ud.parent_mesh : null,
+        attached_to_instance_id: null,
+        attached_placement_id: null,
+      };
+    }
+    n = n.parent;
+  }
+  return null;
+}
+
 export interface ShipLoadStats {
   ship: ShipSummary;
   hullMeshCount: number;
@@ -511,6 +600,97 @@ export class ShipViewer {
     this.helpersVisible = show;
     this.env.grid.visible = show;
     this.env.axes.visible = show;
+  }
+
+  // ── Camera helpers ────────────────────────────────────────────────────
+
+  /**
+   * Reset the camera to the scene default. Mirrors the initial camera
+   * setup in `createSceneEnvironment` so the user can always "get back
+   * to a known view" with one keystroke (default keybind: R).
+   */
+  resetCamera(): void {
+    this.env.camera.position.set(80, 50, 80);
+    this.env.controls.target.set(0, 0, 0);
+    this.env.controls.update();
+  }
+
+  /**
+   * Frame the camera on a specific Object3D (or the whole ship if null).
+   * Computes a bounding sphere, drops the controls target on the centre,
+   * and pulls the camera back along its current view direction by ~2× the
+   * radius (with a small floor for tiny objects). Doesn't tween — for a
+   * dev tool the instant snap reads as "applied" without a wait.
+   */
+  frameOn(target: THREE.Object3D | null): void {
+    const obj = target ?? this.shipRoot;
+    const box = new THREE.Box3().setFromObject(obj);
+    if (box.isEmpty()) return;
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    const radius = Math.max(sphere.radius, 1);
+    const dir = new THREE.Vector3()
+      .subVectors(this.env.camera.position, this.env.controls.target)
+      .normalize();
+    if (dir.lengthSq() < 1e-6) dir.set(1, 0.6, 1).normalize();
+    const distance = radius * 2.4;
+    this.env.controls.target.copy(sphere.center);
+    this.env.camera.position.copy(sphere.center).addScaledVector(dir, distance);
+    this.env.controls.update();
+  }
+
+  /** Read-only handle to the renderer's canvas — needed by callers that
+   *  attach raycaster click handlers without coupling to scene internals. */
+  getCanvas(): HTMLCanvasElement {
+    return this.env.renderer.domElement;
+  }
+
+  /** Read-only camera handle (for raycaster setup). */
+  getCamera(): THREE.PerspectiveCamera {
+    return this.env.camera;
+  }
+
+  /** Read-only scene handle (raycaster needs to walk objects). */
+  getShipRoot(): THREE.Group {
+    return this.shipRoot;
+  }
+
+  /**
+   * Resolve the accessory instance at a screen-space click. Walks the
+   * raycaster's first visible hit up the parent chain to the nearest
+   * Object3D stamped with `userData.asset_id` (set by
+   * `tagAndIndexInstance` on the placement clone). For attached
+   * children — bundled rangefinders, periscopes, ammo boxes — we also
+   * peek at `userData.attached_asset_id` so a click on a turret-mounted
+   * rangefinder reports the rangefinder, not the turret host.
+   *
+   * Returns null if the cursor missed everything or hit only hull /
+   * helper geometry (those have no `asset_id`).
+   *
+   * `clientX` / `clientY` are CSS pixels in the document (the standard
+   * `event.clientX` / `event.clientY` values).
+   */
+  pickAt(clientX: number, clientY: number): PickResult | null {
+    const canvas = this.env.renderer.domElement;
+    const rect = canvas.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    pickPointer.set(x, y);
+    pickRaycaster.setFromCamera(pickPointer, this.env.camera);
+    // Recursive: walks every descendant of shipRoot. Skips invisible.
+    const hits = pickRaycaster.intersectObject(this.shipRoot, true);
+    for (const hit of hits) {
+      if (!isVisibleChain(hit.object)) continue;
+      const info = resolveAssetUserData(hit.object);
+      if (info) {
+        return {
+          object: info.root,
+          point: hit.point.clone(),
+          distance: hit.distance,
+          info,
+        };
+      }
+    }
+    return null;
   }
 
   // ── Texture pipeline (delegated) ──────────────────────────────────────

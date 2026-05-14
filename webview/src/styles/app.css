@@ -1,40 +1,94 @@
-/* Foundational styles: variables, layout, typography.
- * Route-specific styling lives inside the corresponding .svelte file
- * (scoped automatically by Svelte). This file owns only what every page
- * sees: the color palette, the page shell, link/button defaults. */
+/* Foundational styles for the webview.
+ *
+ * Tailwind v4 (CSS-first config): the `@theme inline` block is the
+ * authoritative palette + radii + font family list. shadcn-svelte
+ * components import the standard `background` / `foreground` / `card`
+ * / `popover` / `primary` / `secondary` / `muted` / `accent` /
+ * `destructive` / `border` / `input` / `ring` tokens; we map each to
+ * the dev-tool palette this repo has been carrying since the legacy
+ * webview era.
+ *
+ * Every component in `src/components/` and `src/routes/` is on Tailwind
+ * classes — there are no remaining `<style>` blocks. Component-local
+ * styling lives in class strings; cross-cutting rules (`html`/`body`/
+ * `a`/`code`) live below.
+ */
 
-:root {
-  color-scheme: dark;
-  --bg: #0e1015;
-  --bg-side: #161922;
-  --bg-elev: #1c2030;
-  --bg-elev-2: #242a3b;
-  --fg: #d8dde8;
-  --fg-dim: #9199ab;
-  --fg-muted: #6b7284;
-  --accent: #6ea8fe;
-  --accent-bg: #2b4470;
-  --border: #2e3345;
-  --danger: #ff6b6b;
-  --warn: #ffc061;
+@import 'tailwindcss';
+
+/* Tell Tailwind to treat `.dark` on <html> as the dark-variant root.
+ * We default the page to dark below by setting `class="dark"` on
+ * <html> (or simply by leaving every shadcn component reading the
+ * dark tokens we ship in this stylesheet). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  /* Dev-tool palette → shadcn token names. Tailwind v4 treats any
+   * `--color-<name>` declaration as a generated `bg-<name>` /
+   * `text-<name>` / `border-<name>` utility. */
+  --color-background: hsl(225 17% 7%); /* #0e1015 */
+  --color-foreground: hsl(220 17% 88%); /* #d8dde8 */
+
+  --color-card: hsl(222 18% 11%); /* #161922 */
+  --color-card-foreground: hsl(220 17% 88%);
+
+  --color-popover: hsl(225 21% 14%); /* #1c2030 */
+  --color-popover-foreground: hsl(220 17% 88%);
+
+  --color-primary: hsl(217 99% 71%); /* #6ea8fe */
+  --color-primary-foreground: hsl(225 17% 7%);
+
+  --color-secondary: hsl(225 21% 18%); /* #242a3b */
+  --color-secondary-foreground: hsl(220 17% 88%);
+
+  --color-muted: hsl(225 21% 14%);
+  --color-muted-foreground: hsl(220 11% 51%); /* #6b7284 */
+
+  --color-accent: hsl(217 38% 31%); /* #2b4470 */
+  --color-accent-foreground: hsl(220 17% 88%);
+
+  --color-destructive: hsl(0 100% 71%); /* #ff6b6b */
+  --color-destructive-foreground: hsl(225 17% 7%);
+
+  --color-warning: hsl(36 100% 69%); /* #ffc061 */
+  --color-warning-foreground: hsl(225 17% 7%);
+
+  --color-border: hsl(225 19% 23%); /* #2e3345 */
+  --color-input: hsl(225 19% 23%);
+  --color-ring: hsl(217 99% 71%);
+
+  --color-sidebar: hsl(222 18% 11%);
+  --color-sidebar-foreground: hsl(220 17% 88%);
+  --color-sidebar-primary: hsl(217 99% 71%);
+  --color-sidebar-primary-foreground: hsl(225 17% 7%);
+  --color-sidebar-accent: hsl(225 21% 14%);
+  --color-sidebar-accent-foreground: hsl(220 17% 88%);
+  --color-sidebar-border: hsl(225 19% 23%);
+  --color-sidebar-ring: hsl(217 99% 71%);
+
+  /* Shape + motion. shadcn components read `--radius` for the L/M/S
+   * border-radius family — pinned slightly tighter than upstream's
+   * `0.5rem` default to match the legacy tool aesthetic. */
+  --radius: 0.25rem;
 
   --font-sans:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
-
-  font-family: var(--font-sans);
 }
 
-* {
-  box-sizing: border-box;
+/* Page shell. Tailwind preflight resets `body`'s background so we
+ * re-apply our dark canvas + 13px base type explicitly. */
+:root {
+  color-scheme: dark;
 }
 
 html,
 body {
   margin: 0;
   height: 100%;
-  background: var(--bg);
-  color: var(--fg);
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
 }
 
 body {
@@ -49,8 +103,10 @@ body {
   min-height: 0;
 }
 
+/* Tailwind preflight strips default link colour; restore the accent
+ * tone so legacy markup using bare <a> still reads as interactive. */
 a {
-  color: var(--accent);
+  color: var(--color-primary);
   text-decoration: none;
 }
 a:hover {
@@ -60,16 +116,11 @@ a:hover {
 code {
   font-family: var(--font-mono);
   font-size: 0.92em;
-  background: var(--bg-elev);
+  background: var(--color-popover);
   padding: 1px 4px;
   border-radius: 3px;
 }
 
-button {
-  font: inherit;
-  cursor: pointer;
-}
-
 .muted {
-  color: var(--fg-muted);
+  color: var(--color-muted-foreground);
 }
