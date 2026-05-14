@@ -24,6 +24,10 @@ Public surface — one function per `wowsunpack` subcommand we care about:
     File ops:
         extract              — pull files from VFS by glob
         swizzle_dir          — emit glTF-conformant DDS siblings
+
+    Cache helpers (idempotent, build on demand):
+        ensure_manifest      — VFS manifest at <cache_dir>/wows_manifest.json
+        default_manifest_path — resolve location without building
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ from .bones import dump_bones, fetch_bones
 from .gameparams import dump_gameparams
 from .ship import batch_export_model, export_model, export_ship
 from .swizzle import swizzle_dir
-from .vfs import extract, metadata_json
+from .vfs import default_manifest_path, ensure_manifest, extract, metadata_json
 
 __all__ = [
     # Ship / asset export
@@ -51,4 +55,7 @@ __all__ = [
     # File ops
     "extract",
     "swizzle_dir",
+    # Cache helpers
+    "default_manifest_path",
+    "ensure_manifest",
 ]

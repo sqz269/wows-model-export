@@ -41,13 +41,13 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import struct
 import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Literal
 
+from .. import toolkit
 from ..config import PipelineConfig
 from ..errors import StepError
 from ..resolve import skel_ext_hashes
@@ -65,14 +65,11 @@ from ._step_runner import StepRunner
 SECTION_PREFIXES = ("Bow", "MidFront", "MidBack", "Stern")
 EXCLUDED_VARIANT_TOKENS = ("crack", "wire", "hide", "lod")
 
-# Default VFS manifest location. Configurable via ``WOWS_VFS_MANIFEST``
-# env var; mirrors the convention used by ``compose.accessory_library``.
-_DEFAULT_MANIFEST_PATH = Path(
-    os.environ.get(
-        "WOWS_VFS_MANIFEST",
-        r"C:/Users/sqz269/AppData/Local/Temp/wows_manifest.json",
-    )
-)
+# VFS manifest path resolution lives in :mod:`wows_model_export.toolkit.vfs`.
+# The composer entry resolves a path via :func:`toolkit.default_manifest_path`
+# (override: ``WOWS_VFS_MANIFEST`` env var). Hash-mode is read-only over the
+# manifest, so the file is not built on demand here -- a missing manifest
+# degrades into a warning rather than triggering an extract pass.
 
 # Position-dedup tolerance for "same physical placement" between a
 # candidate and an HP_-bound mount -- catches peculiarityModels swap
@@ -593,7 +590,7 @@ def _resolve_hash_mode(
     *,
     config: PipelineConfig,
     runner: StepRunner,
-    manifest_path: Path = _DEFAULT_MANIFEST_PATH,
+    manifest_path: Path | None = None,
     hull_glb: Path | None = None,
     accessories_lib: Path | None = None,
     include_dock: bool = False,
@@ -611,6 +608,8 @@ def _resolve_hash_mode(
     """
     if warnings is None:
         warnings = []
+    if manifest_path is None:
+        manifest_path = toolkit.default_manifest_path(config)
 
     # ── Step: load_inputs ─────────────────────────────────────────────
     with runner.step("load_inputs", detail=str(placements_json.name)) as st:
@@ -1047,7 +1046,7 @@ def resolve_decorative_placements(
 
     runner = StepRunner(on_event)
     warnings: list[str] = []
-    manifest = manifest_path or _DEFAULT_MANIFEST_PATH
+    manifest = manifest_path or toolkit.default_manifest_path(cfg)
 
     # ``legacy_scan`` is accepted for API stability but unused by the
     # hash-mode pathway.  Surface a warning so a stray legacy call site

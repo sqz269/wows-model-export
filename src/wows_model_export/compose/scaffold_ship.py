@@ -33,8 +33,10 @@ Refactor notes vs the I:-side ``scaffold(ship, *, out_root=, ...)``:
   ``materials_skins``, ``geometry_hitbox``, ``emit_sidecar``).
 * Errors: each step's exception is wrapped in
   :class:`StepError(step=...)` via ``raise ... from e``.
-* The original module's ``print()`` calls are routed through ``on_event``
-  for milestones; debug prints have been dropped.
+* Non-fatal failures inside the GameParams / camo / permoflage passes
+  are appended to the result's ``warnings`` tuple via the local
+  :func:`_warn` helper. ``StepEvent`` notifications are emitted at
+  step boundaries (``started`` / ``completed`` / ``failed``).
 
 Native-permoflage auto-ingest routes through
 :mod:`wows_model_export.compose.skin_pack` — the skin-pack composer is
@@ -93,6 +95,21 @@ _COLOR_SCHEME_PREFIX = "colorScheme"
 _PER_HULL_DIRNAME = "per_hull"
 
 
+def _warn(warnings: list[str] | None, msg: str) -> None:
+    """Surface a non-fatal failure.
+
+    When ``warnings`` is provided, append the message so it lands on
+    :attr:`ScaffoldResult.warnings` (visible to library callers + the
+    StepRunner consumers). When ``None`` -- direct calls into the
+    private helpers -- fall back to stderr so the dev still sees the
+    message at the terminal.
+    """
+    if warnings is not None:
+        warnings.append(msg)
+    else:
+        print(f"[scaffold_ship] {msg}", file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # Permoflage discovery + camo skin emission (lifted)
 # ---------------------------------------------------------------------------
@@ -102,6 +119,7 @@ def _build_palette_resolver(
     config: PipelineConfig | None,
     *,
     ship_name_hint: str | None = None,
+    warnings: list[str] | None = None,
 ) -> Callable[[str, list[str]], tuple[str | None, list, dict]] | None:
     """Build a closure resolving ``(scheme_key, mask_paths)`` to
     ``(camo_name, rolls, categories)`` for the sidecar emit.
@@ -114,7 +132,7 @@ def _build_palette_resolver(
         try:
             _CAMO_DB_CACHE = wg_camo.CamouflageDb.load(config=config)
         except Exception as e:
-            print(f"[scaffold_ship] wg_camo unavailable: {e}", file=sys.stderr)
+            _warn(warnings, f"wg_camo unavailable: {e}")
             return None
 
     db = _CAMO_DB_CACHE
@@ -133,7 +151,7 @@ def _build_palette_resolver(
             mip_index = wg_camo.list_extracted_mips()
             categories = wg_camo.categories_for_entry(entry, mip_index)
         except Exception as e:
-            print(f"[scaffold_ship] wg_camo categories: {e}", file=sys.stderr)
+            _warn(warnings, f"wg_camo categories: {e}")
             categories = {}
         return entry.name, rolls, categories
 
@@ -181,14 +199,19 @@ def _classify_topology(entry: wg_camo.CamoEntry) -> str:
     return _TOPO_SKIP
 
 
-def _resolve_skin_display_base(exterior_id: str, camo_name: str) -> str:
+def _resolve_skin_display_base(
+    exterior_id: str,
+    camo_name: str,
+    *,
+    warnings: list[str] | None = None,
+) -> str:
     """Pick the best human-readable display name for a permoflage skin."""
     try:
         loc = wg_camo.display_name_for_exterior(exterior_id, humanize_fallback=False)
         if loc:
             return loc
     except Exception as exc:
-        print(f"[scaffold_ship] display-name lookup failed: {exc}", file=sys.stderr)
+        _warn(warnings, f"display-name lookup failed: {exc}")
     return _humanize_camo_name(camo_name) or camo_name
 
 
@@ -197,6 +220,7 @@ def _emit_permoflage_skins(
     *,
     db: wg_camo.CamouflageDb,
     config: PipelineConfig | None,
+    warnings: list[str] | None = None,
 ) -> list[dict]:
     """Common emission backend shared by the per-ship and universal walkers."""
     by_topo: dict[str, list[tuple[str, str, str, wg_camo.CamoEntry]]] = {
@@ -223,13 +247,15 @@ def _emit_permoflage_skins(
                 [e for _, _, _, e in untinted], config=config,
             )
         except Exception as e:
-            print(f"[scaffold_ship] mat_albedo extract failed ({e})", file=sys.stderr)
+            _warn(warnings, f"mat_albedo extract failed ({e})")
         mat_mip_index = wg_camo.list_extracted_mips(wg_camo._mat_dir(config))
         for exterior_id, camo_name, peculiarity, entry in untinted:
             mat_textures = wg_camo.mat_textures_for_entry(entry, mat_mip_index)
             if not mat_textures:
                 continue
-            display = _resolve_skin_display_base(exterior_id, camo_name)
+            display = _resolve_skin_display_base(
+                exterior_id, camo_name, warnings=warnings,
+            )
             skins.append(sidecar.make_skin(
                 skin_id=camo_name,
                 display_name=display,
@@ -252,7 +278,7 @@ def _emit_permoflage_skins(
                 config=config,
             )
         except Exception as e:
-            print(f"[scaffold_ship] tinted-mat mask extract failed ({e})", file=sys.stderr)
+            _warn(warnings, f"tinted-mat mask extract failed ({e})")
         try:
             wg_camo.ensure_mat_camo_textures(
                 [e for _, _, _, e in tinted],
@@ -260,7 +286,7 @@ def _emit_permoflage_skins(
                 config=config,
             )
         except Exception as e:
-            print(f"[scaffold_ship] tinted-mat atlas extract failed ({e})", file=sys.stderr)
+            _warn(warnings, f"tinted-mat atlas extract failed ({e})")
         masks_mip_index = wg_camo.list_extracted_mips(wg_camo._masks_dir(config))
         mat_mip_index = wg_camo.list_extracted_mips(wg_camo._mat_dir(config))
         for exterior_id, camo_name, peculiarity, entry in tinted:
@@ -279,7 +305,9 @@ def _emit_permoflage_skins(
                 exterior_id=exterior_id,
                 camo_name=camo_name,
                 peculiarity=peculiarity,
-                display_base=_resolve_skin_display_base(exterior_id, camo_name),
+                display_base=_resolve_skin_display_base(
+                    exterior_id, camo_name, warnings=warnings,
+                ),
                 mat_textures=mat_textures or None,
             ))
 
@@ -293,7 +321,7 @@ def _emit_permoflage_skins(
                 config=config,
             )
         except Exception as e:
-            print(f"[scaffold_ship] tile-permoflage extract failed ({e})", file=sys.stderr)
+            _warn(warnings, f"tile-permoflage extract failed ({e})")
         tile_with_mgn = [
             e for _, _, _, e in tile
             if e.mgn_textures or e.anim_maps
@@ -302,10 +330,7 @@ def _emit_permoflage_skins(
             try:
                 wg_camo.ensure_mat_camo_textures(tile_with_mgn, config=config)
             except Exception as e:
-                print(
-                    f"[scaffold_ship] tile-permoflage mgn extract failed ({e})",
-                    file=sys.stderr,
-                )
+                _warn(warnings, f"tile-permoflage mgn extract failed ({e})")
         masks_mip_index = wg_camo.list_extracted_mips(wg_camo._masks_dir(config))
         mat_mip_index = wg_camo.list_extracted_mips(wg_camo._mat_dir(config))
         for exterior_id, camo_name, peculiarity, entry in tile:
@@ -315,7 +340,9 @@ def _emit_permoflage_skins(
             )
             if not categories:
                 continue
-            display_base = _resolve_skin_display_base(exterior_id, camo_name)
+            display_base = _resolve_skin_display_base(
+                exterior_id, camo_name, warnings=warnings,
+            )
             skins.extend(_emit_palette_skins(
                 entry, categories, db,
                 exterior_id=exterior_id,
@@ -333,10 +360,7 @@ def _emit_permoflage_skins(
                 config=config,
             )
         except Exception as e:
-            print(
-                f"[scaffold_ship] hull_palette mgn extract failed ({e})",
-                file=sys.stderr,
-            )
+            _warn(warnings, f"hull_palette mgn extract failed ({e})")
         mat_mip_index = wg_camo.list_extracted_mips(wg_camo._mat_dir(config))
         for exterior_id, camo_name, peculiarity, entry in hull_pal:
             categories = wg_camo.path_b_categories_for_entry(
@@ -344,7 +368,9 @@ def _emit_permoflage_skins(
             )
             if not categories:
                 continue
-            display_base = _resolve_skin_display_base(exterior_id, camo_name)
+            display_base = _resolve_skin_display_base(
+                exterior_id, camo_name, warnings=warnings,
+            )
             skins.extend(_emit_palette_skins(
                 entry, categories, db,
                 exterior_id=exterior_id,
@@ -404,24 +430,19 @@ def _resolve_full_ship_id(
     *,
     config: PipelineConfig | None,
     log_label: str,
+    warnings: list[str] | None = None,
 ) -> str | None:
     """Resolve a sidecar wg_ship_id prefix to the full GameParams entity key."""
     try:
         _ensure_gameparams_dump(config=config)
     except Exception as e:
-        print(
-            f"[scaffold_ship] {log_label} skip: gameparams.json unavailable ({e})",
-            file=sys.stderr,
-        )
+        _warn(warnings, f"{log_label} skip: gameparams.json unavailable ({e})")
         return None
     if "_" in ship_id:
         return ship_id
     resolved = _gp_read.resolve_ship_id(ship_id)
     if resolved is None:
-        print(
-            f"[scaffold_ship] {log_label} skip: ship_id {ship_id!r} not in cache",
-            file=sys.stderr,
-        )
+        _warn(warnings, f"{log_label} skip: ship_id {ship_id!r} not in cache")
     return resolved
 
 
@@ -429,6 +450,7 @@ def _ensure_camo_db(
     config: PipelineConfig | None,
     *,
     log_label: str,
+    warnings: list[str] | None = None,
 ) -> wg_camo.CamouflageDb | None:
     """Lazily load + cache the camouflages.xml DB."""
     global _CAMO_DB_CACHE
@@ -436,10 +458,7 @@ def _ensure_camo_db(
         try:
             _CAMO_DB_CACHE = wg_camo.CamouflageDb.load(config=config)
         except Exception as e:
-            print(
-                f"[scaffold_ship] {log_label} skip: wg_camo unavailable ({e})",
-                file=sys.stderr,
-            )
+            _warn(warnings, f"{log_label} skip: wg_camo unavailable ({e})")
             return None
     return _CAMO_DB_CACHE
 
@@ -450,23 +469,21 @@ def _discover_permoflage_skins(
     config: PipelineConfig | None,
     ship_name_hint: str | None = None,
     known_camo_patterns: set[str] | None = None,
+    warnings: list[str] | None = None,
 ) -> list[dict]:
     """Discover non-Phase-A permoflages applicable to ``ship_id``."""
-    db = _ensure_camo_db(config, log_label="permoflages")
+    db = _ensure_camo_db(config, log_label="permoflages", warnings=warnings)
     if db is None:
         return []
     full_ship_id = _resolve_full_ship_id(
-        ship_id, config=config, log_label="permoflages",
+        ship_id, config=config, log_label="permoflages", warnings=warnings,
     )
     if full_ship_id is None:
         return []
     try:
         permos = wg_camo.read_vehicle_permoflages(full_ship_id)
     except Exception as e:
-        print(
-            f"[scaffold_ship] permoflages skip: read failed ({e})",
-            file=sys.stderr,
-        )
+        _warn(warnings, f"permoflages skip: read failed ({e})")
         return []
     if not permos:
         return []
@@ -486,7 +503,9 @@ def _discover_permoflage_skins(
     if not candidates:
         return []
 
-    return _emit_permoflage_skins(candidates, db=db, config=config)
+    return _emit_permoflage_skins(
+        candidates, db=db, config=config, warnings=warnings,
+    )
 
 
 def _discover_universal_skins(
@@ -495,23 +514,21 @@ def _discover_universal_skins(
     config: PipelineConfig | None,
     ship_name_hint: str | None = None,
     known_camo_patterns: set[str] | None = None,
+    warnings: list[str] | None = None,
 ) -> list[dict]:
     """Discover universal (``PCEC*``) camos and return them as Skin entries."""
-    db = _ensure_camo_db(config, log_label="universal-PCEC")
+    db = _ensure_camo_db(config, log_label="universal-PCEC", warnings=warnings)
     if db is None:
         return []
     full_ship_id = _resolve_full_ship_id(
-        ship_id, config=config, log_label="universal-PCEC",
+        ship_id, config=config, log_label="universal-PCEC", warnings=warnings,
     )
     if full_ship_id is None:
         return []
     try:
         pcec = wg_camo.read_universal_exteriors()
     except Exception as e:
-        print(
-            f"[scaffold_ship] universal-PCEC skip: read failed ({e})",
-            file=sys.stderr,
-        )
+        _warn(warnings, f"universal-PCEC skip: read failed ({e})")
         return []
     if not pcec:
         return []
@@ -531,7 +548,9 @@ def _discover_universal_skins(
     if not candidates:
         return []
 
-    return _emit_permoflage_skins(candidates, db=db, config=config)
+    return _emit_permoflage_skins(
+        candidates, db=db, config=config, warnings=warnings,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +755,7 @@ def _absorb_gameparams_passes(
     gameparams_ship_id: str | None = None,
     gm3d_dir: Path | None = None,
     active_placements_json: Path | None = None,
+    warnings: list[str] | None = None,
 ) -> dict:
     """Run the GameParams-driven autofill passes (schema v3.1)."""
     ship_id = gameparams_ship_id or (doc.get("ship") or {}).get("wg_ship_id")
@@ -745,26 +765,17 @@ def _absorb_gameparams_passes(
     try:
         _ensure_gameparams_dump(config=config)
     except Exception as e:
-        print(
-            f"[scaffold_ship] gameparams autofill skipped — cache unavailable ({e})",
-            file=sys.stderr,
-        )
+        _warn(warnings, f"gameparams autofill skipped — cache unavailable ({e})")
         return doc
 
     try:
         full_id = _gp_read.resolve_ship_id(ship_id)
         ship_dict = _gp_read.get_ship(ship_id)
     except Exception as e:
-        print(
-            f"[scaffold_ship] gameparams autofill skipped — load failed ({e})",
-            file=sys.stderr,
-        )
+        _warn(warnings, f"gameparams autofill skipped — load failed ({e})")
         return doc
     if ship_dict is None:
-        print(
-            f"[scaffold_ship] gameparams autofill: ship {ship_id!r} not in cache",
-            file=sys.stderr,
-        )
+        _warn(warnings, f"gameparams autofill: ship {ship_id!r} not in cache")
         return doc
 
     components = _gp_autofill.resolve_components(ship_dict, hull_choice="upgraded")
@@ -773,7 +784,7 @@ def _absorb_gameparams_passes(
     try:
         doc = sidecar.absorb_gameparams_ship(doc, ship_dict, full_ship_id=full_id)
     except Exception as e:
-        print(f"[scaffold_ship] gameparams ship-extras failed ({e})", file=sys.stderr)
+        _warn(warnings, f"gameparams ship-extras failed ({e})")
 
     # Pass 2: variants summary
     try:
@@ -781,7 +792,7 @@ def _absorb_gameparams_passes(
         if summary:
             doc = sidecar.absorb_gameparams_variants(doc, ship_dict, summary=summary)
     except Exception as e:
-        print(f"[scaffold_ship] gameparams variants failed ({e})", file=sys.stderr)
+        _warn(warnings, f"gameparams variants failed ({e})")
 
     # Pass 2b: per-hull placement snapshots (schema v3.2)
     try:
@@ -799,7 +810,7 @@ def _absorb_gameparams_passes(
             )
             doc = sidecar.alias_active_hull_to_top_level(doc)
     except Exception as e:
-        print(f"[scaffold_ship] per-hull mount index failed ({e})", file=sys.stderr)
+        _warn(warnings, f"per-hull mount index failed ({e})")
 
     # Pass 3: per-placement gameplay autofill
     try:
@@ -817,10 +828,7 @@ def _absorb_gameparams_passes(
         if autofill_by_hp:
             doc = sidecar.absorb_gameparams_mounts(doc, autofill_by_hp)
     except Exception as e:
-        print(
-            f"[scaffold_ship] gameparams mount autofill failed ({e})",
-            file=sys.stderr,
-        )
+        _warn(warnings, f"gameparams mount autofill failed ({e})")
 
     # Pass 4: per-mount armor + barbettes
     try:
@@ -833,15 +841,17 @@ def _absorb_gameparams_passes(
             )
         if toolkit_armor_data and isinstance(toolkit_armor_data, dict):
             gp_armor = (hull.get("armor") if isinstance(hull, dict) else None) or {}
-            warnings = _gp_autofill.cross_validate_armor(
+            # ``armor_diffs`` is the cross-validate report (not the
+            # outer-scope ``warnings`` accumulator — kept distinct for
+            # clarity).
+            armor_diffs = _gp_autofill.cross_validate_armor(
                 toolkit_armor_data.get("materials_table", {}),
                 gp_armor,
             )
-            if warnings:
-                for line in warnings[:5]:
-                    print(f"    {line}", file=sys.stderr)
+            for line in armor_diffs[:5]:
+                _warn(warnings, f"armor cross-validate: {line}")
     except Exception as e:
-        print(f"[scaffold_ship] gameparams armor failed ({e})", file=sys.stderr)
+        _warn(warnings, f"gameparams armor failed ({e})")
 
     # Pass 5: per-cube hitbox classification
     try:
@@ -853,7 +863,7 @@ def _absorb_gameparams_passes(
                 hit_locations=classification.get("hit_locations"),
             )
     except Exception as e:
-        print(f"[scaffold_ship] gameparams hitbox failed ({e})", file=sys.stderr)
+        _warn(warnings, f"gameparams hitbox failed ({e})")
 
     # Pass 6: per-torpedo PAPT* enrichment
     try:
@@ -872,10 +882,7 @@ def _absorb_gameparams_passes(
             if extras_by_id:
                 doc = sidecar.absorb_gameparams_torpedoes(doc, extras_by_id)
     except Exception as e:
-        print(
-            f"[scaffold_ship] gameparams torpedo profiles failed ({e})",
-            file=sys.stderr,
-        )
+        _warn(warnings, f"gameparams torpedo profiles failed ({e})")
 
     return doc
 
@@ -1308,6 +1315,7 @@ def scaffold_ship(
                 gameparams_ship_id=gameparams_ship_id,
                 gm3d_dir=gm3d_dir,
                 active_placements_json=placements_json,
+                warnings=warnings,
             )
         except Exception as e:
             timer.emit("gameparams_autofill", "failed")
@@ -1334,16 +1342,15 @@ def scaffold_ship(
             )
             if mats:
                 doc["materials"] = mats
-                palette_resolver = _build_palette_resolver(cfg, ship_name_hint=ship)
+                palette_resolver = _build_palette_resolver(
+                    cfg, ship_name_hint=ship, warnings=warnings,
+                )
                 name_resolver: Callable[[str], str | None] | None
                 try:
                     def name_resolver(pat: str) -> str | None:
                         return wg_camo.display_name_for_camo_entry(pat)
                 except Exception as exc:
-                    print(
-                        f"[scaffold_ship] wg_localization unavailable: {exc}",
-                        file=sys.stderr,
-                    )
+                    _warn(warnings, f"wg_localization unavailable: {exc}")
                     name_resolver = None
                 doc["skins"] = sidecar.discover_skins_from_materials(
                     mats,
@@ -1364,6 +1371,7 @@ def scaffold_ship(
                         config=cfg,
                         ship_name_hint=ship,
                         known_camo_patterns=known_patterns,
+                        warnings=warnings,
                     )
                     if permo_skins:
                         doc["skins"].extend(permo_skins)
@@ -1377,6 +1385,7 @@ def scaffold_ship(
                         config=cfg,
                         ship_name_hint=ship,
                         known_camo_patterns=known_patterns,
+                        warnings=warnings,
                     )
                     if universal_skins:
                         doc["skins"].extend(universal_skins)

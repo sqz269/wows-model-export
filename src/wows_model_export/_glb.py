@@ -1,20 +1,20 @@
 """Internal GLB byte-level helpers.
 
-Private module — single-underscore prefix — used by both `toolkit/` (for
-the post-export armor/hitbox winding flip) and (future) `resolve/winding`
-once the auto-detect heuristic ships.
+Private module — single-underscore prefix — used by ``toolkit/`` (for the
+post-export armor/hitbox winding flip), ``resolve/winding`` (auto-detect
+scoring), and ``resolve/rig_normalize_bones`` (read + rewrite of skinned
+rig GLBs).
 
 This file carries only the **byte-level core** of the GLB toolchain:
-parse, reassemble, and reverse triangle winding. The 400+ lines of
-auto-detect scoring + CLI in `tools/shared/glb_flip_winding.py` (in the
-I:/Models/warships private repo) will land in `resolve/winding.py`
-when that lift happens.
+parse, reassemble, and reverse triangle winding. The area-weighted
+scoring + verdict heuristic lives in :mod:`resolve.winding` on top of
+these primitives.
 
-Why a top-level `_glb` instead of `toolkit/_glb`?
-  Both `toolkit` and (eventually) `resolve` need these byte helpers.
-  The layer scheme says toolkit can't depend on resolve, but neither
-  blocks them from sharing a private internal module that has no layer
-  semantics of its own.
+Why a top-level ``_glb`` instead of ``toolkit/_glb``?
+  ``toolkit`` and ``resolve`` both need these byte helpers. The layer
+  scheme says toolkit can't depend on resolve, but neither blocks them
+  from sharing a private internal module that has no layer semantics
+  of its own.
 """
 
 from __future__ import annotations

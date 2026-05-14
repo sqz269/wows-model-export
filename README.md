@@ -29,23 +29,27 @@ visually verified here first.
 
 ## Status
 
-Early — only the webview has landed under this layout. The Python
-pipeline is still being lifted from `I:\Models\warships\tools\` per
-`migration/PIPELINE_REFACTOR.md` (in the source repo).
+Alpha — the Python pipeline and the webview are both in-tree.
+Public API still moving while we shake out drift; once stable, this
+will tag v0.1.0.
 
 ### What's here
 
-- `webview/` — local dev dashboard (Svelte 5 + Three.js + Vite + TS). See
-  [webview/README.md](webview/README.md) for setup.
+- `src/wows_model_export/` — Python pipeline package, layered into
+  `read` / `toolkit` / `resolve` / `compose` / `cli`. See
+  `src/wows_model_export/__init__.py` for the layer rationale.
+- `pyproject.toml` — `pip install -e .` lands the `wows-*` console
+  entry points (`wows-ingest-ship`, `wows-scaffold-ship`,
+  `wows-build-accessory-library`, `wows-publish`, …).
+- `webview/` — local dev dashboard (Svelte 5 + Three.js + Vite + TS).
+  See [webview/README.md](webview/README.md) for setup.
 
 ### What's coming
 
-- `src/wows_model_export/` — Python pipeline package (renamed from the
-  source repo's `tools/`).
-- `docs/contracts/` — public artifact schemas.
-- `pyproject.toml` + `pip install -e .` → `wows-*` CLI entry points.
-
-See the migration docs in the source repo for the rollout plan.
+- `docs/contracts/` — public artifact schemas (sidecar v3,
+  attached-accessories v2, library index).
+- A first batch of smoke tests against the schema authority in
+  `resolve.sidecar`.
 
 ## License
 

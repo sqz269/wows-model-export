@@ -64,15 +64,11 @@ ATTACHMENTS_SUFFIX = ".attached_accessories.json"
 FLIP_OVERRIDES_FILENAME = "flip_overrides.json"
 WINDING_AUDIT_FILENAME = "winding_audit.json"
 
-# VFS manifest path used to detect ``_dead`` variants. Configurable via
-# the ``WOWS_VFS_MANIFEST`` env var; defaults to the I:-side conventional
-# temp-dir location for parity with existing workflows.
-_DEFAULT_MANIFEST_PATH = Path(
-    os.environ.get(
-        "WOWS_VFS_MANIFEST",
-        r"C:/Users/sqz269/AppData/Local/Temp/wows_manifest.json",
-    )
-)
+# VFS manifest path resolution lives in :mod:`wows_model_export.toolkit.vfs`
+# (``default_manifest_path`` / ``ensure_manifest``). Helpers below accept
+# ``manifest_path=None`` and resolve to the toolkit default on use; the
+# composer entry calls ``ensure_manifest`` so the file is materialised
+# before the workers consume it.
 
 
 # ---------------------------------------------------------------------------
@@ -275,15 +271,23 @@ def output_dir_for(library_root: Path, key: AssetKey) -> Path:
 _manifest_paths: set[str] | None = None
 
 
-def _load_manifest_paths(manifest_path: Path) -> set[str]:
+def _resolve_manifest_path(manifest_path: Path | None) -> Path:
+    """Return ``manifest_path`` if set, else the toolkit default."""
+    if manifest_path is not None:
+        return manifest_path
+    return toolkit.default_manifest_path()
+
+
+def _load_manifest_paths(manifest_path: Path | None) -> set[str]:
     """Load all VFS file paths (without leading '/') into a set, cached."""
     global _manifest_paths
     if _manifest_paths is not None:
         return _manifest_paths
-    if not manifest_path.is_file():
+    resolved = _resolve_manifest_path(manifest_path)
+    if not resolved.is_file():
         _manifest_paths = set()
         return _manifest_paths
-    with open(manifest_path, encoding="utf-8") as f:
+    with open(resolved, encoding="utf-8") as f:
         entries = json.load(f)
     _manifest_paths = {e["path"].lstrip("/") for e in entries if "path" in e}
     return _manifest_paths
@@ -291,7 +295,7 @@ def _load_manifest_paths(manifest_path: Path) -> set[str]:
 
 def has_dead_variant(
     key: AssetKey,
-    manifest_path: Path = _DEFAULT_MANIFEST_PATH,
+    manifest_path: Path | None = None,
 ) -> bool:
     """Return True iff the VFS has a ``<asset_id>_dead.geometry`` file
     next to the main geometry for this asset."""
@@ -348,7 +352,7 @@ def _discover_attached_children_keys(
     existing: dict[AssetKey, AssetRecord],
     *,
     allow_style: bool = False,
-    manifest_path: Path = _DEFAULT_MANIFEST_PATH,
+    manifest_path: Path | None = None,
     warnings: list[str] | None = None,
 ) -> list[AssetKey]:
     """Walk every ``<asset>.attached_accessories.json`` in the library
@@ -1086,7 +1090,18 @@ def build_accessory_library(
         )
 
     lib_root.mkdir(parents=True, exist_ok=True)
-    manifest_path = _DEFAULT_MANIFEST_PATH
+    # Materialise the VFS manifest at the toolkit default location
+    # (env override: WOWS_VFS_MANIFEST). Builds via ``metadata_json`` on
+    # first run; idempotent thereafter.
+    try:
+        manifest_path = toolkit.ensure_manifest(config=cfg)
+    except Exception as e:
+        manifest_path = toolkit.default_manifest_path(cfg)
+        warnings.append(
+            f"VFS manifest build failed ({e}); falling back to "
+            f"{manifest_path} (downstream dead-variant + attached-child "
+            "discovery may be incomplete)."
+        )
 
     # ── Step: plan_batch ──────────────────────────────────────────────
     try:

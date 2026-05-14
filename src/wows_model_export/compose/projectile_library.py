@@ -56,15 +56,10 @@ from ..resolve import synth_emission
 from ..types import OnEvent, ProjectileLibraryResult
 from ._step_runner import StepRunner
 
-# Default VFS manifest path (mirrors the I:-side convention). Override
-# via the ``WOWS_VFS_MANIFEST`` env var or the ``manifest_path``
-# parameter on the public entry.
-_DEFAULT_MANIFEST_PATH = Path(
-    os.environ.get(
-        "WOWS_VFS_MANIFEST",
-        r"C:/Users/sqz269/AppData/Local/Temp/wows_manifest.json",
-    )
-)
+# VFS manifest path resolution lives in :mod:`wows_model_export.toolkit.vfs`.
+# The composer entry resolves a path via :func:`toolkit.default_manifest_path`
+# (override: ``WOWS_VFS_MANIFEST`` env var) and materialises it with
+# :func:`toolkit.ensure_manifest` before discovery runs.
 
 # /content/gameplay/{nation}/projectile/{category}/{ID}/{ID}.geometry
 _PROJECTILE_PATH_RE = re.compile(
@@ -139,11 +134,12 @@ def _ensure_manifest(
     config: PipelineConfig | None,
     refresh: bool,
 ) -> Path:
-    """Return a usable VFS manifest, generating one if missing or stale."""
-    if manifest_path.is_file() and not refresh:
-        return manifest_path
-    toolkit.metadata_json(manifest_path, config=config)
-    return manifest_path
+    """Thin wrapper around :func:`toolkit.ensure_manifest` kept for
+    backwards compatibility with the original I:-side function name.
+    """
+    return toolkit.ensure_manifest(
+        manifest_path=manifest_path, refresh=refresh, config=config,
+    )
 
 
 def discover_projectiles(
@@ -791,9 +787,11 @@ def build_projectile_library(
                               already-built assets.
         on_event             Optional progress callback receiving
                               :class:`StepEvent` notifications.
-        manifest_path        VFS manifest JSON path (default: the
+        manifest_path        VFS manifest JSON path. Default: the
                               ``WOWS_VFS_MANIFEST`` env var, falling back
-                              to the I:-side temp-dir convention).
+                              to ``<config.cache_dir>/wows_manifest.json``
+                              (built on first use via
+                              :func:`toolkit.ensure_manifest`).
         refresh_manifest     When True, regenerate the VFS manifest
                               before discovery.
         mode                 ``"dds"`` (default), ``"both"`` (DDS+PNG),
@@ -819,7 +817,9 @@ def build_projectile_library(
     cfg = config or PipelineConfig.load()
     ws = (workspace or cfg.workspace).resolve()
     lib_root = (library_root or (ws / "libraries" / "projectiles")).resolve()
-    manifest = (manifest_path or _DEFAULT_MANIFEST_PATH).resolve()
+    manifest = (
+        manifest_path or toolkit.default_manifest_path(cfg)
+    ).resolve()
     only_ids = set(only) if only else None
 
     runner = StepRunner(on_event)
