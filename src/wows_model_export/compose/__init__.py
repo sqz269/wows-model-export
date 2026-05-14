@@ -4,65 +4,74 @@ Chain `toolkit` invocations, `resolve` transforms, and `read` passes into
 end-to-end procedures. Slow (seconds to minutes), write files, emit
 `StepEvent`s through an optional `on_event` callback.
 
-Public surface — flat function names override submodule attributes
-of the same name (e.g. `compose.scaffold_ship` is the *function*; the
-*submodule* stays reachable via `from wows_model_export.compose.scaffold_ship
-import _internal_helper`).
+Public surface — flat function names that collide with their submodule
+of the same name win the package binding (function takes the name; the
+submodule remains reachable via full-path `from .. import ...` imports).
 
-    from wows_model_export.compose import scaffold_ship, build_accessory_library
+    from wows_model_export.compose import (
+        scaffold_ship, build_accessory_library, ingest_skin_pack,
+        autorig_asset, resolve_decorative_placements, scan_legacy_glb,
+        find_ship_variants, publish, snapshot, teardown_ship,
+    )
     result = scaffold_ship("Montana", config=cfg, on_event=printer)
     lib    = build_accessory_library(config=cfg, on_event=printer)
 
 For the sidecar mutation API (write / apply_variant_asset_swaps /
-absorb_*), use the submodule namespace directly::
+absorb_*), use the submodule namespace::
 
     from wows_model_export.compose import sidecar
     sidecar.write(doc, path)
     sidecar.apply_variant_asset_swaps(doc, ...)
 
-Lifted modules so far:
+For the attached-accessories resolver, the audit pass, or any composer
+where the function name is ambiguous in flat namespace, use submodule
+access::
 
-    sidecar                       — sidecar write + mutation shim
-                                    (authority in resolve.sidecar)
-    scaffold_ship                 — one-shot per-ship scaffold
-                                    (from tools/ship/scaffold_ship.py)
-    accessory_library             — fleet-wide accessory library build
-                                    (from tools/ship/build_accessory_library.py)
-    attached_accessories_library  — per-asset attached-accessories
-                                    resolve pass
-                                    (from tools/ship/asset_attachments_resolve.py)
-    dead_variant_audit            — destroyed-turret variant audit
-                                    (from tools/ship/dead_variant_audit.py)
-
-End-to-end composers still pending: ``ingest_ship``, ``ingest_skin_pack``,
-``publish``, ``snapshot``.
+    from wows_model_export.compose.attached_accessories_library import resolve_library
+    from wows_model_export.compose.dead_variant_audit import audit_library
 """
 
 from __future__ import annotations
 
-# Submodule namespaces — `sidecar` doesn't collide with any function
-# name. The two big orchestrator submodules (scaffold_ship,
-# accessory_library) DO collide with their entry functions; Python
-# binding rules give the function the flat name and leave the module
-# accessible via full-path imports.
+# Submodule namespaces that don't collide with a flat function of the
+# same name (these are always reachable via attribute access on the
+# package object).
 from . import (
     attached_accessories_library,
     dead_variant_audit,
     sidecar,
 )
 
-# Flat function re-exports. These shadow the same-named submodules in
-# the package namespace, which is intentional — the function is the
-# more common reach for these.
+# Flat function re-exports. Submodules of the same name still exist
+# (importable as `from wows_model_export.compose.scaffold_ship import …`)
+# but get shadowed in the package binding by the function.
+from .accessories_scan import scan_legacy_glb
 from .accessory_library import build_accessory_library
+from .find_ship_variants import find_ship_variants
+from .publish import publish
 from .scaffold_ship import scaffold_ship
+from .skel_ext_resolve import resolve_decorative_placements
+from .skin_pack import ingest_skin_pack
+from .snapshot import snapshot
+from .teardown_ship import teardown_ship
+from .turret_autorig import autorig_asset, autorig_asset_full
 
 __all__ = [
     # Submodules
     "attached_accessories_library",
     "dead_variant_audit",
     "sidecar",
-    # Composer functions (also shadow same-named submodules)
+    # Composer functions (also shadow same-named submodules in package
+    # namespace; the submodules remain importable via full-path)
     "scaffold_ship",
     "build_accessory_library",
+    "ingest_skin_pack",
+    "autorig_asset",
+    "autorig_asset_full",
+    "resolve_decorative_placements",
+    "scan_legacy_glb",
+    "find_ship_variants",
+    "publish",
+    "snapshot",
+    "teardown_ship",
 ]

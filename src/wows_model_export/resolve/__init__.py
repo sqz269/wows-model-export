@@ -42,6 +42,11 @@ Lifted modules so far:
     synth_emission       — diffuse * mg.B emissive synthesis for
                            ARP / Azur Lane / Sabaton crossover skins
                            (from synth_emission.py).
+    mesh_compare         — pure mesh-diff transforms for skin-pack
+                           vanilla / mod compare (from
+                           compare_skin_meshes.py library half).
+    exterior_compare     — Exterior peculiarityModels diff helpers
+                           (from compare_exterior_swaps.py library half).
 """
 
 from __future__ import annotations
@@ -50,7 +55,9 @@ from __future__ import annotations
 from . import (
     bone_orientation,
     camo,
+    exterior_compare,
     gameparams_autofill,
+    mesh_compare,
     sidecar,
     skel_ext_hashes,
     synth_emission,
@@ -192,7 +199,9 @@ __all__ = [
     # Submodules
     "bone_orientation",
     "camo",
+    "exterior_compare",
     "gameparams_autofill",
+    "mesh_compare",
     "sidecar",
     "skel_ext_hashes",
     "synth_emission",

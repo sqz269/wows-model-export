@@ -35,8 +35,6 @@ from __future__ import annotations
 import glob
 import json
 import os
-import subprocess
-import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -1439,35 +1437,37 @@ def build_accessory_library(
         )
 
     # ── Step: build_rigs ──────────────────────────────────────────────
-    # The turret_autorig.py CLI lives in the I:-side tree
-    # (`tools/ship/turret_autorig.py`); it hasn't been lifted to the
-    # public package yet. Skip the step gracefully when the script
-    # isn't on disk; warn but continue when it fails.
-    autorig_script = _locate_autorig_script(ws)
-    if autorig_script is None:
-        runner.emit(
-            "build_rigs", "skipped",
-            detail="turret_autorig.py not found",
-        )
-    else:
-        try:
-            with runner.step("build_rigs") as st:
-                repo_root = lib_root.parent.parent
-                cmd = [
-                    sys.executable, str(autorig_script), "--all-guns",
-                    "--repo-root", str(repo_root),
-                ]
-                try:
-                    subprocess.run(cmd, check=True)
-                    st.annotate("turret_autorig succeeded")
-                except subprocess.CalledProcessError as e:
-                    warnings.append(
-                        f"turret_autorig failed (exit {e.returncode})"
-                    )
-        except StepError:
-            raise
-        except Exception as e:
-            warnings.append(f"build_rigs unexpected error: {e}")
+    # Iterate every ``category=="gun"`` asset and invoke the lifted
+    # per-asset rig builder. Each call writes ``<asset_id>.rig_pivots.json``
+    # next to the asset's GLB. Per-asset failures surface as warnings
+    # so a single broken rig doesn't abort the whole library build.
+    from . import turret_autorig as _turret_autorig
+
+    with runner.step("build_rigs") as st:
+        gun_records = [
+            r for r in records.values()
+            if r.key.category == "gun" and r.glb_rel_path is not None
+        ]
+        rigged = 0
+        for rec in gun_records:
+            try:
+                _turret_autorig.autorig_asset(
+                    rec.key.asset_id,
+                    config=cfg,
+                    library_root=lib_root,
+                    on_event=on_event,
+                )
+                rigged += 1
+            except StepError as e:
+                warnings.append(
+                    f"build_rigs[{rec.key.asset_id}] failed at step "
+                    f"{e.step!r}: {e}"
+                )
+            except Exception as e:
+                warnings.append(
+                    f"build_rigs[{rec.key.asset_id}] unexpected error: {e}"
+                )
+        st.annotate(f"{rigged}/{len(gun_records)} gun assets rigged")
 
     assets_built = sum(1 for r in records.values() if r.glb_rel_path is not None)
     return AccessoryLibraryResult(
@@ -1479,32 +1479,6 @@ def build_accessory_library(
         attachment_stats=attachment_stats,
         step_timings_ms=dict(runner.step_timings_ms),
     )
-
-
-def _locate_autorig_script(workspace: Path) -> Path | None:
-    """Find the I:-side ``turret_autorig.py`` script, if available.
-
-    Searches ``WOWS_TURRET_AUTORIG`` env var first, then a conventional
-    sibling-repo layout. Returns ``None`` when nothing is found — the
-    composer then skips the ``build_rigs`` step gracefully.
-
-    TODO: replace this with a lifted :mod:`wows_model_export.compose.turret_autorig`
-    once the per-asset rig builder lands in the public package
-    (currently still in ``I:/Models/warships/tools/ship/turret_autorig.py``).
-    """
-    env_path = os.environ.get("WOWS_TURRET_AUTORIG")
-    if env_path:
-        p = Path(env_path)
-        if p.is_file():
-            return p
-    candidates = [
-        workspace / "tools" / "ship" / "turret_autorig.py",
-        workspace.parent / "tools" / "ship" / "turret_autorig.py",
-    ]
-    for c in candidates:
-        if c.is_file():
-            return c
-    return None
 
 
 __all__ = [

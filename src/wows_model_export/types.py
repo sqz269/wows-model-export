@@ -200,6 +200,29 @@ class AccessoryLibraryResult:
 
 
 @dataclass(frozen=True)
+class TurretRigResult:
+    """Outcome of `compose.turret_autorig.autorig_asset`.
+
+    `rig_pivots_path` is the on-disk JSON the Blender-side rigger
+    consumes. `rig_kind` distinguishes a full turret rig (yaw + elev +
+    per-barrel rollback + muzzles) from an AA mount (muzzle hardpoints
+    only — yaw/elev are parent-driven) or a minimal asset that lacks
+    any of the standard rig bones. `auto_flipped` flags the geometric
+    validator having post-applied a Ry(180°) correction when the
+    library mesh confirmed it.
+    """
+
+    asset_id:        str
+    rig_pivots_path: Path
+    rig_kind:        Literal["turret", "aa_mount", "minimal"]
+    source_kind:     Literal["toolkit", "legacy"]
+    barrel_count:    int = 0
+    shared_elev:     bool = True
+    auto_flipped:    bool = False
+    warnings:        tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class SkinPackResult:
     """Outcome of `compose.ingest_skin_pack`.
 
@@ -271,6 +294,7 @@ __all__ = [
     "IngestResult",
     "AttachmentResolveStats",
     "AccessoryLibraryResult",
+    "TurretRigResult",
     "SkinPackResult",
     "PublishCounts",
     "PublishResult",

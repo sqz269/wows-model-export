@@ -36,16 +36,19 @@ Refactor notes vs the I:-side ``scaffold(ship, *, out_root=, ...)``:
 * The original module's ``print()`` calls are routed through ``on_event``
   for milestones; debug prints have been dropped.
 
-Two dependencies remain dangling (not yet lifted to the public package):
+One dependency remains dangling:
 
-* ``ingest_skin_pack`` -- raises :class:`NotImplementedError` at the
-  native-permoflage call site.  The native-permoflage auto-ingest pass
-  is therefore a no-op for now; callers needing it should ingest the
-  pack manually via the (still-to-be-lifted) skin-pack composer.
-* ``synth_emission`` -- emissive synthesis for ARP/Azur Lane/Sabaton
-  crossover skins is currently disabled (no-op); the sidecar's stem
-  classifier will silently miss ``*_emissive.dd0`` slots until the
-  module lands.  Tracked as a follow-up.
+* ``synth_emission`` is now lifted at :mod:`wows_model_export.resolve.synth_emission`
+  but the emissive-DDS synthesis pass isn't yet rewired into this
+  composer.  ARP / Azur Lane / Sabaton crossover skins will silently
+  miss ``*_emissive.dd0`` slots until the wiring lands.  Tracked as a
+  follow-up.
+
+Native-permoflage auto-ingest now routes through
+:mod:`wows_model_export.compose.skin_pack` — the skin-pack composer is
+called directly when the Vehicle's ``nativePermoflage`` declares a
+non-default ``peculiarity`` (Arpeggio / Azur Lane / Sabaton /
+Kobayashi).
 """
 from __future__ import annotations
 
@@ -1603,12 +1606,16 @@ def scaffold_ship(
         except Exception:
             pass
     if not skip_native_skin and not variant_routed:
-        # TODO: native-permoflage ingest requires the (still-unlifted)
-        # ``ingest_skin_pack`` module.  Skipped for now; the sidecar will
-        # carry the bare base-hull main scheme until the skin-pack
-        # composer lands.  Caller can ingest manually via the existing
-        # CLI on the I:-side until that lift.
-        native_skin_skipped_reason = "ingest_skin_pack composer not yet lifted"
+        # Auto-ingest the Vehicle's ``nativePermoflage`` when peculiarity
+        # is non-default (Arpeggio / Azur Lane / Sabaton / Kobayashi /
+        # haunted / decorative). The toolkit's export-ship above sees
+        # the base ship's A_Hull, so without this step the sidecar's
+        # ``main`` scheme renders the wrong paint.
+        #
+        # Idempotent: skin_pack.ingest_skin_pack replaces a prior auto-
+        # skin in place if re-run. Best-effort: any failure surfaces as
+        # a warning and the scaffold continues with the bare-hull main
+        # scheme intact.
         try:
             ship_id_native = (
                 gameparams_ship_id
@@ -1618,19 +1625,34 @@ def scaffold_ship(
                 ship_dict_native = _gp_read.get_ship(ship_id_native)
                 if ship_dict_native is not None:
                     native = ship_dict_native.get("nativePermoflage")
-                    peculiarity = ship_dict_native.get("peculiarity") or "default"
+                    peculiarity = (
+                        ship_dict_native.get("peculiarity") or "default"
+                    )
                     if (
                         isinstance(native, str)
                         and native
                         and peculiarity != "default"
                     ):
-                        warnings.append(
-                            f"native-permoflage {native!r} detected "
-                            f"(peculiarity={peculiarity!r}) but ingest "
-                            f"skipped: {native_skin_skipped_reason}"
-                        )
+                        from . import skin_pack as _skin_pack
+                        try:
+                            _skin_pack.ingest_skin_pack(
+                                native,
+                                ship_id=ship,
+                                workspace=workspace,
+                                config=cfg,
+                                source_kind="vfs_variant",
+                                on_event=on_event,
+                            )
+                        except Exception as exc:
+                            warnings.append(
+                                f"native-permoflage {native!r} ingest "
+                                f"failed ({type(exc).__name__}: {exc}); "
+                                f"sidecar carries the bare-hull main "
+                                f"scheme. Retry via "
+                                f"compose.skin_pack.ingest_skin_pack."
+                            )
         except Exception:
-            # Quiet — native-permoflage detection is best-effort.
+            # Quiet — native-permoflage detection itself is best-effort.
             pass
 
     # Camo-coverage warning.

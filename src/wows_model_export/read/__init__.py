@@ -29,12 +29,14 @@ Lifted modules so far:
     gameparams    — GameParams JSON entity readers (from gameparams.py)
     sidecar       — sidecar document read shim (authority lives in
                     resolve.sidecar — from tools/ship/sidecar.py)
+    bw_geometry   — BigWorld .geometry binary parser
+                    (from bw_geometry.py)
 """
 
 from __future__ import annotations
 
 # Submodule namespaces
-from . import gameparams, localization, mfm, sidecar
+from . import bw_geometry, gameparams, localization, mfm, sidecar
 
 # gameparams symbols — distinctive names safe at top level
 from .gameparams import (
@@ -75,6 +77,7 @@ from .sidecar import (
 
 __all__ = [
     # Submodules
+    "bw_geometry",
     "gameparams",
     "localization",
     "mfm",
