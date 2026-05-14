@@ -1,17 +1,18 @@
 <script lang="ts">
-  // Asset detail panel: header (asset_id, scope/category/subcategory,
-  // used-by-ships) → 3D viewer → side controls + info section.
+  // Asset detail pane: header bar (left = asset id + breadcrumb, center =
+  // load summary + status pills, right = action cluster) → viewer + side
+  // panel → resizable tabbed inspector at the bottom.
   //
-  // Owns the AccessoryViewer handle so the controls can wire directly to
-  // it. Re-renders when `asset` changes; viewer instance is kept alive
-  // across asset swaps for a smoother feel.
+  // Owns the AccessoryViewer handle so the controls + the bottom panel's
+  // rig editor can wire directly to it. Re-renders on `asset` change; the
+  // viewer instance is kept alive across asset swaps for a smoother feel
+  // (Library.svelte deliberately doesn't {#key activeId} this component).
 
   import AccessoryViewerCmp from './AccessoryViewer.svelte';
-  import RigEditorPanel from './RigEditorPanel.svelte';
+  import DetailBottomPanel from './DetailBottomPanel.svelte';
   import type { AccessoryViewer, LoadResult, MeshInfo, SideMode } from '$lib/accessory';
   import type { LibraryAsset, RigPivots, WindingAuditEntry } from '$lib/types';
   import { fetchRigPivots, postFlipWinding, repoUrl } from '$lib/api';
-  import { fmtBytes } from '$lib/util/html';
   import { onMount } from 'svelte';
 
   // Shared utility classes — mirror the labelled-dropdown idiom used in
@@ -211,7 +212,7 @@
     meshVisibility[i] = v;
     viewer?.setMeshVisibleByIndex(i, v);
   }
-  function toggleVariant(dead: boolean) {
+  function setVariant(dead: boolean) {
     showingDead = dead;
   }
   async function toggleTextures(v: boolean) {
@@ -251,9 +252,7 @@
       const flipped = res.override?.flipped ?? true;
       flipMsg = {
         cls: 'ok',
-        text: flipped
-          ? 'Flipped (persisted). Click again to undo.'
-          : 'Un-flipped (persisted).',
+        text: flipped ? 'Flipped (persisted). Click again to undo.' : 'Un-flipped (persisted).',
       };
       // Bump the audit so the badge updates without a page reload.
       onWindingAuditChange?.();
@@ -351,41 +350,174 @@
     });
   });
 
-  function fmtDist(n: number): string {
-    return Number.isFinite(n) ? `${n.toFixed(4)} m` : '—';
+  /** Pill metadata for the header's winding-status indicator. Mirrors
+   *  the AssetList row badge colour scheme so the at-a-glance state
+   *  reads the same across pages. `null` when no audit is available. */
+  const windingPill = $derived.by(() => {
+    if (!windingAudit) return null;
+    const w = windingAudit;
+    const label =
+      w.in_overrides && w.verdict === 'keep'
+        ? 'MANUAL'
+        : w.in_overrides && w.verdict === 'flip'
+          ? 'DISPUTE'
+          : w.verdict === 'flip'
+            ? 'FLIP'
+            : w.verdict === 'ambiguous'
+              ? 'AMBIG'
+              : w.verdict === 'keep'
+                ? 'KEEP'
+                : w.verdict.toUpperCase();
+    let cls = 'bg-muted text-muted-foreground';
+    if (label === 'FLIP' || label === 'DISPUTE') cls = 'bg-rose-950/60 text-rose-300';
+    else if (label === 'AMBIG') cls = 'bg-amber-950/60 text-amber-300';
+    else if (label === 'MANUAL' || label === 'KEEP') cls = 'bg-emerald-950/60 text-emerald-300';
+    return {
+      label,
+      score: w.correctness,
+      cls,
+      title:
+        `Joint A+B winding heuristic — correctness ${w.correctness.toFixed(3)} ` +
+        `(B=${w.signal_b.toFixed(3)} geom·outward, A=${w.signal_a.toFixed(3)} geom·stored). ` +
+        `>0.5 = correct, <0.5 = inverted.`,
+    };
+  });
+
+  function onRigEditorClose() {
+    rigEditorOpen = false;
   }
+
+  // Disable rig-pivot toggles while editor is on — RigEditorPanel hides
+  // the pivot overlay anyway, so leaving the toggles live would be
+  // misleading.
+  const rigPivotsDisabled = $derived(rigEditorOpen);
 </script>
 
 <section class="flex flex-1 min-w-0 flex-col overflow-hidden">
-  <header
-    class="bg-card border-border flex flex-none items-start justify-between gap-4 border-b px-5 py-3"
-  >
-    <div>
-      <h2 class="m-0 text-sm font-semibold"><code class="font-mono">{id}</code></h2>
-      <div class="text-muted-foreground mt-0.5 text-[11px]">
+  <!--
+    Header bar: three regions, left-to-right.
+    Left  — asset id + breadcrumb + used-by line.
+    Center— load summary + at-a-glance status pills (winding + rig).
+    Right — action cluster (Flip winding, Edit rig, variant, Frame).
+  -->
+  <header class="bg-card border-border flex flex-none items-center gap-4 border-b px-5 py-2.5">
+    <div class="flex min-w-0 flex-1 flex-col">
+      <h2 class="m-0 truncate font-mono text-sm font-semibold">{id}</h2>
+      <div class="text-muted-foreground mt-0.5 truncate text-[11px]">
         {asset.scope}/{asset.category}{asset.subcategory ? `/${asset.subcategory}` : ''}
         {#if asset.species}· {asset.species}{/if}
       </div>
-      <div class="text-muted-foreground mt-1 max-w-[60ch] break-words text-[11px]">
+      <div class="text-muted-foreground mt-0.5 truncate text-[11px]">
         {#if asset.used_by_ships.length}
           used by {asset.used_by_ships.length}:
-          <code>{asset.used_by_ships.join(', ')}</code>
+          <code class="font-mono">{asset.used_by_ships.join(', ')}</code>
         {:else}
           unused
         {/if}
       </div>
     </div>
-    <div class="text-right text-[11px] tabular-nums text-foreground">
-      {#if loadError}
-        <span class="text-destructive">{loadError}</span>
-      {:else if result}
-        {result.meshes.length} mesh{result.meshes.length === 1 ? '' : 'es'} ·
-        {totalTris.toLocaleString()} tris
-      {:else}
-        Loading…
+
+    <div class="flex flex-none flex-col items-center gap-1">
+      <div class="text-[11px] tabular-nums text-foreground">
+        {#if loadError}
+          <span class="text-destructive">{loadError}</span>
+        {:else if result}
+          {result.meshes.length} mesh{result.meshes.length === 1 ? '' : 'es'} ·
+          {totalTris.toLocaleString()} tris
+        {:else}
+          Loading…
+        {/if}
+      </div>
+      <div class="flex items-center gap-1.5">
+        {#if windingPill}
+          <span
+            class="rounded px-1.5 py-[1px] text-[10px] font-semibold tabular-nums {windingPill.cls}"
+            title={windingPill.title}
+          >
+            {windingPill.label}
+            <span class="font-normal opacity-80">{windingPill.score.toFixed(2)}</span>
+          </span>
+        {/if}
+        {#if verdictChip}
+          <span
+            class="rounded px-1.5 py-[1px] text-[10px] {verdictChip.cls}"
+            title={verdictChip.title}
+          >
+            {verdictChip.label}
+          </span>
+        {/if}
+      </div>
+    </div>
+
+    <div class="flex flex-none items-center gap-1.5">
+      <button
+        type="button"
+        disabled={flipPending || rigEditorOpen}
+        onclick={flipWinding}
+        title="Reverse triangle winding and rewrite the GLB on disk. Click again to undo. Shortcut: F"
+        class="rounded border border-border bg-popover px-2 py-1 text-xs hover:bg-accent disabled:opacity-60"
+      >
+        Flip winding <span class="text-muted-foreground ml-0.5">F</span>
+      </button>
+      <button
+        type="button"
+        onclick={() => (rigEditorOpen = !rigEditorOpen)}
+        title="Open the rig editor: re-classify pieces, set face plate, save overrides."
+        class="rounded border px-2 py-1 text-xs {rigEditorOpen
+          ? 'border-primary bg-primary/20 text-foreground'
+          : 'border-border bg-popover hover:bg-accent'}"
+      >
+        {rigEditorOpen ? '✓ Edit rig' : 'Edit rig'}
+      </button>
+      {#if asset.glb_dead}
+        <div
+          class="bg-popover border-border flex items-center rounded border text-[11px]"
+          role="group"
+          aria-label="Variant"
+        >
+          <button
+            type="button"
+            onclick={() => setVariant(false)}
+            class="px-2 py-1 {!showingDead
+              ? 'bg-primary/20 text-foreground'
+              : 'text-muted-foreground hover:bg-accent'}"
+            title="Show intact variant"
+          >
+            intact
+          </button>
+          <button
+            type="button"
+            onclick={() => setVariant(true)}
+            class="px-2 py-1 {showingDead
+              ? 'bg-primary/20 text-foreground'
+              : 'text-muted-foreground hover:bg-accent'}"
+            title="Show destroyed variant"
+          >
+            dead
+          </button>
+        </div>
       {/if}
+      <button
+        type="button"
+        onclick={() => viewer?.frame()}
+        title="Recenter the camera on the model"
+        class="rounded border border-border bg-popover px-2 py-1 text-xs hover:bg-accent"
+      >
+        Frame
+      </button>
     </div>
   </header>
+
+  {#if flipMsg}
+    <div
+      class="bg-card border-border flex-none border-b px-5 py-1 text-[11px] leading-tight"
+      class:text-emerald-400={flipMsg.cls === 'ok'}
+      class:text-destructive={flipMsg.cls === 'fail'}
+      class:text-muted-foreground={flipMsg.cls === 'working'}
+    >
+      {flipMsg.text}
+    </div>
+  {/if}
 
   <div class="flex flex-1 min-h-0 overflow-hidden">
     <AccessoryViewerCmp
@@ -398,55 +530,48 @@
       {onError}
     />
 
+    <!--
+      Side panel: pure view-state controls. Authoring/destructive actions
+      (Flip winding, Edit rig) live in the header; verdict info + audit
+      numbers live in the bottom inspector.
+    -->
     <aside
-      class="bg-card border-border flex w-[260px] flex-none flex-col gap-3 overflow-y-auto border-l p-3.5"
+      class="bg-card border-border flex w-[240px] flex-none flex-col gap-3 overflow-y-auto border-l p-3"
     >
-      <!--
-        View section: matches ShipControls.svelte's idiom — checkboxes for
-        binary toggles, labelled <select>s for n-of-many. Replaces the
-        earlier toggle-button groups (faces / variant / LOD filter) so the
-        Library and Ships pages share one visual + interaction vocabulary.
-      -->
       <div class="flex flex-col gap-2">
-        <div
-          class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold"
-        >
+        <div class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold">
           view
         </div>
-        <label class={rowCls}>
-          <input
-            type="checkbox"
-            checked={helpers}
-            onchange={(e) => toggleHelpers(e.currentTarget.checked)}
-          />
-          Helpers (grid + axes)
-        </label>
-        <label class={rowCls}>
-          <input
-            type="checkbox"
-            checked={wireframe}
-            onchange={(e) => toggleWireframe(e.currentTarget.checked)}
-          />
-          Wireframe
-        </label>
-        <label class={rowCls}>
-          <input
-            type="checkbox"
-            checked={showTextures}
-            onchange={(e) => toggleTextures(e.currentTarget.checked)}
-          />
-          Textures
-        </label>
-        {#if asset.glb_dead}
+        <!--
+          Three independent binary toggles in a compact 2-column grid;
+          the dropdowns sit below in full-width rows.
+        -->
+        <div class="grid grid-cols-2 gap-x-2 gap-y-1">
           <label class={rowCls}>
             <input
               type="checkbox"
-              checked={showingDead}
-              onchange={(e) => toggleVariant(e.currentTarget.checked)}
+              checked={helpers}
+              onchange={(e) => toggleHelpers(e.currentTarget.checked)}
             />
-            Show destroyed variant
+            Helpers
           </label>
-        {/if}
+          <label class={rowCls}>
+            <input
+              type="checkbox"
+              checked={wireframe}
+              onchange={(e) => toggleWireframe(e.currentTarget.checked)}
+            />
+            Wireframe
+          </label>
+          <label class={rowCls}>
+            <input
+              type="checkbox"
+              checked={showTextures}
+              onchange={(e) => toggleTextures(e.currentTarget.checked)}
+            />
+            Textures
+          </label>
+        </div>
         <label class={labelCls}>
           Faces
           <select
@@ -480,74 +605,13 @@
       </div>
 
       <!--
-        Winding section: persist-flip button + F-shortcut hint, plus
-        the audit verdict line when scoring is available. The button
-        is disabled while a flip is in flight or while the rig editor
-        is open (the debug scene has its own materials/winding state).
+        Rig pivot overlay: just the toggles. Verdict chip + per-barrel
+        distance table live in the bottom panel's Rig tab. Toggles are
+        disabled while the rig editor is open since RigEditorPanel
+        forces the overlay off anyway.
       -->
       <div class="flex flex-col gap-1.5">
-        <div
-          class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold"
-        >
-          winding
-        </div>
-        <button
-          type="button"
-          disabled={flipPending || rigEditorOpen}
-          onclick={flipWinding}
-          title="Reverse triangle winding and rewrite the GLB on disk. Click again to undo. Shortcut: F"
-          class="rounded border border-border bg-popover px-2 py-1 text-xs hover:bg-accent disabled:opacity-60 text-left"
-        >
-          Flip winding <span class="text-muted-foreground">F</span>
-        </button>
-        {#if windingAudit}
-          {@const w = windingAudit}
-          {@const label =
-            w.in_overrides && w.verdict === 'keep'
-              ? 'manual'
-              : w.in_overrides && w.verdict === 'flip'
-                ? 'dispute'
-                : w.verdict}
-          <div
-            class="rounded bg-popover/50 px-2 py-1 text-[11px]"
-            title={`Joint A+B winding heuristic — correctness ${w.correctness.toFixed(3)} ` +
-              `(B=${w.signal_b.toFixed(3)} geom·outward, A=${w.signal_a.toFixed(3)} geom·stored). ` +
-              `>0.5 = correct, <0.5 = inverted.`}
-          >
-            auto-detect:
-            <strong
-              class:text-rose-400={label === 'flip' || label === 'dispute'}
-              class:text-amber-400={label === 'ambiguous'}
-              class:text-emerald-400={label === 'manual' || label === 'keep'}
-            >{label}</strong>
-            <span class="text-muted-foreground"> {w.correctness.toFixed(2)}</span>
-            <span class="text-muted-foreground"
-              > B{w.signal_b.toFixed(2)} A{w.signal_a.toFixed(2)}</span
-            >
-          </div>
-        {/if}
-        {#if flipMsg}
-          <div
-            class="text-[11px] leading-tight"
-            class:text-emerald-400={flipMsg.cls === 'ok'}
-            class:text-destructive={flipMsg.cls === 'fail'}
-            class:text-muted-foreground={flipMsg.cls === 'working'}
-          >
-            {flipMsg.text}
-          </div>
-        {/if}
-      </div>
-
-      <!--
-        Rig pivots: yaw / elev / muzzle markers from the
-        `<asset>.rig_pivots.json` sidecar. Hidden entirely when no
-        sidecar exists on disk. Verdict chip + per-barrel distances
-        only render when the rigger emitted a `geometric_check`.
-      -->
-      <div class="flex flex-col gap-1.5">
-        <div
-          class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold"
-        >
+        <div class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold">
           rig pivots
         </div>
         {#if !pivots}
@@ -555,113 +619,41 @@
             no <code>rig_pivots.json</code>
           </div>
         {:else}
-          <label class={rowCls}>
+          <label class={rowCls} class:opacity-50={rigPivotsDisabled}>
             <input
               type="checkbox"
               checked={showRigPivots}
+              disabled={rigPivotsDisabled}
               onchange={(e) => (showRigPivots = e.currentTarget.checked)}
             />
             Show pivots
           </label>
           <label
             class={rowCls}
+            class:opacity-50={rigPivotsDisabled}
             title="Rotate the rig 180° around the yaw axis. Quick A/B for forward-axis mismatches with the mesh. Not saved."
           >
             <input
               type="checkbox"
               checked={rigFlip180}
+              disabled={rigPivotsDisabled}
               onchange={(e) => (rigFlip180 = e.currentTarget.checked)}
             />
             Flip 180°
           </label>
-          <div class="text-[11px]">
-            {pivots.barrel_count} barrel{pivots.barrel_count === 1 ? '' : 's'}
-            · {pivots.shared_elev ? 'shared elev' : 'indep. elev'}
-          </div>
-          {#if verdictChip}
-            <span
-              class="self-start rounded px-1.5 py-[1px] text-[10px] {verdictChip.cls}"
-              title={verdictChip.title}
-            >
-              {verdictChip.label}
-            </span>
-          {/if}
-          {#if distRows.length > 0}
-            <table class="w-full text-[10px] tabular-nums">
-              <thead>
-                <tr class="text-muted-foreground">
-                  <th class="text-left"></th>
-                  <th class="text-right">ok</th>
-                  <th class="text-right">flip</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each distRows as r (r.i)}
-                  <tr>
-                    <td class="text-muted-foreground">b{r.i}</td>
-                    <td
-                      class="text-right"
-                      class:text-emerald-400={r.okBetter}
-                      class:text-muted-foreground={!r.okBetter}>{fmtDist(r.d)}</td
-                    >
-                    <td
-                      class="text-right"
-                      class:text-emerald-400={!r.okBetter}
-                      class:text-muted-foreground={r.okBetter}>{fmtDist(r.f)}</td
-                    >
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          {/if}
-          {#if pivots.warnings?.length}
-            <ul class="m-0 list-disc pl-4 text-[10px] text-amber-300">
-              {#each pivots.warnings as w (w)}<li>{w}</li>{/each}
-            </ul>
+          {#if rigPivotsDisabled}
+            <div class="text-muted-foreground text-[10px] leading-tight">
+              disabled while rig editor is open
+            </div>
           {/if}
         {/if}
       </div>
 
-      <!--
-        Rig editor toggle. The picker lives inside RigEditorPanel which
-        owns the debug-scene load + override-staging state. Opening
-        the editor swaps the viewer's loaded GLB so `onLoaded` fires
-        again on close; that re-fetches pivots and resets the toggles.
-      -->
-      <div class="flex flex-col gap-1.5">
-        <div
-          class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold"
-        >
-          rig editor
-        </div>
-        <label
-          class={rowCls}
-          title="Swap viewer to the pre-merge debug scene with each piece colour-coded by category. Click pieces to override their category or set as the mantlet face-plate."
-        >
-          <input
-            type="checkbox"
-            checked={rigEditorOpen}
-            onchange={(e) => (rigEditorOpen = e.currentTarget.checked)}
-          />
-          Edit rig
-        </label>
-        {#if rigEditorOpen && viewer}
-          <RigEditorPanel
-            assetId={id}
-            assetGlb={asset.glb}
-            {viewer}
-            onClose={() => (rigEditorOpen = false)}
-          />
-        {/if}
-      </div>
-
-      <div class="flex flex-col gap-1">
-        <div
-          class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold"
-        >
+      <div class="flex flex-1 min-h-0 flex-col gap-1">
+        <div class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold">
           meshes
         </div>
-        <ul class="m-0 flex max-h-[320px] flex-col gap-0.5 overflow-y-auto p-0 list-none">
+        <ul class="m-0 flex flex-1 min-h-0 flex-col gap-0.5 overflow-y-auto p-0 list-none">
           {#each meshes() as m, i (i)}
             <li>
               <label
@@ -674,10 +666,12 @@
                   onchange={(e) => toggleMesh(i, e.currentTarget.checked)}
                 />
                 <span class="overflow-hidden text-ellipsis whitespace-nowrap text-foreground">
-                  {truncate(m.name, 36)}
+                  {truncate(m.name, 32)}
                 </span>
                 <span class="text-muted-foreground">lod{m.lod}</span>
-                <span class="text-muted-foreground tabular-nums">{m.triangles.toLocaleString()}</span>
+                <span class="text-muted-foreground tabular-nums"
+                  >{m.triangles.toLocaleString()}</span
+                >
               </label>
             </li>
           {/each}
@@ -686,77 +680,18 @@
     </aside>
   </div>
 
-  <div
-    class="bg-background border-border grid max-h-[30%] flex-none grid-cols-2 gap-6 overflow-y-auto border-t px-5 py-3"
-  >
-    <section>
-      <h3
-        class="text-muted-foreground mb-1.5 text-[11px] font-semibold uppercase tracking-wider"
-      >
-        Library
-      </h3>
-      <dl
-        class="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs [&_dt]:text-muted-foreground [&_dd]:m-0 [&_dd]:break-words [&_code]:font-mono [&_code]:text-[11px]"
-      >
-        <dt>GLB</dt>
-        <dd>
-          <code>{asset.glb}</code> <span class="text-muted-foreground">({fmtBytes(asset.glb_bytes)})</span>
-        </dd>
-        {#if asset.glb_dead}
-          <dt>Dead GLB</dt>
-          <dd>
-            <code>{asset.glb_dead}</code>
-            <span class="text-muted-foreground">({fmtBytes(asset.glb_dead_bytes ?? 0)})</span>
-          </dd>
-        {/if}
-        <dt>Textures</dt>
-        <dd>
-          {#if asset.textures}
-            <code>{asset.textures}</code>
-          {:else}
-            <span class="text-muted-foreground">(none)</span>
-          {/if}
-        </dd>
-        <dt>Textures (DDS)</dt>
-        <dd>
-          {#if asset.textures_dds}
-            <code>{asset.textures_dds}</code>
-          {:else}
-            <span class="text-muted-foreground">(none)</span>
-          {/if}
-        </dd>
-      </dl>
-    </section>
-
-    <section>
-      <h3
-        class="text-muted-foreground mb-1.5 text-[11px] font-semibold uppercase tracking-wider"
-      >
-        LOD breakdown
-      </h3>
-      <table
-        class="w-full border-collapse text-xs [&_th]:text-muted-foreground [&_th]:font-normal [&_th]:uppercase [&_th]:tracking-wider [&_th]:text-[10px] [&_th]:text-left [&_td]:py-0.5 [&_th]:py-0.5 [&_th]:pr-2 [&_td]:pr-2 [&_td:not(:first-child)]:text-right [&_th:not(:first-child)]:text-right [&_td:not(:first-child)]:tabular-nums [&_tfoot_td]:border-t [&_tfoot_td]:border-border [&_tfoot_td]:text-muted-foreground"
-      >
-        <thead>
-          <tr><th>level</th><th>meshes</th><th>triangles</th></tr>
-        </thead>
-        <tbody>
-          {#each lodBreakdown as row (row.lod)}
-            <tr>
-              <td>lod{row.lod}</td>
-              <td>{row.count}</td>
-              <td>{row.tris.toLocaleString()}</td>
-            </tr>
-          {/each}
-        </tbody>
-        <tfoot>
-          <tr>
-            <td>total</td>
-            <td>{meshes().length}</td>
-            <td>{totalTris.toLocaleString()}</td>
-          </tr>
-        </tfoot>
-      </table>
-    </section>
-  </div>
+  <DetailBottomPanel
+    {asset}
+    {windingAudit}
+    {pivots}
+    {verdictChip}
+    {distRows}
+    {lodBreakdown}
+    totalMeshes={meshes().length}
+    {totalTris}
+    {rigEditorOpen}
+    {viewer}
+    assetId={id}
+    onCloseRigEditor={onRigEditorClose}
+  />
 </section>
