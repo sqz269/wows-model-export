@@ -123,11 +123,21 @@ def main(argv: list[str] | None = None) -> int:
         import os
 
         os.environ["WOWS_WORKSPACE"] = str(cfg.workspace)
+        # Watch the wows_model_export package directory so edits to
+        # routes / composers reload the running server. Default
+        # ``reload_dirs`` is the CWD, which under ``npm run dev`` is
+        # ``webview/`` — that misses every Python file. Compute the
+        # package root from this module's own path so the watcher
+        # tracks the installed/editable source on disk.
+        import wows_model_export
+
+        pkg_root = Path(wows_model_export.__file__).resolve().parent
         uvicorn.run(
             "wows_model_export.server.main:_app_for_reload",
             host=args.host,
             port=args.port,
             reload=True,
+            reload_dirs=[str(pkg_root)],
             factory=True,
             log_level=args.log_level,
         )
