@@ -2,7 +2,7 @@
   // Tabbed read-only inspector that lives under the AccessoryViewer.
   //
   // Tabs:
-  //   - Files       : GLB / dead GLB / textures / textures_dds paths
+  //   - Files       : GLB / dead GLB / textures_dds paths
   //   - LODs        : LOD breakdown table
   //   - Winding     : audit numbers + heuristic tooltip
   //   - Rig         : pivots verdict chip + per-barrel distances + warnings
@@ -282,14 +282,6 @@
             </dd>
           {/if}
           <dt>Textures</dt>
-          <dd>
-            {#if asset.textures}
-              <code>{asset.textures}</code>
-            {:else}
-              <span class="text-muted-foreground">(none)</span>
-            {/if}
-          </dd>
-          <dt>Textures (DDS)</dt>
           <dd>
             {#if asset.textures_dds}
               <code>{asset.textures_dds}</code>

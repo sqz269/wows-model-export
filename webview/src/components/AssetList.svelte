@@ -124,7 +124,7 @@
         if (Array.isArray(paths) && paths.length > 0) return true;
       }
     }
-    return Boolean(a.textures || a.textures_dds);
+    return Boolean(a.textures_dds);
   }
 
   function patch<K extends keyof LibraryFilter>(key: K, value: LibraryFilter[K]) {

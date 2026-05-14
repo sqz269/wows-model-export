@@ -18,8 +18,8 @@ export interface LibraryAsset {
   species: string | null;
   /** Path relative to `<workspace>/libraries/accessories/`. */
   glb: string;
-  /** Directory path relative to `accessories/` (null in DDS-only mode). */
-  textures: string | null;
+  /** Directory path relative to `accessories/`, holding the raw WG DDS mip
+   *  chain. `null` when the asset has no textures on disk. */
   textures_dds: string | null;
   glb_bytes: number;
   /**
