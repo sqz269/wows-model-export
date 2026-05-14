@@ -1,26 +1,22 @@
 """Layer 3 — pure transforms.
 
-Take structured input, return structured output. No file writes, no
-subprocess. May touch disk for read-only inspection (e.g.
-`bone_orientation.glb_forward_z_sign` reads a GLB's JSON header to
-analyse vertex bounds) but produce no side effects.
+Take structured input, return structured output. No file writes (with
+two side-effecting bridge functions documented below), no subprocess.
+May touch disk for read-only inspection.
 
 Public surface — two access patterns:
 
 1. **Submodule namespaces** — for callers who want module-scoped names::
 
-       from wows_model_export.resolve import bone_orientation, skel_ext_hashes, gameparams_autofill
+       from wows_model_export.resolve import bone_orientation, skel_ext_hashes, gameparams_autofill, camo, sidecar
        sign = bone_orientation.glb_forward_z_sign(glb_path)
        res  = skel_ext_hashes.resolve_candidates(candidates, table=tbl)
        swap = gameparams_autofill.resolve_variant_accessory_swaps(ship, exterior)
+       cats = camo.categories_for_entry(entry, ...)
+       doc  = sidecar.read(path)
 
-2. **Specific symbols** flattened — for distinctive names::
-
-       from wows_model_export.resolve import (
-           glb_forward_z_sign, post_multiply_ry180,
-           murmur3_32, resolve_candidates,
-           resolve_variant_accessory_swaps, autofill_for_hp,
-       )
+2. **Specific symbols** flattened — for distinctive names. See
+   ``__all__`` for the full list.
 
 Lifted modules so far:
 
@@ -30,18 +26,66 @@ Lifted modules so far:
                            (from skel_ext_hashes.py)
     gameparams_autofill  — GameParams entity transforms for sidecar
                            autofill passes (from gameparams.py)
+    camo                 — WG camo pipeline + CamouflageDb parser +
+                           sidecar adapters (from wg_camo.py). Two
+                           bridge functions cross to toolkit.extract
+                           for VFS-extraction of masks/atlases — they
+                           are the necessary side-effecting bridge for
+                           the otherwise-pure adapter family.
+    sidecar              — sidecar schema authority — every make_*
+                           constructor, absorb_* pass, mutating
+                           transform, and the GLB walkers
+                           (from tools/ship/sidecar.py). The thinnest
+                           reads/writes are re-exported via
+                           wows_model_export.read.sidecar and
+                           wows_model_export.compose.sidecar.
 """
 
 from __future__ import annotations
 
 # Submodule namespaces
-from . import bone_orientation, gameparams_autofill, skel_ext_hashes
+from . import (
+    bone_orientation,
+    camo,
+    gameparams_autofill,
+    sidecar,
+    skel_ext_hashes,
+)
 
 # bone_orientation — pure math + GLB header read
 from .bone_orientation import (
     AXIAL_THRESHOLD_M,
     glb_forward_z_sign,
     post_multiply_ry180,
+)
+
+# camo — distinctive names; generic ``load`` stays in camo namespace
+from .camo import (
+    HULL_CATEGORIES,
+    MASKS_BASE_DIR,
+    MAT_BASE_DIR,
+    TILE_BROADCAST_CATEGORIES,
+    CamoEntry,
+    CamouflageDb,
+    ColorScheme,
+    MgnParams,
+    UvTransform,
+    categories_for_entry,
+    classify_part_category,
+    display_name_for_camo_entry,
+    display_name_for_exterior,
+    ensure_camo_masks_for_entries,
+    ensure_camouflages_xml,
+    ensure_mat_camo_textures,
+    list_extracted_mips,
+    mat_textures_for_entry,
+    mat_textures_from_palette_entry,
+    mgn_params_to_json,
+    palette_for_mask_paths,
+    path_b_categories_for_entry,
+    read_universal_exteriors,
+    read_vehicle_permoflages,
+    tile_categories_for_entry,
 )
 
 # gameparams_autofill — sidecar payload synthesis
@@ -66,6 +110,52 @@ from .gameparams_autofill import (
     variants_summary,
 )
 
+# sidecar — distinctive constructor + transform names; generic ``read``
+# and ``write`` stay scoped to the submodule.
+from .sidecar import (
+    absorb_ballistics_json,
+    absorb_gameparams_armor,
+    absorb_gameparams_hitbox,
+    absorb_gameparams_mounts,
+    absorb_gameparams_ship,
+    absorb_gameparams_torpedoes,
+    absorb_gameparams_variants,
+    absorb_per_hull_placements,
+    absorb_placements_json,
+    alias_active_hull_to_top_level,
+    apply_variant_asset_swaps,
+    derive_attach_to,
+    discover_skins_from_materials,
+    geometry_and_hitbox_from_hull_glb,
+    geometry_from_hull_glb,
+    hitbox_from_hull_glb,
+    make_accessory,
+    make_antiair,
+    make_armor,
+    make_ballistics,
+    make_default_skin,
+    make_geometry,
+    make_hitbox,
+    make_hull_entry,
+    make_hull_stats,
+    make_material,
+    make_pipeline,
+    make_secondary,
+    make_shell,
+    make_ship,
+    make_skin,
+    make_torpedo,
+    make_torpedo_profile,
+    make_turret,
+    make_variants,
+    materials_from_glb,
+    merge_preserving,
+    new_document,
+    new_document_from_placements,
+    ship_from_placements,
+    texture_sets_from_dir,
+)
+
 # skel_ext_hashes — hash builder + p0_hash → asset_id resolver
 from .skel_ext_hashes import (
     build_table,
@@ -81,12 +171,40 @@ from .skel_ext_hashes import (
 __all__ = [
     # Submodules
     "bone_orientation",
+    "camo",
     "gameparams_autofill",
+    "sidecar",
     "skel_ext_hashes",
     # bone_orientation
     "glb_forward_z_sign",
     "post_multiply_ry180",
     "AXIAL_THRESHOLD_M",
+    # camo
+    "CamouflageDb",
+    "CamoEntry",
+    "ColorScheme",
+    "MgnParams",
+    "UvTransform",
+    "categories_for_entry",
+    "classify_part_category",
+    "display_name_for_camo_entry",
+    "display_name_for_exterior",
+    "ensure_camo_masks_for_entries",
+    "ensure_camouflages_xml",
+    "ensure_mat_camo_textures",
+    "list_extracted_mips",
+    "mat_textures_for_entry",
+    "mat_textures_from_palette_entry",
+    "mgn_params_to_json",
+    "palette_for_mask_paths",
+    "path_b_categories_for_entry",
+    "read_universal_exteriors",
+    "read_vehicle_permoflages",
+    "tile_categories_for_entry",
+    "HULL_CATEGORIES",
+    "MASKS_BASE_DIR",
+    "MAT_BASE_DIR",
+    "TILE_BROADCAST_CATEGORIES",
     # gameparams_autofill
     "autofill_for_hp",
     "class_from_caliber",
@@ -106,6 +224,48 @@ __all__ = [
     "torpedo_profile_extras",
     "torpedo_visual_extras",
     "variants_summary",
+    # sidecar
+    "absorb_ballistics_json",
+    "absorb_gameparams_armor",
+    "absorb_gameparams_hitbox",
+    "absorb_gameparams_mounts",
+    "absorb_gameparams_ship",
+    "absorb_gameparams_torpedoes",
+    "absorb_gameparams_variants",
+    "absorb_per_hull_placements",
+    "absorb_placements_json",
+    "alias_active_hull_to_top_level",
+    "apply_variant_asset_swaps",
+    "derive_attach_to",
+    "discover_skins_from_materials",
+    "geometry_and_hitbox_from_hull_glb",
+    "geometry_from_hull_glb",
+    "hitbox_from_hull_glb",
+    "make_accessory",
+    "make_antiair",
+    "make_armor",
+    "make_ballistics",
+    "make_default_skin",
+    "make_geometry",
+    "make_hitbox",
+    "make_hull_entry",
+    "make_hull_stats",
+    "make_material",
+    "make_pipeline",
+    "make_secondary",
+    "make_shell",
+    "make_ship",
+    "make_skin",
+    "make_torpedo",
+    "make_torpedo_profile",
+    "make_turret",
+    "make_variants",
+    "materials_from_glb",
+    "merge_preserving",
+    "new_document",
+    "new_document_from_placements",
+    "ship_from_placements",
+    "texture_sets_from_dir",
     # skel_ext_hashes
     "build_table",
     "extract_placement_strings",
