@@ -159,4 +159,4 @@ the Python package layout is documented at the top of
 
 ## License
 
-TBD before public release.
+MIT
