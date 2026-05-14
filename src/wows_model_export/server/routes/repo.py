@@ -17,6 +17,16 @@ Range support: Starlette's :class:`FileResponse` (which we use) honours
 the ``Range`` request header automatically — large GLBs stream chunked
 without extra plumbing. The Node version did not; this is a small but
 welcome improvement.
+
+Cache policy: DDS / GLB / sidecar JSON files in the workspace are
+immutable per-extraction. We send ``Cache-Control: public, max-age=300``
+on binary payloads (DDS, GLB) so the browser can serve repeated reads
+out of memory cache without a revalidation round-trip — meaningful when
+a ship has 100+ DDS files and the user toggles textures on/off. JSON
+artifacts (sidecar, accessory index) keep ``no-cache`` so re-extractions
+in the same session surface promptly. A hard reload (Ctrl+Shift+R)
+clears the binary cache if the user wants to see freshly re-extracted
+textures within the 5-minute window.
 """
 
 from __future__ import annotations
@@ -25,7 +35,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from fastapi import APIRouter
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from starlette.requests import Request
 
 from ...config import PipelineConfig
@@ -44,9 +54,23 @@ MIME: dict[str, str] = {
     ".bin": "application/octet-stream",
 }
 
+# Suffixes whose payload is content-addressed by the extraction pipeline
+# (writing them is the only way they change) — safe to cache aggressively
+# in the browser. JSON artifacts fall through to the conservative default
+# because the accessory library index is rewritten when new ships land.
+_CACHEABLE_SUFFIXES = frozenset(
+    {".dds", ".dd0", ".dd1", ".dd2", ".glb", ".gltf", ".bin", ".png", ".jpg", ".jpeg"}
+)
+
 
 def _mime_for(p: Path) -> str:
     return MIME.get(p.suffix.lower(), "application/octet-stream")
+
+
+def _cache_control_for(p: Path) -> str:
+    if p.suffix.lower() in _CACHEABLE_SUFFIXES:
+        return "public, max-age=300"
+    return "no-cache"
 
 
 def make_router(config: PipelineConfig) -> APIRouter:
@@ -84,7 +108,7 @@ def make_router(config: PipelineConfig) -> APIRouter:
         return FileResponse(
             path=str(abs_path),
             media_type=_mime_for(abs_path),
-            headers={"Cache-Control": "no-cache"},
+            headers={"Cache-Control": _cache_control_for(abs_path)},
         )
 
     return router

@@ -11,7 +11,6 @@
 
 import type * as THREE from 'three';
 import { loadDdsMipChain, resolveDdsMipUrls } from '$lib/dds';
-import type { DDSLoader } from '$lib/dds';
 import type { Skin } from '$lib/types';
 
 export class CategoryMaskCache {
@@ -19,7 +18,6 @@ export class CategoryMaskCache {
 
   constructor(
     private renderer: THREE.WebGLRenderer,
-    private ddsLoader: DDSLoader,
     private repoBaseUrl: string,
   ) {}
 
@@ -33,7 +31,7 @@ export class CategoryMaskCache {
 
     const urls = resolveDdsMipUrls(mask.dds_mips, this.repoBaseUrl);
     if (urls.length === 0) return null;
-    const tex = await loadDdsMipChain(urls, /* sRGB */ true, this.ddsLoader, this.renderer);
+    const tex = await loadDdsMipChain(urls, /* sRGB */ true, this.renderer);
     if (!tex) return null;
     this.cache.set(cacheKey, tex);
     return tex;
@@ -68,7 +66,6 @@ export class MatAlbedoCache {
 
   constructor(
     private renderer: THREE.WebGLRenderer,
-    private ddsLoader: DDSLoader,
     private repoBaseUrl: string,
   ) {}
 
@@ -82,7 +79,7 @@ export class MatAlbedoCache {
     const urls = resolveDdsMipUrls(albedo.dds_mips, this.repoBaseUrl);
     if (urls.length === 0) return null;
     // sRGB=true: mat_*_a.dds files are albedos (color textures).
-    const tex = await loadDdsMipChain(urls, /* sRGB */ true, this.ddsLoader, this.renderer);
+    const tex = await loadDdsMipChain(urls, /* sRGB */ true, this.renderer);
     if (!tex) return null;
     this.cache.set(cacheKey, tex);
     return tex;

@@ -18,7 +18,7 @@
 // already-bound schemes via `schemesByKey`. Same key from both sides.
 
 import type * as THREE from 'three';
-import { DDSLoader, resolveDdsMipUrls } from '$lib/dds';
+import { resolveDdsMipUrls } from '$lib/dds';
 import { classifyPartCategory, classifyPlacementCategory } from '$lib/types';
 import type { ShipPlacement, Skin, SidecarDoc, SidecarTextureScheme, TextureSet } from '$lib/types';
 import { dummyMaskTexture, dummyMatAlbedoTexture, uniformsOf } from '../camo';
@@ -56,7 +56,6 @@ export interface TextureManagerInit {
 
 export class TextureManager {
   private renderer: THREE.WebGLRenderer;
-  private ddsLoader = new DDSLoader();
   private repoBaseUrl: string;
 
   private entries: TextureMeshEntry[] = [];
@@ -86,9 +85,9 @@ export class TextureManager {
     this.renderer = init.renderer;
     this.hooks = init;
     this.repoBaseUrl = new URL('/repo/', window.location.origin).toString();
-    this.decodedCache = new DecodedTextureCache(this.renderer, this.ddsLoader);
-    this.categoryMaskCache = new CategoryMaskCache(this.renderer, this.ddsLoader, this.repoBaseUrl);
-    this.matAlbedoCache = new MatAlbedoCache(this.renderer, this.ddsLoader, this.repoBaseUrl);
+    this.decodedCache = new DecodedTextureCache(this.renderer);
+    this.categoryMaskCache = new CategoryMaskCache(this.renderer, this.repoBaseUrl);
+    this.matAlbedoCache = new MatAlbedoCache(this.renderer, this.repoBaseUrl);
   }
 
   // ── Bind index ────────────────────────────────────────────────────
