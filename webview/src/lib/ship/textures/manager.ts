@@ -336,6 +336,19 @@ export class TextureManager {
     onProgress?.(`Textures: ${this.decodedCache.size} DDS files decoded`);
   }
 
+  /**
+   * Pick a scheme key without going through the skin table. Used by the
+   * library viewer's dead-variant toggle — there's no per-skin overlay to
+   * apply, just a different texture set in `texture_sets.<key>`. No-op for
+   * the ship page (which routes through `setActiveSkin`).
+   *
+   * Effect deferred to the next `setShowTextures` / `applyTextureState`;
+   * call before flipping textures on.
+   */
+  setActiveSchemeKey(key: string): void {
+    this.activeSchemeKey = key;
+  }
+
   async setActiveSkin(skinId: string, onProgress?: (msg: string) => void): Promise<void> {
     const skin = this.skinTable.get(skinId) ?? null;
     const schemeKey = skin?.scheme_key ?? 'main';

@@ -40,10 +40,16 @@ export interface LoadResult {
  * Library-asset context for a textured render. When passed, the viewer
  * wires the asset's texture sets into the TextureManager and triggers a
  * texture-on render. Omit for untextured-only previews.
+ *
+ * `variant` picks the scheme key inside `texture_sets` — `'main'` for the
+ * intact GLB, `'dead'` when the destroyed-variant GLB is loaded. Missing
+ * slots fall back to `main` inside the manager, so a partial dead scheme
+ * (e.g. only baseColor overridden) still renders correctly.
  */
 export interface LibraryContext {
   assetId: string;
   asset: LibraryAsset;
+  variant?: 'main' | 'dead';
 }
 
 interface TrackedMesh {
@@ -157,7 +163,11 @@ export class AccessoryViewer {
     this.bounds = new THREE.Box3().setFromObject(r);
     this.frame();
 
-    if (lib && this.texturesOn) {
+    if (lib) {
+      // Register + bind on every load regardless of `texturesOn` — the
+      // `disposeRoot` above clears the manager's entries, and a later
+      // `setShowTextures(true)` would otherwise find nothing to texture.
+      // The final flip-on is gated inside `applyLibraryTextures`.
       await this.applyLibraryTextures(lib);
     }
 
@@ -273,7 +283,11 @@ export class AccessoryViewer {
     // Empty `hullBaseUrl` is unused on this path (texture paths inside
     // libEntry resolve against the libEntry.glb location).
     this.textures.bindLibraryAsset(lib.assetId, lib.asset, null, '');
-    await this.textures.setShowTextures(true);
+    this.textures.setActiveSchemeKey(lib.variant ?? 'main');
+    // Flip textures on only when the user wants them — registration
+    // above survives across toggles so a later setShowTextures(true)
+    // finds populated entries.
+    if (this.texturesOn) await this.textures.setShowTextures(true);
   }
 
   private disposeRoot(): void {

@@ -42,10 +42,15 @@
 
   // Library context for the TextureManager. Same `asset` object the
   // page already has — passing it makes the viewer apply the DDS texture
-  // pipeline on load. Reactive: a change to `asset` (rare; only when the
-  // index refetches) re-triggers texture binding via the child's
-  // load effect.
-  const libContext = $derived({ assetId: id, asset });
+  // pipeline on load. `variant` mirrors `showingDead` so the manager
+  // picks `texture_sets.dead` (when present) over `main` for the dead
+  // GLB — without it the dead geometry would render with the intact
+  // albedo. The child reloads on `lib` change via its load effect.
+  const libContext = $derived({
+    assetId: id,
+    asset,
+    variant: (showingDead && asset.glb_dead ? 'dead' : 'main') as 'main' | 'dead',
+  });
 
   // Reset side state whenever the asset changes — different assets have
   // different LOD layouts, mesh counts, and dead variants.

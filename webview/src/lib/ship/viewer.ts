@@ -284,12 +284,19 @@ export class ShipViewer {
         if (res.ok) {
           sidecar = (await res.json()) as SidecarDoc;
           this.textures.bindHullMaterials(sidecar, hullBaseUrl);
-          this.textures.setSkinTable(sidecar.skins ?? []);
         }
       } catch (err) {
         console.warn('[ship] sidecar fetch failed:', err);
       }
     }
+    // Always populate a skin table — synthesize the legacy default skin
+    // when the sidecar is missing or empty. Keeps the active scheme key
+    // pinned to `main` and gives callers iterating `getSkins()` at least
+    // one entry (matches the pre-refactor behaviour).
+    const skins: Skin[] = sidecar?.skins?.length
+      ? sidecar.skins
+      : [{ skin_id: 'default', display_name: 'Standard', scheme_key: 'main', overrides: [] }];
+    this.textures.setSkinTable(skins);
 
     report('Loading placements…');
     const placementsRes = await fetch(repoUrl(ship.accessories_json));
