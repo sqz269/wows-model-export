@@ -82,6 +82,7 @@ def apply_variant_asset_swaps(
     swaps: dict[str, Any],
     *,
     library_root: Path | None = None,
+    base_aid_by_hp: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], int, set[str]]:
     """Rewrite ``asset_id`` / ``dead_asset_id`` / ``misc_filter`` on every
     placement using a swap table from
@@ -129,6 +130,19 @@ def apply_variant_asset_swaps(
     (back-compat for callers that don't have the library on disk —
     in that case any bone-mismatched swaps render 180° wrong, same
     as pre-2026-05-09 behaviour).
+
+    ``base_aid_by_hp`` is a per-HP map of the BASE vehicle's
+    ``hp_name → asset_id`` (i.e. the pre-swap aids that the toolkit
+    emits into ``<Ship>_placements.json``). It feeds the re-run heal
+    path for variants whose swaps are encoded as ``by_hp_name`` only
+    (Azur Lane / ARP / Sabaton nodesConfig pattern — empty
+    ``by_asset_id``). On a re-scaffold where ``<Ship>_accessories.json``
+    already carries the swapped aid (e.g. ``AGM622``) but is missing
+    the ``attached_y_flip`` stamp, the existing heal path's reverse
+    lookup over ``by_asset_id.items()`` finds nothing, so the
+    Ry(180°) correction silently no-ops and the turret keeps
+    rendering 180° off. Passing ``base_aid_by_hp`` lets the heal
+    path recover the source aid via the placement's ``hp_name``.
 
     No-op if ``swaps`` is empty. Hand-authored ``asset_id`` values that
     don't match any swap key pass through untouched. ``display_name``
@@ -312,31 +326,62 @@ def apply_variant_asset_swaps(
 
             # Re-run heal detection: when a prior scaffold already
             # rewrote ``asset_id`` to the variant (so ``aid`` is now
-            # the swap-target value, not a key in by_asset_id) but the
-            # Ry(180°) correction never landed because the variant GLB
-            # wasn't on disk yet (typical on a first ingest where
-            # build_accessory_library runs after scaffold), the
-            # placement's ``attached_y_flip`` flag will be absent. We
-            # reverse-lookup the source via ``by_asset_id``'s values
-            # so the bone-mismatch gate below can re-check the swap
-            # pair and apply the correction now. Gated on
-            # ``library_root`` because that's where the bone signs
-            # come from. Skipped when the placement is already flagged.
-            # This is what lets ``<Ship>_accessories.json`` self-heal
-            # on a re-scaffold post-library-build — the webview reads
-            # accessories.json directly, so the broken matrix sticks
-            # until this heal fires.
+            # the swap-target value) but the Ry(180°) correction never
+            # landed because the variant GLB wasn't on disk yet
+            # (typical on a first ingest where build_accessory_library
+            # runs after scaffold), the placement's ``attached_y_flip``
+            # flag will be absent. Recover the source aid so the
+            # bone-mismatch gate below can re-check the swap pair and
+            # apply the correction now. Gated on ``library_root``
+            # because that's where the bone signs come from. Skipped
+            # when the placement is already flagged. This is what lets
+            # ``<Ship>_accessories.json`` self-heal on a re-scaffold
+            # post-library-build — the webview reads accessories.json
+            # directly, so the broken matrix sticks until this heal
+            # fires.
+            #
+            # Two recovery paths feed ``inferred_source_aid``:
+            #
+            # (1) ``by_asset_id`` reverse-lookup — for variants whose
+            #     Exterior populates peculiarityModels (ARP Blue, Black
+            #     Friday, Sabaton, etc.). Source = the by_asset_id key
+            #     whose value equals the current (already-swapped) aid.
+            #
+            # (2) ``by_hp_name`` fallback — for variants whose Exterior
+            #     encodes per-HP swaps in nodesConfig WITHOUT populating
+            #     peculiarityModels (Azur Lane / ARP nodesConfig-only
+            #     pattern; their ``by_asset_id`` is empty, so path 1
+            #     finds nothing). Source = ``base_aid_by_hp[hp]`` —
+            #     the BASE vehicle's aid at this HP, supplied by the
+            #     caller from the toolkit's raw placements JSON.
+            #
+            # Path 2 also handles the by_hp_name FRESH case where
+            # ``aid == new_aid`` (placement was swapped on a prior run,
+            # the per-HP lookup above re-resolved ``new_aid`` to the
+            # same value, so the ``aid != new_aid`` gate further down
+            # doesn't fire). Without it the heal would skip and the
+            # matrix would never get Ry(180°)-corrected.
             inferred_source_aid: str | None = None
             if (
-                new_aid is None
-                and library_root is not None
+                library_root is not None
                 and isinstance(aid, str)
                 and not p.get("attached_y_flip")
+                and (new_aid is None or new_aid == aid)
             ):
                 for base, variant in by_asset_id.items():
                     if variant == aid and base != aid:
                         inferred_source_aid = base
                         break
+                if (
+                    inferred_source_aid is None
+                    and base_aid_by_hp is not None
+                    and isinstance(hp, str)
+                    and hp in by_hp_name
+                    and by_hp_name[hp] == aid
+                ):
+                    base_for_hp = base_aid_by_hp.get(hp)
+                    if isinstance(base_for_hp, str) and base_for_hp != aid:
+                        inferred_source_aid = base_for_hp
 
             if (
                 new_aid is None

@@ -1600,8 +1600,28 @@ def scaffold_ship(
         if has_swaps:
             # Library root: under workspace/libraries/accessories.
             _accessory_lib_root = workspace / "libraries" / "accessories"
+            # Build the BASE vehicle's ``hp_name → asset_id`` map from the
+            # raw placements_json (pre-swap aids). Feeds the by_hp_name
+            # heal fallback in apply_variant_asset_swaps so a re-scaffold
+            # against an already-swapped accessories.json can still
+            # recover the source aid and land the Ry(180°) correction
+            # for Azur/ARP nodesConfig-only variants (whose swap table
+            # has empty by_asset_id). Without this map, ships like
+            # Baltimore_Azur silently render their turrets 180° off on
+            # re-scaffold.
+            _base_aid_by_hp: dict[str, str] = {}
+            for _section in sidecar.PLACEMENT_SECTIONS:
+                for _entry in _pl_swap.get(_section) or []:
+                    if not isinstance(_entry, dict):
+                        continue
+                    _hp = _entry.get("hp_name")
+                    _aid = _entry.get("asset_id")
+                    if isinstance(_hp, str) and isinstance(_aid, str):
+                        _base_aid_by_hp[_hp] = _aid
             doc, n_swapped, unused_keys = sidecar.apply_variant_asset_swaps(
-                doc, swaps, library_root=_accessory_lib_root,
+                doc, swaps,
+                library_root=_accessory_lib_root,
+                base_aid_by_hp=_base_aid_by_hp,
             )
             variant_asset_set: set[str] = set()
             for vv in (swaps.get("by_asset_id") or {}).values():
@@ -1629,7 +1649,9 @@ def scaffold_ship(
                         acc_doc = json.loads(_af.read().decode("utf-8"))
                     swapped_acc, n_acc_swapped, _unused_acc = (
                         sidecar.apply_variant_asset_swaps(
-                            acc_doc, swaps, library_root=_accessory_lib_root,
+                            acc_doc, swaps,
+                            library_root=_accessory_lib_root,
+                            base_aid_by_hp=_base_aid_by_hp,
                         )
                     )
                     if n_acc_swapped:
