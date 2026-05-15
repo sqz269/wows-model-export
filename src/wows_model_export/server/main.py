@@ -2,14 +2,16 @@
 
 ``create_app(config)`` wires the routers (``/api/library``, ``/api/ships``,
 ``/api/gameparams/status``, ``/api/extract/*``, ``/repo/*``) onto a fresh
-:class:`fastapi.FastAPI` instance. The CLI entry point at
+:class:`fastapi.FastAPI` instance, then mounts the bundled Svelte UI at
+``/`` (see :mod:`.static`). The CLI entry point at
 :mod:`wows_model_export.cli.webview_serve` resolves a
 :class:`PipelineConfig` from env + ``--workspace`` and hands it in here.
 
 The Svelte client treats this backend identically to the legacy Node
-middleware — same routes, same response shapes. The only client-side
-change to ship together with this module is the Vite proxy config in
-``webview/vite.config.ts``.
+middleware — same routes, same response shapes. In production
+(``wows-webview-serve`` against the bundled UI) the same FastAPI process
+serves the SPA static files; in development the Vite dev server hosts
+the UI itself and proxies ``/api/*`` + ``/repo/*`` here.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from .routes import (
     ships,
     winding,
 )
+from .static import mount_webview
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +86,13 @@ def create_app(config: PipelineConfig) -> FastAPI:
     # /repo/* static workspace file service. Mounted at /repo so the
     # path parameter captures the remainder.
     app.include_router(repo.make_router(config), prefix="/repo")
+
+    # Svelte SPA at /. MUST be registered after the API + /repo routers
+    # so those keep precedence — see static.mount_webview docstring for
+    # the SPA-fallback semantics. Missing bundle is a soft failure
+    # (logs a warning, serves API only) so dev workflows that rely on
+    # `npm run dev`'s Vite proxy are unaffected.
+    mount_webview(app)
 
     return app
 
