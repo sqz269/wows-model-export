@@ -1,0 +1,166 @@
+# Release workflow — builds the Windows single-file webview exe and
+# attaches it to a GitHub Release on tag push.
+#
+# End-state UX (the whole reason this workflow exists):
+#   maintainer pushes a tag like ``v0.1.0a1``
+#     → this workflow runs on a windows-latest runner
+#     → builds the Svelte frontend, installs the package, runs PyInstaller
+#     → uploads ``wows-model-export-webview.exe`` as a workflow artifact
+#     → if the trigger was a tag, also publishes a GitHub Release with
+#       the exe attached, so end-users can download + double-click
+#
+# Triggers:
+#   - push of ``v*`` tags (the actual release path)
+#   - manual ``workflow_dispatch`` (for one-off binaries / CI smoke tests)
+#
+# We pin every action to a major version so re-tagged compromises don't
+# silently flow in. Bump intentionally when a new major lands.
+#
+# Assumptions about parallel agent work:
+#   - The webview static-serving agent puts the built Svelte bundle at
+#     ``src/wows_model_export/_static/webview/``. The PyInstaller spec
+#     bundles that path into the exe. If they pick a different layout,
+#     update both ``pyinstaller/wows-webview.spec`` AND the smoke-test
+#     step below.
+#   - The scipy → numpy KD-tree agent removes scipy from runtime deps;
+#     no change needed here.
+#   - ``wowsunpack.exe`` (Rust binary, separate fork) is NOT vendored —
+#     end-users build it themselves and the webview locates it via env
+#     var / user-config / PATH at runtime.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  # softprops/action-gh-release needs ``contents: write`` to create
+  # / edit a release. Everything else is read-only by default.
+  contents: write
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Matches ``requires-python = ">=3.11"`` in pyproject.toml.
+          # Pin to 3.11 (the floor) so the exe runs on every supported
+          # interpreter version without needing forward-compat shims.
+          python-version: "3.11"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: webview/package-lock.json
+
+      - name: Build webview
+        # ``npm ci`` (not ``install``) for reproducible builds — uses
+        # package-lock.json verbatim, fails on drift. ``npm run build``
+        # writes ``webview/dist/``; the static-serving agent's package
+        # data step picks that up and copies it under
+        # ``src/wows_model_export/_static/webview/`` so PyInstaller
+        # finds it via the spec's ``datas=`` entry.
+        working-directory: webview
+        run: |
+          npm ci
+          npm run build
+
+      - name: Stage webview bundle into package data
+        # Mirrors what the webview static-serving agent's package-data
+        # build step does (assumed location:
+        # ``src/wows_model_export/_static/webview/``). Once that agent's
+        # branch is merged + does this copy itself, drop this step.
+        # Until then, this keeps the spec working end-to-end on CI.
+        shell: pwsh
+        run: |
+          $dest = "src/wows_model_export/_static/webview"
+          if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Force -Path $dest | Out-Null }
+          Copy-Item -Recurse -Force webview/dist/* $dest
+
+      - name: Install package + PyInstaller
+        # Editable install is fine here — PyInstaller follows imports
+        # regardless of install mode, and the wheel/sdist build path
+        # would just add CI minutes for no functional difference. Use
+        # the ``[webview]`` extra so fastapi + uvicorn end up in the
+        # frozen bundle.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[webview]"
+          python -m pip install pyinstaller
+
+      - name: Build single-file exe
+        # The spec file does the heavy lifting (entry, datas, hidden
+        # imports, --onefile, console=True, no UPX). Output lands at
+        # ``dist/wows-model-export-webview.exe``.
+        run: pyinstaller pyinstaller/wows-webview.spec --noconfirm
+
+      - name: Smoke test exe (--help)
+        # Cheapest sanity check that doesn't require a real workspace.
+        # If this fails the bundle is dead on arrival; bail before we
+        # waste time on the HTTP smoke test.
+        shell: pwsh
+        run: ./dist/wows-model-export-webview.exe --help
+
+      - name: Smoke test exe (HTTP)
+        # Boot the exe in the background, hit ``/api/openapi.json`` (an
+        # always-200 endpoint that doesn't depend on workspace state),
+        # then kill it. If this proves flaky on Windows runners we'll
+        # downgrade to a pure file-existence check — see the inline
+        # comment.
+        shell: pwsh
+        run: |
+          $exe = "./dist/wows-model-export-webview.exe"
+          if (-not (Test-Path $exe)) { throw "exe not built" }
+          $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
+          try {
+            # First-run extraction tax: --onefile unpacks to %TEMP% on
+            # boot. Give it a generous window before declaring failure.
+            $deadline = (Get-Date).AddSeconds(45)
+            $ok = $false
+            while ((Get-Date) -lt $deadline) {
+              try {
+                $r = Invoke-WebRequest "http://127.0.0.1:5180/api/openapi.json" -UseBasicParsing -TimeoutSec 2
+                if ($r.StatusCode -eq 200) { $ok = $true; break }
+              } catch { Start-Sleep -Milliseconds 500 }
+            }
+            if (-not $ok) { throw "exe failed to serve /api/openapi.json within 45s" }
+            Write-Host "smoke test passed"
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+          }
+
+      - name: Upload exe as workflow artifact
+        # Always upload, even on workflow_dispatch / non-tag pushes —
+        # the artifact is useful for ad-hoc QA and tag-less prereleases.
+        # Retention defaults to 90 days.
+        uses: actions/upload-artifact@v4
+        with:
+          name: wows-model-export-webview-windows
+          path: dist/wows-model-export-webview.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        # Only fires on tag push (the dispatch path produces an
+        # artifact but no release). softprops/action-gh-release picks
+        # up the tag from GITHUB_REF and creates / updates the
+        # corresponding release.
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/wows-model-export-webview.exe
+          # Mark alpha/beta/rc tags as prereleases so they don't show
+          # up as "latest" on the Releases page.
+          prerelease: ${{ contains(github.ref_name, 'a') || contains(github.ref_name, 'b') || contains(github.ref_name, 'rc') }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true

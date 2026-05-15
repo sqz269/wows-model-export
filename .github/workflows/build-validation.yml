@@ -1,0 +1,87 @@
+# Build-validation workflow — catches packaging regressions early on
+# every push / PR that touches packaging-relevant files.
+#
+# Mirrors ``release.yml`` through the PyInstaller step but skips the
+# artifact upload + release publish. Existing for ONE reason: catching
+# "the build broke" *before* a release tag, when there's still time to
+# fix it without re-cutting a tag.
+#
+# Path filter keeps this off pure docs / unrelated source changes — the
+# ``-e .`` install + PyInstaller pass eats ~3-5 minutes of runner time
+# on Windows, so we don't want to run it on every README typo.
+
+name: build-validation
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "pyproject.toml"
+      - "src/**"
+      - "webview/**"
+      - "pyinstaller/**"
+      - ".github/workflows/build-validation.yml"
+      - ".github/workflows/release.yml"
+  pull_request:
+    paths:
+      - "pyproject.toml"
+      - "src/**"
+      - "webview/**"
+      - "pyinstaller/**"
+      - ".github/workflows/build-validation.yml"
+      - ".github/workflows/release.yml"
+
+jobs:
+  validate-windows-build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: webview/package-lock.json
+
+      - name: Build webview
+        working-directory: webview
+        run: |
+          npm ci
+          npm run build
+
+      - name: Stage webview bundle into package data
+        # Same workaround as release.yml — drop once the static-serving
+        # agent's branch lands and does this copy itself.
+        shell: pwsh
+        run: |
+          $dest = "src/wows_model_export/_static/webview"
+          if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Force -Path $dest | Out-Null }
+          Copy-Item -Recurse -Force webview/dist/* $dest
+
+      - name: Install package + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[webview]"
+          python -m pip install pyinstaller
+
+      - name: Build single-file exe
+        run: pyinstaller pyinstaller/wows-webview.spec --noconfirm
+
+      - name: Verify exe exists and runs
+        # Cheaper than the full HTTP smoke test from release.yml — we
+        # just want to know the bundle didn't break, not that every
+        # route works.
+        shell: pwsh
+        run: |
+          $exe = "./dist/wows-model-export-webview.exe"
+          if (-not (Test-Path $exe)) { throw "exe not built" }
+          if ((Get-Item $exe).Length -lt 10MB) { throw "exe suspiciously small" }
+          ./dist/wows-model-export-webview.exe --help
