@@ -14,7 +14,7 @@
   // gameparams.json); subsequent calls hit the per-process Python
   // cache and feel instant.
 
-  import { onMount } from 'svelte';
+  import { toast } from 'svelte-sonner';
   import { navigate } from '$lib/router';
   import { navState } from '$lib/nav_state.svelte';
   import {
@@ -36,7 +36,7 @@
     entityId: string | null;
     active: boolean;
   }
-  const { entityId, active: _active }: Props = $props();
+  const { entityId, active }: Props = $props();
 
   // Filter state.
   let typeHistogram = $state<GameParamTypeHistogram | null>(null);
@@ -131,20 +131,60 @@
     void refreshList();
   }
 
-  onMount(async () => {
+  // Deferred initial load: the backend's `/types` endpoint triggers a
+  // ~10 s synchronous parse of the multi-GB gameparams.json that holds
+  // the Python GIL the whole time, starving every other API request.
+  // App.svelte mounts every route at startup (display:none for inactive
+  // ones), so firing the fetch in onMount would block the *actually
+  // visible* page on first app load. Wait until the user navigates here.
+  let initialLoadStarted = false;
+  let initialLoadInFlight = $state(false);
+  let initialLoadElapsedSec = $state(0);
+  $effect(() => {
+    if (!active || initialLoadStarted) return;
+    initialLoadStarted = true;
+    void runInitialLoad();
+  });
+
+  async function runInitialLoad(): Promise<void> {
+    initialLoadInFlight = true;
+    initialLoadElapsedSec = 0;
+    const start = performance.now();
+    const tick = window.setInterval(() => {
+      initialLoadElapsedSec = Math.floor((performance.now() - start) / 1000);
+    }, 250);
+    // Sticky toast (visible from any page) so users who navigate away
+    // mid-load understand why their next action might stall — the GIL
+    // hold during gameparams.json parse blocks every API request.
+    // `toast.promise` handles the loading→success/error lifecycle in
+    // one call, which renders more reliably than the separate
+    // `toast.loading` + `toast.success` (id-handoff) pattern.
+    const gpPromise = fetchGameParamTypes();
+    toast.promise(gpPromise, {
+      loading:
+        'Loading GameParams cache (~10 s) — other API requests will stall',
+      success: (data) =>
+        `GameParams ready: ${data.total.toLocaleString()} entities`,
+      error: (err: unknown) =>
+        `Failed to load GameParams: ${err instanceof Error ? err.message : String(err)}`,
+      duration: 4000,
+    });
     try {
-      typeHistogram = await fetchGameParamTypes();
-      // Pick a sensible default type — Ship is what users will look at
-      // most often; fall back to the first key when not present.
+      typeHistogram = await gpPromise;
+      // Pick a sensible default type — Ship is what users look at most
+      // often; fall back to the first key when not present.
       if (typeHistogram && !typeHistogram.counts[selectedType]) {
         const first = Object.keys(typeHistogram.counts).sort()[0];
         if (first) selectedType = first;
       }
     } catch (err) {
       listError = err instanceof Error ? err.message : String(err);
+    } finally {
+      window.clearInterval(tick);
+      initialLoadInFlight = false;
     }
     await refreshList();
-  });
+  }
 
   // Type histogram sorted by count desc for the dropdown.
   const typeOptions = $derived.by(() => {
@@ -172,8 +212,16 @@
         <div class="text-muted-foreground mt-1 text-[11px] tabular-nums">
           {listResult?.total ?? '?'} / {typeHistogram.total} entities
         </div>
+      {:else if initialLoadInFlight}
+        <div class="text-muted-foreground mt-1 flex items-center gap-1.5 text-[11px] tabular-nums">
+          <span
+            class="inline-block size-2 animate-pulse rounded-full bg-amber-500"
+            aria-hidden="true"
+          ></span>
+          Loading dump… {initialLoadElapsedSec}s
+        </div>
       {:else}
-        <div class="text-muted-foreground mt-1 text-[11px]">Loading dump…</div>
+        <div class="text-muted-foreground mt-1 text-[11px]">Not loaded.</div>
       {/if}
     </header>
 
@@ -203,6 +251,27 @@
       {#if listError}
         <div class="text-destructive p-3 text-xs">
           {listError}
+        </div>
+      {:else if initialLoadInFlight && !typeHistogram}
+        <!--
+          One-time initial cache load. This is the dominant in-page
+          signal that something is happening AND that other API calls
+          will queue behind us — the toast carries the same warning
+          for users who navigate away mid-load.
+        -->
+        <div class="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+          <span
+            class="inline-block size-3 animate-pulse rounded-full bg-amber-500"
+            aria-hidden="true"
+          ></span>
+          <div class="text-foreground text-xs font-medium tabular-nums">
+            Parsing GameParams… {initialLoadElapsedSec}s
+          </div>
+          <div class="text-muted-foreground max-w-[260px] text-[11px] leading-snug">
+            One-time per-process cache (~10 s). Other API requests
+            (ship loads, library refresh, etc.) will stall until this
+            finishes.
+          </div>
         </div>
       {:else if listLoading && !listResult}
         <div class="text-muted-foreground p-3 text-xs">Loading…</div>
