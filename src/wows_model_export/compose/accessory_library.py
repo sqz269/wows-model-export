@@ -749,26 +749,71 @@ def _audit_winding(
     apply: bool,
     margin: float = 0.10,
     warnings: list[str],
+    rebuild: bool = False,
 ) -> tuple[list[str], int]:
     """Score every GLB in the library, write ``winding_audit.json``, and
     optionally auto-flip the high-confidence inversions.
 
     Returns ``(auto_flipped_paths, applied_count)``.
+
+    With ``rebuild=False`` (default), reuses prior per-GLB entries from
+    ``winding_audit.json`` when each GLB's mtime is unchanged since the
+    score was taken (``scored_mtime`` field in the entry). Pass
+    ``rebuild=True`` to force a fresh score for every GLB.
     """
     overrides = _load_flip_overrides(library_root)
     overrides_paths: set[str] = set(overrides.keys())
+
+    # Prior-pass reuse map: rel_path -> entry. Empty when ``rebuild`` or
+    # the audit file is missing / unparseable.
+    prior_entries: dict[str, dict] = {}
+    audit_path = library_root / WINDING_AUDIT_FILENAME
+    if not rebuild and audit_path.is_file():
+        try:
+            prior_doc = json.loads(audit_path.read_text(encoding="utf-8"))
+            for e in prior_doc.get("assets") or []:
+                p = e.get("path")
+                if isinstance(p, str):
+                    prior_entries[p] = e
+        except (OSError, ValueError, json.JSONDecodeError):
+            prior_entries = {}
 
     flip_recs: list[dict] = []
     ambiguous_recs: list[dict] = []
     manual_recs: list[dict] = []
     keep_count = 0
     skipped_unscored = 0
-    scored = 0
     audit_entries: list[dict] = []
+
+    def _bucket(rec: dict) -> None:
+        nonlocal keep_count
+        if rec.get("in_overrides"):
+            manual_recs.append(rec)
+            return
+        v = rec.get("verdict")
+        if v == resolve_winding.VERDICT_FLIP:
+            flip_recs.append(rec)
+        elif v == resolve_winding.VERDICT_AMBIGUOUS:
+            ambiguous_recs.append(rec)
+        else:
+            keep_count += 1
 
     for glb_path in sorted(library_root.rglob("*.glb")):
         rel = str(glb_path.relative_to(library_root)).replace("\\", "/")
         if glb_path.parent.name != glb_path.stem:
+            continue
+        glb_mtime = glb_path.stat().st_mtime
+        prior = prior_entries.get(rel)
+        if (prior is not None
+                and isinstance(prior.get("scored_mtime"), (int, float))
+                and prior["scored_mtime"] >= glb_mtime):
+            # Reuse the prior score verbatim, but refresh ``in_overrides``
+            # since flip_overrides.json can change between runs without
+            # touching the GLB itself (recategorises into manual_recs).
+            rec = dict(prior)
+            rec["in_overrides"] = rel in overrides_paths
+            audit_entries.append(rec)
+            _bucket(rec)
             continue
         try:
             data = glb_path.read_bytes()
@@ -802,19 +847,10 @@ def _audit_winding(
             "signal_a":     round(a, 4),
             "n_prim":       score["n_prim"],
             "in_overrides": in_overrides,
+            "scored_mtime": glb_mtime,
         }
         audit_entries.append(rec)
-        scored += 1
-
-        if in_overrides:
-            manual_recs.append(rec)
-            continue
-        if verdict == resolve_winding.VERDICT_FLIP:
-            flip_recs.append(rec)
-        elif verdict == resolve_winding.VERDICT_AMBIGUOUS:
-            ambiguous_recs.append(rec)
-        else:
-            keep_count += 1
+        _bucket(rec)
 
     applied = 0
     auto_flipped: list[str] = []
@@ -845,6 +881,12 @@ def _audit_winding(
                 r["correctness"] = round(1.0 - r["correctness"], 4)
                 r["signal_b"] = round(1.0 - r["signal_b"], 4)
                 r["signal_a"] = round(1.0 - r["signal_a"], 4)
+                # Bump ``scored_mtime`` past the post-flip write so the
+                # next run reuses this entry instead of re-scoring the
+                # now-correctly-oriented GLB. The override locks the
+                # verdict at "manual" regardless, so re-scoring would be
+                # wasted work.
+                r["scored_mtime"] = glb_path.stat().st_mtime
             except Exception as e:
                 warnings.append(f"failed to flip {rel}: {e}")
         if applied:
@@ -1234,6 +1276,7 @@ def build_accessory_library(
                 lib_root,
                 index_doc=idx_doc,
                 write_sidecar=True,
+                rebuild=rebuild,
             )
             st.annotate(
                 f"{len(results)} assets classified",
@@ -1249,7 +1292,7 @@ def build_accessory_library(
         with runner.step("resolve_attachments") as st:
             try:
                 att_stats = attached_accessories_library.resolve_library(
-                    lib_root, quiet=True, config=cfg,
+                    lib_root, quiet=True, config=cfg, rebuild=rebuild,
                 )
             except Exception as e:
                 warnings.append(f"resolve_attachments first pass failed: {e}")
@@ -1283,7 +1326,7 @@ def build_accessory_library(
 
                 try:
                     att_stats2 = attached_accessories_library.resolve_library(
-                        lib_root, quiet=True, config=cfg,
+                        lib_root, quiet=True, config=cfg, rebuild=rebuild,
                     )
                     attachment_stats.update(att_stats2)
                 except Exception as e:
@@ -1334,6 +1377,7 @@ def build_accessory_library(
             flipped_paths, applied_count = _audit_winding(
                 lib_root, apply=audit_should_apply,
                 warnings=warnings,
+                rebuild=rebuild,
             )
             st.annotate(
                 f"applied={applied_count}",
@@ -1374,7 +1418,19 @@ def build_accessory_library(
             if r.key.category == "gun" and r.glb_rel_path is not None
         ]
         rigged = 0
+        skipped_fresh = 0
         for rec in gun_records:
+            out_dir = output_dir_for(lib_root, rec.key)
+            rig_path = out_dir / f"{rec.key.asset_id}.rig_pivots.json"
+            glb_path = lib_root / rec.glb_rel_path
+            # Skip when a prior pass produced the rig JSON and the source
+            # GLB hasn't been re-exported since. `rebuild=True` (or
+            # CLI --rebuild-library) bypasses the skip and forces a full
+            # re-rig pass.
+            if (not rebuild and rig_path.is_file() and glb_path.is_file()
+                    and rig_path.stat().st_mtime >= glb_path.stat().st_mtime):
+                skipped_fresh += 1
+                continue
             try:
                 _turret_autorig.autorig_asset(
                     rec.key.asset_id,
@@ -1393,7 +1449,10 @@ def build_accessory_library(
                 warnings.append(
                     f"build_rigs[{rec.key.asset_id}] unexpected error: {e}"
                 )
-        st.annotate(f"{rigged}/{len(gun_records)} gun assets rigged")
+        st.annotate(
+            f"{rigged}/{len(gun_records)} gun assets rigged "
+            f"({skipped_fresh} fresh, skipped)"
+        )
 
     assets_built = sum(1 for r in records.values() if r.glb_rel_path is not None)
     return AccessoryLibraryResult(

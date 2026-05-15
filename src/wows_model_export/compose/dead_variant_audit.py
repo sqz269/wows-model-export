@@ -165,6 +165,11 @@ class AssetResult:
     array. ``verdict`` is the human-readable classification string the
     accessory-library index propagates as ``dead_orientation`` on each
     asset entry.
+
+    The two ``scored_*_mtime`` fields are written by ``audit_library``
+    so subsequent incremental runs can reuse this row when neither GLB
+    has been re-exported. ``None`` on legacy entries (always
+    re-classified, which is safe).
     """
 
     asset_id: str
@@ -178,6 +183,8 @@ class AssetResult:
     x_class: str
     verdict: str                # human-readable verdict
     note: str = ""
+    scored_alive_mtime: float | None = None
+    scored_dead_mtime: float | None = None
 
 
 def classify_asset(asset_id: str, entry: dict, library_root: Path) -> AssetResult:
@@ -273,6 +280,78 @@ def classify_asset(asset_id: str, entry: dict, library_root: Path) -> AssetResul
     )
 
 
+def _try_reuse_prior(
+    asset_id: str,
+    entry: dict,
+    prior_by_id: dict[str, dict],
+    library_root: Path,
+) -> AssetResult | None:
+    """Return a reconstructed AssetResult when the prior audit row is
+    fresh against the current alive + dead GLBs, else ``None``.
+
+    Freshness rules:
+      * The prior entry must carry ``scored_alive_mtime`` (legacy rows
+        without it always re-classify).
+      * The alive GLB path in ``index.json`` must match the prior row's
+        ``alive_glb`` and the file must exist with mtime ≤ the prior
+        ``scored_alive_mtime``.
+      * If the index entry references a dead GLB, the prior row must
+        have a matching ``dead_glb`` and ``scored_dead_mtime`` ≥ the
+        current dead GLB mtime.
+      * If the index entry has no dead GLB, the prior row must also
+        have ``dead_glb=None`` (otherwise the dead variant disappeared
+        and we want to re-classify).
+    """
+    prior = prior_by_id.get(asset_id)
+    if prior is None:
+        return None
+    prior_alive_mtime = prior.get("scored_alive_mtime")
+    if not isinstance(prior_alive_mtime, (int, float)):
+        return None
+
+    alive_rel = entry.get("glb")
+    if alive_rel is None or alive_rel != prior.get("alive_glb"):
+        return None
+    alive_path = library_root / alive_rel
+    if not alive_path.is_file():
+        return None
+    if alive_path.stat().st_mtime > prior_alive_mtime:
+        return None
+
+    dead_rel = entry.get("glb_dead")
+    prior_dead_rel = prior.get("dead_glb")
+    if dead_rel != prior_dead_rel:
+        return None
+    prior_dead_mtime = prior.get("scored_dead_mtime")
+    if dead_rel is not None:
+        if not isinstance(prior_dead_mtime, (int, float)):
+            return None
+        dead_path = library_root / dead_rel
+        if not dead_path.is_file():
+            return None
+        if dead_path.stat().st_mtime > prior_dead_mtime:
+            return None
+
+    return AssetResult(
+        asset_id=asset_id,
+        category=prior.get("category"),
+        subcategory=prior.get("subcategory"),
+        alive_glb=str(alive_rel),
+        dead_glb=str(dead_rel) if dead_rel else None,
+        alive_bbox=prior.get("alive_bbox"),
+        dead_bbox=prior.get("dead_bbox"),
+        z_class=prior.get("z_class") or "ambiguous",
+        x_class=prior.get("x_class") or "ambiguous",
+        verdict=prior.get("verdict") or "ERROR",
+        note=prior.get("note") or "",
+        scored_alive_mtime=float(prior_alive_mtime),
+        scored_dead_mtime=(
+            float(prior_dead_mtime)
+            if isinstance(prior_dead_mtime, (int, float)) else None
+        ),
+    )
+
+
 def audit_library(
     library_root: Path,
     *,
@@ -280,6 +359,7 @@ def audit_library(
     only: set[str] | None = None,
     write_sidecar: bool = True,
     out_path: Path | None = None,
+    rebuild: bool = False,
 ) -> tuple[list[AssetResult], Path | None]:
     """Audit every asset under ``library_root`` and (optionally) write
     the JSON sidecar at ``library_root / "dead_variant_audit.json"``.
@@ -287,6 +367,11 @@ def audit_library(
     ``index_doc`` is the parsed ``index.json``. When ``None`` we read it
     from ``library_root / "index.json"`` — pass it in to avoid a re-read
     when the caller already has it in memory.
+
+    With ``rebuild=False`` (default), per-asset rows from a prior audit
+    are reused when both GLBs are unchanged since the row was scored
+    (see :func:`_try_reuse_prior`). Pass ``rebuild=True`` to force a
+    fresh classification for every asset.
 
     Returns ``(results, audit_path)`` where ``audit_path`` is the
     written sidecar path or ``None`` when ``write_sidecar=False`` /
@@ -298,6 +383,21 @@ def audit_library(
             return [], None
         index_doc = json.loads(idx_path.read_text(encoding="utf-8"))
 
+    out = out_path or (library_root / "dead_variant_audit.json")
+
+    # Prior-pass reuse map: asset_id -> entry. Empty when ``rebuild``
+    # or the audit file is missing / unparseable.
+    prior_by_id: dict[str, dict] = {}
+    if not rebuild and out.is_file():
+        try:
+            prior_doc = json.loads(out.read_text(encoding="utf-8"))
+            for a in (prior_doc.get("assets") or []):
+                aid = a.get("asset_id")
+                if aid:
+                    prior_by_id[aid] = a
+        except (OSError, ValueError, json.JSONDecodeError):
+            prior_by_id = {}
+
     targets: list[tuple[str, dict]] = []
     for aid, entry in (index_doc.get("assets") or {}).items():
         if only is not None and aid not in only:
@@ -307,6 +407,10 @@ def audit_library(
 
     results: list[AssetResult] = []
     for aid, entry in targets:
+        reused = _try_reuse_prior(aid, entry, prior_by_id, library_root)
+        if reused is not None:
+            results.append(reused)
+            continue
         try:
             r = classify_asset(aid, entry, library_root)
         except Exception as e:
@@ -320,12 +424,24 @@ def audit_library(
                 z_class="ambiguous", x_class="ambiguous",
                 verdict="ERROR", note=str(e),
             )
+        # Tag freshly-computed rows with current GLB mtimes so the next
+        # run can reuse them. ERROR / ALIVE_MISSING rows leave the
+        # mtime fields ``None``, forcing a retry next pass.
+        alive_rel = entry.get("glb")
+        if alive_rel:
+            ap = library_root / alive_rel
+            if ap.is_file():
+                r.scored_alive_mtime = ap.stat().st_mtime
+        dead_rel = entry.get("glb_dead")
+        if dead_rel:
+            dp = library_root / dead_rel
+            if dp.is_file():
+                r.scored_dead_mtime = dp.stat().st_mtime
         results.append(r)
 
     if not write_sidecar:
         return results, None
 
-    out = out_path or (library_root / "dead_variant_audit.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     doc = {
         "schema": "wows_dead_variant_audit/v1",

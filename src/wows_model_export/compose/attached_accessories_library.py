@@ -525,6 +525,33 @@ def resolve_asset_attachments(
     return doc, final_stats
 
 
+def _stats_from_prior_doc(doc: dict) -> AttachmentResolveStats | None:
+    """Reconstruct an AttachmentResolveStats from a prior
+    ``attached_accessories.json``'s ``stats`` block. Returns ``None``
+    when the block is missing or malformed (caller should recompute)."""
+    s = doc.get("stats")
+    if not isinstance(s, dict):
+        return None
+    try:
+        return AttachmentResolveStats(
+            candidates_total=int(s.get("candidates_total", 0)),
+            candidates_in_kept_records=int(s.get("candidates_in_kept_records", 0)),
+            unresolved_p0_hashes=int(s.get("unresolved_p0_hashes", 0)),
+            filtered_skinned=int(s.get("filtered_skinned", 0)),
+            attachments_live=int(s.get("attachments_live", 0)),
+            attachments_dead=int(s.get("attachments_dead", 0)),
+            distinct_assets=int(s.get("distinct_assets", 0)),
+            convention_b_external_y_conjugate=int(
+                s.get("convention_b_external_y_conjugate", 0)
+            ),
+            convention_b_host_space_children=int(
+                s.get("convention_b_host_space_children", 0)
+            ),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 def resolve_for_asset_dir(
     asset_dir: Path,
     *,
@@ -532,6 +559,7 @@ def resolve_for_asset_dir(
     keep_record_offsets: Iterable[str] = DEFAULT_KEEP_RECORD_OFFSETS,
     include_skinned: bool = False,
     config: PipelineConfig | None = None,
+    rebuild: bool = False,
 ) -> tuple[Path, AttachmentResolveStats] | None:
     """Resolve one library asset directory's candidates JSON, write the
     attachments JSON next to it, and return ``(out_path, stats)``.
@@ -543,11 +571,28 @@ def resolve_for_asset_dir(
     toolkit emits when the source had no real skel_ext): we leave any
     stale ``attached_accessories.json`` from a prior build alone if
     present, but skip emitting an empty one.
+
+    When ``rebuild=False`` (default), an existing
+    ``<asset_id>.attached_accessories.json`` whose mtime is newer than
+    the candidates JSON is reused as-is — stats are reconstructed from
+    its embedded ``stats`` block. Pass ``rebuild=True`` to force a
+    fresh hash-resolve pass.
     """
     asset_id = asset_dir.name
     candidates_path = asset_dir / f"{asset_id}{CANDIDATES_SUFFIX}"
     if not candidates_path.is_file():
         return None
+    out_path = asset_dir / f"{asset_id}{ATTACHMENTS_SUFFIX}"
+    if (not rebuild
+            and out_path.is_file()
+            and out_path.stat().st_mtime >= candidates_path.stat().st_mtime):
+        try:
+            prior = json.loads(out_path.read_text(encoding="utf-8"))
+            cached = _stats_from_prior_doc(prior)
+            if cached is not None:
+                return (out_path, cached)
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass  # fall through and recompute
     doc, stats = resolve_asset_attachments(
         candidates_path,
         asset_id=asset_id,
@@ -556,7 +601,6 @@ def resolve_for_asset_dir(
         include_skinned=include_skinned,
         config=config,
     )
-    out_path = asset_dir / f"{asset_id}{ATTACHMENTS_SUFFIX}"
     # Empty result — clean up any stale prior file but don't write a
     # new one. Most accessories emit an empty manifest because their
     # source had no skel_ext (the toolkit emits the manifest
@@ -582,11 +626,17 @@ def resolve_library(
     include_skinned: bool = False,
     quiet: bool = False,
     config: PipelineConfig | None = None,
+    rebuild: bool = False,
 ) -> dict[str, AttachmentResolveStats]:
     """Walk the accessory library and resolve every asset that has a
     candidates JSON. Returns ``{asset_id: stats}`` for the pass.
 
     Hash table is loaded once and shared across all asset resolves.
+
+    With ``rebuild=False`` (default), per-asset reuses the existing
+    ``attached_accessories.json`` when its mtime is newer than the
+    sibling candidates JSON. Pass ``rebuild=True`` to force a fresh
+    hash-resolve pass for every asset.
     """
     _invalidate_root_caches(library_root)
     hash_table = _ensure_hash_table(None, config=config)
@@ -602,6 +652,7 @@ def resolve_library(
             keep_record_offsets=keep_record_offsets,
             include_skinned=include_skinned,
             config=config,
+            rebuild=rebuild,
         )
         if result is None:
             continue
