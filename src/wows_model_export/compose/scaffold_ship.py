@@ -914,6 +914,7 @@ def scaffold_ship(
     skip_geometry_hitbox: bool = False,
     variant_permoflage: str | None = "auto",
     on_event: OnEvent | None = None,
+    cancel: threading.Event | None = None,
 ) -> ScaffoldResult:
     """Scaffold a fresh ship directory: hull GLB + sidecar + side files.
 
@@ -937,6 +938,13 @@ def scaffold_ship(
     ``resolve_identity`` / ``export_hull`` / ``export_armor`` /
     ``export_ammo`` / ``gameparams_autofill`` / ``materials_skins`` /
     ``geometry_hitbox`` / ``emit_sidecar``.
+
+    ``cancel`` is an optional :class:`threading.Event` for cooperative
+    cancellation; when set, the next step boundary raises
+    :class:`wows_model_export.errors.CancelledError`.  The parallel
+    export block (hull + armor + ammo) checks the flag too — but a
+    long-running wowsunpack subprocess won't be torn down mid-call;
+    cancel takes effect at the next subprocess boundary.
     """
     cfg = config or PipelineConfig.load()
     if workspace is None:
@@ -947,7 +955,7 @@ def scaffold_ship(
     if variant_permoflage in ("none", ""):
         variant_permoflage = None
 
-    timer = StepRunner(on_event)
+    timer = StepRunner(on_event, cancel=cancel)
     warnings: list[str] = []
 
     # ── Step: resolve_identity ─────────────────────────────────────────

@@ -35,6 +35,7 @@ import json
 import math
 import struct
 import sys
+import threading
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -979,6 +980,7 @@ def resolve_decorative_placements(
     origin_threshold_m: float = 0.001,
     config: PipelineConfig | None = None,
     on_event: OnEvent | None = None,
+    cancel: threading.Event | None = None,
 ) -> Path:
     """Merge HP_ placements + decorative candidates into a unified
     accessories JSON.  Returns the output path.
@@ -1012,7 +1014,7 @@ def resolve_decorative_placements(
     candidates_json = Path(candidates_json)
     output_json = Path(output_json)
 
-    runner = StepRunner(on_event)
+    runner = StepRunner(on_event, cancel=cancel)
     warnings: list[str] = []
     manifest = manifest_path or toolkit.default_manifest_path(cfg)
 

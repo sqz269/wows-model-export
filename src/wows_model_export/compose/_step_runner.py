@@ -44,11 +44,12 @@ a buggy listener can't kill a long-running ingest.
 
 from __future__ import annotations
 
+import threading
 import time
 from contextlib import AbstractContextManager
 from types import TracebackType
 
-from ..errors import StepError
+from ..errors import CancelledError, StepError
 from ..types import OnEvent, StepEvent, StepState
 
 
@@ -58,14 +59,52 @@ class StepRunner:
     Construct once at composer entry, fill in `step_timings_ms` as
     steps complete, then `dict(runner.step_timings_ms)` into the
     result dataclass.
+
+    Cancellation: pass a ``cancel: threading.Event`` and the runner
+    will check it at every step boundary (``start`` / ``complete`` /
+    ``progress`` / context-manager entry). When set, a
+    :class:`CancelledError` is raised carrying the step about to run
+    (or just completed) — composers' existing ``except StepError``
+    clauses then propagate the cancellation up the call chain without
+    needing per-composer awareness.
+
+    The check is at step granularity only: a long-running ``runner.step``
+    block (e.g. a multi-minute toolkit subprocess) won't honor cancel
+    until that step finishes. That's a deliberate trade-off — a
+    sub-step polling loop would force every composer step to be
+    re-entrant, which they aren't today.
     """
 
-    def __init__(self, on_event: OnEvent | None) -> None:
+    def __init__(
+        self,
+        on_event: OnEvent | None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> None:
         self.on_event = on_event
+        self.cancel = cancel
         self.step_timings_ms: dict[str, float] = {}
         self._t_run = time.perf_counter()
         self._active_step: str | None = None
         self._t_active: float | None = None
+
+    # ── cancellation check ─────────────────────────────────────────────
+
+    def _check_cancelled(self, step: str) -> None:
+        """Raise :class:`CancelledError` when the cancel flag is set.
+
+        Called at every step boundary — invisible no-op when no cancel
+        event was passed (the common CLI / library case). The
+        ``underlying`` slot carries a fresh ``KeyboardInterrupt`` as a
+        sentinel; the surface contract is `isinstance(exc,
+        CancelledError)`, not the wrapped type.
+        """
+        if self.cancel is not None and self.cancel.is_set():
+            raise CancelledError(
+                step=step,
+                underlying=KeyboardInterrupt("cancelled by caller"),
+                detail="cancelled at step boundary",
+            )
 
     # ── elapsed-time accessor ──────────────────────────────────────────
 
@@ -105,7 +144,19 @@ class StepRunner:
     # ── procedural API ─────────────────────────────────────────────────
 
     def start(self, step: str, *, detail: str = "") -> None:
-        """Mark a step as started (procedural use)."""
+        """Mark a step as started (procedural use).
+
+        Honors cancellation: raises :class:`CancelledError` when the
+        cancel flag was set before this step ran. The check happens
+        before the ``started`` event fires, so a cancelled job's event
+        log doesn't include phantom "started" entries for steps that
+        never executed.
+        """
+        # Check first so we don't emit a "started" event for a step
+        # we're about to abort. The CancelledError propagates through
+        # the composer's existing ``except StepError`` chain — no
+        # per-composer cancel awareness required.
+        self._check_cancelled(step)
         self._active_step = step
         self._t_active = time.perf_counter()
         self.emit(step, "started", detail=detail)
@@ -116,7 +167,16 @@ class StepRunner:
         detail: str = "",
         data: dict | None = None,
     ) -> None:
-        """Mark the active step as completed; records ``step_ms``."""
+        """Mark the active step as completed; records ``step_ms``.
+
+        Honors cancellation: raises :class:`CancelledError` if the
+        cancel flag was set during the step. The completed event still
+        fires (we record the timing) but the next step's ``start`` /
+        the composer's return path sees the raise. We deliberately
+        check *after* the emit so a step that finished its work right
+        before cancel doesn't leave the composer's bookkeeping in a
+        half-finished state.
+        """
         if self._active_step is None or self._t_active is None:
             return
         step_ms = (time.perf_counter() - self._t_active) * 1000.0
@@ -127,8 +187,31 @@ class StepRunner:
             step_ms=step_ms,
             data=data,
         )
+        completed_step = self._active_step
         self._active_step = None
         self._t_active = None
+        self._check_cancelled(completed_step)
+
+    def progress(
+        self,
+        step: str | None = None,
+        *,
+        detail: str = "",
+        data: dict | None = None,
+    ) -> None:
+        """Emit a ``progress`` event for the active (or named) step.
+
+        Long-running composer steps that want to publish intra-step
+        notifications (a per-asset counter, a wowsunpack stdout line)
+        call this. Honors cancellation at the same granularity as
+        ``start``/``complete`` — call it from inside a ``runner.step``
+        block to get cooperative cancel mid-step.
+        """
+        target = step or self._active_step or ""
+        # Cancel check before the emit, same rationale as ``start``:
+        # don't surface a progress line for work we're about to abort.
+        self._check_cancelled(target)
+        self.emit(target, "progress", detail=detail, data=data)
 
     def skip(self, step: str, *, detail: str = "") -> None:
         """Mark a step as skipped (no timing recorded).
@@ -194,6 +277,10 @@ class StepContext(AbstractContextManager["StepContext"]):
         self._t_start: float = 0.0
 
     def __enter__(self) -> StepContext:
+        # Cancel check before we emit "started" — symmetric with
+        # ``StepRunner.start``. A cancelled composer's event log
+        # doesn't grow phantom started entries.
+        self.runner._check_cancelled(self.step)
         self._t_start = time.perf_counter()
         self.runner.emit(self.step, "started", detail=self.detail)
         return self

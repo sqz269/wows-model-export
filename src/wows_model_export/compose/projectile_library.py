@@ -44,6 +44,7 @@ import re
 import shutil
 import struct
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -768,6 +769,7 @@ def build_projectile_library(
     mode: str = "dds",
     only: tuple[str, ...] | None = None,
     emission_intensity: float = 2.5,
+    cancel: threading.Event | None = None,
 ) -> ProjectileLibraryResult:
     """Build / refresh the fleet-wide projectile library.
 
@@ -806,6 +808,10 @@ def build_projectile_library(
                               picks it up; default 2.5 produces a
                               moderate glow on Star Trek / Halloween /
                               Vulcan torpedoes.
+        cancel               Optional :class:`threading.Event` for
+                              cooperative cancel; when set, the next
+                              step boundary raises
+                              :class:`wows_model_export.errors.CancelledError`.
 
     Returns a :class:`ProjectileLibraryResult` with the library root,
     counts, warnings, and per-step timings.
@@ -822,7 +828,7 @@ def build_projectile_library(
     ).resolve()
     only_ids = set(only) if only else None
 
-    runner = StepRunner(on_event)
+    runner = StepRunner(on_event, cancel=cancel)
     warnings: list[str] = []
 
     # ── Step: discover_projectiles ────────────────────────────────────

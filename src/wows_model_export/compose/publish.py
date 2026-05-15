@@ -41,6 +41,7 @@ carries a ``<Name>.meta.json`` sidecar gets published.
 from __future__ import annotations
 
 import shutil
+import threading
 from pathlib import Path
 
 from ..config import PipelineConfig
@@ -288,6 +289,7 @@ def publish(
     domains: tuple[str, ...] = ("ships", "library", "projectiles", "decals"),
     force: bool = False,
     on_event: OnEvent | None = None,
+    cancel: threading.Event | None = None,
 ) -> PublishResult:
     """Copy pipeline artifacts to a consumer target.
 
@@ -316,6 +318,9 @@ def publish(
                      ``copy_decals`` — each emits ``started`` ->
                      ``completed`` (or ``skipped`` when the domain is
                      not in the ``domains`` filter).
+        cancel       Optional :class:`threading.Event` for cooperative
+                     cancel; when set, the next step boundary raises
+                     :class:`wows_model_export.errors.CancelledError`.
 
     Returns a :class:`PublishResult` with per-domain
     :class:`PublishCounts` (``copied`` / ``skipped`` / ``deleted``).
@@ -337,7 +342,7 @@ def publish(
 
     domain_set = set(domains)
     warnings: list[str] = []
-    runner = StepRunner(on_event)
+    runner = StepRunner(on_event, cancel=cancel)
 
     target_dir.mkdir(parents=True, exist_ok=True)
 

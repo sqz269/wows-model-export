@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -257,6 +258,7 @@ def teardown_ship(
     dry_run: bool = True,
     prune_orphans: bool = False,
     on_event: OnEvent | None = None,
+    cancel: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Remove a ship's per-ship working directory + library bindings.
 
@@ -281,6 +283,10 @@ def teardown_ship(
                        ``discover_artifacts``, ``delete_ship_dir``,
                        ``clean_library_index`` — each emits ``started``
                        -> ``completed`` (or ``skipped``).
+        cancel         Optional :class:`threading.Event` for
+                       cooperative cancel; when set, the next step
+                       boundary raises
+                       :class:`wows_model_export.errors.CancelledError`.
 
     Returns the structured report described in the module docstring.
     Raises :class:`StepError` on any per-step failure.
@@ -306,7 +312,7 @@ def teardown_ship(
     library_dir = (workspace / Path(*_LIBRARY_REL)).resolve()
     index_path = library_dir / _INDEX_FILENAME
 
-    runner = StepRunner(on_event)
+    runner = StepRunner(on_event, cancel=cancel)
     report: dict[str, Any] = {
         "ship":              ship,
         "dry_run":           dry_run,

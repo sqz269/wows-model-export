@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import threading
 from pathlib import Path
 
 from .. import toolkit
@@ -199,6 +200,7 @@ def build_decal_library(
     on_event: OnEvent | None = None,
     source_dir: Path | None = None,
     patch_id: str | None = None,
+    cancel: threading.Event | None = None,
 ) -> DecalLibraryResult:
     """Mirror WG's ``dyndecals/`` into ``<library_root>/`` with a manifest.
 
@@ -229,6 +231,10 @@ def build_decal_library(
         patch_id         Patch identifier stamped into the manifest.
                           Defaults to the I:-side convention; override
                           per game patch.
+        cancel           Optional :class:`threading.Event` for
+                          cooperative cancel; when set, the next step
+                          boundary raises
+                          :class:`wows_model_export.errors.CancelledError`.
 
     Returns a :class:`DecalLibraryResult` with the library root, copy
     counts, manifest path, warnings, and per-step timings.
@@ -243,7 +249,7 @@ def build_decal_library(
     src = (source_dir or _DEFAULT_DYNDECALS_DIR).resolve()
     pid = patch_id or _DEFAULT_PATCH_ID
 
-    runner = StepRunner(on_event)
+    runner = StepRunner(on_event, cancel=cancel)
     warnings: list[str] = []
 
     # ── Step: extract_dyndecals ───────────────────────────────────────

@@ -27,6 +27,7 @@ to one of the names above; ``raise ... from e`` preserves the chain.
 from __future__ import annotations
 
 import json
+import threading
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
@@ -150,6 +151,7 @@ def find_ship_variants(
     output_json: Path | None = None,
     config: PipelineConfig | None = None,
     on_event: OnEvent | None = None,
+    cancel: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Enumerate every Vehicle in GameParams + cross-link by mesh-swap
     ``nativePermoflage``.
@@ -196,9 +198,13 @@ def find_ship_variants(
             ``PipelineConfig.load()``.
         on_event
             Optional :class:`StepEvent` callback.
+        cancel
+            Optional :class:`threading.Event` for cooperative cancel;
+            when set, the next step boundary raises
+            :class:`wows_model_export.errors.CancelledError`.
     """
     cfg = config or PipelineConfig.load()
-    runner = StepRunner(on_event)
+    runner = StepRunner(on_event, cancel=cancel)
 
     # ── Step: ensure_gameparams ───────────────────────────────────────
     with runner.step(

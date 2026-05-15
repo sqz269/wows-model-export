@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -793,6 +794,7 @@ def snapshot(
     config: PipelineConfig | None = None,
     refresh: bool = False,
     on_event: OnEvent | None = None,
+    cancel: threading.Event | None = None,
 ) -> SnapshotResult:
     """Build the Vehicles + permoflages picker payload.
 
@@ -814,6 +816,9 @@ def snapshot(
                      ``enumerate_permoflages``, ``join_metadata``,
                      ``write_snapshot`` — each emits ``started`` ->
                      ``completed``.
+        cancel       Optional :class:`threading.Event` for cooperative
+                     cancel; when set, the next step boundary raises
+                     :class:`wows_model_export.errors.CancelledError`.
 
     Returns a :class:`SnapshotResult` carrying the on-disk output path,
     the ``vehicles[]`` / ``permoflages_by_vehicle`` counts, and a flag
@@ -824,7 +829,7 @@ def snapshot(
     """
     cfg = config or PipelineConfig.load()
     output_path = Path(output_path)
-    runner = StepRunner(on_event)
+    runner = StepRunner(on_event, cancel=cancel)
 
     payload = _build_snapshot(config=cfg, runner=runner, refresh=refresh)
     meta = payload.pop("_meta", {})

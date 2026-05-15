@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+import threading
 from pathlib import Path
 
 from ..config import PipelineConfig
@@ -266,6 +267,7 @@ def ingest_ship(
     toolkit_ship_override: str | None = None,
     gameparams_ship_id: str | None = None,
     on_event: OnEvent | None = None,
+    cancel: threading.Event | None = None,
 ) -> IngestResult:
     """Run the full per-ship ingest pipeline end-to-end.
 
@@ -339,6 +341,14 @@ def ingest_ship(
             Optional progress callback.  Receives :class:`StepEvent`s
             at the canonical step boundaries listed in the module
             docstring; sub-composers' events flow through verbatim.
+        cancel
+            Optional :class:`threading.Event` for cooperative cancel.
+            When set, the next step boundary raises
+            :class:`wows_model_export.errors.CancelledError` (a
+            :class:`StepError` subclass).  Forwarded verbatim into
+            every sub-composer, so a single flag cancels the whole
+            pipeline.  Default ``None`` keeps the legacy
+            no-cancel-checks behavior for CLI / library callers.
 
     Returns:
         :class:`IngestResult` wrapping the inner :class:`ScaffoldResult`
@@ -384,7 +394,7 @@ def ingest_ship(
     # lint rule for unused-arguments quiet.
     _ = auto_rig
 
-    timer = StepRunner(on_event)
+    timer = StepRunner(on_event, cancel=cancel)
     warnings: list[str] = []
 
     accessories_json_path: Path | None = None
@@ -469,6 +479,7 @@ def ingest_ship(
             gameparams_ship_id=gameparams_ship_id,
             variant_permoflage=variant_permoflage,
             on_event=on_event,
+            cancel=cancel,
         )
         warnings.extend(scaffold_result.warnings)
         timer.complete(
@@ -523,6 +534,7 @@ def ingest_ship(
                 output_json=accessories_json,
                 config=cfg,
                 on_event=on_event,
+                cancel=cancel,
             )
             accessories_json_path = accessories_json
             timer.complete(detail=str(accessories_json.name))
@@ -562,6 +574,7 @@ def ingest_ship(
                 skip_geometry_hitbox=True,
                 variant_permoflage=variant_permoflage,
                 on_event=on_event,
+                cancel=cancel,
             )
             warnings.extend(refresh_result.warnings)
             # Re-bind so the consumer sees the post-refresh ScaffoldResult.
@@ -598,6 +611,7 @@ def ingest_ship(
                 config=cfg,
                 rebuild=rebuild_library,
                 on_event=on_event,
+                cancel=cancel,
             )
             library_refreshed = True
             timer.complete()
@@ -639,6 +653,7 @@ def ingest_ship(
                     skip_geometry_hitbox=True,
                     variant_permoflage=variant_permoflage,
                     on_event=on_event,
+                    cancel=cancel,
                 )
                 warnings.extend(refresh_result.warnings)
                 scaffold_result = refresh_result
@@ -674,6 +689,7 @@ def ingest_ship(
                 only_ships=(label,),
                 force=publish_force,
                 on_event=on_event,
+                cancel=cancel,
             )
             published_to = publish_target
             timer.complete(detail=str(publish_target))

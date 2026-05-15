@@ -67,6 +67,7 @@ import json
 import shutil
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -1176,6 +1177,7 @@ def ingest_skin_pack(
     display_name: str | None = None,
     source_kind: Literal["loose_mod", "vfs_variant", "auto"] = "auto",
     on_event: OnEvent | None = None,
+    cancel: threading.Event | None = None,
 ) -> SkinPackResult:
     """Ingest a skin pack and append it to the ship's sidecar.
 
@@ -1211,6 +1213,10 @@ def ingest_skin_pack(
         ``detect_source`` / ``extract_textures`` / ``swizzle_textures`` /
         ``compare_meshes`` / ``compare_exteriors`` / ``build_skin_entry`` /
         ``merge_sidecar``.
+    cancel
+        Optional :class:`threading.Event` for cooperative cancel; when
+        set, the next step boundary raises
+        :class:`wows_model_export.errors.CancelledError`.
 
     Returns
     -------
@@ -1241,7 +1247,7 @@ def ingest_skin_pack(
             detail=f"sidecar not found at {sidecar_path}",
         )
 
-    timer = StepRunner(on_event)
+    timer = StepRunner(on_event, cancel=cancel)
     warnings: list[str] = []
     swizzled_flag = [False]
 

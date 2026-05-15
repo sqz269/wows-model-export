@@ -41,8 +41,10 @@ from __future__ import annotations
 
 import json
 import struct
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+
 from ..config import PipelineConfig
 from ..errors import StepError, ToolkitError
 from ..toolkit.bones import fetch_bones
@@ -654,6 +656,7 @@ def autorig_asset(
     library_root: Path | None = None,
     output_path: Path | None = None,
     on_event: OnEvent | None = None,
+    cancel: threading.Event | None = None,
 ) -> Path:
     """Extract turret rig pivots for a single library asset.
 
@@ -669,6 +672,10 @@ def autorig_asset(
                         names: ``"resolve_asset"``, ``"fetch_bones"``,
                         ``"extract_pivots"``, ``"validate_rig"``,
                         ``"write_rig_json"``.
+        cancel          Optional :class:`threading.Event` for
+                        cooperative cancel; when set, the next step
+                        boundary raises
+                        :class:`wows_model_export.errors.CancelledError`.
 
     Returns the written ``rig_pivots.json`` path. We return a bare
     :class:`Path` because the accessory-library composer currently
@@ -687,6 +694,7 @@ def autorig_asset(
         library_root=library_root,
         output_path=output_path,
         on_event=on_event,
+        cancel=cancel,
     ).rig_pivots_path
 
 
@@ -697,6 +705,7 @@ def autorig_asset_full(
     library_root: Path | None = None,
     output_path: Path | None = None,
     on_event: OnEvent | None = None,
+    cancel: threading.Event | None = None,
 ) -> TurretRigResult:
     """Same as :func:`autorig_asset` but returns the full
     :class:`TurretRigResult` (rig kind, barrel count, etc.).
@@ -706,7 +715,7 @@ def autorig_asset_full(
     cfg = config or PipelineConfig.load()
     lib_root = (library_root or (cfg.workspace / "libraries" / "accessories")).resolve()
 
-    runner = StepRunner(on_event)
+    runner = StepRunner(on_event, cancel=cancel)
 
     # ── Step: resolve_asset ───────────────────────────────────────────
     src_toolkit: ToolkitSource | None = None

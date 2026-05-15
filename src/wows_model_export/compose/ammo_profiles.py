@@ -51,6 +51,7 @@ The composer emits the following canonical :class:`StepEvent` names:
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -212,6 +213,7 @@ def build_ammo_profiles(
     on_event: OnEvent | None = None,
     refresh_gameparams: bool = False,
     pretty: bool = False,
+    cancel: threading.Event | None = None,
 ) -> AmmoProfilesResult:
     """Build / refresh ``<library_root>/ammo_profiles.json``.
 
@@ -235,6 +237,10 @@ def build_ammo_profiles(
         pretty               When True, write indented JSON. Defaults
                               to compact (the file is a few MB; primary
                               readers are downstream consumers).
+        cancel               Optional :class:`threading.Event` for
+                              cooperative cancel; when set, the next
+                              step boundary raises
+                              :class:`wows_model_export.errors.CancelledError`.
 
     Returns an :class:`AmmoProfilesResult` with the output path,
     profile count, warnings, and per-step timings.
@@ -250,7 +256,7 @@ def build_ammo_profiles(
         output_path or (lib_root / "ammo_profiles.json")
     ).resolve()
 
-    runner = StepRunner(on_event)
+    runner = StepRunner(on_event, cancel=cancel)
     warnings: list[str] = []
 
     # ── Step: load_gameparams ─────────────────────────────────────────

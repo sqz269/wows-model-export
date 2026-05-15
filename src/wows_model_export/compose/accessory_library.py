@@ -35,6 +35,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -981,6 +982,7 @@ def build_accessory_library(
     audit_winding: bool = False,
     auto_flip_winding: bool = False,
     on_event: OnEvent | None = None,
+    cancel: threading.Event | None = None,
 ) -> AccessoryLibraryResult:
     """Build / refresh the fleet-wide accessory library.
 
@@ -1012,6 +1014,13 @@ def build_accessory_library(
         on_event             Optional progress callback receiving
                               :class:`StepEvent` notifications. See the
                               "Canonical step names" docstring.
+        cancel               Optional :class:`threading.Event` for
+                              cooperative cancel. When set, the next
+                              step boundary raises
+                              :class:`wows_model_export.errors.CancelledError`.
+                              Forwarded into per-asset
+                              ``autorig_asset`` so cancel takes effect
+                              between rigging passes too.
 
     Returns an :class:`AccessoryLibraryResult` with the library root,
     counts, the list of asset paths auto-flipped this run, the per-
@@ -1031,7 +1040,7 @@ def build_accessory_library(
         # works in either layout.
         ship_root = ws
 
-    runner = StepRunner(on_event)
+    runner = StepRunner(on_event, cancel=cancel)
     warnings: list[str] = []
     attachment_stats: dict[str, AttachmentResolveStats] = {}
     auto_flipped: tuple[str, ...] = ()
@@ -1372,6 +1381,7 @@ def build_accessory_library(
                     config=cfg,
                     library_root=lib_root,
                     on_event=on_event,
+                    cancel=cancel,
                 )
                 rigged += 1
             except StepError as e:

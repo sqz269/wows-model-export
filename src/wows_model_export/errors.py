@@ -100,10 +100,36 @@ class StepError(PipelineError):
         super().__init__(summary)
 
 
+class CancelledError(StepError):
+    """A composer was cancelled cooperatively at a step boundary.
+
+    Subclasses :class:`StepError` so existing `except StepError` clauses
+    continue to catch cancellation as "the step died" — the `.step`
+    field still names the canonical step that was active when the
+    cancel flag was observed (or the next step that hadn't yet started).
+
+    Raised by :class:`wows_model_export.compose._step_runner.StepRunner`
+    when its optional ``cancel: threading.Event`` is set. Carries
+    ``state="cancelled"`` so the server-side job runner can flip the
+    job's terminal state without parsing the message.
+
+    Subclassing rather than declaring a fresh dataclass keeps the
+    inherited ``(step, underlying, detail, data)`` constructor — callers
+    pass ``underlying=KeyboardInterrupt()`` (or any sentinel) to keep
+    the dataclass shape; consumers branch on ``isinstance(exc,
+    CancelledError)`` rather than the underlying type.
+    """
+
+    # Discriminator field for code that branches on the terminal job
+    # state without `isinstance` (e.g. JSON-serialised error payloads).
+    state: str = "cancelled"
+
+
 __all__ = [
     "PipelineError",
     "ConfigError",
     "ToolkitError",
     "ResolveError",
     "StepError",
+    "CancelledError",
 ]
