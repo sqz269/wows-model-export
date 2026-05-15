@@ -187,7 +187,6 @@ from .skel_ext_hashes import (
 
 # synth_emission — diffuse × mg.B emissive synthesis
 from .synth_emission import (
-    is_emissive_mask_pattern,
     synth_emissive,
     synth_emissive_dds,
 )
@@ -319,7 +318,6 @@ __all__ = [
     # synth_emission
     "synth_emissive",
     "synth_emissive_dds",
-    "is_emissive_mask_pattern",
     # rig_normalize_bones (renamed to avoid clashing with generic ``normalize``)
     "normalize_rig",
     "normalize_rig_file",

@@ -1386,15 +1386,21 @@ def scaffold_ship(
             detail="placements JSON missing",
         )
 
+    # Single placements_json load shared by every downstream consumer in
+    # this function (per-hull export, ship-id override, variant swap,
+    # variant-routed retroactive flag, _fold_variant_overlay_into_default).
+    try:
+        with open(placements_json, "rb") as _f:
+            pl_doc = json.loads(_f.read().decode("utf-8"))
+        if not isinstance(pl_doc, dict):
+            pl_doc = {}
+    except Exception:
+        pl_doc = {}
+    pl_ship_block = pl_doc.get("ship") if isinstance(pl_doc.get("ship"), dict) else {}
+
     # Per-hull placements export (still runs under --skip-export so legacy
     # ships scaffolded before v3.2 land on v3.2).
-    toolkit_param_index: str | None = None
-    try:
-        with open(placements_json, "rb") as f:
-            _pl = json.loads(f.read().decode("utf-8"))
-        toolkit_param_index = ((_pl.get("ship") or {}).get("param_index"))
-    except Exception:
-        pass
+    toolkit_param_index = pl_ship_block.get("param_index")
     try:
         _export_per_hull_placements(
             toolkit_name=toolkit_name,
@@ -1431,15 +1437,8 @@ def scaffold_ship(
             pass
 
     # Auto-derive ship-id override for mesh-swap variants.
-    if gameparams_ship_id is None and placements_json.is_file():
-        try:
-            with open(placements_json, "rb") as _f:
-                _pl_vp = json.loads(_f.read().decode("utf-8"))
-            _variant_perm_for_id = (
-                (_pl_vp.get("ship") or {}).get("variant_permoflage")
-            )
-        except Exception:
-            _variant_perm_for_id = None
+    if gameparams_ship_id is None:
+        _variant_perm_for_id = pl_ship_block.get("variant_permoflage")
         if isinstance(_variant_perm_for_id, str) and _variant_perm_for_id:
             try:
                 _ensure_gameparams_dump(config=cfg)
@@ -1449,7 +1448,7 @@ def scaffold_ship(
             except Exception:
                 derived = None
             if derived:
-                _pl_existing_index = (_pl_vp.get("ship") or {}).get("param_index")
+                _pl_existing_index = pl_ship_block.get("param_index")
                 if derived != _pl_existing_index and not (
                     isinstance(_pl_existing_index, str)
                     and derived.startswith(_pl_existing_index + "_")
@@ -1679,14 +1678,8 @@ def scaffold_ship(
             warnings.append(f"existing sidecar not reusable ({e}); overwriting")
 
     # ── Per-mount accessory swap for mesh-swap permoflages ────────────
-    variant_perm_for_swap: str | None = None
-    try:
-        with open(placements_json, "rb") as _f:
-            _pl_swap = json.loads(_f.read().decode("utf-8"))
-        variant_perm_for_swap = (
-            (_pl_swap.get("ship") or {}).get("variant_permoflage")
-        )
-    except Exception:
+    variant_perm_for_swap = pl_ship_block.get("variant_permoflage")
+    if not isinstance(variant_perm_for_swap, str):
         variant_perm_for_swap = None
     base_vehicle_for_swap = (
         gameparams_ship_id
@@ -1727,7 +1720,7 @@ def scaffold_ship(
             # re-scaffold.
             _base_aid_by_hp: dict[str, str] = {}
             for _section in sidecar.PLACEMENT_SECTIONS:
-                for _entry in _pl_swap.get(_section) or []:
+                for _entry in pl_doc.get(_section) or []:
                     if not isinstance(_entry, dict):
                         continue
                     _hp = _entry.get("hp_name")
@@ -1740,15 +1733,10 @@ def scaffold_ship(
                 base_aid_by_hp=_base_aid_by_hp,
             )
             variant_asset_set: set[str] = set()
-            for vv in (swaps.get("by_asset_id") or {}).values():
-                if vv:
-                    variant_asset_set.add(vv)
-            for vv in (swaps.get("by_hp_name") or {}).values():
-                if vv:
-                    variant_asset_set.add(vv)
-            for vv in (swaps.get("dead_by_hp_name") or {}).values():
-                if vv:
-                    variant_asset_set.add(vv)
+            for _swap_key in ("by_asset_id", "by_hp_name", "dead_by_hp_name"):
+                for vv in (swaps.get(_swap_key) or {}).values():
+                    if vv:
+                        variant_asset_set.add(vv)
             # Extend the opt-out set with bespoke attached children of
             # each variant-swapped parent. These are the variant-themed
             # decorative assets (AM6068_Cartridges_Hoshino,
@@ -1810,10 +1798,7 @@ def scaffold_ship(
                 )
 
     # Fold variant overlay into default skin.
-    _fold_variant_overlay_into_default(
-        doc,
-        active_placements_json=placements_json,
-    )
+    _fold_variant_overlay_into_default(doc, placements_doc=pl_doc)
 
     # Strip phantom `misc_filter_mode` fields.
     for _section in sidecar.PLACEMENT_SECTIONS:
@@ -1837,16 +1822,11 @@ def scaffold_ship(
     # ── Native-permoflage auto-ingest ─────────────────────────────────
     # Compute variant_routed across both fresh-export and skip-export passes.
     if not variant_routed:
-        try:
-            with open(placements_json, "rb") as _f:
-                _pl_doc = json.loads(_f.read().decode("utf-8"))
-            _stamped = (_pl_doc.get("ship") or {}).get("variant_permoflage")
-            if _stamped:
-                variant_routed = True
-                if variant_exterior_id is None:
-                    variant_exterior_id = _stamped
-        except Exception:
-            pass
+        _stamped = pl_ship_block.get("variant_permoflage")
+        if isinstance(_stamped, str) and _stamped:
+            variant_routed = True
+            if variant_exterior_id is None:
+                variant_exterior_id = _stamped
     if not skip_native_skin and not variant_routed:
         # Auto-ingest the Vehicle's ``nativePermoflage`` when peculiarity
         # is non-default (Arpeggio / Azur Lane / Sabaton / Kobayashi /
@@ -1950,7 +1930,7 @@ def scaffold_ship(
 def _fold_variant_overlay_into_default(
     doc: dict,
     *,
-    active_placements_json: Path,
+    placements_doc: dict[str, Any],
 ) -> None:
     """Copy the active variant permoflage's overlay onto the default skin."""
     skins = doc.get("skins")
@@ -1962,14 +1942,9 @@ def _fold_variant_overlay_into_default(
     if default.get("categories") or default.get("mat_textures"):
         return
 
-    variant_id: str | None = None
-    try:
-        with open(active_placements_json, "rb") as f:
-            pl_doc = json.loads(f.read().decode("utf-8"))
-        variant_id = ((pl_doc.get("ship") or {}).get("variant_permoflage"))
-    except Exception:
-        return
-    if not variant_id:
+    pl_ship = placements_doc.get("ship") if isinstance(placements_doc.get("ship"), dict) else {}
+    variant_id = pl_ship.get("variant_permoflage")
+    if not isinstance(variant_id, str) or not variant_id:
         return
 
     match = next((s for s in skins if s.get("exterior_id") == variant_id), None)
@@ -2002,13 +1977,10 @@ def _check_camo_coverage_gap(textures_dds_dir: Path, doc: dict) -> str | None:
         return None
     camo_files = sorted(
         f.name for f in textures_dds_dir.iterdir()
-        if f.is_file() and f.name.endswith(".dd0") and "_camo_" in f.name.lower()
+        if (f.is_file()
+            and (f.name.endswith(".dd0") or f.name.endswith(".dds"))
+            and "_camo_" in f.name.lower())
     )
-    if not camo_files:
-        camo_files = sorted(
-            f.name for f in textures_dds_dir.iterdir()
-            if f.is_file() and f.name.endswith(".dds") and "_camo_" in f.name.lower()
-        )
     if not camo_files:
         return None
     skins = doc.get("skins") or []

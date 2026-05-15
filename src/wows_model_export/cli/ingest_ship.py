@@ -6,7 +6,7 @@ Drives the one-shot per-ship pipeline composer end-to-end. Argv shape::
         [--workspace P] [--label LBL]
         [--non-interactive]
         [--class-override CO] [--ship-key-suffix S]
-        [--build-library] [--rebuild-library] [--no-auto-rig]
+        [--build-library] [--rebuild-library]
         [--and-publish --publish-target P] [--publish-force]
         [--variant-permoflage ID]
         [--toolkit-ship NAME] [--gameparams-ship-id ID]
@@ -76,13 +76,6 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Implies --build-library. Forces a full regenerate of "
              "every asset GLB + DDS.",
-    )
-    ap.add_argument(
-        "--no-auto-rig",
-        action="store_true",
-        help="Reserved -- the composer's library builder runs autorig "
-             "per gun asset internally, so this flag is currently a "
-             "no-op (kept for I:-side CLI parity).",
     )
     ap.add_argument(
         "--and-publish",
@@ -167,7 +160,6 @@ def main(argv: list[str] | None = None) -> int:
             ship_key_suffix=args.ship_key_suffix,
             build_library=args.build_library or args.rebuild_library,
             rebuild_library=args.rebuild_library,
-            auto_rig=not args.no_auto_rig,
             and_publish=args.and_publish or args.publish_force,
             publish_target=args.publish_target,
             publish_force=args.publish_force,

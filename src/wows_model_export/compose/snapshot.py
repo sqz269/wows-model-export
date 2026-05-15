@@ -339,20 +339,11 @@ def _classify_vfs_status(
 
 
 def _classify_camo_topology(entry: wg_camo.CamoEntry) -> str:
-    """Inline of scaffold_ship._classify_topology; keep in sync."""
-    keys = set(entry.textures)
-    has_hull_specific = bool(keys & {"Hull", "DeckHouse", "Bulge"})
-    has_tile = "Tile" in keys
-    has_palette = bool(entry.color_schemes)
-    is_mat = entry.name.startswith("mat_")
-
-    if is_mat and has_hull_specific:
-        return _TOPO_MAT_PALETTE if has_palette else _TOPO_MAT_ALBEDO
-    if not is_mat and has_hull_specific and has_palette:
-        return _TOPO_HULL_PALETTE
-    if has_tile and has_palette:
-        return _TOPO_TILE_BROADCAST
-    return _TOPO_OTHER
+    """Map ``scaffold_ship._classify_topology``'s ``"skip"`` bucket onto
+    snapshot's ``"other"`` bucket; otherwise pass through verbatim."""
+    from .scaffold_ship import _classify_topology, _TOPO_SKIP
+    topo = _classify_topology(entry)
+    return _TOPO_OTHER if topo == _TOPO_SKIP else topo
 
 
 def _path_to_dir(model_path: str) -> str | None:

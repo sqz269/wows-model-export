@@ -77,6 +77,12 @@ _DIFFUSE_PATH_RE = re.compile(
     r"(?P<stem>.+?)_a\.(?:dd0|dd1|dd2|dds)$"
 )
 
+#: Default emissive multiplier for projectile materials with an emissive
+#: slot. Above 1.0 pushes emission into HDR territory so URP Bloom picks
+#: it up; 2.5 produces a moderate glow on Star Trek / Halloween / Vulcan
+#: torpedoes without blowing out non-effect projectiles.
+DEFAULT_EMISSION_INTENSITY: float = 2.5
+
 # Match channel suffixes on already-extracted DDS files. Used to recover
 # the unique texture stems present in an asset's textures_dds/ dir.
 _CHANNEL_SUFFIX_RE = re.compile(
@@ -217,7 +223,7 @@ def output_dir_for(library_root: Path, key: ProjectileKey) -> Path:
 def mark_effect_render_sets(
     glb_path: Path,
     *,
-    emissive_strength: float = 2.5,
+    emissive_strength: float = DEFAULT_EMISSION_INTENSITY,
 ) -> int:
     """Detect 'effect overlay' render sets in a projectile GLB and rewrite
     its material/node entries so they don't render as solid PBR meshes.
@@ -581,7 +587,7 @@ def populate_material_manifest(
     records: dict[ProjectileKey, ProjectileRecord],
     library_root: Path,
     *,
-    emission_intensity: float = 2.5,
+    emission_intensity: float = DEFAULT_EMISSION_INTENSITY,
     warnings: list[str],
 ) -> None:
     """For each successfully-built record, extract per-material metadata
@@ -768,7 +774,7 @@ def build_projectile_library(
     refresh_manifest: bool = False,
     mode: str = "dds",
     only: tuple[str, ...] | None = None,
-    emission_intensity: float = 2.5,
+    emission_intensity: float = DEFAULT_EMISSION_INTENSITY,
     cancel: threading.Event | None = None,
 ) -> ProjectileLibraryResult:
     """Build / refresh the fleet-wide projectile library.

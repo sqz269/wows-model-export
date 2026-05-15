@@ -162,17 +162,10 @@ def apply_variant_asset_swaps(
     if not swaps:
         return (doc, 0, set())
 
-    # Normalize legacy flat shape → dict-of-dicts shape.
-    if all(isinstance(v, str) for v in swaps.values()):
-        by_asset_id: dict[str, str] = swaps  # type: ignore[assignment]
-        by_hp_name: dict[str, str] = {}
-        dead_by_hp_name: dict[str, str] = {}
-        misc_filter_by_hp: dict[str, list[str]] = {}
-    else:
-        by_asset_id = swaps.get("by_asset_id") or {}
-        by_hp_name = swaps.get("by_hp_name") or {}
-        dead_by_hp_name = swaps.get("dead_by_hp_name") or {}
-        misc_filter_by_hp = swaps.get("misc_filter_by_hp") or {}
+    by_asset_id: dict[str, str] = swaps.get("by_asset_id") or {}
+    by_hp_name: dict[str, str] = swaps.get("by_hp_name") or {}
+    dead_by_hp_name: dict[str, str] = swaps.get("dead_by_hp_name") or {}
+    misc_filter_by_hp: dict[str, list[str]] = swaps.get("misc_filter_by_hp") or {}
 
     if not (by_asset_id or by_hp_name or dead_by_hp_name or misc_filter_by_hp):
         return (doc, 0, set())
@@ -927,21 +920,8 @@ def absorb_gameparams_mounts(
             file=sys.stderr,
         )
     if not update:
-        out = doc
-    else:
-        out = merge_preserving(doc, update)
-    # Strip phantom `misc_filter_mode` lingering on placements scaffolded
-    # before 2026-05-09. The runtime never read the field; consumers
-    # ignored it; emission was dropped. Active strip here lets re-runs
-    # of old ships shed the orphan key without a separate migration.
-    for section in PLACEMENT_SECTIONS:
-        items = out.get(section)
-        if not isinstance(items, list):
-            continue
-        for entry in items:
-            if isinstance(entry, dict):
-                entry.pop("misc_filter_mode", None)
-    return out
+        return doc
+    return merge_preserving(doc, update)
 
 
 def absorb_gameparams_armor(

@@ -139,6 +139,12 @@ def flip_180_y(p: tuple[float, float, float]) -> tuple[float, float, float]:
     return (-p[0], p[1], -p[2])
 
 
+#: Ratio threshold for the muzzle-tip vs Y-flipped-tip vote. A vote
+#: registers when one distance is at least ``1/MUZZLE_VOTE_RATIO``× the
+#: other (i.e. 2× closer). Below this margin the vote is a tie.
+_MUZZLE_VOTE_RATIO: float = 0.5
+
+
 def validate_against_mesh(pivots: dict, library_glb: Path) -> dict:
     """Geometric sanity check: each muzzle should land near the alive
     library mesh. If the 180°-flipped pose lands closer at all barrels,
@@ -177,9 +183,9 @@ def validate_against_mesh(pivots: dict, library_glb: Path) -> dict:
         dists_flip.append(round(d_flip, 4))
         # 2× ratio — strong signal vs noise. If neither is meaningfully
         # closer, treat as a tie.
-        if d_flip < d_ok * 0.5:
+        if d_flip < d_ok * _MUZZLE_VOTE_RATIO:
             votes_flip += 1
-        elif d_ok < d_flip * 0.5:
+        elif d_ok < d_flip * _MUZZLE_VOTE_RATIO:
             votes_ok += 1
         else:
             votes_tie += 1

@@ -247,21 +247,9 @@ def texture_sets_from_dir(
     # promoted to the canonical name when no conformant sibling is on
     # disk, dropped when one exists.
     for scheme_slots in sets.values():
-        _promote_legacy_raw_slots_for_dir(scheme_slots)
+        _promote_legacy_raw_slots(scheme_slots)
 
     return sets
-
-
-def _promote_legacy_raw_slots_for_dir(slots: dict[str, list[str]]) -> None:
-    """Variant of [`_promote_legacy_raw_slots`] for the
-    [`texture_sets_from_dir`] manifest shape (slot → list[str] of mip
-    URIs, not slot → {dds_mips: [...]}). Same behaviour matrix.
-    """
-    for raw_slot in [s for s in slots if s.startswith(_LEGACY_RAW_SLOT_PREFIX)]:
-        canonical = raw_slot[len(_LEGACY_RAW_SLOT_PREFIX):]
-        raw_value = slots.pop(raw_slot)
-        if canonical and canonical not in slots:
-            slots[canonical] = raw_value
 
 
 def materials_from_glb(

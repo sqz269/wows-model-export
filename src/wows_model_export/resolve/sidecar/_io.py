@@ -269,16 +269,8 @@ def write(doc: dict[str, Any], path: str | Path) -> Path:
 def read(path: str | Path) -> dict[str, Any]:
     """Load + validate a v3 sidecar.
 
-    Raises :class:`SidecarSchemaError` for:
-      - Missing / non-int ``schema_version``
-      - v1 input (``schema_version == 1``). v1 is not auto-migrated; ships
-        regenerate through the new pipeline.
-      - v2 input (``schema_version == 2``). v2 ships must be
-        regenerated to pick up the new ``materials[i].texture_sets``
-        scheme-keyed structure + ``skins[].scheme_key`` field. Run
-        ``python tools/ship/scaffold_ship.py <Ship> --skip-export
-        --skip-armor --skip-ammo`` to upgrade.
-      - Any ``schema_version`` other than :data:`SCHEMA_VERSION`.
+    Raises :class:`SidecarSchemaError` on a missing / non-int
+    ``schema_version`` or any value other than :data:`SCHEMA_VERSION`.
     """
     path = Path(path)
     with open(path, "rb") as f:
@@ -291,23 +283,11 @@ def read(path: str | Path) -> dict[str, Any]:
         raise SidecarSchemaError(
             f"{path}: missing or non-int 'schema_version' — not a valid sidecar"
         )
-    if version == 1:
-        raise SidecarSchemaError(
-            f"{path}: schema_version=1 is not supported. v1 ships must be "
-            "regenerated through the toolkit pipeline (run `wows-scaffold-ship "
-            "<Ship>`); there is no automatic migration."
-        )
-    if version == 2:
-        raise SidecarSchemaError(
-            f"{path}: schema_version=2 is not supported. v2 ships must be "
-            "regenerated to pick up the v3 `materials[i].texture_sets` + "
-            "`skins[].scheme_key` structure. Re-scaffold with "
-            "`wows-scaffold-ship <Ship> --skip-export --skip-armor --skip-ammo`."
-        )
     if version != SCHEMA_VERSION:
         raise SidecarSchemaError(
             f"{path}: schema_version={version} not supported by this "
-            f"library (expected {SCHEMA_VERSION})"
+            f"library (expected {SCHEMA_VERSION}); re-scaffold with "
+            "`wows-scaffold-ship <Ship>`"
         )
     return doc
 

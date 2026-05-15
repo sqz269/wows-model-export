@@ -174,6 +174,14 @@ def resolve_variant_model_dir(
     return (None, chosen_id)
 
 
+#: Per-process index ``{nativePermoflage → vehicle_key}`` built lazily on
+#: first :func:`find_vehicle_by_native_permoflage` call. Keyed by the
+#: ``id(flat)`` of the cached GameParams dict so a refresh
+#: (load_full(refresh=True)) invalidates automatically — the new dict has
+#: a different id() and we rebuild.
+_NATIVE_PERMOFLAGE_INDEX: tuple[int, dict[str, str]] | None = None
+
+
 def find_vehicle_by_native_permoflage(
     exterior_id: str,
     *,
@@ -193,22 +201,30 @@ def find_vehicle_by_native_permoflage(
     variant's per-ship ``mat_*`` permoflage skin (e.g. mat_Montana_Hoshino)
     that should fold into the default skin's overlay.
 
-    Linear walk of the flat cache; first match wins. The fleet has ~1
-    Vehicle per ``nativePermoflage`` (mesh-swap variants are 1:1 with
-    their permoflage), so the walk is unambiguous.
+    Builds a per-process ``{nativePermoflage → vehicle_key}`` index on
+    first call so repeated lookups in a batch run amortise the walk. The
+    fleet has ~1 Vehicle per ``nativePermoflage`` (mesh-swap variants
+    are 1:1 with their permoflage); first occurrence wins.
     """
+    global _NATIVE_PERMOFLAGE_INDEX
     if not isinstance(exterior_id, str) or not exterior_id:
         return None
     flat = load_full(refresh=refresh) if refresh else load_full()
-    for k, v in flat.items():
-        if not isinstance(v, dict):
-            continue
-        ti = v.get("typeinfo")
-        if not isinstance(ti, dict) or ti.get("type") != "Ship":
-            continue
-        if v.get("nativePermoflage") == exterior_id:
-            return k
-    return None
+    cache = _NATIVE_PERMOFLAGE_INDEX
+    if cache is None or cache[0] != id(flat):
+        index: dict[str, str] = {}
+        for k, v in flat.items():
+            if not isinstance(v, dict):
+                continue
+            ti = v.get("typeinfo")
+            if not isinstance(ti, dict) or ti.get("type") != "Ship":
+                continue
+            np = v.get("nativePermoflage")
+            if isinstance(np, str) and np and np not in index:
+                index[np] = k
+        _NATIVE_PERMOFLAGE_INDEX = (id(flat), index)
+        cache = _NATIVE_PERMOFLAGE_INDEX
+    return cache[1].get(exterior_id)
 
 
 def _path_to_stem(model_path: str) -> str | None:

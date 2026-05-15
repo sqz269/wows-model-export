@@ -72,6 +72,7 @@ Refactor notes vs the I:-side ``ingest(*, ship_input=, out_root=, ...)``:
 from __future__ import annotations
 
 import re
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -259,7 +260,6 @@ def ingest_ship(
     ship_key_suffix: str | None = None,
     build_library: bool = False,
     rebuild_library: bool = False,
-    auto_rig: bool = True,
     and_publish: bool = False,
     publish_target: Path | None = None,
     publish_force: bool = False,
@@ -308,11 +308,6 @@ def ingest_ship(
             Implies ``build_library=True``; passes
             ``rebuild=True`` to the library builder (regenerate every
             asset GLB + DDS from scratch).
-        auto_rig
-            Reserved for parity with the I:-side flag.  The lifted
-            ``accessory_library.build_accessory_library`` invokes
-            ``turret_autorig`` per gun asset internally, so this
-            parameter is currently a no-op.
         and_publish
             After ingest (and library build, if any), publish this
             ship's outputs.  Requires ``publish_target`` to be set.
@@ -387,12 +382,6 @@ def ingest_ship(
             ),
             detail="publish_target is unset",
         )
-
-    # `auto_rig` is accepted on the signature for parity with the I:-side
-    # CLI but the lifted ``build_accessory_library`` runs turret_autorig
-    # per gun asset internally; explicitly touching the value keeps the
-    # lint rule for unused-arguments quiet.
-    _ = auto_rig
 
     timer = StepRunner(on_event, cancel=cancel)
     warnings: list[str] = []
@@ -514,6 +503,27 @@ def ingest_ship(
     )
     accessories_json = ship_models / f"{label}_accessories.json"
 
+    def _refresh_sidecar() -> "_scaffold_ship_mod.ScaffoldResult":
+        """Re-run scaffold_ship with all heavy steps skipped (sidecar fold only)."""
+        return _scaffold_ship_mod.scaffold_ship(
+            label,
+            workspace=workspace,
+            config=cfg,
+            class_override=class_override,
+            ship_key_suffix=ship_key_suffix,
+            toolkit_ship=toolkit_name if toolkit_name != label else None,
+            gameparams_ship_id=gameparams_ship_id,
+            skip_export=True,
+            skip_armor=True,
+            skip_ammo=True,
+            skip_gameparams_autofill=True,
+            skip_materials_skins=True,
+            skip_geometry_hitbox=True,
+            variant_permoflage=variant_permoflage,
+            on_event=on_event,
+            cancel=cancel,
+        )
+
     # ------------------------------------------------------------------
     # Step: resolve_decoratives
     # ------------------------------------------------------------------
@@ -558,24 +568,7 @@ def ingest_ship(
         # armor + ammo + autofill + materials + geometry) and just folds
         # the new decoratives into the sidecar via merge_preserving.
         try:
-            refresh_result = _scaffold_ship_mod.scaffold_ship(
-                label,
-                workspace=workspace,
-                config=cfg,
-                class_override=class_override,
-                ship_key_suffix=ship_key_suffix,
-                toolkit_ship=toolkit_name if toolkit_name != label else None,
-                gameparams_ship_id=gameparams_ship_id,
-                skip_export=True,
-                skip_armor=True,
-                skip_ammo=True,
-                skip_gameparams_autofill=True,
-                skip_materials_skins=True,
-                skip_geometry_hitbox=True,
-                variant_permoflage=variant_permoflage,
-                on_event=on_event,
-                cancel=cancel,
-            )
+            refresh_result = _refresh_sidecar()
             warnings.extend(refresh_result.warnings)
             # Re-bind so the consumer sees the post-refresh ScaffoldResult.
             scaffold_result = refresh_result
@@ -637,24 +630,7 @@ def ingest_ship(
         # extents). No-op for ships without variant swaps.
         if candidates_json.is_file():
             try:
-                refresh_result = _scaffold_ship_mod.scaffold_ship(
-                    label,
-                    workspace=workspace,
-                    config=cfg,
-                    class_override=class_override,
-                    ship_key_suffix=ship_key_suffix,
-                    toolkit_ship=toolkit_name if toolkit_name != label else None,
-                    gameparams_ship_id=gameparams_ship_id,
-                    skip_export=True,
-                    skip_armor=True,
-                    skip_ammo=True,
-                    skip_gameparams_autofill=True,
-                    skip_materials_skins=True,
-                    skip_geometry_hitbox=True,
-                    variant_permoflage=variant_permoflage,
-                    on_event=on_event,
-                    cancel=cancel,
-                )
+                refresh_result = _refresh_sidecar()
                 warnings.extend(refresh_result.warnings)
                 scaffold_result = refresh_result
             except StepError as e:

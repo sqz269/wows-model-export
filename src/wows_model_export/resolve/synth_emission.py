@@ -46,6 +46,11 @@ from PIL import Image
 from ..config import PipelineConfig
 
 
+#: Default ``emissivePower`` when an ``*_emissive.mfm`` doesn't carry one.
+#: Empirically 1.8 across every tested ARP / AL / Sabaton ship.
+DEFAULT_EMISSIVE_POWER: float = 1.8
+
+
 # 8-bit sRGB ↔ linear LUTs — standard glTF / three.js / PBR convention.
 def _srgb_to_linear(c: float) -> float:
     if c <= 0.04045:
@@ -97,42 +102,6 @@ def _open_dd(path: Path) -> Image.Image:
     return Image.open(path)
 
 
-def is_emissive_mask_pattern(
-    mg_path: str | Path,
-    sample: int = 100_000,
-    threshold: float = 0.90,
-) -> bool:
-    """Heuristic check: does this ``_mg`` map look like an emissive
-    shader's mask, vs a regular gloss channel?
-
-    Returns True when ≥``threshold`` of sampled B-channel texels are
-    either 0 or near-saturation (categorical mask), which is the
-    pattern observed across all tested ARP / AL ships. Regular gloss
-    channels are continuous and fail the threshold.
-
-    Caller can use this when the .mfm isn't available (e.g. base-ship
-    extraction where no ``*_emissive.mfm`` was extracted) to gate
-    synthesis on an empirical signal.
-    """
-    import collections
-    import random
-    img = _open_dd(Path(mg_path)).convert("RGB")
-    w, h = img.size
-    random.seed(0)
-    pts = [(random.randint(0, w - 1), random.randint(0, h - 1))
-           for _ in range(sample)]
-    px = img.load()
-    cb: collections.Counter[int] = collections.Counter()
-    for x, y in pts:
-        cb[px[x, y][2]] += 1
-
-    # "Categorical" = mode-at-0 PLUS a handful of high values (≥200).
-    # Non-emissive gloss is continuous — no single peak dominates.
-    zero = cb.get(0, 0)
-    high = sum(n for v, n in cb.items() if v >= 200)
-    return (zero + high) / sample >= threshold
-
-
 def synth_emissive(diffuse: Image.Image, mg: Image.Image,
                    emissive_power: float) -> Image.Image:
     """Return an sRGB RGB image of ``diffuse * (mg.B / 255) *
@@ -164,7 +133,7 @@ def synth_emissive_dds(
     mg_path: str | Path,
     output_path: str | Path,
     *,
-    emissive_power: float = 1.8,
+    emissive_power: float = DEFAULT_EMISSIVE_POWER,
     pixel_format: str = "DXT1",
 ) -> Path:
     """Synthesize ``output_path`` (a DDS) from the ARP-style mask + diffuse.
@@ -371,7 +340,7 @@ def synthesize_emissive_textures(
             )
             continue
 
-        power = wg_mfm.get_emissive_power(mfm, default=1.8)
+        power = wg_mfm.get_emissive_power(mfm, default=DEFAULT_EMISSIVE_POWER)
 
         if diff_dd0.is_file() and mg_dd0.is_file():
             out_dd0 = textures_dds_dir / f"{stem}_emissive.dd0"
@@ -551,7 +520,7 @@ def synthesize_emissive_textures_batch(
             )
             continue
 
-        power = wg_mfm.get_emissive_power(mfm, default=1.8)
+        power = wg_mfm.get_emissive_power(mfm, default=DEFAULT_EMISSIVE_POWER)
 
         written = []
         if diff_dd0.is_file() and mg_dd0.is_file():
@@ -580,7 +549,7 @@ def synth_emissive_dds_pyramid(
     out_dir: Path,
     out_stem: str,
     *,
-    emissive_power: float = 1.8,
+    emissive_power: float = DEFAULT_EMISSIVE_POWER,
     pixel_format: str = "DXT1",
     mip_suffixes: tuple[str, ...] = (".dd0", ".dd1", ".dd2", ".dds"),
 ) -> list[Path]:
@@ -611,7 +580,6 @@ def synth_emissive_dds_pyramid(
 
 
 __all__ = [
-    "is_emissive_mask_pattern",
     "synth_emissive",
     "synth_emissive_dds",
     "synth_emissive_dds_pyramid",
