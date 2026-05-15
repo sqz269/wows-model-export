@@ -1,0 +1,7 @@
+# The bundled webview output is byte-for-byte what Vite produced.
+# Source maps reference exact byte offsets and minified JS/CSS payloads
+# carry trailing-newline + line-count semantics. Mark them binary so
+# git stores + checks out verbatim across OSes — otherwise a Windows
+# clone would get CRLF-normalised bundles that diverge from what the
+# developer built and tested locally.
+webview/** -text

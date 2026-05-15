@@ -79,6 +79,15 @@ Repository = "https://github.com/sqz269/wows-model-export"
 where = ["src"]
 include = ["wows_model_export*"]
 
+# Bundle the pre-built Svelte UI under `wows_model_export/_static/webview/`
+# into the wheel. The mirror is committed to the repo (see
+# `src/wows_model_export/_static/README.md` for the rationale); this
+# stanza just opts setuptools into shipping non-`.py` files from that
+# subtree. Patterns are recursive — `**/*` covers index.html, the
+# fingerprinted JS/CSS chunks under assets/, and the .map sourcemaps.
+[tool.setuptools.package-data]
+wows_model_export = ["_static/webview/**/*", "_static/README.md"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100
