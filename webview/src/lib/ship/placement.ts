@@ -16,7 +16,7 @@
 // the matrix, so the consumer just decomposes verbatim.
 
 import * as THREE from 'three';
-import { LOD_RE, PATCH_RE } from './visibility';
+import { PATCH_RE, lodLevelOfName } from './visibility';
 import type { HullSectionKey, ShipPlacement, ShipSectionKey } from '$lib/types';
 import type { ColorMaterials, PlacementColorEntry } from './color_mode';
 
@@ -33,7 +33,13 @@ export function applyAttachedMatrix(node: THREE.Object3D, matrix16: number[]): v
   tmpMat4.decompose(node.position, node.quaternion, node.scale);
 }
 
-export type LodPolicy = 'lod0' | 'all';
+/** LOD policy. `'lod0'` shows only the default high-detail mesh (the
+ *  user's normal viewing mode); `'all'` shows every level overlaid (a
+ *  visually-noisy debug view); `'lodN'` (N ≥ 1) shows ONLY meshes at
+ *  that level — useful for QAing the coarser-substitute geometry in
+ *  isolation. Available levels per ship are reported by
+ *  `ShipViewer.getAvailableLodLevels()`. */
+export type LodPolicy = 'all' | `lod${number}`;
 
 export interface TagOptions {
   section: ShipSectionKey;
@@ -45,7 +51,9 @@ export interface TagOptions {
 
 export interface TagResult {
   colorEntries: PlacementColorEntry[];
-  lowLodMeshes: THREE.Object3D[];
+  /** All meshes under this placement bucketed by LOD level. The viewer
+   *  merges these into the global per-level map for the LOD cascade. */
+  meshesByLodLevel: Map<number, THREE.Object3D[]>;
 }
 
 /**
@@ -92,15 +100,20 @@ export function tagAndIndexInstance(
     : colorMaterials.hullSectionNull;
 
   const colorEntries: PlacementColorEntry[] = [];
-  const lowLodMeshes: THREE.Object3D[] = [];
+  const meshesByLodLevel = new Map<number, THREE.Object3D[]>();
 
   root.traverse((obj) => {
     const m = obj as THREE.Mesh;
     if (!m.isMesh) return;
-    if (LOD_RE.test(m.name || '')) {
-      lowLodMeshes.push(m);
-      if (lodPolicy === 'lod0') m.visible = false;
+    const level = lodLevelOfName(m.name || '');
+    let bucket = meshesByLodLevel.get(level);
+    if (!bucket) {
+      bucket = [];
+      meshesByLodLevel.set(level, bucket);
     }
+    bucket.push(m);
+    if (level > 0 && lodPolicy === 'lod0') m.visible = false;
+
     colorEntries.push({
       mesh: m,
       originalMaterial: m.material,
@@ -109,5 +122,5 @@ export function tagAndIndexInstance(
     });
   });
 
-  return { colorEntries, lowLodMeshes };
+  return { colorEntries, meshesByLodLevel };
 }

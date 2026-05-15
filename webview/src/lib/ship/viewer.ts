@@ -52,7 +52,7 @@ import {
 import { AccessoryCache } from './accessory_loader';
 import { AttachedDocCache } from './attached_loader';
 import { TextureManager } from './textures';
-import { LOD_RE } from './visibility';
+import { lodLevelOfName } from './visibility';
 
 /**
  * Info resolved from `userData` on the clicked accessory instance. The
@@ -177,13 +177,15 @@ export class ShipViewer {
     groups: [],
     renderersByMesh: new Map(),
     damageMeshes: [],
-    lowLodMeshes: [],
+    meshesByLodLevel: new Map(),
   };
 
   // Placement tracking
   private placementsByMesh = new Map<string, THREE.Object3D[]>();
   private placementColorEntries: PlacementColorEntry[] = [];
-  private placementLowLodMeshes: THREE.Object3D[] = [];
+  /** Per-level placement meshes — merged from each placement's
+   *  `TagResult.meshesByLodLevel` so the cascade can filter by level. */
+  private placementMeshesByLodLevel = new Map<number, THREE.Object3D[]>();
 
   // Color
   private colorMaterials: ColorMaterials;
@@ -420,7 +422,7 @@ export class ShipViewer {
         for (const e of places) {
           const inst = tpl.clone(true);
           applyPlacementMatrix(inst, e.placement.transform.matrix);
-          const { colorEntries, lowLodMeshes } = tagAndIndexInstance(
+          const { colorEntries, meshesByLodLevel } = tagAndIndexInstance(
             inst,
             {
               section: e.section,
@@ -431,7 +433,14 @@ export class ShipViewer {
             this.placementsByMesh,
           );
           this.placementColorEntries.push(...colorEntries);
-          this.placementLowLodMeshes.push(...lowLodMeshes);
+          for (const [level, meshes] of meshesByLodLevel) {
+            let bucket = this.placementMeshesByLodLevel.get(level);
+            if (!bucket) {
+              bucket = [];
+              this.placementMeshesByLodLevel.set(level, bucket);
+            }
+            bucket.push(...meshes);
+          }
           inst.traverse((obj) => {
             const m = obj as THREE.Mesh;
             if (!m.isMesh) return;
@@ -485,10 +494,14 @@ export class ShipViewer {
               childInst.traverse((obj) => {
                 const cm = obj as THREE.Mesh;
                 if (!cm.isMesh) return;
-                if (LOD_RE.test(cm.name || '')) {
-                  this.placementLowLodMeshes.push(cm);
-                  if (this.lodPolicy === 'lod0') cm.visible = false;
+                const level = lodLevelOfName(cm.name || '');
+                let bucket = this.placementMeshesByLodLevel.get(level);
+                if (!bucket) {
+                  bucket = [];
+                  this.placementMeshesByLodLevel.set(level, bucket);
                 }
+                bucket.push(cm);
+                if (level > 0 && this.lodPolicy === 'lod0') cm.visible = false;
                 this.textures.registerAccessoryMesh(cm, childPlacement);
               });
               attachmentsRendered++;
@@ -551,11 +564,11 @@ export class ShipViewer {
       groups: [],
       renderersByMesh: new Map(),
       damageMeshes: [],
-      lowLodMeshes: [],
+      meshesByLodLevel: new Map(),
     };
     this.placementsByMesh.clear();
     this.placementColorEntries.length = 0;
-    this.placementLowLodMeshes.length = 0;
+    this.placementMeshesByLodLevel.clear();
     this.seamStates = defaultSeamStates();
     this.textures.clearShip();
     this.attachedDocCache.clear();
@@ -572,14 +585,20 @@ export class ShipViewer {
 
   setLodPolicy(p: LodPolicy): void {
     this.lodPolicy = p;
-    if (p === 'all') {
-      for (const m of this.classified.lowLodMeshes) m.visible = true;
-      for (const m of this.placementLowLodMeshes) m.visible = true;
-    } else {
-      for (const m of this.classified.lowLodMeshes) m.visible = false;
-      for (const m of this.placementLowLodMeshes) m.visible = false;
-    }
+    // applyAllStates owns the visibility cascade now — it walks
+    // meshesByLodLevel and forces visible=false on every level that
+    // doesn't match the policy. No need to pre-toggle here.
     this.applyAllStates();
+  }
+
+  /** Sorted ascending list of LOD levels present on the currently
+   *  loaded ship (hull + placements combined). Always contains 0 when
+   *  any mesh is loaded. Drives the ShipControls LOD dropdown. */
+  getAvailableLodLevels(): number[] {
+    const levels = new Set<number>();
+    for (const level of this.classified.meshesByLodLevel.keys()) levels.add(level);
+    for (const level of this.placementMeshesByLodLevel.keys()) levels.add(level);
+    return [...levels].sort((a, b) => a - b);
   }
 
   setDamageVariantsVisible(show: boolean): void {
@@ -752,6 +771,29 @@ export class ShipViewer {
     return this.classified.groups.map((g) => g.name);
   }
 
+  /** Per-hull-group stats for the bottom-panel Hull tab. Walks each
+   *  group node once; cheap enough to call per render (the hull tree
+   *  is shallow). `triangles` counts the position-attribute / index
+   *  buffer of every Mesh under the group, regardless of visibility. */
+  getHullGroupStats(): ReadonlyArray<{ name: string; meshes: number; triangles: number }> {
+    return this.classified.groups.map((g) => {
+      let meshes = 0;
+      let triangles = 0;
+      g.node.traverse((obj) => {
+        const m = obj as THREE.Mesh;
+        if (!m.isMesh) return;
+        meshes += 1;
+        const geom = m.geometry as THREE.BufferGeometry | undefined;
+        if (geom?.index) {
+          triangles += geom.index.count / 3;
+        } else if (geom?.attributes?.position) {
+          triangles += geom.attributes.position.count / 3;
+        }
+      });
+      return { name: g.name, meshes, triangles };
+    });
+  }
+
   getSeamStates(): Readonly<Record<SeamKey, SeamState>> {
     return this.seamStates;
   }
@@ -788,8 +830,8 @@ export class ShipViewer {
     applyAllStates({
       hullRenderersByMesh: this.classified.renderersByMesh,
       placementsByMesh: this.placementsByMesh,
-      hullLowLodMeshes: this.classified.lowLodMeshes,
-      placementLowLodMeshes: this.placementLowLodMeshes,
+      hullMeshesByLodLevel: this.classified.meshesByLodLevel,
+      placementMeshesByLodLevel: this.placementMeshesByLodLevel,
       hullDamageMeshes: this.classified.damageMeshes,
       seamStates: this.seamStates,
       lodPolicy: this.lodPolicy,

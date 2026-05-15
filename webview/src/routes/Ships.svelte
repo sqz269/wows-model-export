@@ -1,13 +1,20 @@
 <script lang="ts">
   // Ships route: loads /api/ships + /api/library on mount, hosts the
-  // ship picker + viewer + controls panel. The URL hash drives ship
-  // selection so the back button + bookmarks work
-  // (`#/ship/<name>` → opens that ship).
+  // ship picker + header + viewer + side controls + bottom inspector.
+  // The URL hash drives ship selection so the back button + bookmarks
+  // work (`#/ship/<name>` → opens that ship).
   //
   // Async load lifecycle is reported via a single sticky svelte-sonner
   // toast per ship that promotes to success / warning / error on
-  // completion; the durable status bar below the viewer keeps the
-  // final-state summary so the user can scan it without a toast hover.
+  // completion; the bottom inspector's Overview tab keeps the final-
+  // state summary so the user can scan it without a toast hover.
+  //
+  // State ownership: the header pill + bottom panel's Skin tab need to
+  // mirror state that used to live in ShipControls (showTextures,
+  // activeSkin, skins, seamStates). Those mirrors live here now, with
+  // ShipControls calling back via `onShowTexturesChange` /
+  // `onSeamStatesChange` callbacks. `pickSkin` (with toast plumbing)
+  // also lives here so the bottom panel's Skins tab can drive it.
 
   import { onMount } from 'svelte';
   import { toast } from 'svelte-sonner';
@@ -16,12 +23,15 @@
   import { extractEvents } from '$lib/extract_events.svelte';
   import { navState } from '$lib/nav_state.svelte';
   import { hasModifier, isTypingContext } from '$lib/shortcuts';
-  import type { LibraryIndex, ShipSummary } from '$lib/types';
+  import type { LibraryIndex, SeamKey, SeamState, ShipSummary, Skin } from '$lib/types';
   import type { PickResult, ShipLoadStats, ShipViewer } from '$lib/ship';
   import ShipPicker from '$components/ShipPicker.svelte';
   import ShipViewerCmp from '$components/ShipViewer.svelte';
   import ShipControls from '$components/ShipControls.svelte';
-  import MeshInspector from '$components/MeshInspector.svelte';
+  import ShipHeaderBar from '$components/ShipHeaderBar.svelte';
+  import ShipBottomPanel, {
+    type ShipBottomPanelHandle,
+  } from '$components/ShipBottomPanel.svelte';
 
   interface Props {
     /** Ship name from the URL (`#/ship/<name>`), or null when the user
@@ -41,38 +51,84 @@
   let loadError = $state<string | null>(null);
   let viewer = $state<ShipViewer | null>(null);
   let loadStats = $state<ShipLoadStats | null>(null);
-  // Bumped each time the ship reloads so child controls can re-read state.
+  // Bumped each time the ship reloads OR a major viewer state change
+  // (skin pick) so child surfaces can re-read state. Header pill and
+  // bottom panel both watch this.
   let controlsRevision = $state(0);
   // Active sticky loading toast id; promoted to success/warning/error on
   // completion so each ship swap reuses one slot instead of stacking.
   let shipLoadToastId: string | number | null = null;
+  // Toast id for the async skin-activate op (kept here so the side
+  // panel + bottom panel share one slot).
+  let skinToastId: string | number | null = null;
   // Picker binding for the `/` shortcut. Component instance exports
   // (svelte 5 supports the v4 `export function` pattern via bind:this).
   let pickerRef: ShipPicker | null = $state(null);
-  // Latest mesh-inspector pick + its local-x/y inside `.main`. Cleared by
-  // clicking empty space, the inspector's close button, or pressing ESC.
+  // Bottom-panel handle. Used by the header's "N unresolved" pill to
+  // jump the panel to the Unresolved tab.
+  let bottomPanelHandle: ShipBottomPanelHandle | null = null;
+  // Latest mesh-inspector pick. Cleared by clicking empty space, the
+  // bottom-panel Pick tab's close button, or pressing ESC.
   let selectedPick = $state<PickResult | null>(null);
-  let inspectorX = $state(0);
-  let inspectorY = $state(0);
-  let mainEl: HTMLElement | null = $state(null);
 
-  function handlePick(pick: PickResult | null, clientX: number, clientY: number) {
-    if (!pick || !mainEl) {
-      selectedPick = null;
-      return;
-    }
-    const rect = mainEl.getBoundingClientRect();
-    // Nudge a few px below-right of the click point so the card doesn't
-    // cover what was just picked. Clamp inside .main on the right + bottom
-    // edges so a click near the corner doesn't push the card offscreen.
-    const NUDGE = 12;
-    const PANEL_W = 280;
-    const PANEL_H = 220;
-    const localX = Math.min(clientX - rect.left + NUDGE, rect.width - PANEL_W - 8);
-    const localY = Math.min(clientY - rect.top + NUDGE, rect.height - PANEL_H - 8);
-    inspectorX = Math.max(8, localX);
-    inspectorY = Math.max(8, localY);
+  // Mirrors of viewer-owned state that the header pill + bottom-panel
+  // tabs need to read. ShipControls owns the side-panel toggles and
+  // calls back here so these mirrors stay in sync.
+  let showTextures = $state(false);
+  let skins = $state<readonly Skin[]>([]);
+  let activeSkin = $state<string | null>(null);
+  let seamStates = $state<Readonly<Record<SeamKey, SeamState>>>({
+    'Bow-MidFront': 'Intact',
+    'MidFront-MidBack': 'Intact',
+    'MidBack-Stern': 'Intact',
+  });
+  // Cached per-ship hull group names. `viewer.getHullGroups()` allocates
+  // a new array on every call, so reading it inline at the template
+  // makes the prop unstable — ShipControls' $effect would loop because
+  // tracked-prop changes on every parent re-render. Refresh in
+  // onViewerLoaded so it stays stable between ship swaps.
+  let hullGroups = $state<readonly string[]>([]);
+  // Same rationale for the per-ship LOD level list. The ShipControls
+  // dropdown populates from this; ships with only level 0 + level 1
+  // get a 3-option dropdown, ships with deeper LOD chains get more.
+  let lodLevels = $state<readonly number[]>([0]);
+
+  function handlePick(pick: PickResult | null, _clientX: number, _clientY: number) {
     selectedPick = pick;
+  }
+
+  async function pickSkin(skinId: string) {
+    if (!viewer) return;
+    activeSkin = skinId;
+    skinToastId = toast.loading(`Activating ${skinId}…`, {
+      duration: Number.POSITIVE_INFINITY,
+    });
+    try {
+      await viewer.setActiveSkin(skinId, (msg) => {
+        if (skinToastId !== null) {
+          toast.loading(msg, { id: skinToastId, duration: Number.POSITIVE_INFINITY });
+        }
+      });
+      if (skinToastId !== null) {
+        toast.success(`Skin: ${skinId}`, { id: skinToastId, duration: 2000 });
+        skinToastId = null;
+      }
+      // Bump so the bottom-panel Hull tab re-reads geometry stats
+      // (texture/material swap may have re-bound mesh groups).
+      controlsRevision++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (skinToastId !== null) {
+        toast.error(`Failed to apply ${skinId}`, {
+          id: skinToastId,
+          description: msg,
+          duration: 8000,
+        });
+        skinToastId = null;
+      } else {
+        toast.error(`Failed to apply ${skinId}`, { description: msg, duration: 8000 });
+      }
+    }
   }
 
   // Sticky internal selection. `shipName` carries the URL claim (`Iowa`
@@ -209,6 +265,17 @@
 
   function onViewerLoaded(stats: ShipLoadStats) {
     loadStats = stats;
+    // Read mirrors from the freshly-loaded viewer. showTextures stays
+    // off per ship by design (DDS decoding is expensive); the side
+    // panel + header pill pick it up on toggle via onShowTexturesChange.
+    if (viewer) {
+      showTextures = viewer.isShowingTextures();
+      skins = viewer.getSkins();
+      activeSkin = viewer.getActiveSkinId();
+      seamStates = { ...viewer.getSeamStates() };
+      hullGroups = viewer.getHullGroups();
+      lodLevels = viewer.getAvailableLodLevels();
+    }
     controlsRevision++;
     const unresolved = stats.unresolvedAssets.size;
     const summary =
@@ -258,7 +325,7 @@
     onSelect={selectShip}
   />
 
-  <section class="relative flex flex-1 min-w-0 flex-col" bind:this={mainEl}>
+  <section class="relative flex flex-1 min-w-0 flex-col">
     {#if loadError}
       <div class="text-destructive flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
         <strong>Failed to load workspace:</strong>
@@ -273,51 +340,55 @@
         Pick a ship from the left to load it.
       </div>
     {:else}
-      <ShipViewerCmp
+      <ShipHeaderBar
         ship={activeShip}
-        {library}
-        bindHandle={(v) => {
-          viewer = v;
-        }}
-        onProgress={onShipProgress}
-        onLoaded={onViewerLoaded}
-        onError={onViewerError}
-        onPick={handlePick}
+        {viewer}
+        {loadStats}
+        {showTextures}
+        {skins}
+        {activeSkin}
+        onShowUnresolved={() => bottomPanelHandle?.selectTab('unresolved')}
       />
-      {#if selectedPick}
-        <MeshInspector
-          info={selectedPick.info}
-          x={inspectorX}
-          y={inspectorY}
+      <div class="relative flex flex-1 min-h-0 overflow-hidden">
+        <ShipViewerCmp
+          ship={activeShip}
           {library}
-          onClose={() => (selectedPick = null)}
+          bindHandle={(v) => {
+            viewer = v;
+          }}
+          onProgress={onShipProgress}
+          onLoaded={onViewerLoaded}
+          onError={onViewerError}
+          onPick={handlePick}
         />
-      {/if}
-      <div
-        class="bg-card border-border flex flex-none items-center gap-2 border-t px-3 py-1.5 text-[11px] text-foreground"
-      >
-        {#if loadStats}
-          <span>
-            {loadStats.placementsRendered}/{loadStats.placementsRequested} placements · {loadStats.attachmentsRendered}
-            attached
-            {#if loadStats.attachmentsFilteredByMisc > 0}
-              ({loadStats.attachmentsFilteredByMisc} miscFilter-dropped)
-            {/if}
-            · {loadStats.hullMeshCount} hull meshes
-            {#if loadStats.unresolvedAssets.size > 0}
-              · <span class="text-warning">
-                {loadStats.unresolvedAssets.size} unresolved
-              </span>
-            {/if}
-          </span>
-        {:else}
-          <span class="text-muted-foreground">Loading…</span>
-        {/if}
       </div>
+      <ShipBottomPanel
+        ship={activeShip}
+        {viewer}
+        {loadStats}
+        {library}
+        revision={controlsRevision}
+        {skins}
+        {activeSkin}
+        onPickSkin={pickSkin}
+        {seamStates}
+        {selectedPick}
+        onClosePick={() => (selectedPick = null)}
+        bindHandle={(h) => {
+          bottomPanelHandle = h;
+        }}
+      />
     {/if}
   </section>
 
   {#if activeShip && viewer}
-    <ShipControls {viewer} hullGroups={viewer.getHullGroups()} revision={controlsRevision} />
+    <ShipControls
+      {viewer}
+      {hullGroups}
+      {lodLevels}
+      revision={controlsRevision}
+      onShowTexturesChange={(v) => (showTextures = v)}
+      onSeamStatesChange={(s) => (seamStates = { ...s })}
+    />
   {/if}
 </div>

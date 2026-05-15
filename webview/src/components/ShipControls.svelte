@@ -1,33 +1,57 @@
 <script lang="ts">
   // Controls panel: LOD, color mode, per-section visibility, per-hull-group
-  // visibility, per-seam damage state, texture toggles, active skin
-  // selector. Wired directly to the ShipViewer handle — no intermediate
-  // state. Toggles fire viewer methods synchronously; the viewer
-  // re-applies the cascade. The texture toggle and skin radio are async
-  // (DDS decoding); progress flows through svelte-sonner toasts so a
-  // long decode pass doesn't block the panel UI.
+  // visibility, per-seam damage state, texture toggles. Wired directly to
+  // the ShipViewer handle — no intermediate state. Toggles fire viewer
+  // methods synchronously; the viewer re-applies the cascade. The
+  // texture toggle is async (DDS decoding); progress flows through
+  // svelte-sonner toasts so a long decode pass doesn't block the panel UI.
+  //
+  // Skins moved to the bottom-panel `Skins` tab (richer layout + room
+  // for more metadata). Frame / Reset camera moved to the header bar.
+  // This component is the *view-state controls* surface now —
+  // authoring/destructive actions live in the header, read-only
+  // inspector info lives in the bottom panel.
   //
   // Persistence: cosmetic / cross-ship preferences (helpers, LOD,
   // colorMode, per-section visibility, texture-detail toggles, panel
   // open/close) round-trip through `$lib/store`. Per-ship inspection
-  // state (seamStates, damageVariants, showTextures, activeSkin) is NOT
-  // persisted — those reset per ship by design, matching the legacy v3
-  // rule that bumping a seam doesn't bleed into the next ship.
+  // state (seamStates, damageVariants, showTextures) is NOT persisted —
+  // those reset per ship by design, matching the legacy v3 rule that
+  // bumping a seam doesn't bleed into the next ship.
   import { toast } from 'svelte-sonner';
+  import { untrack } from 'svelte';
   import { Button } from '$lib/components/ui/button';
   import { SHIP_SECTIONS, SEAMS } from '$lib/types';
-  import type { SeamKey, SeamState, ShipSectionKey, Skin } from '$lib/types';
+  import type { SeamKey, SeamState, ShipSectionKey } from '$lib/types';
   import type { ColorMode, LodPolicy, ShipViewer } from '$lib/ship';
   import { loadState, patchState, patchNestedState, type PanelSection } from '$lib/store';
+  import { rowCls, labelCls, inputBoxCls } from '$lib/ui/controls';
 
   interface Props {
     viewer: ShipViewer;
     hullGroups: readonly string[];
+    /** LOD levels present on the loaded ship (ascending; 0 = high-
+     *  detail default). The dropdown adds one option per level plus an
+     *  "all" mixer. */
+    lodLevels: readonly number[];
     /** Tick when caller wants the panel to re-read state from the viewer. */
     revision: number;
+    /** Notify the parent when textures toggle (so the header pill +
+     *  any other surface mirroring this state stays in sync). */
+    onShowTexturesChange?: (v: boolean) => void;
+    /** Notify when seam states change so the bottom-panel Damage tab
+     *  can refresh its snapshot without polling. */
+    onSeamStatesChange?: (states: Readonly<Record<SeamKey, SeamState>>) => void;
   }
 
-  const { viewer, hullGroups, revision }: Props = $props();
+  const {
+    viewer,
+    hullGroups,
+    lodLevels,
+    revision,
+    onShowTexturesChange,
+    onSeamStatesChange,
+  }: Props = $props();
 
   // Local mirror of viewer state. Read once per `revision` bump so the
   // panel reflects whatever the viewer is actually doing, even across
@@ -54,20 +78,14 @@
   let aoMaps = $state(true);
   let mrMaps = $state(false);
   let preserveUnderwater = $state(true);
-  let skins = $state<readonly Skin[]>([]);
-  let activeSkin = $state<string | null>(null);
 
   // Panel open/close — UI-only; tracked separately so toggling a section
   // doesn't trigger the larger $effect that re-reads viewer state.
   let panelOpen = $state(loadState().panelOpen);
 
-  // Sticky-toast ids for async ops. Both texture-toggle and skin-pick are
-  // streaming (progress callbacks) so we hold one slot per family and
-  // promote on completion. Ship-swap resets aren't strictly needed —
-  // svelte-sonner garbage-collects dismissed toasts on its own — but we
-  // null them on completion to avoid stale id reuse across reloads.
+  // Sticky-toast id for the texture-toggle async op. Streaming progress
+  // callbacks promote on completion; one slot is held across the run.
   let textureToastId: string | number | null = null;
-  let skinToastId: string | number | null = null;
 
   $effect(() => {
     void revision;
@@ -76,39 +94,63 @@
     // panel reflects what the user will actually see. The set/get
     // round-trip is the source-of-truth path; persistence is one-way
     // input on each ship swap.
-    const persisted = loadState();
-    viewer.setHelpers(persisted.helpers);
-    viewer.setLodPolicy(persisted.lodPolicy);
-    viewer.setColorMode(persisted.colorMode);
-    for (const k of SHIP_SECTIONS) {
-      viewer.setSectionVisible(k, persisted.sectionVisible[k]);
-    }
-    viewer.setAoEnabled(persisted.aoMaps);
-    viewer.setMrMapEnabled(persisted.mrMaps);
-    viewer.setPreserveUnderwaterHull(persisted.preserveUnderwater);
+    //
+    // The whole body runs inside untrack() so the only tracked dep is
+    // `revision` (deliberate trigger). Without this, reading $state
+    // mirrors after writing them — or reading the callback props —
+    // would re-trigger the effect and the parent's mirror-write
+    // callbacks would loop ad infinitum.
+    untrack(() => {
+      const persisted = loadState();
+      viewer.setHelpers(persisted.helpers);
+      // Clamp the persisted LOD policy to a level that actually exists
+      // on this ship — a ship without LOD 2 meshes shouldn't get a
+      // policy that hides everything just because the previous ship
+      // had a deeper LOD chain.
+      const effectiveLod = resolveLodPolicy(persisted.lodPolicy, lodLevels);
+      viewer.setLodPolicy(effectiveLod);
+      viewer.setColorMode(persisted.colorMode);
+      for (const k of SHIP_SECTIONS) {
+        viewer.setSectionVisible(k, persisted.sectionVisible[k]);
+      }
+      viewer.setAoEnabled(persisted.aoMaps);
+      viewer.setMrMapEnabled(persisted.mrMaps);
+      viewer.setPreserveUnderwaterHull(persisted.preserveUnderwater);
 
-    lodPolicy = viewer.getLodPolicy();
-    colorMode = viewer.getColorMode();
-    damageVariants = viewer.getDamageVariantsVisible();
-    helpers = viewer.getHelpersVisible();
-    sectionVisible = { ...persisted.sectionVisible };
-    seamStates = { ...viewer.getSeamStates() };
-    showTextures = viewer.isShowingTextures();
-    aoMaps = viewer.getAoEnabled();
-    mrMaps = viewer.getMrMapEnabled();
-    preserveUnderwater = viewer.getPreserveUnderwater();
-    skins = viewer.getSkins();
-    activeSkin = viewer.getActiveSkinId();
+      const newSeamStates = { ...viewer.getSeamStates() };
+      const newShowTextures = viewer.isShowingTextures();
 
-    // Hull groups: defaults match the classifier (Armor + Hitboxes hidden).
-    // No persistence yet — groups vary per ship, so a cross-ship
-    // preference would either need per-ship-name scoping or a fleet-wide
-    // pattern list. Skip for now.
-    const next: Record<string, boolean> = {};
-    for (const g of hullGroups) {
-      next[g] = !(g === 'Armor' || g === 'Hitboxes');
-    }
-    groupVisible = next;
+      lodPolicy = viewer.getLodPolicy();
+      colorMode = viewer.getColorMode();
+      damageVariants = viewer.getDamageVariantsVisible();
+      helpers = viewer.getHelpersVisible();
+      sectionVisible = { ...persisted.sectionVisible };
+      seamStates = newSeamStates;
+      showTextures = newShowTextures;
+      aoMaps = viewer.getAoEnabled();
+      mrMaps = viewer.getMrMapEnabled();
+      preserveUnderwater = viewer.getPreserveUnderwater();
+      onShowTexturesChange?.(newShowTextures);
+      onSeamStatesChange?.(newSeamStates);
+
+      // Hull groups: defaults match the classifier (Armor + Hitboxes hidden).
+      // No persistence yet — groups vary per ship, so a cross-ship
+      // preference would either need per-ship-name scoping or a fleet-wide
+      // pattern list. Skip for now.
+      const next: Record<string, boolean> = {};
+      for (const g of hullGroups) {
+        next[g] = !(g === 'Armor' || g === 'Hitboxes');
+      }
+      groupVisible = next;
+
+      // Honor the persisted Show-textures choice. Each ship's viewer
+      // starts with textures off (TextureManager.clearShip()); kick off
+      // the async decode here so the user's last toggle carries across
+      // ship swaps. Fire-and-forget — the toast tracks progress.
+      if (persisted.showTextures && !newShowTextures) {
+        void toggleShowTextures(true);
+      }
+    });
   });
 
   function toggleHelpers(v: boolean) {
@@ -142,14 +184,21 @@
   function setSeam(k: SeamKey, v: SeamState) {
     seamStates[k] = v;
     viewer.setSeamState(k, v);
+    onSeamStatesChange?.(seamStates);
   }
   function resetSeams() {
     viewer.resetSeamStates();
     seamStates = { ...viewer.getSeamStates() };
+    onSeamStatesChange?.(seamStates);
   }
 
   async function toggleShowTextures(v: boolean) {
     showTextures = v;
+    onShowTexturesChange?.(v);
+    // Persist so ship swaps + page reloads pick up the same choice.
+    // DDS decoding is expensive but the decoded textures are cached per
+    // asset across ship swaps, so re-applying is usually fast.
+    patchState({ showTextures: v });
     if (v) {
       textureToastId = toast.loading('Decoding DDS textures…', {
         duration: Number.POSITIVE_INFINITY,
@@ -197,34 +246,15 @@
     viewer.setPreserveUnderwaterHull(v);
     patchState({ preserveUnderwater: v });
   }
-  async function pickSkin(skinId: string) {
-    activeSkin = skinId;
-    skinToastId = toast.loading(`Activating ${skinId}…`, {
-      duration: Number.POSITIVE_INFINITY,
-    });
-    try {
-      await viewer.setActiveSkin(skinId, (msg) => {
-        if (skinToastId !== null) {
-          toast.loading(msg, { id: skinToastId, duration: Number.POSITIVE_INFINITY });
-        }
-      });
-      if (skinToastId !== null) {
-        toast.success(`Skin: ${skinId}`, { id: skinToastId, duration: 2000 });
-        skinToastId = null;
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (skinToastId !== null) {
-        toast.error(`Failed to apply ${skinId}`, {
-          id: skinToastId,
-          description: msg,
-          duration: 8000,
-        });
-        skinToastId = null;
-      } else {
-        toast.error(`Failed to apply ${skinId}`, { description: msg, duration: 8000 });
-      }
-    }
+  /** Snap a persisted LOD policy onto the levels available on the
+   *  currently-loaded ship. Out-of-range falls back to lod0; if the
+   *  ship somehow has no level 0 either, falls back to `all`. */
+  function resolveLodPolicy(p: LodPolicy, available: readonly number[]): LodPolicy {
+    if (p === 'all') return 'all';
+    const level = parseInt(p.slice(3), 10);
+    if (Number.isFinite(level) && available.includes(level)) return p;
+    if (available.includes(0)) return 'lod0';
+    return 'all';
   }
 
   function togglePanel(key: PanelSection, open: boolean) {
@@ -232,17 +262,14 @@
     patchNestedState('panelOpen', { [key]: open });
   }
 
-  // Shared Tailwind class slugs for the dense controls. Pulling them
-  // into named consts here keeps the markup below scannable; without
-  // this each `<details>` / row repeats the same 6-utility chain.
+  // Page-local accents for the `<details>` collapsible vocabulary. The
+  // cross-page idioms (rowCls / labelCls / inputBoxCls) come from
+  // $lib/ui/controls; the chevron-summary styling below is unique to
+  // this panel.
   const detailsCls = 'border-border border-b last:border-b-0';
   const summaryCls =
     'flex items-center gap-1.5 cursor-pointer select-none px-3.5 py-2 text-[11px] uppercase tracking-wider font-semibold text-muted-foreground hover:bg-popover hover:text-foreground [&::-webkit-details-marker]:hidden before:content-[""] before:inline-block before:size-0 before:border-y-[4px] before:border-y-transparent before:border-l-[5px] before:border-l-muted-foreground before:transition-transform group-open:before:rotate-90';
   const bodyCls = 'flex flex-col gap-2 px-3.5 pb-3 pt-1';
-  const rowCls = 'flex items-center gap-1.5 text-xs text-foreground';
-  const labelCls = 'flex flex-col gap-0.5 text-[11px] text-muted-foreground';
-  const inputBoxCls =
-    'h-7 rounded border border-border bg-popover px-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30 focus:border-ring';
 </script>
 
 <section class="bg-card border-border flex w-[280px] flex-none flex-col gap-0 overflow-y-auto border-l">
@@ -269,8 +296,12 @@
           onchange={(e) => setLod(e.currentTarget.value as LodPolicy)}
           class={inputBoxCls}
         >
-          <option value="lod0">LOD 0 only</option>
-          <option value="all">All LODs</option>
+          {#each lodLevels as level (level)}
+            <option value={`lod${level}`}>LOD {level} only</option>
+          {/each}
+          {#if lodLevels.length > 1}
+            <option value="all">All LODs</option>
+          {/if}
         </select>
       </label>
 
@@ -422,28 +453,4 @@
     </div>
   </details>
 
-  {#if skins.length > 1}
-    <details
-      open={panelOpen.skin}
-      ontoggle={(e) => togglePanel('skin', e.currentTarget.open)}
-      class="group {detailsCls}"
-    >
-      <summary class={summaryCls}>Skin</summary>
-      <div class={bodyCls}>
-        {#each skins as skin (skin.skin_id)}
-          <label class={rowCls}>
-            <input
-              type="radio"
-              name="active-skin"
-              checked={activeSkin === skin.skin_id}
-              onchange={() => pickSkin(skin.skin_id)}
-            />
-            <span class="overflow-hidden text-ellipsis whitespace-nowrap">
-              {skin.display_name || skin.skin_id}
-            </span>
-          </label>
-        {/each}
-      </div>
-    </details>
-  {/if}
 </section>

@@ -5,6 +5,7 @@
 
 import type * as THREE from 'three';
 import { resolveMeshVisibility } from './visibility';
+import type { LodPolicy } from './placement';
 import type { SeamKey, SeamState } from '$lib/types';
 
 export interface CascadeInputs {
@@ -12,15 +13,24 @@ export interface CascadeInputs {
   hullRenderersByMesh: Map<string, THREE.Mesh[]>;
   /** parent_mesh → placement nodes. Hides cascade onto these. */
   placementsByMesh: Map<string, THREE.Object3D[]>;
-  /** Non-LOD0 meshes — hidden under `lod0`. */
-  hullLowLodMeshes: THREE.Object3D[];
-  placementLowLodMeshes: THREE.Object3D[];
+  /** Hull meshes bucketed by LOD level (0 = high-detail, 1+ = coarser). */
+  hullMeshesByLodLevel: Map<number, THREE.Object3D[]>;
+  /** Placement meshes bucketed by LOD level. */
+  placementMeshesByLodLevel: Map<number, THREE.Object3D[]>;
   /** Cracks + patches — hidden unless the diagnostic toggle is on. */
   hullDamageMeshes: THREE.Object3D[];
 
   seamStates: Record<SeamKey, SeamState>;
-  lodPolicy: 'lod0' | 'all';
+  lodPolicy: LodPolicy;
   damageVariantsVisible: boolean;
+}
+
+/** Parse a `'lod${N}'` policy string into its numeric level, or `null`
+ *  for `'all'`. Used by the cascade + meshIsVisibleNow predicates. */
+export function policyLodLevel(p: LodPolicy): number | null {
+  if (p === 'all') return null;
+  const n = parseInt(p.slice(3), 10);
+  return Number.isFinite(n) ? n : 0;
 }
 
 /**
@@ -34,12 +44,21 @@ export function applyAllStates(inp: CascadeInputs): void {
     for (const r of renderers) r.visible = visible;
   }
 
-  // LOD override: hide non-LOD0 if policy says so.
-  for (const m of inp.hullLowLodMeshes) {
-    if (inp.lodPolicy === 'lod0') m.visible = false;
-  }
-  for (const m of inp.placementLowLodMeshes) {
-    if (inp.lodPolicy === 'lod0') m.visible = false;
+  // LOD override. `'all'` is a no-op; `'lodN'` hides every mesh whose
+  // level isn't N (including level-0 meshes when N >= 1, so the user
+  // can inspect a coarser LOD's geometry in isolation).
+  const target = policyLodLevel(inp.lodPolicy);
+  if (target !== null) {
+    for (const [level, meshes] of inp.hullMeshesByLodLevel) {
+      if (level !== target) {
+        for (const m of meshes) m.visible = false;
+      }
+    }
+    for (const [level, meshes] of inp.placementMeshesByLodLevel) {
+      if (level !== target) {
+        for (const m of meshes) m.visible = false;
+      }
+    }
   }
 
   // Damage-variant override: by default the resolver hides cracks (and
@@ -62,11 +81,12 @@ export function applyAllStates(inp: CascadeInputs): void {
 export function meshIsVisibleNow(
   meshName: string,
   inp: Pick<CascadeInputs, 'seamStates' | 'lodPolicy' | 'damageVariantsVisible'>,
-  isLowLod = false,
+  meshLodLevel = 0,
   isDamageVariant = false,
 ): boolean {
   if (!resolveMeshVisibility(meshName, inp.seamStates)) return false;
-  if (isLowLod && inp.lodPolicy === 'lod0') return false;
+  const target = policyLodLevel(inp.lodPolicy);
+  if (target !== null && meshLodLevel !== target) return false;
   if (isDamageVariant && !inp.damageVariantsVisible) return false;
   return true;
 }

@@ -14,13 +14,7 @@
   import type { LibraryAsset, RigPivots, WindingAuditEntry } from '$lib/types';
   import { fetchRigPivots, postFlipWinding, repoUrl } from '$lib/api';
   import { onMount } from 'svelte';
-
-  // Shared utility classes — mirror the labelled-dropdown idiom used in
-  // ShipControls.svelte so the Library and Ships pages read identically.
-  const labelCls = 'flex flex-col gap-0.5 text-[11px] text-muted-foreground';
-  const inputBoxCls =
-    'h-7 rounded border border-border bg-popover px-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30 focus:border-ring';
-  const rowCls = 'flex items-center gap-1.5 text-xs text-foreground';
+  import { rowCls, labelCls, inputBoxCls } from '$lib/ui/controls';
 
   interface Props {
     /** Asset_id (key in LibraryIndex.assets). */

@@ -13,6 +13,7 @@
 
   import { onMount, untrack } from 'svelte';
   import { fmtBytes } from '$lib/util/html';
+  import { tabBtnBase } from '$lib/ui/controls';
   import RigEditorPanel from './RigEditorPanel.svelte';
   import type { AccessoryViewer } from '$lib/accessory';
   import type { LibraryAsset, RigPivots, WindingAuditEntry } from '$lib/types';
@@ -210,10 +211,6 @@
   function fmtDist(n: number): string {
     return Number.isFinite(n) ? `${n.toFixed(4)} m` : '—';
   }
-
-  const tabBtnBase =
-    'px-3 py-1.5 text-[11px] uppercase tracking-wider font-semibold ' +
-    'border-b-2 transition-colors focus:outline-none';
 </script>
 
 <section class="bg-card border-border flex flex-none flex-col border-t" style="height: {height}px">

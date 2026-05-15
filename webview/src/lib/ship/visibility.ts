@@ -23,6 +23,17 @@ export const LOD_RE = /_lod(?:[1-9]|Shape[1-9])/i;
 export const PATCH_RE = /_patch_/i;
 export const CRACK_RE = /_crack_/i;
 
+/** Extract the LOD level number from a mesh name. Returns 0 for meshes
+ *  without a `_lodN` / `_lodShapeN` suffix (the default high-detail
+ *  mesh), or the parsed integer otherwise. Matches both naming flavours
+ *  documented above. */
+const LOD_LEVEL_RE = /_lod(?:Shape)?([1-9][0-9]*)/i;
+export function lodLevelOfName(name: string): number {
+  if (!name) return 0;
+  const m = LOD_LEVEL_RE.exec(name);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
 /** Hidden by default — debug / collision overlays the user can opt into. */
 export const HULL_HIDDEN_GROUPS = new Set(['Armor', 'Hitboxes']);
 

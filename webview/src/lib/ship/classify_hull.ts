@@ -7,7 +7,13 @@
 // `_crack_` / `_patch_` / `_lodN` convention used by `resolveMeshVisibility`.
 
 import type * as THREE from 'three';
-import { CRACK_RE, HULL_HIDDEN_GROUPS, LOD_RE, PATCH_RE, shortMeshName } from './visibility';
+import {
+  CRACK_RE,
+  HULL_HIDDEN_GROUPS,
+  PATCH_RE,
+  lodLevelOfName,
+  shortMeshName,
+} from './visibility';
 
 export interface HullGroupRef {
   name: string;
@@ -21,8 +27,11 @@ export interface ClassifiedHull {
   renderersByMesh: Map<string, THREE.Mesh[]>;
   /** Meshes whose name matches `_crack_` or `_patch_` — damage variants. */
   damageMeshes: THREE.Object3D[];
-  /** Non-LOD0 meshes — hidden under `lodPolicy === 'lod0'`. */
-  lowLodMeshes: THREE.Object3D[];
+  /** All meshes bucketed by LOD level. Level 0 is the default high-
+   *  detail mesh (no `_lodN` suffix); levels 1..N are progressively
+   *  coarser substitutes. `lodPolicy === 'lod0'` hides every level > 0;
+   *  `lodPolicy === 'lodN'` shows only level N. */
+  meshesByLodLevel: Map<number, THREE.Object3D[]>;
 }
 
 export interface ClassifyOptions {
@@ -42,7 +51,7 @@ export function classifyHullScene(
     groups: [],
     renderersByMesh: new Map(),
     damageMeshes: [],
-    lowLodMeshes: [],
+    meshesByLodLevel: new Map(),
   };
 
   for (const child of root.children) {
@@ -63,10 +72,15 @@ export function classifyHullScene(
     }
     list.push(m);
 
-    if (LOD_RE.test(name)) {
-      out.lowLodMeshes.push(m);
-      if (hideLowLod) m.visible = false;
+    const level = lodLevelOfName(name);
+    let bucket = out.meshesByLodLevel.get(level);
+    if (!bucket) {
+      bucket = [];
+      out.meshesByLodLevel.set(level, bucket);
     }
+    bucket.push(m);
+    if (level > 0 && hideLowLod) m.visible = false;
+
     if (CRACK_RE.test(name) || PATCH_RE.test(name)) {
       out.damageMeshes.push(m);
       if (hideDamageVariants) m.visible = false;

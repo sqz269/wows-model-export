@@ -26,8 +26,7 @@ export type PanelSection =
   | 'sections'
   | 'hull-groups'
   | 'damage'
-  | 'textures'
-  | 'skin';
+  | 'textures';
 
 export interface PersistedState {
   /** Helpers (grid + axes). */
@@ -87,7 +86,6 @@ export function defaultState(): PersistedState {
       'hull-groups': false,
       damage: false,
       textures: false,
-      skin: true,
     },
     shipSearch: '',
   };
