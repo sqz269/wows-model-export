@@ -12,3 +12,4 @@ export * from './sidecar';
 export * from './categories';
 export * from './extract';
 export * from './rig';
+export * from './gameparams';

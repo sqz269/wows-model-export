@@ -5,3 +5,4 @@ export * from './repo';
 export * from './extract';
 export * from './settings';
 export * from './bootstrap';
+export * from './gameparams';

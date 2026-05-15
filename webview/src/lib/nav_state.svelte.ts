@@ -23,6 +23,7 @@ class NavState {
   lastShipName = $state<string | null>(null);
   lastAssetId = $state<string | null>(null);
   lastVehicleId = $state<string | null>(null);
+  lastGameParamId = $state<string | null>(null);
 }
 
 export const navState = new NavState();
@@ -49,6 +50,14 @@ export function extractHref(): string {
   return navState.lastVehicleId
     ? `#/extract/${encodeURIComponent(navState.lastVehicleId)}`
     : '#/extract';
+}
+
+/** Topnav href for the GameParams tab. Falls back to bare `#/gameparams`
+ *  when no entity has been opened this session. */
+export function gameParamsHref(): string {
+  return navState.lastGameParamId
+    ? `#/gameparams/${encodeURIComponent(navState.lastGameParamId)}`
+    : '#/gameparams';
 }
 
 /** Topnav href for the Settings tab. No sub-routes today — kept as a

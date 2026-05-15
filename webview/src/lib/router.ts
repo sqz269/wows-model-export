@@ -41,7 +41,20 @@ export type SettingsRoute = {
   path: string;
 };
 
-export type RouteState = LibraryRoute | ShipsRoute | ExtractRoute | SettingsRoute;
+export type GameParamsRoute = {
+  page: 'gameparams';
+  path: string;
+  /** Selected GameParams entity id from `#/gameparams/<id>`. Null on
+   *  bare `#/gameparams`. */
+  entityId: string | null;
+};
+
+export type RouteState =
+  | LibraryRoute
+  | ShipsRoute
+  | ExtractRoute
+  | SettingsRoute
+  | GameParamsRoute;
 
 function parseHash(hash: string): RouteState {
   const path = hash.replace(/^#\/?/, '');
@@ -55,6 +68,9 @@ function parseHash(hash: string): RouteState {
   }
   if (head === 'settings') {
     return { page: 'settings', path };
+  }
+  if (head === 'gameparams') {
+    return { page: 'gameparams', path, entityId: rest ?? null };
   }
   // Default + `library` + `asset/...` all route to the library page.
   return { page: 'library', path, assetId: rest ?? null };

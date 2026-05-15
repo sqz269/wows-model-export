@@ -4,12 +4,19 @@
   import { Toaster } from '$lib/components/ui/sonner';
   import { Button } from '$lib/components/ui/button';
   import { readRoute, onRouteChange, navigate, type RouteState } from '$lib/router';
-  import { extractHref, libraryHref, settingsHref, shipsHref } from '$lib/nav_state.svelte';
+  import {
+    extractHref,
+    gameParamsHref,
+    libraryHref,
+    settingsHref,
+    shipsHref,
+  } from '$lib/nav_state.svelte';
   import { hasModifier, isTypingContext } from '$lib/shortcuts';
   import Library from '$routes/Library.svelte';
   import Ships from '$routes/Ships.svelte';
   import Extract from '$routes/Extract.svelte';
   import Settings from '$routes/Settings.svelte';
+  import GameParams from '$routes/GameParams.svelte';
   import HelpDialog from '$components/HelpDialog.svelte';
 
   let route = $state<RouteState>(readRoute());
@@ -53,6 +60,10 @@
           e.preventDefault();
           return;
         case '4':
+          navigate(gameParamsHref());
+          e.preventDefault();
+          return;
+        case '5':
           navigate(settingsHref());
           e.preventDefault();
           return;
@@ -75,7 +86,8 @@
     { page: 'extract', href: extractHref(), label: 'Extract', keyHint: '1' },
     { page: 'ships', href: shipsHref(), label: 'Ships', keyHint: '2' },
     { page: 'library', href: libraryHref(), label: 'Library', keyHint: '3' },
-    { page: 'settings', href: settingsHref(), label: 'Settings', keyHint: '4' },
+    { page: 'gameparams', href: gameParamsHref(), label: 'GameParams', keyHint: '4' },
+    { page: 'settings', href: settingsHref(), label: 'Settings', keyHint: '5' },
   ]);
 
   function go(e: MouseEvent, href: string) {
@@ -156,6 +168,12 @@
     <Extract
       vehicleId={route.page === 'extract' ? route.vehicleId : null}
       active={route.page === 'extract'}
+    />
+  </div>
+  <div class={route.page === 'gameparams' ? 'flex flex-1 min-w-0' : 'hidden'}>
+    <GameParams
+      entityId={route.page === 'gameparams' ? route.entityId : null}
+      active={route.page === 'gameparams'}
     />
   </div>
   <div class={route.page === 'settings' ? 'flex flex-1 min-w-0' : 'hidden'}>
