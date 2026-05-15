@@ -3,23 +3,25 @@
 Endpoints:
 
   ``GET  /api/extract/snapshot``        — full vehicles + permoflages dump
-  ``POST /api/extract/run``             — kick off ``wows-ingest-ship``
-  ``POST /api/extract/skin``            — kick off ``wows-ingest-skin-pack``
+  ``POST /api/extract/run``             — kick off :func:`compose.ingest_ship`
+  ``POST /api/extract/skin``            — kick off :func:`compose.ingest_skin_pack`
   ``GET  /api/extract/jobs``            — list all known jobs
   ``GET  /api/extract/jobs/{id}``       — one job (state + accumulated logs)
-  ``POST /api/extract/jobs/{id}/cancel`` — SIGTERM the child
+  ``POST /api/extract/jobs/{id}/cancel`` — flip the cancel flag
 
-Snapshot is dumped via the ``wows-snapshot`` CLI entry point. The output
-JSON file lives at ``<workspace>/.cache/snapshot.json``; we cache the
-parsed value in memory keyed on the joint
-``(gameparams.json mtime, snapshot.json mtime)`` so a refresh of
-GameParams or a manual re-dump invalidates automatically.
+Snapshot is built via ``compose.snapshot`` directly. The output JSON
+file lives at ``<workspace>/.cache/snapshot.json``; we cache the parsed
+value in memory keyed on the joint ``(gameparams.json mtime,
+snapshot.json mtime)`` so a refresh of GameParams or a manual re-dump
+invalidates automatically.
 
-Port of ``webview/src/server/endpoints/extract.ts``. The validation
-regexes (``VEHICLE_ID`` / ``LABEL_ID`` / ``SHIP_FOLDER_ID`` / ``SKIN_ID``
-/ ``JOB_ID``) are copied verbatim — same charset, same length limits.
-Hostile bodies can't inject extra spawn args; the child also runs
-without a shell so the threat surface is minimal.
+Stage 3 swap: extract / skin / snapshot all run as in-process composer
+calls inside the shared ``ThreadPoolExecutor`` (see
+:mod:`wows_model_export.server.jobs`). The validation regexes
+(``VEHICLE_ID`` / ``LABEL_ID`` / ``SHIP_FOLDER_ID`` / ``SKIN_ID`` /
+``JOB_ID``) are still enforced — even though we no longer spawn a
+shell, the regexes keep IDs bounded for downstream use (filesystem
+paths, sidecar lookups, etc.).
 """
 
 from __future__ import annotations
@@ -30,9 +32,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException, Path as PathParam
+from fastapi import APIRouter, Body, HTTPException
+from fastapi import Path as PathParam
 from fastapi.responses import JSONResponse
 
+from ... import compose
 from ...config import PipelineConfig
 from ..jobs import (
     JobLockedError,
@@ -43,7 +47,6 @@ from ..jobs import (
     list_jobs,
     spawn_job,
 )
-
 
 # ID-shape guards. Each call uses a tight regex so a hostile body can't
 # inject extra spawn args; the child runs without a shell so the threat
@@ -89,12 +92,18 @@ def make_router(config: PipelineConfig) -> APIRouter:
 
     # ── Snapshot ensure ─────────────────────────────────────────────────
     async def ensure_snapshot() -> dict[str, Any]:
-        """Resolve a fresh-enough snapshot blob, spawning ``wows-snapshot``
-        on cold cache.
+        """Resolve a fresh-enough snapshot blob, building the cache if cold.
 
-        Mirrors the Node side's cache logic 1-to-1. Concurrent first
-        callers share one ``wows-snapshot`` subprocess via the
-        ``asyncio.Lock`` so we don't fan out parallel spawns.
+        Stage 3 swap: builds the snapshot in-process via
+        :func:`compose.snapshot` instead of spawning ``wows-snapshot``.
+        We offload the call to a background thread via
+        :func:`asyncio.to_thread` so the FastAPI event loop stays
+        responsive — ``compose.snapshot`` does heavy synchronous work
+        (~30 s on cold GameParams).
+
+        Concurrent first callers still share one composer call via the
+        ``asyncio.Lock`` so we don't load + parse the 2.8 GB
+        GameParams blob N times in parallel.
         """
         if not gp_cache_path.exists():
             raise FileNotFoundError(
@@ -123,20 +132,26 @@ def make_router(config: PipelineConfig) -> APIRouter:
             # cold start when a previous run already wrote one.
             if not snapshot_cache_path.exists() or snap_mtime < gp_mtime:
                 cache_dir.mkdir(parents=True, exist_ok=True)
-                proc = await asyncio.create_subprocess_exec(
-                    "wows-snapshot",
-                    "--output",
-                    str(snapshot_cache_path),
-                    cwd=str(workspace),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                _, stderr = await proc.communicate()
-                if proc.returncode != 0:
-                    raise RuntimeError(
-                        f"wows-snapshot exit={proc.returncode}: "
-                        f"{stderr.decode('utf-8', errors='replace')}"
+                # asyncio.to_thread keeps the event loop responsive
+                # while the composer parses GameParams. We don't gate
+                # this through spawn_job because (a) the result isn't
+                # interesting to the UI's job table, and (b) the
+                # asyncio.Lock above already serialises concurrent
+                # callers — the spawn_job lock would be redundant.
+                try:
+                    await asyncio.to_thread(
+                        compose.snapshot,
+                        output_path=snapshot_cache_path,
+                        config=config,
                     )
+                except Exception as exc:
+                    # Compose-level failures (StepError, ConfigError,
+                    # ToolkitError) bubble through to the GET handler
+                    # which renders them as a 500.
+                    raise RuntimeError(
+                        f"compose.snapshot failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
             with snapshot_cache_path.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
             refreshed = int(snapshot_cache_path.stat().st_mtime * 1000)
@@ -241,32 +256,61 @@ def make_router(config: PipelineConfig) -> APIRouter:
         model_dir = str(veh.get("model_dir") or "") or param_index
         positional = model_dir or param_index
 
-        # `wows-ingest-ship` accepts a positional ship arg (even when
-        # --toolkit-ship overrides it; argparse enforces presence).
-        # Pass model_dir so the displayed command matches what the
-        # runner spawns.
-        args: list[str] = [
+        # Build the kwargs dict for compose.ingest_ship. The composer
+        # signature mirrors the CLI flags one-to-one — see
+        # `compose/ingest_ship.py::ingest_ship` for the full param list.
+        # `interactive=False` is critical: we run inside a worker
+        # thread that has no stdin, so the ambiguity-resolve prompt
+        # path (lines 219-231 of ingest_ship.py) would deadlock the
+        # job. The composer raises `StepError("resolve_identity")`
+        # cleanly when ambiguous + non-interactive, which the job
+        # runner surfaces as a failed job with a parseable error.
+        kwargs: dict[str, Any] = {
+            "ship_input":            positional,
+            "config":                config,
+            "forced_label":          label,
+            "toolkit_ship_override": model_dir,
+            "gameparams_ship_id":    top_key_full,
+            "interactive":           False,
+            "build_library":         bool(body.get("build_library")),
+            "and_publish":           bool(body.get("and_publish")),
+            "publish_force":         bool(body.get("publish_force")),
+        }
+        # `variant_permoflage` defaults to "auto" inside the composer —
+        # only override when the body explicitly sets it. Keeps the
+        # default behaviour identical to the prior CLI invocation when
+        # the body omits the field.
+        if permoflage is not None:
+            kwargs["variant_permoflage"] = permoflage
+
+        # Display-only command line preserves the legacy "what the user
+        # asked the server to do" header that the Extract panel renders.
+        # We rebuild the wows-ingest-ship-style argv string for that
+        # purpose only — not actually run as a shell.
+        cmd_display: list[str] = [
+            "compose.ingest_ship",
             positional,
-            "--label",
-            label,
-            "--toolkit-ship",
-            model_dir,
-            "--gameparams-ship-id",
-            top_key_full,
-            "--non-interactive",
+            "--label",         label,
+            "--toolkit-ship",  model_dir,
+            "--gameparams-ship-id", top_key_full,
         ]
         if permoflage is not None:
-            args += ["--variant-permoflage", permoflage]
+            cmd_display += ["--variant-permoflage", permoflage]
         if body.get("build_library"):
-            args.append("--build-library")
+            cmd_display.append("--build-library")
         if body.get("and_publish"):
-            args.append("--and-publish")
+            cmd_display.append("--and-publish")
         if body.get("publish_force"):
-            args.append("--publish-force")
+            cmd_display.append("--publish-force")
 
-        cmd = ["wows-ingest-ship", *args]
         try:
-            job = spawn_job(kind="extract", label=label, cmd=cmd, cwd=workspace)
+            job = spawn_job(
+                kind="extract",
+                label=label,
+                target=compose.ingest_ship,
+                kwargs=kwargs,
+                cmd_display=cmd_display,
+            )
         except JobLockedError as err:
             return JSONResponse(
                 status_code=409,
@@ -374,25 +418,64 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 },
             )
 
-        args: list[str] = [
-            ship,
-            "--source",
-            f"{source}:{source_arg}",
-            "--skin-id",
-            skin_id,
+        # Map the route body to compose.ingest_skin_pack kwargs:
+        #
+        #   route source -> composer source_kind
+        #   "loose"      -> "loose_mod"   (skin_source is a folder path)
+        #   "wg" / "vfs" -> "vfs_variant" (skin_source is a Vehicle or
+        #                                  Exterior GameParams id)
+        #
+        # The composer's auto-detect path is also valid; we set
+        # source_kind explicitly here so a body that names a non-
+        # existent path still routes the way the user asked instead of
+        # silently falling through to vfs_variant.
+        if source == "loose":
+            source_kind: str = "loose_mod"
+        else:
+            source_kind = "vfs_variant"
+
+        # exterior_id from the body is informational — the composer
+        # resolves Vehicle → Exterior internally for vfs_variant. We
+        # log it in the display string so the user can correlate the
+        # pick on the page with the running job, but don't pass it as
+        # a kwarg (the composer signature has no exterior_id field).
+        kwargs: dict[str, Any] = {
+            "skin_source": source_arg,
+            "ship_id":     ship,
+            "config":      config,
+            "skin_id":     skin_id,
+            "source_kind": source_kind,
+        }
+        if display_name:
+            kwargs["display_name"] = str(display_name)
+
+        # Display-only command line preserves the legacy header. The
+        # `--source` / `--exterior` flags here are illustrative — they
+        # don't match a runnable CLI invocation since the actual
+        # `wows-ingest-skin-pack` arg shape is different. The job log
+        # uses this purely for the "what did this job do" header.
+        cmd_display: list[str] = [
+            "compose.ingest_skin_pack",
+            source_arg,
+            "--ship", ship,
+            "--source-kind", source_kind,
+            "--skin-id", skin_id,
         ]
         if exterior_id:
-            args += ["--exterior", str(exterior_id)]
+            cmd_display += ["# exterior", str(exterior_id)]
         if display_name:
-            args += ["--display-name", str(display_name)]
+            cmd_display += ["--display-name", str(display_name)]
 
         # Different skins for the same ship may run in parallel; the
         # same skin re-trigger is serialised against itself.
         lock_label = f"{ship}__skin__{skin_id}"
-        cmd = ["wows-ingest-skin-pack", *args]
         try:
             job = spawn_job(
-                kind="skin", label=lock_label, cmd=cmd, cwd=workspace
+                kind="skin",
+                label=lock_label,
+                target=compose.ingest_skin_pack,
+                kwargs=kwargs,
+                cmd_display=cmd_display,
             )
         except JobLockedError as err:
             return JSONResponse(

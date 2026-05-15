@@ -5,7 +5,7 @@ Three routes:
   ``GET    /api/rig-overrides?assetId=X`` — read the asset's sidecar
   ``POST   /api/rig-overrides?assetId=X`` — write the sidecar
   ``DELETE /api/rig-overrides?assetId=X`` — clear the sidecar
-  ``POST   /api/rig-rebuild``             — spawn ``wows-turret-autorig``
+  ``POST   /api/rig-rebuild``             — invoke ``compose.autorig_asset``
 
 The override sidecar (``<asset_id>.rig_overrides.json``) lives next to
 the asset's GLB. Shape (mirrors the rigger's :class:`RigOverrides`)::
@@ -25,13 +25,18 @@ the asset's GLB. Shape (mirrors the rigger's :class:`RigOverrides`)::
       }
     }
 
-The rebuild endpoint spawns ``wows-turret-autorig <asset_id>`` and waits
-for completion. The current ``wows-turret-autorig`` doesn't emit the
-``.rig.debug.glb`` debug scene that the rig editor's picker consumes —
-that's a known gap (see the legacy ``tools/ship/turret_rig.py
---debug-scene`` path on the I:-side repo). The endpoint still works for
-the pivot-extraction half: a successful rebuild refreshes the
-``.rig_pivots.json`` that the viewer overlay reads.
+The rebuild endpoint runs :func:`compose.autorig_asset_full`
+in-process via ``asyncio.to_thread`` and waits for completion. We
+return the result synchronously rather than going through ``spawn_job``
+because the rebuild is fast (~1 s for a single asset) and the rig
+editor's flow is "click rebuild → see result" — the job-table UX
+adds latency without buying anything. The current
+``compose.turret_autorig`` doesn't emit the ``.rig.debug.glb`` debug
+scene that the rig editor's picker consumes — that's a known gap
+(see the legacy ``tools/ship/turret_rig.py --debug-scene`` path on
+the I:-side repo). The endpoint still works for the pivot-extraction
+half: a successful rebuild refreshes the ``.rig_pivots.json`` that
+the viewer overlay reads.
 """
 
 from __future__ import annotations
@@ -47,8 +52,9 @@ from typing import Any
 from fastapi import APIRouter, Body, Query
 from fastapi.responses import JSONResponse
 
+from ... import compose
 from ...config import PipelineConfig
-
+from ...errors import StepError
 
 # Asset id: alnum + underscore. Same shape ``wows-turret-autorig``
 # validates internally; we mirror it here so a bad assetId fails fast
@@ -100,7 +106,10 @@ def _resolve_asset_dir(
 def make_router(config: PipelineConfig) -> APIRouter:
     """Build the rig router bound to ``config.workspace``."""
     router = APIRouter()
-    workspace = config.workspace
+    # Stage 3: the rig-rebuild route used to need ``workspace`` as the
+    # subprocess cwd. The in-process composer call resolves paths from
+    # ``config`` directly, so the captured workspace local is no longer
+    # required.
 
     # ── /api/rig-overrides ──────────────────────────────────────────────
     @router.get("/rig-overrides")
@@ -223,9 +232,13 @@ def make_router(config: PipelineConfig) -> APIRouter:
         return JSONResponse(content={"ok": True, "deleted": True})
 
     # ── /api/rig-rebuild ────────────────────────────────────────────────
-    # Spawns ``wows-turret-autorig <asset_id>``. Sync subprocess — the
-    # rigger is fast for a single asset (~1 s) and surfacing structured
-    # job state isn't worth the complexity at the typical click rate.
+    # In-process call to ``compose.autorig_asset_full`` via
+    # asyncio.to_thread — keeps the asyncio loop responsive while the
+    # composer parses the asset GLB + walks bones (~1 s for a single
+    # asset). We return the structured result inline instead of going
+    # through spawn_job because the rebuild is fast and the rig
+    # editor's UX is "click rebuild → see result" — the job-table
+    # round trip adds latency without buying anything.
     @router.post("/rig-rebuild")
     async def post_rig_rebuild(body: dict[str, Any] = Body(default={})) -> JSONResponse:
         asset_id = str(body.get("assetId") or "")
@@ -234,40 +247,44 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 status_code=400,
                 content={"ok": False, "error": "invalid assetId"},
             )
+
+        # Capture composer events into a buffer so the response body
+        # carries a `stdout`-shaped string the existing rig editor
+        # client can render. Format mirrors `cli/_emit.py:46-55` so the
+        # log looks identical to the legacy subprocess output.
+        log_lines: list[str] = []
+        from ...types import StepEvent  # local import — module-level
+        # would create a circular type-only reference and the route
+        # file is already heavyweight enough.
+
+        def _on_event(event: StepEvent) -> None:
+            elapsed = f"[{event.elapsed_ms:>8.0f}ms]"
+            parts = [elapsed, f"{event.step} {event.state}"]
+            if event.step_ms is not None:
+                parts.append(f"(Δ {event.step_ms:.0f}ms)")
+            if event.detail:
+                parts.append(event.detail)
+            log_lines.append("  ".join(parts))
+
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "wows-turret-autorig",
+            result = await asyncio.to_thread(
+                compose.autorig_asset_full,
                 asset_id,
-                cwd=str(workspace),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                config=config,
+                on_event=_on_event,
             )
-            stdout_b, stderr_b = await proc.communicate()
-            stdout = stdout_b.decode("utf-8", errors="replace")
-            stderr = stderr_b.decode("utf-8", errors="replace")
-            if proc.returncode != 0:
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "ok": False,
-                        "error": f"wows-turret-autorig exit={proc.returncode}",
-                        "stdout": stdout,
-                        "stderr": stderr,
-                    },
-                )
-            return JSONResponse(
-                content={"ok": True, "stdout": stdout, "stderr": stderr}
-            )
-        except FileNotFoundError as err:
+        except StepError as err:
             return JSONResponse(
                 status_code=500,
                 content={
                     "ok": False,
                     "error": (
-                        f"wows-turret-autorig not on PATH: {err}. "
-                        "Install the package or run the rigger CLI from a "
-                        "shell where it's available."
+                        f"compose.autorig_asset failed at step "
+                        f"{err.step!r}: {err.detail or err}"
                     ),
+                    "stdout": "\n".join(log_lines),
+                    "stderr": str(err),
+                    "step":   err.step,
                 },
             )
         except Exception as err:  # noqa: BLE001
@@ -276,9 +293,29 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 content={
                     "ok": False,
                     "error": f"{type(err).__name__}: {err}",
+                    "stdout": "\n".join(log_lines),
                     "traceback": traceback.format_exc(),
                 },
             )
+
+        return JSONResponse(
+            content={
+                "ok":     True,
+                "stdout": "\n".join(log_lines),
+                "stderr": "",
+                # Additive: structured result the new client can read.
+                # Old client just renders `stdout` and ignores extras.
+                "result": {
+                    "asset_id":        result.asset_id,
+                    "rig_pivots_path": str(result.rig_pivots_path),
+                    "rig_kind":        result.rig_kind,
+                    "barrel_count":    result.barrel_count,
+                    "shared_elev":     result.shared_elev,
+                    "auto_flipped":    result.auto_flipped,
+                    "warnings":        list(result.warnings),
+                },
+            }
+        )
 
     return router
 

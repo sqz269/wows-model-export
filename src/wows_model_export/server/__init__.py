@@ -12,8 +12,9 @@ Layout:
                          CLI entry helper
     workspace.py       — thin re-export of :func:`wows_model_export.config`
                          resolution (env-var precedence)
-    jobs.py            — in-memory job runner (``Popen`` + per-stream
-                         daemon threads)
+    jobs.py            — in-memory job runner (Stage 3:
+                         ``ThreadPoolExecutor`` + composer ``Future``,
+                         no longer ``Popen``-based)
     routes/repo.py     — ``GET /repo/<path>`` (workspace static file
                          service, traversal-guarded)
     routes/ships.py    — ``GET /api/ships`` (per-ship summaries)

@@ -9,33 +9,38 @@ Two prereqs today:
 
   ``snapshot``  →  ``<workspace>/.cache/snapshot.json`` (and as a
                    side-effect ``gameparams.json``). Built by
-                   :program:`wows-snapshot`. Required by the Extract
+                   :func:`compose.snapshot`. Required by the Extract
                    tab; missing it surfaces as a 503 from
                    ``/api/extract/snapshot``.
 
   ``library``   →  ``<workspace>/libraries/accessories/index.json``.
-                   Built by :program:`wows-build-accessory-library`.
+                   Built by :func:`compose.build_accessory_library`.
                    Required by the Library tab; missing it surfaces
                    as the 404 the user keeps seeing.
 
 GET ``/api/bootstrap`` returns per-target presence + mtime + size, plus
 a top-level ``config_complete`` flag so the page can disable build
-buttons when ``game_dir`` / ``toolkit_bin`` aren't set yet (the CLIs
-would raise :class:`ConfigError` and the job would die immediately).
+buttons when ``game_dir`` / ``toolkit_bin`` aren't set yet (the
+composers would raise :class:`ConfigError` and the job would die
+immediately).
 
-POST ``/api/bootstrap/build`` spawns the matching CLI via the shared
-:mod:`wows_model_export.server.jobs` runner. The response carries
-``job_id`` so the client can poll ``/api/jobs/{id}`` for progress.
+POST ``/api/bootstrap/build`` submits the matching composer via the
+shared :mod:`wows_model_export.server.jobs` runner (in-process call
+inside the executor; see Stage 3 docstring there). The response
+carries ``job_id`` so the client can poll ``/api/jobs/{id}`` for
+progress.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 
+from ... import compose
 from ...config import PipelineConfig
 from ..jobs import JobLockedError, spawn_job
 
@@ -78,18 +83,40 @@ def make_router(config: PipelineConfig) -> APIRouter:
     snapshot_path = cache_dir / "snapshot.json"
     library_path = workspace / "libraries" / "accessories" / "index.json"
 
-    # Per-target metadata. The CLI args are evaluated at request time so
-    # a path change via $WOWS_WORKSPACE between requests is reflected
-    # (cwd is captured fresh from `workspace` below). Keeping the
-    # `--output` flag explicit, even where the CLI's default would land
-    # in the same place, makes the spawned command line self-describing
-    # in the job log.
-    def _cmd_for(target: BootstrapTarget) -> list[str]:
+    # Per-target dispatch table. Stage 3: each entry pairs the composer
+    # callable with a kwargs builder that closes over the request-time
+    # config + path resolution. The display ``cmd`` keeps the legacy
+    # `wows-*` invocation shape so the Settings UI's "what will this
+    # build" preview reads naturally — the actual call goes through
+    # `compose.*` in-process via spawn_job.
+    _BootstrapDispatch = tuple[
+        Callable[..., Any],   # target composer
+        Callable[[], dict[str, Any]],  # kwargs builder (request-time)
+        list[str],            # display cmd for the job log
+    ]
+
+    def _dispatch_for(target: BootstrapTarget) -> _BootstrapDispatch:
         if target == "snapshot":
-            return ["wows-snapshot", "--output", str(snapshot_path)]
+            return (
+                compose.snapshot,
+                lambda: {
+                    "output_path": snapshot_path,
+                    "config":      config,
+                },
+                ["compose.snapshot", "--output", str(snapshot_path)],
+            )
         if target == "library":
-            return ["wows-build-accessory-library"]
+            return (
+                compose.build_accessory_library,
+                lambda: {"config": config},
+                ["compose.build_accessory_library"],
+            )
         raise ValueError(f"unknown bootstrap target: {target}")  # pragma: no cover
+
+    def _cmd_for(target: BootstrapTarget) -> list[str]:
+        # Display-only; preserved as a separate accessor so the GET
+        # handler's response shape doesn't change.
+        return _dispatch_for(target)[2]
 
     @router.get("/bootstrap")
     def get_bootstrap() -> dict[str, Any]:
@@ -161,14 +188,17 @@ def make_router(config: PipelineConfig) -> APIRouter:
                     },
                 )
 
-        cmd = _cmd_for(body.target)
+        target_callable, kwargs_builder, cmd_display = _dispatch_for(
+            body.target
+        )
         label = f"bootstrap:{body.target}"
         try:
             job = spawn_job(
                 kind="bootstrap",
                 label=label,
-                cmd=cmd,
-                cwd=workspace,
+                target=target_callable,
+                kwargs=kwargs_builder(),
+                cmd_display=cmd_display,
             )
         except JobLockedError as err:
             raise HTTPException(
