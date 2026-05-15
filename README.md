@@ -176,19 +176,24 @@ HMR. The frontend dev guide is in [`webview/README.md`](webview/README.md);
 the Python package layout is documented at the top of
 [`src/wows_model_export/__init__.py`](src/wows_model_export/__init__.py).
 
-When you change the Svelte UI and want the change to land in published
-wheels, rebuild and refresh the bundled mirror:
+For local dev runs (`wows-webview-serve` from an editable install),
+just `cd webview && npm run build` — the static resolver falls back to
+`webview/dist` automatically, no copy needed.
+
+Wheel and standalone-exe builds need the dist staged into the package
+at `src/wows_model_export/_static/webview/` (git-ignored). CI does this
+in [`.github/workflows/release.yml`](.github/workflows/release.yml). To
+build a wheel locally:
 
 ```bash
-cd webview && npm run build
+cd webview && npm run build && cd ..
 rm -rf src/wows_model_export/_static/webview
 cp -r webview/dist src/wows_model_export/_static/webview
+python -m build --wheel
 ```
 
-The committed mirror under `src/wows_model_export/_static/webview/` is
-what setuptools packs into the wheel; see
-[`src/wows_model_export/_static/README.md`](src/wows_model_export/_static/README.md)
-for the rationale.
+See [`src/wows_model_export/_static/README.md`](src/wows_model_export/_static/README.md)
+for the resolution order across install modes.
 
 ## License
 

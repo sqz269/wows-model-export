@@ -1,47 +1,37 @@
-# `_static/` — bundled webview build
+# `_static/` — staging dir for the bundled webview
 
-The contents of `_static/webview/` are a verbatim mirror of
-`webview/dist/`, the production build output from
-`cd webview && npm run build`. They are committed to git (rather than
-generated at install time) so:
+`_static/webview/` is a **build-time** mirror of `webview/dist/`, not
+source. The directory itself is git-ignored (see `.gitignore`); only this
+README and `.gitattributes` are tracked.
 
-  1. `pip install` from a wheel works without a Node toolchain.
-  2. Editable installs (`pip install -e .`) still see the same files
-     under the same package path — no separate path resolution per
-     install mode.
-  3. PyInstaller picks them up automatically as package data; the
-     `_static/` directory survives `--onefile` packaging without a
-     custom `--add-data` flag, because setuptools already declares
-     it as `package_data` in `pyproject.toml`.
+## How the bundle reaches each consumer
 
-## When to refresh
+  1. **Local dev (editable install):** the resolver in
+     `wows_model_export/server/static.py` first checks
+     `_static/webview/index.html`. If absent, it walks up to find
+     `webview/dist/index.html` instead. So `cd webview && npm run build`
+     followed by `wows-webview-serve` Just Works — no copy required.
+  2. **Wheel install (`pip install <wheel>`):** the wheel must already
+     contain `_static/webview/`. The CI release workflow runs
+     `npm run build` and copies `webview/dist/*` into `_static/webview/`
+     before invoking `python -m build`. `pyproject.toml`'s
+     `[tool.setuptools.package-data]` declares the subtree so setuptools
+     pulls it into the wheel.
+  3. **PyInstaller frozen exe:** the spec at `pyinstaller/wows-webview.spec`
+     bundles `_static/webview/` as a data dir; the release workflow stages
+     the bundle the same way before invoking PyInstaller.
 
-Run after any change to `webview/src/**` that you want to ship in the
-wheel:
+## Building a wheel locally
+
+You must populate the mirror first — setuptools silently drops missing
+package_data, so a wheel built without this step ships without the UI:
 
 ```bash
-cd webview && npm run build
-# Sync the mirror — overwrite, never delete-then-copy (preserves git
-# stat tracking for renamed files):
+cd webview && npm run build && cd ..
 rm -rf src/wows_model_export/_static/webview
 cp -r webview/dist src/wows_model_export/_static/webview
-git add src/wows_model_export/_static/webview
+python -m build --wheel
 ```
 
-The mirror is intentionally a flat copy; no transforms. Vite's
-fingerprinted asset names (`index-<hash>.js`) handle cache-busting on
-their own, and the `index.html` references them with absolute paths
-(`/assets/...`) which work as-is when StaticFiles is mounted at `/`.
-
-## Why not auto-build during install?
-
-Considered and rejected:
-
-  - Installing from a wheel must not require Node.
-  - A custom `setuptools` build hook that shells out to `npm` would
-    fail on user machines without npm — and pulling Node into the
-    Python build env via a build-time dependency would balloon install
-    times for users who never touch the webview.
-  - The dist is small (~5 MB) and rebuilds rarely, so committing the
-    mirror is the simplest reliable strategy. The duplication is a
-    deliberate trade for install-time simplicity.
+The same dance lives in `.github/workflows/release.yml` — keep them in
+sync if either changes.

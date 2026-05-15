@@ -1,32 +1,32 @@
 """Resolve + serve the bundled Svelte webview build.
 
-The webview's production output (`webview/dist`) is mirrored into the
-package at install time as `wows_model_export/_static/webview/` (see
-`src/wows_model_export/_static/README.md` for why a committed mirror
-beats a build hook for this project). This module finds that directory
-across the three install modes the project ships in and exposes a
+The webview's production output (`webview/dist`) is staged into the
+package as `wows_model_export/_static/webview/` at build time — by CI
+before wheel/exe packaging, or by hand for local wheel builds (see
+`src/wows_model_export/_static/README.md`). The staged copy is
+git-ignored; only the wheel/exe ever ships with it populated. This
+module locates the bundle across every install mode and exposes a
 single :func:`mount_webview` helper that wires it onto a FastAPI app.
 
 Install modes the resolver handles:
 
-  1. **Editable install** (`pip install -e .`) — package files live at
-     ``<repo>/src/wows_model_export/`` so the bundled mirror is at
-     ``<repo>/src/wows_model_export/_static/webview/``. ``importlib.resources``
-     returns a real on-disk path here.
-  2. **Wheel install** (`pip install ./*.whl`) — files land under
-     ``<site-packages>/wows_model_export/_static/webview/`` and again
+  1. **Editable install** (`pip install -e .`) — usually the staged
+     mirror is empty (you didn't build a wheel). The dev-tree fallback
+     below picks up `webview/dist` instead, so `npm run build` followed
+     by `wows-webview-serve` Just Works without a copy step.
+  2. **Wheel install** (`pip install ./*.whl`) — the wheel was built
+     with the mirror populated, so files land under
+     ``<site-packages>/wows_model_export/_static/webview/`` and
      ``importlib.resources`` returns a real path.
-  3. **PyInstaller frozen** — the spec file (or `--collect-data
-     wows_model_export`) drops the package data under ``sys._MEIPASS``,
-     and ``importlib.resources`` continues to work because PyInstaller
-     installs an importer that proxies it transparently.
+  3. **PyInstaller frozen** — the spec file drops the package data
+     under ``sys._MEIPASS`` and ``importlib.resources`` continues to
+     work because PyInstaller installs an importer that proxies it
+     transparently.
 
-The dev-tree fallback (`<repo>/webview/dist`) covers a fourth case the
-task spec calls out: someone running `wows-webview-serve` from a fresh
-clone who hasn't built the webview yet AND somehow has no mirror under
-`_static/`. In practice the mirror is committed, so the fallback only
-fires in deliberately broken configurations — but having it costs
-nothing and gives a useful "did you forget to npm run build?" log line.
+The dev-tree fallback walks up from this file looking for a sibling
+`webview/dist/index.html`. It's the primary lookup for editable installs
+in practice, since nobody copies the mirror by hand for plain
+`wows-webview-serve` runs.
 """
 
 from __future__ import annotations
@@ -52,12 +52,11 @@ _PACKAGE_STATIC_SUBPATH = ("_static", "webview")
 def _resolve_bundled_dir() -> Path | None:
     """Return the on-disk path of the bundled webview build, or None.
 
-    Tries the package-resource path first (covers editable, wheel, and
-    PyInstaller installs). Falls back to a sibling `webview/dist`
-    directory if the package doesn't carry the mirror — that branch is
-    only useful in a working tree where the user runs the server before
-    syncing the mirror, and it deliberately reaches outside the package
-    so it's never the production path.
+    Tries the package-resource path first (covers wheel + PyInstaller
+    installs, where the bundle was staged at build time). Falls back to
+    a sibling `webview/dist` for editable installs where the mirror is
+    git-ignored and almost always empty — `npm run build` populates
+    `webview/dist` and the resolver finds it via this branch.
     """
     # importlib.resources is the right tool here: it abstracts over
     # zipped vs unpacked package layouts (PyInstaller bundles can be

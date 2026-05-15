@@ -53,3 +53,8 @@ tmp/
 # this catches in case a build leaks up).
 /webview/dist/
 /webview/node_modules/
+# Build-time mirror of webview/dist consumed by setuptools package_data
+# and PyInstaller. Populated locally by `npm run build` (the resolver
+# in server/static.py falls back to webview/dist when this is empty) or
+# by CI before wheel/exe builds. Not source — never commit.
+/src/wows_model_export/_static/webview/
