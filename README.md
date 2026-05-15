@@ -159,8 +159,10 @@ layer is winning at a glance.
 
 ## Status
 
-Alpha. The public artifact schemas are still moving; once they stabilise
-this will tag `v0.1.0` and start cutting GitHub Releases.
+Alpha. The public artifact schemas are still moving — alpha releases are
+cut from `master` (current: `v0.1.0a1`) so binaries are easy to grab,
+but expect breaking changes to the sidecar/library JSON between alphas
+until `v0.1.0` lands.
 
 ## Development
 

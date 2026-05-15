@@ -88,16 +88,24 @@ jobs:
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Force -Path $dest | Out-Null }
           Copy-Item -Recurse -Force webview/dist/* $dest
 
-      - name: Install package + PyInstaller
-        # Editable install is fine here — PyInstaller follows imports
-        # regardless of install mode, and the wheel/sdist build path
-        # would just add CI minutes for no functional difference. Use
-        # the ``[webview]`` extra so fastapi + uvicorn end up in the
-        # frozen bundle.
+      - name: Install package + PyInstaller + build
+        # Editable install is fine for PyInstaller — it follows imports
+        # regardless of install mode. ``build`` is for the wheel step
+        # further down; install it now so the toolchain is fully set up
+        # before any artifact production starts.
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[webview]"
-          python -m pip install pyinstaller
+          python -m pip install pyinstaller build
+
+      - name: Build wheel
+        # Produces ``dist/wows_model_export-<version>-py3-none-any.whl``.
+        # Runs BEFORE PyInstaller so the wheel + exe both land under
+        # ``dist/`` and the release upload step grabs them together.
+        # setuptools picks up the staged ``_static/webview/`` via the
+        # ``[tool.setuptools.package-data]`` glob in pyproject.toml, so
+        # the wheel ships with the UI bundled the same way the exe does.
+        run: python -m build --wheel
 
       - name: Build single-file exe
         # The spec file does the heavy lifting (entry, datas, hidden
@@ -150,6 +158,13 @@ jobs:
           path: dist/wows-model-export-webview.exe
           if-no-files-found: error
 
+      - name: Upload wheel as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wows-model-export-wheel
+          path: dist/*.whl
+          if-no-files-found: error
+
       - name: Publish GitHub Release
         # Only fires on tag push (the dispatch path produces an
         # artifact but no release). softprops/action-gh-release picks
@@ -158,7 +173,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/wows-model-export-webview.exe
+          files: |
+            dist/wows-model-export-webview.exe
+            dist/*.whl
           # Mark alpha/beta/rc tags as prereleases so they don't show
           # up as "latest" on the Releases page.
           prerelease: ${{ contains(github.ref_name, 'a') || contains(github.ref_name, 'b') || contains(github.ref_name, 'rc') }}

@@ -66,14 +66,26 @@ jobs:
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Force -Path $dest | Out-Null }
           Copy-Item -Recurse -Force webview/dist/* $dest
 
-      - name: Install package + PyInstaller
+      - name: Install package + PyInstaller + build
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[webview]"
-          python -m pip install pyinstaller
+          python -m pip install pyinstaller build
+
+      - name: Build wheel
+        # Mirrors release.yml so packaging breaks are caught before tag
+        # push. Output: ``dist/wows_model_export-<version>-py3-none-any.whl``.
+        run: python -m build --wheel
 
       - name: Build single-file exe
         run: pyinstaller pyinstaller/wows-webview.spec --noconfirm
+
+      - name: Verify wheel exists
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem -Path dist -Filter "*.whl" | Select-Object -First 1
+          if (-not $wheel) { throw "wheel not built" }
+          if ($wheel.Length -lt 100KB) { throw "wheel suspiciously small" }
 
       - name: Verify exe exists and runs
         # Cheaper than the full HTTP smoke test from release.yml — we

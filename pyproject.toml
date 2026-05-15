@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wows-model-export"
-version = "0.1.0a0"
+version = "0.1.0a1"
 description = "Extraction pipeline for World of Warships assets (producer for downstream web / DCC consumers)"
 readme = "README.md"
 requires-python = ">=3.11"
