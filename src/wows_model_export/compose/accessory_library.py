@@ -494,7 +494,7 @@ def _extract_material_manifest(
             glb_path,
             textures_dir=png_dir if png_dir.is_dir() else None,
             textures_dds_dir=dds_dir if dds_dir.is_dir() else None,
-            material_mappings_json=mm_path if mm_path.is_file() else None,
+            material_mappings_json=mm_path,
         )
         rec.texture_sets = (
             resolve_sidecar.texture_sets_from_dir(dds_dir)

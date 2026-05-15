@@ -1207,11 +1207,7 @@ def scaffold_ship(
                     textures_dds_dir,
                     config=cfg,
                     label=ship,
-                    material_mappings_json=(
-                        material_mappings_json
-                        if material_mappings_json.is_file()
-                        else None
-                    ),
+                    material_mappings_json=material_mappings_json,
                 )
                 if synth_paths:
                     _emit_locked(
@@ -1557,9 +1553,7 @@ def scaffold_ship(
                 hull_glb,
                 textures_dir=textures_dir if textures_dir.is_dir() else None,
                 textures_dds_dir=textures_dds_dir if textures_dds_dir.is_dir() else None,
-                material_mappings_json=(
-                    material_mappings_json if material_mappings_json.is_file() else None
-                ),
+                material_mappings_json=material_mappings_json,
             )
             if mats:
                 doc["materials"] = mats
