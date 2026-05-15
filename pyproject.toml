@@ -25,16 +25,19 @@ classifiers = [
 
 # Runtime deps audited from `tools/` imports survey (2026-05-13):
 #   numpy   — bw_geometry, rig_normalize_bones, compare_skin_meshes, synth_emission
-#   scipy   — compare_skin_meshes (cKDTree only; could later drop in favour of a
-#             small custom kd-tree if scipy footprint matters)
 #   pillow  — synth_emission (DDS round-trip via numpy + PIL)
 #   ijson   — compare_exterior_swaps (streams the 2.8 GB GameParams cache)
+#
+# scipy was previously listed for its KD-tree in resolve/mesh_compare.py; we
+# replaced it with an in-house numpy KD-tree (resolve/_kdtree.py) to drop
+# ~100 MB from the eventual PyInstaller .exe (scipy + bundled OpenBLAS).
+# Performance is acceptable for our mesh sizes (~3k verts/primitive, sub-100ms
+# per accessory comparison); trade-off is dropping the 100 MB scipy dep.
 #
 # Everything else (json, struct, subprocess, pathlib, xml.etree, dataclasses,
 # argparse, hashlib, gettext-style .mo decoder) is stdlib.
 dependencies = [
     "numpy>=1.26",
-    "scipy>=1.11",
     "pillow>=10.0",
     "ijson>=3.2",
 ]

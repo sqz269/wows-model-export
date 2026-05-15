@@ -43,9 +43,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from scipy.spatial import cKDTree
 
 from ..read import bw_geometry as bwg
+from ._kdtree import KDTree
 
 # ---------------------------------------------------------------------------
 # Mesh snapshot
@@ -220,7 +220,7 @@ def _uv_agreement(
     the other side simplified the mesh and removed nearby vertices), we
     fall back to the nearest-neighbour UV — flagged as "uncovered".
     """
-    tree = cKDTree(dst.positions)
+    tree = KDTree(dst.positions)
     candidates_lists = tree.query_ball_point(src.positions, r=eps_position)
 
     nn_dists, nn_idx = tree.query(src.positions, k=1)
@@ -284,7 +284,7 @@ def _mirror_detect(mod: MeshSnapshot, vanilla: MeshSnapshot) -> dict | None:
         ext_m = ext_m_flipped_max - ext_m_flipped_min
         if not np.allclose(ext_v, ext_m, atol=eps):
             continue
-        tree = cKDTree(flipped)
+        tree = KDTree(flipped)
         d, idx = tree.query(vanilla.positions, k=1)
         if d.max() > eps:
             continue
