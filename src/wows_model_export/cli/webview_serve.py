@@ -12,10 +12,17 @@ The CLI deliberately does **not** use the shared ``add_common_args`` /
 shared infra would just pull in unused argparse groups. Workspace
 resolution is the only config field that matters at startup.
 
-Run two-process from the webview's ``npm run dev`` script (the Vite dev
-server proxies ``/api/*`` + ``/repo/*`` to here), or stand-alone after
-``pip install`` once the bundle-static-files step lands (Path B / Stage
-2+).
+Two supported deployment shapes:
+
+  * **Stand-alone** (default): the Svelte UI is bundled into the wheel
+    under ``wows_model_export/_static/webview/`` and served by the same
+    FastAPI process at ``/``. After ``pip install`` users get the full
+    UI from a single ``wows-webview-serve`` invocation — no Node, no
+    second process, no port juggling.
+  * **Dev (two-process)**: ``cd webview && npm run dev`` runs Vite for
+    HMR alongside this server; Vite proxies ``/api/*`` + ``/repo/*``
+    here. The bundled UI is irrelevant in this mode (Vite serves the
+    sources directly).
 """
 
 from __future__ import annotations
@@ -34,10 +41,11 @@ def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="wows-webview-serve",
         description=(
-            "FastAPI backend launcher for the wows-model-export Svelte "
-            "webview. Hosts /api/* + /repo/* on a local TCP port; the "
-            "webview's Vite dev server proxies its same-origin requests "
-            "here in development."
+            "Local web UI for wows-model-export. Serves the bundled "
+            "Svelte SPA at / together with the /api/* + /repo/* "
+            "endpoints on a single TCP port. In development the Vite "
+            "dev server (cd webview && npm run dev) hosts the UI itself "
+            "and proxies API/repo calls back here."
         ),
     )
     ap.add_argument(

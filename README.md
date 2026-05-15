@@ -46,8 +46,10 @@ pip install "./wows_model_export-<version>-py3-none-any.whl[webview]"
 
 This drops the `wows-*` console scripts (`wows-webview-serve`,
 `wows-ingest-ship`, `wows-build-accessory-library`, …) on your `PATH`.
-The Svelte UI ships pre-built inside the wheel — no Node toolchain
-required to use it.
+The Svelte UI ships pre-built inside the wheel
+(`wows_model_export/_static/webview/`) and is served by the same
+`wows-webview-serve` process at `http://127.0.0.1:5180/` — no Node
+toolchain required to use it.
 
 ## First run
 
@@ -156,6 +158,20 @@ cd webview && npm install && npm run dev
 HMR. The frontend dev guide is in [`webview/README.md`](webview/README.md);
 the Python package layout is documented at the top of
 [`src/wows_model_export/__init__.py`](src/wows_model_export/__init__.py).
+
+When you change the Svelte UI and want the change to land in published
+wheels, rebuild and refresh the bundled mirror:
+
+```bash
+cd webview && npm run build
+rm -rf src/wows_model_export/_static/webview
+cp -r webview/dist src/wows_model_export/_static/webview
+```
+
+The committed mirror under `src/wows_model_export/_static/webview/` is
+what setuptools packs into the wheel; see
+[`src/wows_model_export/_static/README.md`](src/wows_model_export/_static/README.md)
+for the rationale.
 
 ## License
 

@@ -187,13 +187,18 @@ changes:
 
 ## Long-term (architecture)
 
-### `wows-webview serve` as a single distribution entry point
+### `wows-webview-serve` as a single distribution entry point — DONE
 
-After the FastAPI port lands: ~3 days to bundle `webview/dist/` into
-the wheel via `package_data` and serve static files alongside the API.
-Result: `pip install wows-model-export && wows-webview serve` — no
-Node at runtime, only at build time. Document the dev vs. prod split
-(dev still uses Vite for HMR; prod is uvicorn + static).
+`webview/dist/` is mirrored under `src/wows_model_export/_static/webview/`
+and shipped via `[tool.setuptools.package-data]`; the FastAPI app
+mounts the SPA at `/` (with API/`/repo` taking precedence and a
+client-side-routing fallback to `index.html` for unknown paths) via
+`server/static.py:mount_webview`. Path resolution covers editable
+installs, wheel installs, and PyInstaller-frozen layouts via
+`importlib.resources`. Result: `pip install wows-model-export[webview]
+&& wows-webview-serve` — no Node at runtime, only at build time. Dev
+still uses Vite (`cd webview && npm run dev`) for HMR; prod is uvicorn
++ static.
 
 ### Type-sharing snapshot.json ↔ `lib/types/extract.ts`
 
