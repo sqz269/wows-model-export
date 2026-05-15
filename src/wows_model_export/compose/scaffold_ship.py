@@ -85,6 +85,114 @@ from ._step_runner import StepRunner
 # refresh sequentially). XML parse is ~1s and the lookup is read-only.
 _CAMO_DB_CACHE: wg_camo.CamouflageDb | None = None
 
+# Cached accessory-library index.json per library root, keyed on the
+# resolved absolute path string. The index lists every built asset and
+# (when applicable) the relative path to that asset's
+# ``<asset>.attached_accessories.json``. Loaded once per scaffold to
+# back the variant-swap bespoke-children extension below.
+_ACCESSORY_INDEX_BY_ROOT: dict[str, dict[str, Any]] = {}
+
+# Cached (library_root → asset_id → set of attached-child asset_ids)
+# pulled from ``<asset>.attached_accessories.json``. Populated lazily
+# by :func:`_attached_child_ids_for_asset`.
+_ATTACHED_CHILDREN_BY_ASSET: dict[tuple[str, str], frozenset[str]] = {}
+
+
+def _accessory_index_for_root(library_root: Path) -> dict[str, Any]:
+    """Return the parsed ``index.json`` for an accessory library root,
+    cached per resolved root path. Empty dict on missing or malformed.
+    """
+    key = str(library_root.resolve())
+    cached = _ACCESSORY_INDEX_BY_ROOT.get(key)
+    if cached is not None:
+        return cached
+    path = library_root / "index.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    _ACCESSORY_INDEX_BY_ROOT[key] = raw
+    return raw
+
+
+def _attached_child_ids_for_asset(
+    library_root: Path,
+    asset_id: str,
+) -> frozenset[str]:
+    """Return the set of child ``asset_id``s referenced by an asset's
+    ``<asset>.attached_accessories.json`` (live + dead union).
+
+    Empty set when the library index has no entry, no attached file is
+    listed, the file is missing on disk, or the JSON is malformed. The
+    asset itself is excluded — only its children are returned.
+    """
+    root_key = str(library_root.resolve())
+    cache_key = (root_key, asset_id)
+    cached = _ATTACHED_CHILDREN_BY_ASSET.get(cache_key)
+    if cached is not None:
+        return cached
+
+    index = _accessory_index_for_root(library_root)
+    assets = index.get("assets") if isinstance(index, dict) else None
+    entry = assets.get(asset_id) if isinstance(assets, dict) else None
+    rel = entry.get("attached_accessories") if isinstance(entry, dict) else None
+    if not isinstance(rel, str) or not rel:
+        _ATTACHED_CHILDREN_BY_ASSET[cache_key] = frozenset()
+        return frozenset()
+
+    doc_path = library_root / rel
+    try:
+        doc = json.loads(doc_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        _ATTACHED_CHILDREN_BY_ASSET[cache_key] = frozenset()
+        return frozenset()
+
+    out: set[str] = set()
+    for section in ("attachments_live", "attachments_dead"):
+        items = doc.get(section) if isinstance(doc, dict) else None
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            aid = item.get("asset_id")
+            if isinstance(aid, str) and aid and aid != asset_id:
+                out.add(aid)
+    frozen = frozenset(out)
+    _ATTACHED_CHILDREN_BY_ASSET[cache_key] = frozen
+    return frozen
+
+
+def _bespoke_attached_children_for_swap(
+    library_root: Path,
+    base_asset_id: str,
+    variant_asset_id: str,
+) -> set[str]:
+    """Return the bespoke variant-only attached children for a swap pair.
+
+    ``variant.attachments - base.attachments`` over the union of live +
+    dead children. These are the variant-themed assets bundled inside
+    the variant's ``.skel_ext`` that the base parent does not carry —
+    e.g. ``AM6068_Cartridges_Hoshino`` shows up under
+    ``AGM3019_16in50_Mk7_Hoshino`` but not under the base
+    ``AGM034_16in50_Mk7`` it replaces.
+
+    Returns an empty set when either parent's attached doc is missing
+    or empty (defensive — a fresh library may not yet carry the variant
+    on first ingest; the base counterpart is always built first).
+    """
+    if not base_asset_id or not variant_asset_id:
+        return set()
+    if base_asset_id == variant_asset_id:
+        return set()
+    base = _attached_child_ids_for_asset(library_root, base_asset_id)
+    variant = _attached_child_ids_for_asset(library_root, variant_asset_id)
+    if not variant:
+        return set()
+    return set(variant) - set(base)
+
 # Topology tags used by the permoflage walkers to route each
 # CamoEntry to the right extraction + emission path.
 _TOPO_MAT_ALBEDO = "mat_albedo"
@@ -1641,6 +1749,33 @@ def scaffold_ship(
             for vv in (swaps.get("dead_by_hp_name") or {}).values():
                 if vv:
                     variant_asset_set.add(vv)
+            # Extend the opt-out set with bespoke attached children of
+            # each variant-swapped parent. These are the variant-themed
+            # decorative assets (AM6068_Cartridges_Hoshino,
+            # AM6072_Rangefinder_Hoshino, Azur AM920_Rangefinder, etc.)
+            # bundled inside the variant turret's `.skel_ext`. Without
+            # this extension, _fold_variant_overlay_into_default lands
+            # the variant's `mat_textures` onto the default skin and
+            # consumers paint them over with the generic atlas, masking
+            # the bespoke albedo. Identification by set-diff against the
+            # base parent's attached children — robust against the
+            # generic accessories (boats, ladders, ammo boxes) that the
+            # variant SHOULD still inherit the camo wash on.
+            for base_aid, variant_aid in (swaps.get("by_asset_id") or {}).items():
+                if not isinstance(base_aid, str) or not isinstance(variant_aid, str):
+                    continue
+                variant_asset_set |= _bespoke_attached_children_for_swap(
+                    _accessory_lib_root, base_aid, variant_aid,
+                )
+            for hp_name, variant_aid in (swaps.get("by_hp_name") or {}).items():
+                if not isinstance(variant_aid, str):
+                    continue
+                base_aid = _base_aid_by_hp.get(hp_name) if isinstance(hp_name, str) else None
+                if not isinstance(base_aid, str):
+                    continue
+                variant_asset_set |= _bespoke_attached_children_for_swap(
+                    _accessory_lib_root, base_aid, variant_aid,
+                )
             variant_asset_list = sorted(variant_asset_set)
             doc.setdefault("ship", {})["variant_swapped_asset_ids"] = variant_asset_list
 
