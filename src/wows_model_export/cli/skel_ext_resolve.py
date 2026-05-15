@@ -7,11 +7,10 @@ accessories JSON. Argv shape::
         --candidates <P> --output <P>
         [--record-offsets 0x0,0x...]
         [--manifest P] [--hull-glb P]
-        [--accessories-lib P]
         [--include-dock] [--keep-skinned]
-        [--hull-margin-m F] [--ship-nation N]
+        [--ship-nation N]
         [--extra-scopes common,...]
-        [--keep-degenerate] [--origin-threshold-m F]
+        [--keep-degenerate]
         [common flags ...]
 """
 
@@ -77,15 +76,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--hull-glb",
         type=Path,
         default=None,
-        help="Path to the hull GLB; used by the degenerate-origin "
-             "filter to score candidates against the hull bounds.",
-    )
-    ap.add_argument(
-        "--accessories-lib",
-        type=Path,
-        default=None,
-        help="Override accessory library root (default: "
-             "<workspace>/libraries/accessories).",
+        help="Path to the hull GLB; the resolver reads its `_patch_*` "
+             "meshes to assign parent_mesh on patch-anchored placements. "
+             "Auto-discovered next to placements_json when unset.",
     )
     ap.add_argument(
         "--include-dock",
@@ -97,12 +90,6 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Keep SP_* skinned-mesh placements (default: drop). Enable "
              "when feeding a per-permoflage composer downstream.",
-    )
-    ap.add_argument(
-        "--hull-margin-m",
-        type=float,
-        default=5.0,
-        help="Outside-hull rejection margin in metres (default: 5.0).",
     )
     ap.add_argument(
         "--ship-nation",
@@ -120,13 +107,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--keep-degenerate",
         action="store_true",
         help="Keep candidates with degenerate origins (default: drop).",
-    )
-    ap.add_argument(
-        "--origin-threshold-m",
-        type=float,
-        default=0.001,
-        help="Distance-from-origin threshold for the degenerate filter "
-             "(default: 0.001m).",
     )
     add_common_args(ap)
     return ap
@@ -162,14 +142,11 @@ def main(argv: list[str] | None = None) -> int:
             keep_record_offsets=record_offsets,
             manifest_path=args.manifest,
             hull_glb=args.hull_glb,
-            accessories_lib=args.accessories_lib,
             include_dock=args.include_dock,
             drop_skinned=not args.keep_skinned,
-            hull_margin_m=args.hull_margin_m,
             ship_nation=args.ship_nation,
             extra_scopes=extra_scopes,
             drop_degenerate=not args.keep_degenerate,
-            origin_threshold_m=args.origin_threshold_m,
             config=cfg,
             on_event=printer,
         )
