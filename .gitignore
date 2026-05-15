@@ -49,6 +49,9 @@ scratch/
 tmp/
 *.tmp
 
+# local-only context, never published.
+/reference/
+
 # Webview build artifacts (webview/.gitignore handles its own subtree;
 # this catches in case a build leaks up).
 /webview/dist/
