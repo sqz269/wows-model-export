@@ -36,6 +36,23 @@ reference one.
 
 ## Install
 
+Two paths depending on whether you want the CLI tooling or just the
+local viewer.
+
+### Standalone Windows exe (just the viewer)
+
+Grab `wows-model-export-webview.exe` from
+[GitHub Releases](https://github.com/sqz269/wows-model-export/releases/latest)
+and double-click it. A console window opens, the local server boots, and
+the URL it prints (`http://127.0.0.1:5180`) opens the UI in your
+browser. Nothing to install — Python is bundled inside the exe. First
+run takes ~5-10 seconds to extract; subsequent launches are faster.
+
+You still need `wowsunpack.exe` on your `PATH` (or pointed at via the
+Settings page) for the Extract tab to work — see Prerequisites above.
+
+### Wheel install (full CLI + viewer)
+
 Grab the latest wheel from
 [GitHub Releases](https://github.com/sqz269/wows-model-export/releases/latest),
 then:
