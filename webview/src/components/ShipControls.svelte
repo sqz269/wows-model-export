@@ -147,7 +147,18 @@
       // starts with textures off (TextureManager.clearShip()); kick off
       // the async decode here so the user's last toggle carries across
       // ship swaps. Fire-and-forget — the toast tracks progress.
-      if (persisted.showTextures && !newShowTextures) {
+      //
+      // Gate on `revision > 0`: the very first $effect run happens at
+      // mount, before the parent has bumped controlsRevision for a
+      // completed ship-load. At that point TextureManager.entries is
+      // still empty, so setShowTextures(true) would mark the pipeline
+      // active without applying anything — and the post-load revision
+      // bump would then see isShowingTextures()=true and skip the real
+      // decode pass. The premature toast pair also raced svelte-sonner's
+      // height/toast bookkeeping, corrupting the heights array and
+      // breaking subsequent reactivity (ship navigation hung). Wait for
+      // the parent's first real load completion before auto-restoring.
+      if (revision > 0 && persisted.showTextures && !newShowTextures) {
         void toggleShowTextures(true);
       }
     });
