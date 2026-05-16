@@ -616,7 +616,18 @@ export class TextureManager {
       if (matTextures && !variantOptOut && entry.category in matTextures) {
         const matCat = matTextures[entry.category];
         const params = matCat.params ?? null;
-        if (params && params.camo_mode === 0) {
+        // Engine per-part rule (selector at +0x188+part*0xc0 in
+        // makeCamoMaterial — RE'd at exe 0x14108ad80): when `<*_mgn>`
+        // exists for the part, Path B wins over the Path A mat_camo
+        // overlay. Mirrors the `categories`-block prefer-mgn dispatch
+        // above. Skipping the binding lets the asset render with its
+        // natural albedo — correct when params default camo_mode = -1
+        // ("no override") which is what hybrid mat_palette skins carry
+        // on their gun/director/misc/wire categories. Full Path B
+        // render is TODO per project_camo_hybrid_path_ab.md.
+        if (matCat.mgn) {
+          // Path B configured — skip Path A.
+        } else if (params && params.camo_mode === 0) {
           // Path B explicitly disabled — leave matTex null.
         } else {
           matTex = this.matAlbedoCache.get(matCat.albedo);

@@ -78,72 +78,61 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
           `
 #ifdef USE_MAP
   vec4 baseSample = texture2D( map, vMapUv );
-  // WG bakes per-pixel surface classification into the BLUE channel of
-  // the ship's NORMAL MAP, repacked at toolkit emit-time as the BC4
-  // 'camoMaskMap' (99.6% within ±4 of the original BC7 B bytes).
-  // Empirical clusters (sample_nb.py, 2026-05-08):
+
+  // ── nbmask paint factor (Path B only) ────────────────────────────────
+  // The ship's _n.B channel is repacked at toolkit emit time as the BC4
+  // `camoMaskMap`. Path B (`ship_camo_mgn_material.fx`) samples it as a
+  // per-pixel paint multiplier via 4 quadratic soft bands around the
+  // reserved deny values u8 {136, 187, 221, 238} — verified from DXBC
+  // chunk001 lines 613/617/623/627/631/635. See
+  // `reference/investigations/normal_b_deny_list_re.md`.
   //
-  //   PAINT (default — apply camo):
-  //     u8 ~119      universal default
-  //     u8 ~115/118/120  BC7 spread around 119
-  //     u8 ~99/100/102/107  paint sub-clusters
-  //     u8 ~51, ~68  paint sub-clusters (turret roofs)
-  //     u8 ~17       AGS010 shield accent
-  //   SKIP (preserve base):
-  //     u8 ~0        unmapped UV regions
-  //     u8 ~34       boot-topping / detail strips
-  //     u8 ~85       IJN deck-skip / some accessory regions
-  //     u8 ~136-140  AA gun MAGAZINE / breech (Bofors variants)
-  //     u8 ~153      US-capital deck-top
-  //     u8 ~187-189  GUN MANTLET / dark gun face
-  //     u8 ~204      Baltimore-hull-specific
+  //     float4 t = (-0.533330, -0.733330, -0.866660, -0.933330);
+  //     float4 d = abs(_n.b - t); d = min(1, d*d*1000);
+  //     float paint = d.x * d.y * d.z * d.w;     // 0 = SKIP, 1 = PAINT
   //
-  // DENY-LIST gate. Same gate applies to BOTH the mask+palette path AND
-  // the mat_albedo path: WG samples one no-camo classification regardless
-  // of paint source.
-  //
-  // 'camoMaskBound' flips off when no nbmask is bound (legacy exports
-  // pre-2026-04-30). In that case we have no classification signal so
-  // default to apply-everywhere.
-  float nbSkip = 0.0;
+  // Path A (`ship_camo_material.fx`) does NOT sample _n.B — its gate is
+  // the camoColorMask R/G/B/Black zone alpha (zoneColor.a). So nbPaint
+  // multiplies the mat_albedo branch only; the palette branch keeps its
+  // own zone-alpha gate. `camoMaskBound` defaults the factor to 1
+  // (apply-everywhere) when no nbmask is bound (legacy exports).
+  float nbPaint = 1.0;
   if ( camoMaskBound > 0.5 ) {
     float nb = texture2D( camoMaskMap, vMapUv ).r;
-    // Band widths chosen to absorb BC4 quantization (±2/255) plus
-    // residual BC7-source spread; centred on observed skip-cluster modes.
-    bool inSkipBand =
-        ( nb <= 0.020 ) ||                       // u8 ~0    unmapped
-        ( nb >= 0.110 && nb <= 0.157 ) ||        // u8 ~34   boot-top / detail
-        ( nb >= 0.314 && nb <= 0.353 ) ||        // u8 ~85   IJN deck / accessory
-        ( nb >= 0.514 && nb <= 0.569 ) ||        // u8 ~136-140 AA magazine
-        ( nb >= 0.580 && nb <= 0.620 ) ||        // u8 ~153  US deck top
-        ( nb >= 0.714 && nb <= 0.757 ) ||        // u8 ~187-189 gun mantlet
-        ( nb >= 0.781 && nb <= 0.820 );          // u8 ~204  Baltimore-specific
-    if ( inSkipBand ) {
-      nbSkip = 1.0;
-    }
+    vec4 d = abs( vec4( nb ) - vec4( 0.5333, 0.7333, 0.8666, 0.9333 ) );
+    vec4 dsq = min( vec4( 1.0 ), d * d * 1000.0 );
+    nbPaint = dsq.x * dsq.y * dsq.z * dsq.w;
   }
-  bool inPaintZone = ( vWorldY >= waterlineY ) && ( nbSkip < 0.5 );
-  if ( matAlbedoEnable > 0.5 && inPaintZone ) {
-    // mat_* permoflage paint. Two recipes:
-    //   matAlbedoMode <  0.5  → Path A: multiplicative atlas overlay
-    //                            (tile / mat_camo skins without an
-    //                            authored <Part_mgn> block).
-    //   matAlbedoMode >= 1.5  → Path B: alpha-weighted RGB replace.
-    //                            Mode 2 is the most common (AzurNJ, ARP,
-    //                            Sabaton, Aegir AL); modes 1 and 3 use
-    //                            the same lerp here — exact channel
-    //                            routing is rare and visually close.
+
+  // Underwater gate — separate aesthetic (preserves the wet/dirty base
+  // below the waterline). Applies to both Path A and Path B.
+  bool aboveWaterline = ( vWorldY >= waterlineY );
+
+  if ( matAlbedoEnable > 0.5 && aboveWaterline ) {
+    // mat_* permoflage paint (Path B). Two recipes:
+    //   matAlbedoMode <  0.5  → Path A-style multiplicative atlas overlay
+    //                            (tile / mat_camo without <Part_mgn>).
+    //   matAlbedoMode >= 1.5  → Path B alpha-weighted RGB replace.
+    //                            Mode 2 most common (AzurNJ, ARP, Sabaton,
+    //                            Aegir AL); modes 1/3 use the same lerp.
+    // Blend the per-pixel camo contribution with the natural diffuse by
+    // `nbPaint` — engine-faithful soft falloff around the 4 deny bands.
     vec2 matUv = vMapUv * matAlbedoUv.xy + matAlbedoUv.zw;
     vec4 matSample = texture2D( matAlbedoMap, matUv );
+    vec3 natural = diffuseColor.rgb * baseSample.rgb;
+    vec3 painted;
     if ( matAlbedoMode < 0.5 ) {
-      diffuseColor.rgb *= matSample.rgb;
+      painted = diffuseColor.rgb * matSample.rgb;
     } else {
       float coverage = matSample.a;
       float aoMod = mix( 1.0, coverage, matAlbedoAo );
-      vec3 camoRgb = matSample.rgb;
-      diffuseColor.rgb = mix( diffuseColor.rgb * aoMod, camoRgb, coverage );
+      painted = mix( diffuseColor.rgb * aoMod, matSample.rgb, coverage );
     }
-  } else if ( camoEnable > 0.5 && inPaintZone ) {
+    diffuseColor.rgb = mix( natural, painted, nbPaint );
+    diffuseColor.a   = baseSample.a;
+  } else if ( camoEnable > 0.5 && aboveWaterline ) {
+    // Path A — palette + zoned mask. No nbmask gate; zoneColor.a (zero
+    // in the authored "no-paint" zone) is the engine's deny mechanism.
     // Mask sampling uses vCamoUv (= vMapUv * camoUV.xy + camoUV.zw) so
     // tile-pattern accessory masks repeat at WG's per-camo authored
     // scale. Hull masks have identity camoUV → vCamoUv == vMapUv.
