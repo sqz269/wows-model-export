@@ -71,9 +71,20 @@ def extract(
     argv.extend(files)
 
     # Don't pass expect_outputs — extract can succeed without writing
-    # anything if the glob matches nothing. Callers that need a
-    # presence check should walk `out_dir`.
-    return run_toolkit(argv, config=cfg, expect_outputs=(out,))
+    # anything if the glob matches nothing, AND `out` is a directory
+    # (run_toolkit's check uses `Path.is_file()` which would always fail
+    # on a dir and raise even after a successful extract). Callers that
+    # need a presence check should walk `out_dir`.
+    result = run_toolkit(argv, config=cfg)
+    # Re-stamp `output_paths` so the docstring contract holds even though
+    # we skipped the post-exit existence check.
+    return ToolkitResult(
+        output_paths=(out,),
+        stderr=result.stderr,
+        elapsed_ms=result.elapsed_ms,
+        data=result.data,
+        stdout=result.stdout,
+    )
 
 
 def metadata_json(
