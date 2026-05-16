@@ -3,6 +3,8 @@
 
 export { ShipViewer } from './viewer';
 export type { ShipLoadStats, PickedAssetInfo, PickResult } from './viewer';
+export { DEFAULT_BLOOM_PARAMS } from '$lib/three/scene';
+export type { BloomParams } from '$lib/three/scene';
 export type { ColorMode } from './color_mode';
 export type { LodPolicy } from './placement';
 export {

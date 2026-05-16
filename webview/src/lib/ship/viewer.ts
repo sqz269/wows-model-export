@@ -15,7 +15,11 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-import { createSceneEnvironment, type SceneEnvironment } from '$lib/three/scene';
+import {
+  createSceneEnvironment,
+  type BloomParams,
+  type SceneEnvironment,
+} from '$lib/three/scene';
 import { observeResize } from '$lib/three/resize';
 import { startRenderLoop } from '$lib/three/render_loop';
 import { disposeTree } from '$lib/three/dispose';
@@ -241,11 +245,12 @@ export class ShipViewer {
       container,
       renderer: this.env.renderer,
       camera: this.env.camera,
+      onResize: (w, h) => this.env.setSize(w, h),
     });
 
     this.stopLoop = startRenderLoop(() => {
       this.env.controls.update();
-      this.env.renderer.render(this.env.scene, this.env.camera);
+      this.env.render();
     });
   }
 
@@ -642,6 +647,24 @@ export class ShipViewer {
     this.helpersVisible = show;
     this.env.grid.visible = show;
     this.env.axes.visible = show;
+  }
+
+  // ── Post-FX (bloom) ───────────────────────────────────────────────────
+
+  setBloomEnabled(on: boolean): void {
+    this.env.setBloomEnabled(on);
+  }
+
+  setBloomParams(p: Partial<BloomParams>): void {
+    this.env.setBloomParams(p);
+  }
+
+  getBloomEnabled(): boolean {
+    return this.env.isBloomEnabled();
+  }
+
+  getBloomParams(): Readonly<BloomParams> {
+    return this.env.getBloomParams();
   }
 
   // ── Camera helpers ────────────────────────────────────────────────────

@@ -26,7 +26,8 @@ export type PanelSection =
   | 'sections'
   | 'hull-groups'
   | 'damage'
-  | 'textures';
+  | 'textures'
+  | 'effects';
 
 export interface PersistedState {
   /** Helpers (grid + axes). */
@@ -52,6 +53,15 @@ export interface PersistedState {
    * correct without the legacy v9 force-off. */
   mrMaps: boolean;
   preserveUnderwater: boolean;
+  /** Bloom post-FX — adds glow to emissive areas (ARP / Sabaton / Halloween
+   *  ships). Default OFF; the composer is built lazily on first enable. */
+  bloomEnabled: boolean;
+  /** Overall bloom contribution (UnrealBloomPass.strength). */
+  bloomStrength: number;
+  /** Spread of the bloom kernel (UnrealBloomPass.radius). */
+  bloomRadius: number;
+  /** Luminance threshold above which fragments contribute (0..1). */
+  bloomThreshold: number;
   /** ShipControls panel: which sections are expanded. */
   panelOpen: Record<PanelSection, boolean>;
   /** Ship picker search text. */
@@ -80,12 +90,17 @@ export function defaultState(): PersistedState {
     aoMaps: true,
     mrMaps: true,
     preserveUnderwater: true,
+    bloomEnabled: false,
+    bloomStrength: 0.6,
+    bloomRadius: 0.35,
+    bloomThreshold: 0.75,
     panelOpen: {
       view: true,
       sections: true,
       'hull-groups': false,
       damage: false,
       textures: false,
+      effects: false,
     },
     shipSearch: '',
   };

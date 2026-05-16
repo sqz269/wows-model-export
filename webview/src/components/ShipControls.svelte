@@ -24,6 +24,7 @@
   import { SHIP_SECTIONS, SEAMS } from '$lib/types';
   import type { SeamKey, SeamState, ShipSectionKey } from '$lib/types';
   import type { ColorMode, LodPolicy, ShipViewer } from '$lib/ship';
+  import { DEFAULT_BLOOM_PARAMS } from '$lib/ship';
   import { loadState, patchState, patchNestedState, type PanelSection } from '$lib/store';
   import { rowCls, labelCls, inputBoxCls } from '$lib/ui/controls';
 
@@ -78,6 +79,10 @@
   let aoMaps = $state(true);
   let mrMaps = $state(false);
   let preserveUnderwater = $state(true);
+  let bloomEnabled = $state(false);
+  let bloomStrength = $state(DEFAULT_BLOOM_PARAMS.strength);
+  let bloomRadius = $state(DEFAULT_BLOOM_PARAMS.radius);
+  let bloomThreshold = $state(DEFAULT_BLOOM_PARAMS.threshold);
 
   // Panel open/close — UI-only; tracked separately so toggling a section
   // doesn't trigger the larger $effect that re-reads viewer state.
@@ -116,6 +121,15 @@
       viewer.setAoEnabled(persisted.aoMaps);
       viewer.setMrMapEnabled(persisted.mrMaps);
       viewer.setPreserveUnderwaterHull(persisted.preserveUnderwater);
+      // Bloom params must be set BEFORE enabling so the lazy composer
+      // build picks them up; the params setter is a no-op until the
+      // composer exists, but that's the right order regardless.
+      viewer.setBloomParams({
+        strength: persisted.bloomStrength,
+        radius: persisted.bloomRadius,
+        threshold: persisted.bloomThreshold,
+      });
+      viewer.setBloomEnabled(persisted.bloomEnabled);
 
       const newSeamStates = { ...viewer.getSeamStates() };
       const newShowTextures = viewer.isShowingTextures();
@@ -130,6 +144,11 @@
       aoMaps = viewer.getAoEnabled();
       mrMaps = viewer.getMrMapEnabled();
       preserveUnderwater = viewer.getPreserveUnderwater();
+      bloomEnabled = viewer.getBloomEnabled();
+      const bp = viewer.getBloomParams();
+      bloomStrength = bp.strength;
+      bloomRadius = bp.radius;
+      bloomThreshold = bp.threshold;
       onShowTexturesChange?.(newShowTextures);
       onSeamStatesChange?.(newSeamStates);
 
@@ -256,6 +275,31 @@
     preserveUnderwater = v;
     viewer.setPreserveUnderwaterHull(v);
     patchState({ preserveUnderwater: v });
+  }
+  function toggleBloom(v: boolean) {
+    bloomEnabled = v;
+    viewer.setBloomEnabled(v);
+    patchState({ bloomEnabled: v });
+  }
+  function setBloomStrength(v: number) {
+    bloomStrength = v;
+    viewer.setBloomParams({ strength: v });
+    patchState({ bloomStrength: v });
+  }
+  function setBloomRadius(v: number) {
+    bloomRadius = v;
+    viewer.setBloomParams({ radius: v });
+    patchState({ bloomRadius: v });
+  }
+  function setBloomThreshold(v: number) {
+    bloomThreshold = v;
+    viewer.setBloomParams({ threshold: v });
+    patchState({ bloomThreshold: v });
+  }
+  function resetBloom() {
+    setBloomStrength(DEFAULT_BLOOM_PARAMS.strength);
+    setBloomRadius(DEFAULT_BLOOM_PARAMS.radius);
+    setBloomThreshold(DEFAULT_BLOOM_PARAMS.threshold);
   }
   /** Snap a persisted LOD policy onto the levels available on the
    *  currently-loaded ship. Out-of-range falls back to lod0; if the
@@ -461,6 +505,84 @@
         />
         Preserve underwater hull
       </label>
+    </div>
+  </details>
+
+  <details
+    open={panelOpen.effects}
+    ontoggle={(e) => togglePanel('effects', e.currentTarget.open)}
+    class="group {detailsCls}"
+  >
+    <summary class={summaryCls}>Effects</summary>
+    <div class={bodyCls}>
+      <label class={rowCls}>
+        <input
+          type="checkbox"
+          checked={bloomEnabled}
+          onchange={(e) => toggleBloom(e.currentTarget.checked)}
+        />
+        Bloom (emissive glow)
+      </label>
+      <label class="{labelCls} {!bloomEnabled ? 'opacity-55' : ''}">
+        <span class="flex items-center justify-between">
+          Strength
+          <span class="text-muted-foreground tabular-nums text-[10px]">
+            {bloomStrength.toFixed(2)}
+          </span>
+        </span>
+        <input
+          type="range"
+          min="0"
+          max="3"
+          step="0.05"
+          value={bloomStrength}
+          disabled={!bloomEnabled}
+          oninput={(e) => setBloomStrength(parseFloat(e.currentTarget.value))}
+        />
+      </label>
+      <label class="{labelCls} {!bloomEnabled ? 'opacity-55' : ''}">
+        <span class="flex items-center justify-between">
+          Radius
+          <span class="text-muted-foreground tabular-nums text-[10px]">
+            {bloomRadius.toFixed(2)}
+          </span>
+        </span>
+        <input
+          type="range"
+          min="0"
+          max="1"
+          step="0.05"
+          value={bloomRadius}
+          disabled={!bloomEnabled}
+          oninput={(e) => setBloomRadius(parseFloat(e.currentTarget.value))}
+        />
+      </label>
+      <label class="{labelCls} {!bloomEnabled ? 'opacity-55' : ''}">
+        <span class="flex items-center justify-between">
+          Threshold
+          <span class="text-muted-foreground tabular-nums text-[10px]">
+            {bloomThreshold.toFixed(2)}
+          </span>
+        </span>
+        <input
+          type="range"
+          min="0"
+          max="1"
+          step="0.01"
+          value={bloomThreshold}
+          disabled={!bloomEnabled}
+          oninput={(e) => setBloomThreshold(parseFloat(e.currentTarget.value))}
+        />
+      </label>
+      <Button
+        variant="outline"
+        size="xs"
+        class="mt-1 w-fit"
+        disabled={!bloomEnabled}
+        onclick={resetBloom}
+      >
+        Reset
+      </Button>
     </div>
   </details>
 
