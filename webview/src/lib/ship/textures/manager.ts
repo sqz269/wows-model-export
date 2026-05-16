@@ -175,7 +175,18 @@ export class TextureManager {
    * against the hull GLB's directory (so per-stem `_camo_NN.dds` work).
    */
   bindHullMaterials(sidecar: SidecarDoc, hullBaseUrl: string): void {
-    this.variantSwappedAssetIds = new Set(sidecar.ship?.variant_swapped_asset_ids ?? []);
+    // Union both opt-out sets: variant_swapped_asset_ids covers swap-targets
+    // and bespoke attached children of swapped parents; camo_skip_asset_ids
+    // covers WG's engine-side per-mesh "_9" material-id marker (themed /
+    // skin-exclusive decorative geometry like AM6067_Whale_Hoshino, Azur
+    // Lane secondaries, Ayane gun barrels). Both classes of asset should
+    // bypass camo painting — the runtime engine never enters camo
+    // dispatch for "_9" materials (verified via Ghidra on the static
+    // material-name → part_index table at exe 0x140071a20).
+    this.variantSwappedAssetIds = new Set([
+      ...(sidecar.ship?.variant_swapped_asset_ids ?? []),
+      ...(sidecar.ship?.camo_skip_asset_ids ?? []),
+    ]);
     for (const mat of sidecar.materials ?? []) {
       const matName = mat.material_id;
       if (!matName) continue;

@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import re
 import sys
 import threading
 import time
@@ -192,6 +193,98 @@ def _bespoke_attached_children_for_swap(
     if not variant:
         return set()
     return set(variant) - set(base)
+
+
+# ---------------------------------------------------------------------------
+# Engine-side camo opt-out: material-id _9 suffix detector
+# ---------------------------------------------------------------------------
+
+# WG runtime gates per-mesh camo binding via a static material-name →
+# part_index lookup table at exe ``0x140071a20`` (verified 2026-05-16 via
+# Ghidra). The 4 lookup groups (Hull-family / Gun-family / Misc-family /
+# Plane-family) enumerate names like ``Hull``, ``DeckHouse``, ``Bulge``,
+# ``Gun``, ``Gun1``, ``Director``, ``Misc``, ``Misc1``, ``Misc_skinned``,
+# etc. ``Misc9`` / ``Gun9`` / ``Catapult9_skinned`` / ``Misc_9`` are
+# **NOT** in any table; meshes carrying those material identifiers never
+# enter the camo dispatch list and render with their natural diffuse.
+#
+# Empirically the ``9`` digit marks themed / skin-exclusive decorative
+# geometry (Hoshino bow whale, Azur Lane secondaries, Ayane turret
+# barrels, snowman ornaments, …). 220 materials across the live corpus
+# match the pattern.
+#
+# Mirror the engine rule by collecting placement ``asset_id``s whose
+# library entry carries at least one ``_9``-suffix material. Emitted as
+# ``ship.camo_skip_asset_ids`` and unioned with
+# ``variant_swapped_asset_ids`` in the consumer's ``variantOptOut`` gate.
+_CAMO_SKIP_RE = re.compile(
+    r"_(Misc|Gun|Catapult|Director|Plane|Float|Hull|DeckHouse|Bulge|Wire)"
+    r"_?9(Dead)?(_skinned)?$",
+)
+
+
+def _material_id_is_camo_skip(material_id: str) -> bool:
+    """True if ``material_id`` matches WG's ``_9``-suffix no-camo marker."""
+    return bool(_CAMO_SKIP_RE.search(material_id))
+
+
+def _camo_skip_asset_ids_from_doc(
+    library_root: Path,
+    doc: dict[str, Any],
+) -> set[str]:
+    """Return placement ``asset_id``s whose library material set carries
+    at least one ``_9``-suffix material identifier (engine's "skip camo"
+    marker; see module-level note).
+
+    Conservative rule: ANY ``_9`` material on the asset → full opt-out.
+    Mixed-material assets where some renderers are ``_9`` and others
+    aren't (~4/1020 in the live corpus, e.g. JGS3019 Ayane gun's
+    ``Gun_skinned`` + ``Gun9_skinned``) get the whole asset opted out;
+    proper per-renderer suppression would require plumbing material-id
+    through to the consumer entry-level, which we haven't done yet.
+    """
+    index = _accessory_index_for_root(library_root)
+    assets = index.get("assets") if isinstance(index, dict) else None
+    if not isinstance(assets, dict):
+        return set()
+
+    # Seed with every asset_id appearing in a top-level placement.
+    seen_aids: set[str] = set()
+    for section in sidecar.PLACEMENT_SECTIONS:
+        for entry in doc.get(section) or []:
+            if not isinstance(entry, dict):
+                continue
+            for key in ("asset_id", "dead_asset_id"):
+                aid = entry.get(key)
+                if isinstance(aid, str) and aid:
+                    seen_aids.add(aid)
+
+    # Also walk attached children — themed accessories like
+    # AM6068_Cartridges_Hoshino are bundled under parent turrets and
+    # never appear as top-level placements. The swap-children-diff path
+    # (variant_swapped_asset_ids) catches them WHEN their parent is a
+    # swap target; this walker catches them for the vanilla-parent case
+    # too (e.g. a `_9` decoration attached to an unswapped mount).
+    for aid in list(seen_aids):
+        seen_aids |= _attached_child_ids_for_asset(library_root, aid)
+
+    skip: set[str] = set()
+    for aid in seen_aids:
+        info = assets.get(aid)
+        if not isinstance(info, dict):
+            continue
+        mats = info.get("materials")
+        if not isinstance(mats, list):
+            continue
+        for m in mats:
+            if not isinstance(m, dict):
+                continue
+            mid = m.get("material_id")
+            if isinstance(mid, str) and _material_id_is_camo_skip(mid):
+                skip.add(aid)
+                break
+    return skip
+
 
 # Topology tags used by the permoflage walkers to route each
 # CamoEntry to the right extraction + emission path.
@@ -994,6 +1087,79 @@ def _absorb_gameparams_passes(
                 doc = sidecar.absorb_gameparams_torpedoes(doc, extras_by_id)
     except Exception as e:
         _warn(warnings, f"gameparams torpedo profiles failed ({e})")
+
+    # Pass 7: particle effect attachments + resolved Effect blob data
+    # (schema v3.x). Drives the webview's particle renderer and the
+    # Unity-side ParticleSystem authoring. Best-effort: a missing
+    # assets.bin / unresolved entry degrades to a warning, never blocks
+    # the rest of the sidecar build.
+    try:
+        # Collect every particle scope the consumer can preview: hull
+        # anchored EP_* effects (fire / flood / death / smoke / wake),
+        # per-gun muzzle + damage + purge + reload + lens, per-AA-aura
+        # flak burst + detonation + miss puff, and per-Munition impact
+        # / projectile-destroyed / tracer XML refs. Each row carries a
+        # ``source`` field the webview pivots on for tab bucketing.
+        attachments = _gp_autofill.collect_all_particle_attachments(
+            ship_dict, components,
+        )
+        if attachments:
+            from ..read import particles as _particles
+            from ..toolkit import assets_bin as _assets_bin
+            try:
+                assets_bin_path = _assets_bin.ensure_dump(config=config)
+            except Exception as e:
+                _warn(warnings, f"gameparams effects: assets.bin unavailable ({e})")
+                assets_bin_path = None
+            if assets_bin_path is not None:
+                with _particles.ParticleStore.open(assets_bin_path) as store:
+                    paths = _gp_autofill.collect_unique_particle_paths(attachments)
+                    resolved: dict[str, dict] = {}
+                    unresolved: list[str] = []
+                    for p in paths:
+                        eff = store.get(p)
+                        if eff is None:
+                            unresolved.append(p)
+                        else:
+                            resolved[p] = eff
+                    if unresolved:
+                        _warn(
+                            warnings,
+                            f"gameparams effects: {len(unresolved)} of "
+                            f"{len(paths)} particle paths unresolved "
+                            f"(e.g. {unresolved[0]!r})",
+                        )
+                    # Extract every DDS referenced by Renderer.textureName*
+                    # / Animation.motionVectorsTexture into the workspace
+                    # cache so the webview can fetch them. Stamps each
+                    # renderer block with a ``texture_url_*`` field used
+                    # by the JS-side ParticleScene.
+                    try:
+                        from . import effects_textures as _eff_tex
+                        tex_paths = _eff_tex.collect_texture_paths(resolved)
+                        if tex_paths:
+                            resolved_urls, missing_tex = _eff_tex.ensure_textures_on_disk(
+                                tex_paths, config=config,
+                            )
+                            stamped = _eff_tex.stamp_texture_urls(resolved, resolved_urls)
+                            if missing_tex:
+                                _warn(
+                                    warnings,
+                                    f"effects textures: {len(missing_tex)} of "
+                                    f"{len(tex_paths)} referenced textures not "
+                                    f"extractable (e.g. {sorted(missing_tex)[0]!r})",
+                                )
+                            print(
+                                f"  effects: extracted {len(resolved_urls)} "
+                                f"texture(s) ({stamped} field(s) stamped)",
+                            )
+                    except Exception as e:
+                        _warn(warnings, f"effects textures failed ({e})")
+                    doc = sidecar.absorb_gameparams_effects(
+                        doc, attachments=attachments, particles=resolved,
+                    )
+    except Exception as e:
+        _warn(warnings, f"gameparams effects failed ({e})")
 
     return doc
 
@@ -1799,6 +1965,19 @@ def scaffold_ship(
         for _entry in doc.get(_section) or []:
             if isinstance(_entry, dict):
                 _entry.pop("misc_filter_mode", None)
+
+    # Stamp engine-side camo opt-out set. Runs unconditionally so even
+    # non-variant ships (no variant_swapped_asset_ids) record their
+    # ``_9``-suffix themed accessories — those still ride along when a
+    # camo / tile permoflage tries to paint the misc/gun category.
+    try:
+        _camo_skip = _camo_skip_asset_ids_from_doc(
+            workspace / "libraries" / "accessories",
+            doc,
+        )
+        doc.setdefault("ship", {})["camo_skip_asset_ids"] = sorted(_camo_skip)
+    except Exception as e:
+        warnings.append(f"camo_skip_asset_ids scan failed ({e})")
 
     # ── Step: emit_sidecar ────────────────────────────────────────────
     timer.start("emit_sidecar", detail=sidecar_path.name)
