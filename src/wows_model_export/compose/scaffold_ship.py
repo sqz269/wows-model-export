@@ -387,6 +387,15 @@ def _strip_color_scheme_prefix(roll_name: str) -> str:
 def _classify_topology(entry: wg_camo.CamoEntry) -> str:
     """Classify a ``CamoEntry`` by its ``<Textures>`` shape so the
     walker can route it to the right extraction + skin-emission path.
+
+    ``is_mat`` entries always route to a mat_* branch, even when they
+    only carry accessory tags (``<Gun>``/``<Director>``/``<Misc>``)
+    without ``<Hull>``/``<DeckHouse>``/``<Bulge>``. ~39 ``mat_Azur_*``
+    entries today are authored for not-yet-released ships and would
+    previously fall into ``_TOPO_SKIP``; once WG ships a referencing
+    Vehicle they need a working emit path. The mat_textures_for_entry
+    function handles whatever tags exist, so the mat_albedo branch
+    works for accessory-only entries too.
     """
     keys = set(entry.textures)
     has_hull_specific = bool(keys & {"Hull", "DeckHouse", "Bulge"})
@@ -394,8 +403,13 @@ def _classify_topology(entry: wg_camo.CamoEntry) -> str:
     has_palette = bool(entry.color_schemes)
     is_mat = entry.name.startswith("mat_")
 
-    if is_mat and has_hull_specific:
-        return _TOPO_MAT_PALETTE if has_palette else _TOPO_MAT_ALBEDO
+    if is_mat:
+        if has_hull_specific:
+            return _TOPO_MAT_PALETTE if has_palette else _TOPO_MAT_ALBEDO
+        # Accessory-only mat_* — route to mat_albedo emit. The
+        # mat_textures_for_entry iterates entry.textures and emits
+        # whatever it finds (gun/director/misc/etc. — no hull).
+        return _TOPO_MAT_ALBEDO
     if not is_mat and has_hull_specific and has_palette:
         return _TOPO_HULL_PALETTE
     if has_tile and has_palette:
@@ -437,8 +451,13 @@ def _emit_permoflage_skins(
         topo = _classify_topology(entry)
         if topo == _TOPO_SKIP:
             continue
-        if topo == _TOPO_HULL_PALETTE and not (entry.mgn_textures or entry.anim_maps):
-            continue
+        # Note: hull_palette entries used to short-circuit when neither
+        # mgn nor anim_map was present, on the theory that "Phase A
+        # handles them per-stem". Phase A only handles HULL stems,
+        # though — accessory `<Gun>/<Director>/<Plane>/<Float>/<Misc>/
+        # <Wire>` masks would silently drop. The hull_palette branch
+        # below now emits accessory categories via categories_for_entry
+        # so Path-A-only entries survive too.
         by_topo[topo].append((exterior_id, camo_name, peculiarity, entry))
 
     skins: list[dict] = []
@@ -555,7 +574,11 @@ def _emit_permoflage_skins(
                 display_base=display_base,
             ))
 
-    # hull_palette + Path B (hybrid Phase A + Path B case)
+    # hull_palette + Path B (hybrid Phase A + Path B case). Pure Path A
+    # hull_palette entries (~932 in corpus, none currently applied to
+    # any Vehicle) also reach here — for those we emit accessory masks
+    # via categories_for_entry(include_hull=False); the hull stems are
+    # covered by the per-stem Phase A cascade in materials/texture_sets.
     hull_pal = by_topo[_TOPO_HULL_PALETTE]
     if hull_pal:
         try:
@@ -565,11 +588,32 @@ def _emit_permoflage_skins(
             )
         except Exception as e:
             _warn(warnings, f"hull_palette mgn extract failed ({e})")
+        try:
+            wg_camo.ensure_camo_masks_for_entries(
+                [e for _, _, _, e in hull_pal],
+                include_hull=False,
+                config=config,
+            )
+        except Exception as e:
+            _warn(warnings, f"hull_palette accessory-mask extract failed ({e})")
+        masks_mip_index = wg_camo.list_extracted_mips(wg_camo._masks_dir(config))
         mat_mip_index = wg_camo.list_extracted_mips(wg_camo._mat_dir(config))
         for exterior_id, camo_name, peculiarity, entry in hull_pal:
+            # Path B (mgn/anim_map) entries get the per-part-mgn projection.
             categories = wg_camo.path_b_categories_for_entry(
                 entry, mat_mip_index, include_hull=True,
             )
+            # Path A accessory masks — `<Gun>`/`<Director>`/`<Misc>`/etc.
+            # Skip the hull triad (covered by Phase A per-stem cascade).
+            path_a_cats = wg_camo.categories_for_entry(
+                entry, masks_mip_index,
+                include_hull=False,
+                mat_extracted_mips=mat_mip_index,
+            )
+            # Merge: Path B wins per-category when both present (engine
+            # selector at +0x188+part*0xc0).
+            for k, v in path_a_cats.items():
+                categories.setdefault(k, v)
             if not categories:
                 continue
             display_base = _resolve_skin_display_base(

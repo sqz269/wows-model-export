@@ -145,4 +145,15 @@ export interface Skin {
    */
   asset_overrides?: Record<string, AssetOverrideEntry>;
   overrides?: SkinOverride[];
+  /**
+   * Per-skin V-flip override. `null` / undefined = auto (derive from
+   * `source` — `loose:` → off, vanilla / VFS extract → on).
+   * `true` / `false` = force the convention regardless of source.
+   * Mirrors Unity's `SidecarSchema.cs:556` `flip_v` field. Useful for
+   * the rare loose mod authored top-down or the unusual VFS variant
+   * shipped bottom-up. Consumers don't yet honor this in the webview
+   * (Unity does); schema kept in sync so loose-mod sidecars aren't
+   * silently lossy on this field.
+   */
+  flip_v?: boolean | null;
 }

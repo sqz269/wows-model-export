@@ -36,6 +36,12 @@ export function classifyPartCategory(stem: string): string {
     if (cat === 'GM' || cat === 'GS' || cat === 'GA') return 'gun';
     if (cat === 'D0' || cat === 'D1' || cat === 'F0' || cat === 'F1') return 'director';
     if (cat === 'RS') return 'misc';
+    // Single-letter `M*` covers ~74% of the accessory library
+    // (engine routes to part_index 6, Misc-family). Mirrors the
+    // Python classifier at src/wows_model_export/resolve/camo.py.
+    if (stem[1] === 'M' && stem.length >= 3 && stem[2] >= '0' && stem[2] <= '9') return 'misc';
+    if (cat === 'C0' || cat === 'C1') return 'gun';  // catapult equipment
+    if (cat === 'GT') return 'misc';                 // torpedo gear
   }
   if (lower.includes('_hull')) return 'tile';
   return 'tile';

@@ -702,6 +702,23 @@ def classify_part_category(stem: str) -> str:
             return "director"
         if cat_code == "RS":
             return "misc"
+        # Single-letter `M*` covers ~74% of the accessory library:
+        # decorative meshes that the engine routes to part_index 6
+        # (Misc-family). 269 AM*, 269 JM*, 96 RM*, plus BM/CM/FM/GM/etc.
+        # Mostly hit at the per-placement category lookup (which uses
+        # the VFS directory), but the classifier surface is exported as
+        # public API so cover the fallback path too.
+        if stem[1] == "M" and len(stem) >= 3 and stem[2].isdigit():
+            return "misc"
+        # Catapult equipment (`?C0*` / `?C1*`): engine has a distinct
+        # `Catapult` part_index 4 entry; we collapse to `gun` (same
+        # group, similar paint behaviour) until a catapult-specific
+        # category is added downstream.
+        if cat_code in ("C0", "C1"):
+            return "gun"
+        # `?GT*` torpedo gear → misc. Same group reasoning.
+        if cat_code == "GT":
+            return "misc"
     if "_hull" in lower:
         return "tile"
     return "tile"
@@ -1188,8 +1205,25 @@ class CamouflageDb:
         hits = self.entries.get(name)
         if not hits:
             return None
+        # Defensive: even single-hit entries must respect targetShip /
+        # shipGroups filtering. A camo block authored exclusively for
+        # ship X (target_ships={X} or ship_groups={GX}) shouldn't apply
+        # to ship Y just because no other block named the camo. Today
+        # the live corpus never authors a single targeted block without
+        # a sibling catch-all so this branch is defensive; the moment a
+        # future patch ships a PCEC*-only camo block, the OLD early-
+        # return would silently mis-paint every non-matching ship.
         if len(hits) == 1:
-            return hits[0]
+            h = hits[0]
+            if ship_index and (h.target_ships or h.ship_groups):
+                if ship_index in h.target_ships:
+                    return h
+                for grp in h.ship_groups:
+                    members = self.ship_groups.get(grp)
+                    if members and ship_index in members:
+                        return h
+                return None
+            return h
         if ship_index:
             for h in hits:
                 if ship_index in h.target_ships:
@@ -1447,9 +1481,18 @@ def mat_textures_from_palette_entry(
 # as in the renderer. Tile permoflages broadcast a single shared mask
 # across all of these so any classified mesh picks up the paint, with
 # per-category UV from the camo's ``<UV>`` block (identity when absent).
+#
+# ``wire`` covers WG's per-mesh ``SHIPWIRE_PBS_*`` material family
+# (antennas / rigging / jib lines / fightin' lights) — distinct from the
+# accessory's gameplay category. Engine renders these via the
+# ``Wire*`` part_index 9 entries in the runtime lookup table. Our
+# consumers currently classify accessories per-asset (not per-material)
+# so the wire branch only fires when an asset's gameplay-category itself
+# is ``wire``; emitting the broadcast entry now keeps the producer
+# output engine-faithful ahead of a per-material consumer split.
 TILE_BROADCAST_CATEGORIES: tuple[str, ...] = (
     "tile", "deckhouse", "bulge",
-    "gun", "director", "plane", "float", "misc",
+    "gun", "director", "plane", "float", "misc", "wire",
 )
 
 
