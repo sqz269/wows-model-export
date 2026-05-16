@@ -55,6 +55,30 @@ export function buildBootstrapTarget(
   });
 }
 
+export interface BootstrapResetResponse {
+  ok: true;
+  /** Echo of the target that was reset. */
+  target: BootstrapTarget;
+  /** Absolute path of the directory the backend wiped. */
+  path: string;
+  /** False when the directory was already absent (still a 200, idempotent). */
+  existed: boolean;
+}
+
+/** Wipe a bootstrap target's on-disk state. Synchronous on the server
+ *  (rmtree, no job runner). 409 if a build for the same target is in
+ *  flight. After this resolves, fetchBootstrap() reports present=false
+ *  and the Build button rebuilds from scratch. */
+export function resetBootstrapTarget(
+  target: BootstrapTarget,
+): Promise<BootstrapResetResponse> {
+  return fetchJson<BootstrapResetResponse>('/api/bootstrap/reset', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target }),
+  });
+}
+
 // ── Job polling (generic) ───────────────────────────────────────────
 
 export type JobState = 'running' | 'done' | 'failed' | 'cancelled';

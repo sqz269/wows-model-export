@@ -16,6 +16,7 @@
     buildBootstrapTarget,
     fetchBootstrap,
     fetchSettings,
+    resetBootstrapTarget,
     saveSettings,
     waitForJob,
     type BootstrapStatus,
@@ -24,6 +25,7 @@
     type SettingsResponse,
     type SettingSource,
   } from '$lib/api';
+  import { invalidateLibrary } from '$lib/api/library';
   import { toast } from 'svelte-sonner';
 
   let data = $state<SettingsResponse | null>(null);
@@ -34,6 +36,12 @@
   let building = $state<Record<BootstrapTarget, string | null>>({
     snapshot: null,
     library: null,
+  });
+  /** Map target → true while the reset POST is in flight; disables both
+   *  Build and Reset for that row so the user can't double-click. */
+  let resetting = $state<Record<BootstrapTarget, boolean>>({
+    snapshot: false,
+    library: false,
   });
 
   // Form state. Initialised from `data.fields[k].value`, but `null` on
@@ -208,6 +216,45 @@
       toast.error(`Build failed`, { id: tid, description: msg, duration: 8000 });
     } finally {
       building[target] = null;
+      await reloadBootstrap();
+    }
+  }
+
+  /** Wipe a bootstrap target's on-disk state. Surfaces a browser
+   *  confirm() before calling the backend — the rmtree is irreversible
+   *  and the user might have re-runnable but expensive artifacts in
+   *  there (snapshot rebuild is ~30 s, library rebuild walks every
+   *  ship). After delete, refresh the bootstrap status so the row
+   *  re-renders as "not built" and the Build button re-enables. */
+  async function onResetTarget(target: BootstrapTarget) {
+    if (resetting[target] || building[target]) return;
+    const t = bootstrap?.targets[target];
+    const targetLabel = t?.label ?? target;
+    const path = t?.path ?? '';
+    const ok = window.confirm(
+      `Reset ${targetLabel}?\n\n` +
+        `This will delete:\n  ${path}\n\n` +
+        `You'll need to rebuild it before tabs that depend on it work again.`,
+    );
+    if (!ok) return;
+    resetting[target] = true;
+    const tid = toast.loading(`Resetting ${targetLabel}…`, {
+      duration: Number.POSITIVE_INFINITY,
+    });
+    try {
+      const res = await resetBootstrapTarget(target);
+      // Drop the in-memory library cache so the Library/Ships pages
+      // re-fetch on next mount (they'd see a stale index otherwise).
+      if (target === 'library') invalidateLibrary();
+      toast.success(
+        res.existed ? `${targetLabel} reset` : `${targetLabel} was already empty`,
+        { id: tid, description: res.path, duration: 5000 },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`Reset failed`, { id: tid, description: msg, duration: 8000 });
+    } finally {
+      resetting[target] = false;
       await reloadBootstrap();
     }
   }
@@ -447,7 +494,10 @@
             {@const blockedBy = t.requires_config.filter((f) =>
               bootstrap?.missing_config.includes(f),
             )}
-            {@const disabled = blockedBy.length > 0 || building[target] !== null}
+            {@const buildDisabled =
+              blockedBy.length > 0 || building[target] !== null || resetting[target]}
+            {@const resetDisabled =
+              building[target] !== null || resetting[target] || !t.present}
             <div
               class="rounded border border-border bg-popover/40 px-3 py-2.5 flex flex-col gap-1.5"
             >
@@ -475,10 +525,18 @@
               <div class="flex items-center gap-3 pt-1">
                 <Button
                   size="sm"
-                  {disabled}
+                  disabled={buildDisabled}
                   onclick={() => onBuild(target)}
                 >
                   {building[target] ? 'Building…' : t.present ? 'Rebuild' : 'Build'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={resetDisabled}
+                  onclick={() => onResetTarget(target)}
+                >
+                  {resetting[target] ? 'Resetting…' : 'Reset'}
                 </Button>
                 {#if blockedBy.length > 0}
                   <span class="text-amber-400 text-[11px]">

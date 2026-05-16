@@ -33,6 +33,7 @@ progress.
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -42,13 +43,21 @@ from pydantic import BaseModel, ConfigDict
 
 from ... import compose
 from ...config import PipelineConfig
-from ..jobs import JobLockedError, spawn_job
+from ..jobs import JobLockedError, list_jobs, spawn_job
 
 BootstrapTarget = Literal["snapshot", "library"]
 
 
 class BootstrapBuildBody(BaseModel):
     """POST body. ``target`` is the prereq key from the GET response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target: BootstrapTarget
+
+
+class BootstrapResetBody(BaseModel):
+    """POST body for ``/api/bootstrap/reset``. Same target key as build."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -211,6 +220,75 @@ def make_router(config: PipelineConfig) -> APIRouter:
             ) from None
         # Client polls /api/jobs/{id} from here on.
         return {"ok": True, "job_id": job.id, "cmd": job.cmd}
+
+    # ── /api/bootstrap/reset ────────────────────────────────────────────
+    # Wipe a target's on-disk state so the next build starts from scratch.
+    # Synchronous because it's a single rmtree call (tens of MB / seconds);
+    # no need for the job runner. After reset, GET /api/bootstrap reports
+    # present=false and the existing Build button rebuilds.
+    #
+    #   snapshot → wipes the cache_dir entirely. That covers
+    #              gameparams.json + snapshot.json AND the toolkit's
+    #              transient scratch (geom/, dds/, per_swap/, vfs_extract/,
+    #              skel_ext_hashes.json, camouflages.xml). Conservative —
+    #              "reset the cache" should leave nothing behind.
+    #
+    #   library  → wipes libraries/accessories/ entirely. Drops index.json,
+    #              every shared GLB + textures dir, the winding audit, and
+    #              flip_overrides.json (which the rebuild re-applies from a
+    #              fresh score pass).
+    @router.post("/bootstrap/reset")
+    def post_bootstrap_reset(body: BootstrapResetBody) -> dict[str, Any]:
+        # 409 if a build for this target is in flight — would race with
+        # the rmtree and leave the workspace in a half-built state.
+        label = f"bootstrap:{body.target}"
+        for j in list_jobs():
+            if j.label == label and j.state == "running":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "ok": False,
+                        "error": (
+                            f"a build for '{body.target}' is in progress; "
+                            f"wait for it to finish or cancel it first"
+                        ),
+                        "existing_job_id": j.id,
+                    },
+                )
+
+        if body.target == "snapshot":
+            path = cache_dir
+        elif body.target == "library":
+            path = workspace / "libraries" / "accessories"
+        else:  # pragma: no cover - pydantic Literal already gates this
+            raise HTTPException(
+                status_code=400,
+                detail={"ok": False, "error": f"unknown target: {body.target}"},
+            )
+
+        # Idempotent: missing dir is a no-op success. shutil.rmtree handles
+        # the recursive delete; we surface OS errors as 500 with detail so
+        # the user can see e.g. a Windows file-lock from a still-running
+        # toolkit process.
+        existed = path.exists()
+        if existed:
+            try:
+                shutil.rmtree(path)
+            except OSError as err:
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "ok": False,
+                        "error": f"failed to remove {path}: {err}",
+                    },
+                ) from None
+
+        return {
+            "ok": True,
+            "target": body.target,
+            "path": str(path),
+            "existed": existed,
+        }
 
     return router
 
