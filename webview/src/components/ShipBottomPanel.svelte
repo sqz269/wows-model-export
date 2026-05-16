@@ -32,9 +32,11 @@
     SeamState,
     ShipSectionKey,
     ShipSummary,
+    SidecarDoc,
     Skin,
   } from '$lib/types';
   import type { PickResult, ShipLoadStats, ShipViewer } from '$lib/ship';
+  import DdsTexturePreview from './DdsTexturePreview.svelte';
 
   export type ShipBottomTab =
     | 'overview'
@@ -43,7 +45,29 @@
     | 'hull'
     | 'skins'
     | 'damage'
+    | 'textures'
     | 'pick';
+
+  // PBR-read slot order for the Textures tab, matching the AssetDetail
+  // bottom panel.
+  const TEXTURE_SLOT_ORDER = [
+    'baseColor',
+    'normal',
+    'metallicRoughness',
+    'occlusion',
+    'emissive',
+    'camoMask',
+  ] as const;
+
+  // Scheme ordering — `main` first, `dead` next, then camo variants
+  // alphabetised. Anything unknown trails after.
+  function schemeWeight(key: string): number {
+    if (key === 'main') return 0;
+    if (key === 'dead') return 1;
+    if (key.startsWith('camo_')) return 2;
+    if (key.startsWith('dead_camo_')) return 3;
+    return 4;
+  }
 
   export interface ShipBottomPanelHandle {
     selectTab: (tab: ShipBottomTab) => void;
@@ -113,6 +137,7 @@
     'hull',
     'skins',
     'damage',
+    'textures',
   ];
 
   onMount(() => {
@@ -255,6 +280,76 @@
 
   const unresolvedCount = $derived(loadStats?.unresolvedAssets.size ?? 0);
 
+  // Hull material textures grouped by material, then by scheme, slot-
+  // ordered. The sidecar shape is:
+  //   sidecar.materials[i].texture_sets[<scheme>][<slot>].dds_mips[]
+  // — different from the asset-level `texture_sets` (which inlines
+  // path arrays directly). Bumped by `revision` so a skin pick / ship
+  // swap re-reads via getSidecar(). Empty when the viewer isn't loaded
+  // or the sidecar fetch failed.
+  interface MaterialSchemeView {
+    scheme: string;
+    slots: Array<{ slot: string; paths: string[] }>;
+  }
+  interface MaterialTextureView {
+    materialId: string;
+    displayName: string | null;
+    schemes: MaterialSchemeView[];
+  }
+  const materialTextures: MaterialTextureView[] = $derived.by(() => {
+    void revision;
+    if (!viewer) return [];
+    const sidecar = viewer.getSidecar() as SidecarDoc | null;
+    if (!sidecar?.materials?.length) return [];
+    const out: MaterialTextureView[] = [];
+    for (const mat of sidecar.materials) {
+      const matId = mat.material_id || '';
+      if (!matId) continue;
+      const ts = mat.texture_sets ?? {};
+      const schemes: MaterialSchemeView[] = [];
+      for (const [schemeKey, slotMap] of Object.entries(ts)) {
+        if (!slotMap) continue;
+        const slots: Array<{ slot: string; paths: string[] }> = [];
+        // Conventional slots first, then any extras.
+        for (const slot of TEXTURE_SLOT_ORDER) {
+          const entry = slotMap[slot];
+          const paths = entry?.dds_mips;
+          if (Array.isArray(paths) && paths.length > 0) slots.push({ slot, paths });
+        }
+        for (const [slot, entry] of Object.entries(slotMap)) {
+          if ((TEXTURE_SLOT_ORDER as readonly string[]).includes(slot)) continue;
+          const paths = (entry as { dds_mips?: string[] } | undefined)?.dds_mips;
+          if (Array.isArray(paths) && paths.length > 0) slots.push({ slot, paths });
+        }
+        if (slots.length > 0) schemes.push({ scheme: schemeKey, slots });
+      }
+      schemes.sort((a, b) => {
+        const wa = schemeWeight(a.scheme);
+        const wb = schemeWeight(b.scheme);
+        if (wa !== wb) return wa - wb;
+        return a.scheme.localeCompare(b.scheme);
+      });
+      if (schemes.length > 0) {
+        out.push({
+          materialId: matId,
+          displayName: (mat as { display_name?: string }).display_name ?? null,
+          schemes,
+        });
+      }
+    }
+    return out;
+  });
+
+  // Hull GLB's directory URL — the sidecar paths (e.g.
+  // `textures_dds/ASB017_a.dd0`) resolve against this. Mirrors how
+  // `TextureManager.bindHullMaterials` builds its base.
+  const hullTexturesBaseUrl = $derived.by(() => {
+    void revision;
+    return viewer?.getHullBaseUrl() ?? '';
+  });
+
+  const hasHullTextures = $derived(materialTextures.length > 0);
+
   const tabs: Array<{ id: ShipBottomTab; label: string; hide?: boolean; badge?: number }> =
     $derived([
       { id: 'overview', label: 'Overview' },
@@ -268,6 +363,7 @@
       { id: 'hull', label: 'Hull' },
       { id: 'skins', label: 'Skins', hide: skins.length <= 1 },
       { id: 'damage', label: 'Damage' },
+      { id: 'textures', label: 'Textures', hide: !hasHullTextures },
       { id: 'pick', label: 'Pick', hide: !selectedPick },
     ]);
 
@@ -569,6 +665,61 @@
             </tbody>
           </table>
         </div>
+      {:else if activeTab === 'textures'}
+        {#if materialTextures.length === 0}
+          <div class="text-muted-foreground">
+            no hull <code class="font-mono text-[11px]">materials[*].texture_sets</code>
+            on this ship — sidecar fetch failed or sidecar pre-dates the materials autofill
+          </div>
+        {:else}
+          <!--
+            Per-material rows, each grouping its schemes (main → dead →
+            camo_*). Material-level layout (vs. flat slot grid like the
+            Library page's accessory previews) because hull sidecars
+            carry many materials with the same scheme keys — flattening
+            would hide which material owns which texture.
+          -->
+          <div class="flex flex-col gap-4">
+            {#each materialTextures as mat (mat.materialId)}
+              <div class="flex flex-col gap-2 border-l-2 border-border/60 pl-3">
+                <div class="flex items-baseline gap-2">
+                  <span class="text-foreground font-mono text-[11px] font-semibold">
+                    {mat.materialId}
+                  </span>
+                  {#if mat.displayName && mat.displayName !== mat.materialId}
+                    <span class="text-muted-foreground text-[10px]">
+                      {mat.displayName}
+                    </span>
+                  {/if}
+                  <span class="text-muted-foreground/70 ml-auto text-[10px]">
+                    {mat.schemes.length} scheme{mat.schemes.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+                {#each mat.schemes as scheme (scheme.scheme)}
+                  <div class="flex flex-col gap-1">
+                    <div
+                      class="text-muted-foreground text-[10px] uppercase tracking-wider"
+                    >
+                      {scheme.scheme}
+                      <span class="text-muted-foreground/70 ml-1 normal-case">
+                        · {scheme.slots.length} slot{scheme.slots.length === 1 ? '' : 's'}
+                      </span>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                      {#each scheme.slots as s (s.slot)}
+                        <DdsTexturePreview
+                          paths={s.paths}
+                          baseUrl={hullTexturesBaseUrl}
+                          slot={s.slot}
+                        />
+                      {/each}
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/each}
+          </div>
+        {/if}
       {:else if activeTab === 'pick'}
         {#if pickInfo}
           <div class="flex flex-col gap-2">

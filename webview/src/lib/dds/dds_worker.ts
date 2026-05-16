@@ -36,6 +36,19 @@ const RGTC_DXGI: Record<number, { signed: boolean }> = {
   81: { signed: true }, // BC4_SNORM
 };
 
+// DX10-wrapped classic BC formats. WG's toolkit emits some `_mr.dds`
+// files this way: DDS fourCC = "DX10", DXGI format = 71 (BC1_UNORM)
+// rather than the older fourCC = "DXT1" header. Same block layout,
+// just a different way of advertising it.
+const CLASSIC_DXGI: Record<number, { format: number; blockSize: number; sRGB: boolean }> = {
+  71: { format: RGB_S3TC_DXT1_Format, blockSize: 8, sRGB: false }, // BC1_UNORM
+  72: { format: RGB_S3TC_DXT1_Format, blockSize: 8, sRGB: true }, // BC1_UNORM_SRGB
+  74: { format: RGBA_S3TC_DXT3_Format, blockSize: 16, sRGB: false }, // BC2_UNORM
+  75: { format: RGBA_S3TC_DXT3_Format, blockSize: 16, sRGB: true }, // BC2_UNORM_SRGB
+  77: { format: RGBA_S3TC_DXT5_Format, blockSize: 16, sRGB: false }, // BC3_UNORM
+  78: { format: RGBA_S3TC_DXT5_Format, blockSize: 16, sRGB: true }, // BC3_UNORM_SRGB
+};
+
 interface Mip {
   data: Uint8Array;
   width: number;
@@ -256,6 +269,46 @@ function parseClassic(buf: ArrayBuffer): ParseSuccess | null {
   return { kind: 'classic', format, mipmaps, width: topW, height: topH };
 }
 
+// DX10-wrapped classic BC1/BC2/BC3. Same block math as `parseClassic`
+// but the pixel data starts at byte 148 (128 + 20-byte DX10 extension
+// header) and the format comes from the DXGI table rather than the
+// classic fourCC.
+function parseDx10Classic(buf: ArrayBuffer, dxgi: number): ParseSuccess | null {
+  const desc = CLASSIC_DXGI[dxgi];
+  if (!desc) return null;
+  const view = new DataView(buf);
+  let height = view.getUint32(12, true);
+  let width = view.getUint32(16, true);
+  const topW = width;
+  const topH = height;
+  const mipCount = Math.max(1, view.getUint32(28, true));
+
+  let offset = 148;
+  const mipmaps: Mip[] = [];
+  for (let i = 0; i < mipCount; i++) {
+    const blockW = Math.max(1, Math.ceil(width / 4));
+    const blockH = Math.max(1, Math.ceil(height / 4));
+    const byteSize = blockW * blockH * desc.blockSize;
+    if (offset + byteSize > buf.byteLength) break;
+    const out = new Uint8Array(byteSize);
+    out.set(new Uint8Array(buf, offset, byteSize));
+    mipmaps.push({ data: out, width, height });
+    offset += byteSize;
+    if (width === 1 && height === 1) break;
+    width = Math.max(1, width >> 1);
+    height = Math.max(1, height >> 1);
+  }
+  if (mipmaps.length === 0) return null;
+  return {
+    kind: 'classic',
+    format: desc.format,
+    mipmaps,
+    width: topW,
+    height: topH,
+    sRGBOverride: desc.sRGB,
+  };
+}
+
 function parse(buf: ArrayBuffer): ParseSuccess | null {
   const view = new DataView(buf);
   if (view.byteLength < 128 || view.getUint32(0, true) !== DDS_MAGIC) return null;
@@ -265,6 +318,7 @@ function parse(buf: ArrayBuffer): ParseSuccess | null {
     const dxgi = view.getUint32(128, true);
     if (BPTC_DXGI[dxgi]) return parseBptc(buf);
     if (RGTC_DXGI[dxgi]) return parseRgtc(buf);
+    if (CLASSIC_DXGI[dxgi]) return parseDx10Classic(buf, dxgi);
     return null;
   }
   return parseClassic(buf);

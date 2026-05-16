@@ -14,11 +14,34 @@
   import { onMount, untrack } from 'svelte';
   import { fmtBytes } from '$lib/util/html';
   import { tabBtnBase } from '$lib/ui/controls';
+  import { repoUrl } from '$lib/api';
   import RigEditorPanel from './RigEditorPanel.svelte';
+  import DdsTexturePreview from './DdsTexturePreview.svelte';
   import type { AccessoryViewer } from '$lib/accessory';
   import type { LibraryAsset, RigPivots, WindingAuditEntry } from '$lib/types';
 
-  export type BottomTab = 'files' | 'lods' | 'winding' | 'rig' | 'rig-editor';
+  export type BottomTab = 'files' | 'lods' | 'textures' | 'winding' | 'rig' | 'rig-editor';
+
+  // Slot ordering for the Textures tab — matches the PBR-conventional
+  // read order so albedo lands first, masks last.
+  const TEXTURE_SLOT_ORDER = [
+    'baseColor',
+    'normal',
+    'metallicRoughness',
+    'occlusion',
+    'emissive',
+    'camoMask',
+  ] as const;
+
+  // Scheme ordering — `main` first, `dead` next, then camo variants
+  // alphabetised. Anything unknown trails after.
+  function schemeWeight(key: string): number {
+    if (key === 'main') return 0;
+    if (key === 'dead') return 1;
+    if (key.startsWith('camo_')) return 2;
+    if (key.startsWith('dead_camo_')) return 3;
+    return 4;
+  }
 
   interface VerdictChip {
     label: string;
@@ -100,7 +123,13 @@
         if (Number.isFinite(n) && n >= COLLAPSED_HEIGHT) height = n;
       }
       const t = localStorage.getItem(TAB_KEY);
-      if (t === 'files' || t === 'lods' || t === 'winding' || t === 'rig') {
+      if (
+        t === 'files' ||
+        t === 'lods' ||
+        t === 'textures' ||
+        t === 'winding' ||
+        t === 'rig'
+      ) {
         activeTab = t;
       }
     } catch {
@@ -124,7 +153,14 @@
         } catch {
           t = null;
         }
-        activeTab = t === 'files' || t === 'lods' || t === 'winding' || t === 'rig' ? t : 'files';
+        activeTab =
+          t === 'files' ||
+          t === 'lods' ||
+          t === 'textures' ||
+          t === 'winding' ||
+          t === 'rig'
+            ? t
+            : 'files';
       }
       prevRigEditorOpen = open;
     });
@@ -200,9 +236,60 @@
 
   const collapsed = $derived(height <= COLLAPSED_HEIGHT + 4);
 
+  // Texture set entries grouped by scheme, slot-ordered, with empty
+  // slots dropped so the grid stays tight. Asset-level `texture_sets`
+  // inlines path arrays directly (different shape from the per-material
+  // sidecar `texture_sets[scheme][slot].dds_mips[]`).
+  interface TextureSchemeView {
+    key: string;
+    slots: Array<{ slot: string; paths: string[] }>;
+  }
+  const textureSchemes: TextureSchemeView[] = $derived.by(() => {
+    const sets = asset.texture_sets;
+    if (!sets) return [];
+    const out: TextureSchemeView[] = [];
+    for (const [schemeKey, slotsMap] of Object.entries(sets)) {
+      if (!slotsMap) continue;
+      const slots: Array<{ slot: string; paths: string[] }> = [];
+      // Conventional slots first, in PBR-read order.
+      for (const slot of TEXTURE_SLOT_ORDER) {
+        const v = slotsMap[slot];
+        if (Array.isArray(v) && v.length > 0) slots.push({ slot, paths: v });
+      }
+      // Plus any extras the toolkit emits we don't know about.
+      for (const [slot, v] of Object.entries(slotsMap)) {
+        if ((TEXTURE_SLOT_ORDER as readonly string[]).includes(slot)) continue;
+        if (Array.isArray(v) && v.length > 0) slots.push({ slot, paths: v });
+      }
+      if (slots.length > 0) out.push({ key: schemeKey, slots });
+    }
+    out.sort((a, b) => {
+      const wa = schemeWeight(a.key);
+      const wb = schemeWeight(b.key);
+      if (wa !== wb) return wa - wb;
+      return a.key.localeCompare(b.key);
+    });
+    return out;
+  });
+
+  // Base URL for resolving the asset-level texture paths. The
+  // `texture_sets[scheme][slot]` arrays carry paths relative to the
+  // asset's GLB directory (e.g. `textures_dds/AD001_a.dds`), not the
+  // library root. `new URL(rel, base)` treats the base's last segment
+  // as a filename and replaces it with `rel`, so we anchor against
+  // the GLB URL itself the same way `TextureManager.bindAccessory`
+  // does — joining "textures_dds/foo.dds" against the GLB URL lands
+  // the texture next to it.
+  const texturesBaseUrl = $derived(
+    new URL(repoUrl(`libraries/accessories/${asset.glb}`), window.location.origin).toString(),
+  );
+
+  const hasTextures = $derived(textureSchemes.length > 0);
+
   const tabs: Array<{ id: BottomTab; label: string; hide?: boolean }> = $derived([
     { id: 'files', label: 'Files' },
     { id: 'lods', label: 'LODs' },
+    { id: 'textures', label: 'Textures', hide: !hasTextures },
     { id: 'winding', label: 'Winding' },
     { id: 'rig', label: 'Rig' },
     { id: 'rig-editor', label: 'Rig editor', hide: !rigEditorOpen },
@@ -311,6 +398,43 @@
             </tr>
           </tfoot>
         </table>
+      {:else if activeTab === 'textures'}
+        {#if textureSchemes.length === 0}
+          <div class="text-muted-foreground">
+            no <code class="font-mono text-[11px]">texture_sets</code> on this asset
+          </div>
+        {:else}
+          <!--
+            Per-scheme rows: `main` first, then `dead`, then camo
+            variants. Slot tiles within a scheme follow the PBR-read
+            ordering (baseColor → normal → MR → AO → emissive → camoMask).
+            The tile preview is decoded via the shared off-screen WebGL
+            renderer; missing slots simply don't render.
+          -->
+          <div class="flex flex-col gap-3">
+            {#each textureSchemes as scheme (scheme.key)}
+              <div class="flex flex-col gap-1.5">
+                <div
+                  class="text-muted-foreground text-[10px] uppercase tracking-wider font-semibold"
+                >
+                  {scheme.key}
+                  <span class="text-muted-foreground/70 ml-1 normal-case font-normal">
+                    {scheme.slots.length} slot{scheme.slots.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                  {#each scheme.slots as s (s.slot)}
+                    <DdsTexturePreview
+                      paths={s.paths}
+                      baseUrl={texturesBaseUrl}
+                      slot={s.slot}
+                    />
+                  {/each}
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
       {:else if activeTab === 'winding'}
         {#if windingAudit}
           {@const w = windingAudit}

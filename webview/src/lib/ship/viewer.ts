@@ -194,6 +194,15 @@ export class ShipViewer {
   // Texture pipeline
   private textures: TextureManager;
 
+  // Last-loaded sidecar JSON. Stashed for the bottom panel's Textures
+  // tab — the texture pipeline already parses it; rather than re-fetch
+  // we just hold onto the parsed value here. Null between ship swaps.
+  private sidecar: SidecarDoc | null = null;
+  /** Base URL the sidecar's relative texture paths resolve against
+   *  (i.e. the hull GLB's directory). The DDS preview tab needs this
+   *  to build absolute URLs the same way the texture manager does. */
+  private hullBaseUrl: string | null = null;
+
   // Visibility state
   private seamStates: Record<SeamKey, SeamState> = defaultSeamStates();
   private lodPolicy: LodPolicy = 'lod0';
@@ -291,6 +300,11 @@ export class ShipViewer {
         console.warn('[ship] sidecar fetch failed:', err);
       }
     }
+    // Stash for the bottom panel's Textures tab. Done after the texture
+    // manager binding so a binding failure doesn't strand a partially-
+    // loaded sidecar on the viewer.
+    this.sidecar = sidecar;
+    this.hullBaseUrl = hullBaseUrl;
     // Always populate a skin table — synthesize the legacy default skin
     // when the sidecar is missing or empty. Keeps the active scheme key
     // pinned to `main` and gives callers iterating `getSkins()` at least
@@ -572,6 +586,8 @@ export class ShipViewer {
     this.seamStates = defaultSeamStates();
     this.textures.clearShip();
     this.attachedDocCache.clear();
+    this.sidecar = null;
+    this.hullBaseUrl = null;
   }
 
   setSectionVisible(section: ShipSectionKey, visible: boolean): void {
@@ -796,6 +812,20 @@ export class ShipViewer {
 
   getSeamStates(): Readonly<Record<SeamKey, SeamState>> {
     return this.seamStates;
+  }
+
+  /** Last-loaded `<Ship>.meta.json` parse, or null if the sidecar
+   *  wasn't on disk / failed to fetch. Bottom-panel Textures tab
+   *  reads `sidecar.materials[*].texture_sets` from this. */
+  getSidecar(): SidecarDoc | null {
+    return this.sidecar;
+  }
+
+  /** Absolute URL of the hull GLB's directory (with the GLB filename
+   *  as the last segment so `new URL(rel, base)` strips it the way
+   *  the texture manager does). Null between ship swaps. */
+  getHullBaseUrl(): string | null {
+    return this.hullBaseUrl;
   }
 
   getLodPolicy(): LodPolicy {
