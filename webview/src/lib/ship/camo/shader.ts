@@ -81,20 +81,20 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
 
   // ── nbmask paint factor (Path B only) ────────────────────────────────
   // The ship's _n.B channel is repacked at toolkit emit time as the BC4
-  // `camoMaskMap`. Path B (`ship_camo_mgn_material.fx`) samples it as a
+  // 'camoMaskMap'. Path B ('ship_camo_mgn_material.fx') samples it as a
   // per-pixel paint multiplier via 4 quadratic soft bands around the
   // reserved deny values u8 {136, 187, 221, 238} — verified from DXBC
   // chunk001 lines 613/617/623/627/631/635. See
-  // `reference/investigations/normal_b_deny_list_re.md`.
+  // 'reference/investigations/normal_b_deny_list_re.md'.
   //
   //     float4 t = (-0.533330, -0.733330, -0.866660, -0.933330);
   //     float4 d = abs(_n.b - t); d = min(1, d*d*1000);
   //     float paint = d.x * d.y * d.z * d.w;     // 0 = SKIP, 1 = PAINT
   //
-  // Path A (`ship_camo_material.fx`) does NOT sample _n.B — its gate is
+  // Path A ('ship_camo_material.fx') does NOT sample _n.B — its gate is
   // the camoColorMask R/G/B/Black zone alpha (zoneColor.a). So nbPaint
   // multiplies the mat_albedo branch only; the palette branch keeps its
-  // own zone-alpha gate. `camoMaskBound` defaults the factor to 1
+  // own zone-alpha gate. 'camoMaskBound' defaults the factor to 1
   // (apply-everywhere) when no nbmask is bound (legacy exports).
   float nbPaint = 1.0;
   if ( camoMaskBound > 0.5 ) {
@@ -116,7 +116,7 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     //                            Mode 2 most common (AzurNJ, ARP, Sabaton,
     //                            Aegir AL); modes 1/3 use the same lerp.
     // Blend the per-pixel camo contribution with the natural diffuse by
-    // `nbPaint` — engine-faithful soft falloff around the 4 deny bands.
+    // 'nbPaint' — engine-faithful soft falloff around the 4 deny bands.
     vec2 matUv = vMapUv * matAlbedoUv.xy + matAlbedoUv.zw;
     vec4 matSample = texture2D( matAlbedoMap, matUv );
     vec3 natural = diffuseColor.rgb * baseSample.rgb;
