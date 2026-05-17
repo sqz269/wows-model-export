@@ -860,13 +860,16 @@ def _apply_material_mappings_json(
         # Detail params + atlas binding. Toolkit invariant (post-2026-05-17,
         # see ``write_material_mappings_json`` in ``ship.rs``):
         #
-        # * Every material entry carries a ``floats`` dict.
-        # * A material whose MFM declared ``g_detail*`` carries all six
-        #   ``g_detail{Normal,Albedo,Gloss}Influence`` /
+        # * Every material entry carries a ``floats`` dict and a
+        #   ``textures`` dict.
+        # * A material whose MFM declared the detail-normal layer carries
+        #   all six ``g_detail{Normal,Albedo,Gloss}Influence`` /
         #   ``g_detailFadeDistance`` / ``g_detailScaleU`` /
         #   ``g_detailScaleV`` keys AND a ``textures.detailMap`` entry.
-        # * A material without detail data carries an empty floats dict
-        #   and no ``textures.detailMap``.
+        # * Materials whose MFM doesn't declare detail (most: every
+        #   SHIPWIRE entry, transparent_glass, etc.) carry empty floats
+        #   and no ``textures.detailMap``. The single membership test
+        #   below routes those past the per-material branch.
         #
         # Emit ``detail_params`` + bind the shared atlas only when at
         # least one influence is non-zero. Materials whose MFM ships
@@ -876,7 +879,7 @@ def _apply_material_mappings_json(
         textures = chosen["textures"]
         floats = chosen["floats"]
         detail_slot_paths: list[str] | None = None
-        if (
+        if "g_detailNormalInfluence" in floats and (
             floats["g_detailNormalInfluence"] != 0.0
             or floats["g_detailAlbedoInfluence"] != 0.0
             or floats["g_detailGlossInfluence"] != 0.0
