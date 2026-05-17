@@ -339,11 +339,28 @@ def _classify_vfs_status(
 
 
 def _classify_camo_topology(entry: wg_camo.CamoEntry) -> str:
-    """Map ``scaffold_ship._classify_topology``'s ``"skip"`` bucket onto
-    snapshot's ``"other"`` bucket; otherwise pass through verbatim."""
-    from .scaffold_ship import _classify_topology, _TOPO_SKIP
-    topo = _classify_topology(entry)
-    return _TOPO_OTHER if topo == _TOPO_SKIP else topo
+    """Bucket a ``CamoEntry`` for snapshot reporting.
+
+    Mirrors the inline partition in
+    :func:`scaffold_ship._emit_permoflage_skins`. Malformed entries (no
+    recognized topology tags) fall into ``_TOPO_OTHER`` so they appear
+    in the snapshot for visibility — emit-side, scaffold_ship skips
+    them with a stderr warning.
+    """
+    keys = set(entry.textures)
+    has_hull = bool(keys & {"Hull", "DeckHouse", "Bulge"})
+    has_tile = "Tile" in keys
+    has_palette = bool(entry.color_schemes)
+    is_mat = entry.name.startswith("mat_")
+    if is_mat and (not has_palette or not has_hull):
+        return _TOPO_MAT_ALBEDO
+    if is_mat and has_palette and has_hull:
+        return _TOPO_MAT_PALETTE
+    if has_palette and has_tile:
+        return _TOPO_TILE_BROADCAST
+    if has_palette and has_hull:
+        return _TOPO_HULL_PALETTE
+    return _TOPO_OTHER
 
 
 def _path_to_dir(model_path: str) -> str | None:

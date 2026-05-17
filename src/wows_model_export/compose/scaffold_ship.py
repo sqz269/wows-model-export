@@ -298,13 +298,6 @@ def _camo_skip_asset_ids_from_doc(
     return skip
 
 
-# Topology tags used by the permoflage walkers to route each
-# CamoEntry to the right extraction + emission path.
-_TOPO_MAT_ALBEDO = "mat_albedo"
-_TOPO_MAT_PALETTE = "mat_palette"
-_TOPO_HULL_PALETTE = "hull_palette"
-_TOPO_TILE_BROADCAST = "tile_broadcast"
-
 _COLOR_SCHEME_PREFIX = "colorScheme"
 
 _PER_HULL_DIRNAME = "per_hull"
@@ -395,53 +388,39 @@ def _strip_color_scheme_prefix(roll_name: str) -> str:
     return roll_name
 
 
-def _classify_topology(entry: wg_camo.CamoEntry) -> str | None:
-    """Classify a ``CamoEntry`` by its ``<Textures>`` shape so the
-    walker can route it to the right extraction + skin-emission path.
+def _merged_path_a_b_categories(
+    entry: wg_camo.CamoEntry,
+    masks_mip_index: dict[str, list[str]],
+    mat_mip_index: dict[str, list[str]],
+) -> dict[str, dict]:
+    """Build category records by walking Path B (``entry.mgn_textures``)
+    then Path A (``entry.textures``), with Path B winning per category.
 
-    ``is_mat`` entries always route to a mat_* branch, even when they
-    only carry accessory tags (``<Gun>``/``<Director>``/``<Misc>``)
-    without ``<Hull>``/``<DeckHouse>``/``<Bulge>``. ~39 ``mat_Azur_*``
-    entries today are authored for not-yet-released ships and would
-    previously fall into a no-route bucket (formerly ``_TOPO_SKIP``,
-    now returns None); once WG ships a referencing Vehicle they need a
-    working emit path. The mat_textures_for_entry function handles
-    whatever tags exist, so the mat_albedo branch works for
-    accessory-only entries too.
+    Mirrors the engine's per-part selector at ``+0x188 + part*0xc0`` in
+    ``makeCamoMaterial``: when both ``<X>`` and ``<X_mgn>`` exist, the
+    engine picks Path B. Pure-Path-B parts (e.g. ``<Director_mgn>``
+    with no matching ``<Director>``) come from the mgn walk; pure-Path-A
+    parts come from the textures walk; hybrid parts get Path B fields
+    attached via :func:`categories_for_entry`'s ``mat_extracted_mips``
+    mechanism (so ``setdefault`` here only resolves the pure-Path-A
+    additions — hybrid parts have already landed via the Path B pass).
 
-    Returns ``None`` for malformed entries with no recognized topology
-    tags — empirically dead after the May 2026 ``is_mat``-escape fix
-    above, but kept as a defensive fallthrough surfaced via stderr so
-    new malformed entries don't silently disappear.
+    The Path A walk excludes ``Hull``/``DeckHouse``/``Bulge`` (covered
+    by Phase A's per-stem ``texture_sets`` cascade). The Path B walk
+    includes hull because shared Path B hull textures (e.g.
+    ``mat_250_NAVY_mgn``) don't have an equivalent per-stem cascade.
     """
-    keys = set(entry.textures)
-    has_hull_specific = bool(keys & {"Hull", "DeckHouse", "Bulge"})
-    has_tile = "Tile" in keys
-    has_palette = bool(entry.color_schemes)
-    is_mat = entry.name.startswith("mat_")
-
-    if is_mat:
-        if has_hull_specific:
-            return _TOPO_MAT_PALETTE if has_palette else _TOPO_MAT_ALBEDO
-        # Accessory-only mat_* — route to mat_albedo emit. The
-        # mat_textures_for_entry iterates entry.textures and emits
-        # whatever it finds (gun/director/misc/etc. — no hull).
-        return _TOPO_MAT_ALBEDO
-    if not is_mat and has_hull_specific and has_palette:
-        return _TOPO_HULL_PALETTE
-    if has_tile and has_palette:
-        return _TOPO_TILE_BROADCAST
-    # Malformed entry — no recognized topology tags. Inlined stderr
-    # warning (rather than threading ``warnings`` through every caller)
-    # since the audit's recommended outcome was "Replace with explicit
-    # warning log for malformed entries" — fidelity-to-the-original
-    # less important than getting the dead branch removed.
-    print(
-        f"[scaffold_ship] camo entry {entry.name} has no recognized "
-        f"topology tags; skipping",
-        file=sys.stderr,
+    categories = wg_camo.path_b_categories_for_entry(
+        entry, mat_mip_index, include_hull=True,
     )
-    return None
+    path_a_cats = wg_camo.categories_for_entry(
+        entry, masks_mip_index,
+        include_hull=False,
+        mat_extracted_mips=mat_mip_index,
+    )
+    for cat, record in path_a_cats.items():
+        categories.setdefault(cat, record)
+    return categories
 
 
 def _resolve_skin_display_base(
@@ -467,39 +446,78 @@ def _emit_permoflage_skins(
     config: PipelineConfig | None,
     warnings: list[str] | None = None,
 ) -> list[dict]:
-    """Common emission backend shared by the per-ship and universal walkers."""
-    by_topo: dict[str, list[tuple[str, str, str, wg_camo.CamoEntry]]] = {
-        _TOPO_MAT_ALBEDO: [],
-        _TOPO_MAT_PALETTE: [],
-        _TOPO_TILE_BROADCAST: [],
-        _TOPO_HULL_PALETTE: [],
-    }
+    """Common emission backend shared by the per-ship and universal walkers.
+
+    Two top-level skin shapes:
+
+    - ``kind="mat_albedo"`` — untinted ``mat_*`` entries with no palette
+      (or no hull). Carries ``mat_textures`` only, no ``categories``.
+    - ``kind="palette"`` (default) — anything with a palette + hull/tile.
+      Per color roll: emits ``categories`` (per-part Path A masks with
+      Path B fields attached where present) plus optional ``mat_textures``
+      for hybrid mat_palette entries.
+
+    The engine selects Path A vs Path B per-part (selector at
+    ``+0x188 + part*0xc0`` in ``makeCamoMaterial``). Within the palette
+    branch, three sub-shapes pick different category builders:
+
+    - ``is_mat`` (mat_palette hybrid): Path A masks excl. mat_camo entries
+      + ``mat_textures_from_palette_entry`` for the Path B atlases.
+    - ``has_tile`` (tile broadcast): one ``<Tile>`` mask broadcasts to
+      many categories via ``tile_categories_for_entry``.
+    - else (hull_palette): per-part Path A + Path B union via
+      :func:`_merged_path_a_b_categories`.
+
+    Malformed entries (no recognized topology tags) are surfaced via
+    stderr and skipped — empirically dead after the May 2026
+    ``is_mat``-escape fix, but kept defensively.
+    """
+    untinted_mat: list[tuple[str, str, str, wg_camo.CamoEntry]] = []
+    mat_palette: list[tuple[str, str, str, wg_camo.CamoEntry]] = []
+    tile_broadcast: list[tuple[str, str, str, wg_camo.CamoEntry]] = []
+    hull_palette: list[tuple[str, str, str, wg_camo.CamoEntry]] = []
+
     for exterior_id, camo_name, peculiarity, entry in candidates:
-        topo = _classify_topology(entry)
-        if topo is None:
+        is_mat = entry.name.startswith("mat_")
+        has_palette = bool(entry.color_schemes)
+        keys = set(entry.textures)
+        has_hull = bool(keys & {"Hull", "DeckHouse", "Bulge"})
+        has_tile = "Tile" in keys
+        bucket: list | None
+        if is_mat and (not has_palette or not has_hull):
+            # mat_* with accessory-only tags OR mat_* + hull but no
+            # palette → kind="mat_albedo" emit (no categories, just
+            # mat_textures). ~39 mat_Azur_* entries authored for
+            # not-yet-released ships land here via the accessory-only
+            # case.
+            bucket = untinted_mat
+        elif is_mat and has_palette and has_hull:
+            bucket = mat_palette
+        elif has_palette and has_tile:
+            bucket = tile_broadcast
+        elif has_palette and has_hull:
+            bucket = hull_palette
+        else:
+            print(
+                f"[scaffold_ship] camo entry {entry.name} has no "
+                f"recognized topology tags; skipping",
+                file=sys.stderr,
+            )
             continue
-        # Note: hull_palette entries used to short-circuit when neither
-        # mgn nor anim_map was present, on the theory that "Phase A
-        # handles them per-stem". Phase A only handles HULL stems,
-        # though — accessory `<Gun>/<Director>/<Plane>/<Float>/<Misc>/
-        # <Wire>` masks would silently drop. The hull_palette branch
-        # below now emits accessory categories via categories_for_entry
-        # so Path-A-only entries survive too.
-        by_topo[topo].append((exterior_id, camo_name, peculiarity, entry))
+        bucket.append((exterior_id, camo_name, peculiarity, entry))
 
     skins: list[dict] = []
 
-    # Untinted mat_albedo
-    untinted = by_topo[_TOPO_MAT_ALBEDO]
-    if untinted:
+    # ── Untinted mat_albedo (no palette) ─────────────────────────────
+    if untinted_mat:
         try:
             wg_camo.ensure_mat_camo_textures(
-                [e for _, _, _, e in untinted], config=config,
+                [e for _, _, _, e in untinted_mat], config=config,
             )
         except Exception as e:
             _warn(warnings, f"mat_albedo extract failed ({e})")
         mat_mip_index = wg_camo.list_extracted_mips(wg_camo._mat_dir(config))
-        for exterior_id, camo_name, peculiarity, entry in untinted:
+        for exterior_id, camo_name, peculiarity, entry in untinted_mat:
             mat_textures = wg_camo.mat_textures_for_entry(entry, mat_mip_index)
             if not mat_textures:
                 continue
@@ -517,155 +535,146 @@ def _emit_permoflage_skins(
                 mat_textures=mat_textures,
             ))
 
-    # Tinted mat_* (mask + palette + mat_camo atlas overlay)
-    tinted = by_topo[_TOPO_MAT_PALETTE]
-    if tinted:
+    # ── Batched palette-branch extracts ──────────────────────────────
+    # Three sub-shapes share extract phases but call different
+    # category builders during emit. Run extracts up front so the mip
+    # indices below are populated once.
+    if mat_palette:
         try:
             wg_camo.ensure_camo_masks_for_entries(
-                [e for _, _, _, e in tinted],
+                [e for _, _, _, e in mat_palette],
                 include_hull=True,
                 skip_mat_camo=True,
                 config=config,
             )
         except Exception as e:
-            _warn(warnings, f"tinted-mat mask extract failed ({e})")
+            _warn(warnings, f"mat_palette mask extract failed ({e})")
         try:
             wg_camo.ensure_mat_camo_textures(
-                [e for _, _, _, e in tinted],
+                [e for _, _, _, e in mat_palette],
                 only_mat_camo=True,
                 config=config,
             )
         except Exception as e:
-            _warn(warnings, f"tinted-mat atlas extract failed ({e})")
-        masks_mip_index = wg_camo.list_extracted_mips(wg_camo._masks_dir(config))
-        mat_mip_index = wg_camo.list_extracted_mips(wg_camo._mat_dir(config))
-        for exterior_id, camo_name, peculiarity, entry in tinted:
-            categories = wg_camo.categories_for_entry(
-                entry, masks_mip_index,
-                include_hull=True, skip_mat_camo=True,
-                mat_extracted_mips=mat_mip_index,
-            )
-            mat_textures = wg_camo.mat_textures_from_palette_entry(
-                entry, mat_mip_index,
-            )
-            if not categories and not mat_textures:
-                continue
-            skins.extend(_emit_palette_skins(
-                entry, categories, db,
-                exterior_id=exterior_id,
-                camo_name=camo_name,
-                peculiarity=peculiarity,
-                display_base=_resolve_skin_display_base(
-                    exterior_id, camo_name, warnings=warnings,
-                ),
-                mat_textures=mat_textures or None,
-            ))
+            _warn(warnings, f"mat_palette atlas extract failed ({e})")
 
-    # Tile permoflage
-    tile = by_topo[_TOPO_TILE_BROADCAST]
-    if tile:
+    if tile_broadcast:
         try:
             wg_camo.ensure_camo_masks_for_entries(
-                [e for _, _, _, e in tile],
+                [e for _, _, _, e in tile_broadcast],
                 include_hull=True,
                 config=config,
             )
         except Exception as e:
-            _warn(warnings, f"tile-permoflage extract failed ({e})")
+            _warn(warnings, f"tile_broadcast mask extract failed ({e})")
         tile_with_mgn = [
-            e for _, _, _, e in tile
+            e for _, _, _, e in tile_broadcast
             if e.mgn_textures or e.anim_maps
         ]
         if tile_with_mgn:
             try:
                 wg_camo.ensure_mat_camo_textures(tile_with_mgn, config=config)
             except Exception as e:
-                _warn(warnings, f"tile-permoflage mgn extract failed ({e})")
-        masks_mip_index = wg_camo.list_extracted_mips(wg_camo._masks_dir(config))
-        mat_mip_index = wg_camo.list_extracted_mips(wg_camo._mat_dir(config))
-        for exterior_id, camo_name, peculiarity, entry in tile:
-            # `include_hull=True` because plain camo_*_tile entries have
-            # NO per-stem hull cascade — the toolkit only bakes per-stem
-            # variant textures for `mat_camo_schemes` (mat_* style camos),
-            # not for plain tile camos. Without this, the hull falls
-            # through to `entry.maskTextureByScheme` which is empty for
-            # the tile-camo scheme key → `camoEnable = 0` → hull renders
-            # unpainted while accessories show the tile pattern. The
-            # docstring on `tile_categories_for_entry` warns of double-
-            # tinting from include_hull=True, but that only applies to
-            # variant-routed bespoke crossovers (Iowa_AzurLane etc.) —
-            # those bespokes live in `texture_sets["main"]`, not in the
-            # tile scheme, so there's no overlap.
-            categories = wg_camo.tile_categories_for_entry(
-                entry, masks_mip_index,
-                include_hull=True,
-                mat_extracted_mips=mat_mip_index,
-            )
-            if not categories:
-                continue
-            display_base = _resolve_skin_display_base(
-                exterior_id, camo_name, warnings=warnings,
-            )
-            skins.extend(_emit_palette_skins(
-                entry, categories, db,
-                exterior_id=exterior_id,
-                camo_name=camo_name,
-                peculiarity=peculiarity,
-                display_base=display_base,
-            ))
+                _warn(warnings, f"tile_broadcast mgn extract failed ({e})")
 
-    # hull_palette + Path B (hybrid Phase A + Path B case). Pure Path A
-    # hull_palette entries (~932 in corpus, none currently applied to
-    # any Vehicle) also reach here — for those we emit accessory masks
-    # via categories_for_entry(include_hull=False); the hull stems are
-    # covered by the per-stem Phase A cascade in materials/texture_sets.
-    hull_pal = by_topo[_TOPO_HULL_PALETTE]
-    if hull_pal:
+    if hull_palette:
         try:
             wg_camo.ensure_mat_camo_textures(
-                [e for _, _, _, e in hull_pal],
+                [e for _, _, _, e in hull_palette],
                 config=config,
             )
         except Exception as e:
             _warn(warnings, f"hull_palette mgn extract failed ({e})")
         try:
             wg_camo.ensure_camo_masks_for_entries(
-                [e for _, _, _, e in hull_pal],
+                [e for _, _, _, e in hull_palette],
                 include_hull=False,
                 config=config,
             )
         except Exception as e:
             _warn(warnings, f"hull_palette accessory-mask extract failed ({e})")
+
+    if mat_palette or tile_broadcast or hull_palette:
         masks_mip_index = wg_camo.list_extracted_mips(wg_camo._masks_dir(config))
         mat_mip_index = wg_camo.list_extracted_mips(wg_camo._mat_dir(config))
-        for exterior_id, camo_name, peculiarity, entry in hull_pal:
-            # Path B (mgn/anim_map) entries get the per-part-mgn projection.
-            categories = wg_camo.path_b_categories_for_entry(
-                entry, mat_mip_index, include_hull=True,
-            )
-            # Path A accessory masks — `<Gun>`/`<Director>`/`<Misc>`/etc.
-            # Skip the hull triad (covered by Phase A per-stem cascade).
-            path_a_cats = wg_camo.categories_for_entry(
-                entry, masks_mip_index,
-                include_hull=False,
-                mat_extracted_mips=mat_mip_index,
-            )
-            # Merge: Path B wins per-category when both present (engine
-            # selector at +0x188+part*0xc0).
-            for k, v in path_a_cats.items():
-                categories.setdefault(k, v)
-            if not categories:
-                continue
-            display_base = _resolve_skin_display_base(
+    else:
+        masks_mip_index = {}
+        mat_mip_index = {}
+
+    # ── Tinted mat_palette emit (mask + palette + mat_camo atlas) ────
+    for exterior_id, camo_name, peculiarity, entry in mat_palette:
+        categories = wg_camo.categories_for_entry(
+            entry, masks_mip_index,
+            include_hull=True, skip_mat_camo=True,
+            mat_extracted_mips=mat_mip_index,
+        )
+        mat_textures = wg_camo.mat_textures_from_palette_entry(
+            entry, mat_mip_index,
+        )
+        if not categories and not mat_textures:
+            continue
+        skins.extend(_emit_palette_skins(
+            entry, categories, db,
+            exterior_id=exterior_id,
+            camo_name=camo_name,
+            peculiarity=peculiarity,
+            display_base=_resolve_skin_display_base(
                 exterior_id, camo_name, warnings=warnings,
-            )
-            skins.extend(_emit_palette_skins(
-                entry, categories, db,
-                exterior_id=exterior_id,
-                camo_name=camo_name,
-                peculiarity=peculiarity,
-                display_base=display_base,
-            ))
+            ),
+            mat_textures=mat_textures or None,
+        ))
+
+    # ── Tile broadcast emit ──────────────────────────────────────────
+    # `include_hull=True` because plain camo_*_tile entries have NO
+    # per-stem hull cascade — the toolkit only bakes per-stem variant
+    # textures for `mat_camo_schemes` (mat_* style camos), not for
+    # plain tile camos. Without this, the hull falls through to
+    # `entry.maskTextureByScheme` which is empty for the tile-camo
+    # scheme key → `camoEnable = 0` → hull renders unpainted while
+    # accessories show the tile pattern. The docstring on
+    # `tile_categories_for_entry` warns of double-tinting from
+    # include_hull=True, but that only applies to variant-routed
+    # bespoke crossovers (Iowa_AzurLane etc.) — those bespokes live in
+    # `texture_sets["main"]`, not in the tile scheme, so no overlap.
+    for exterior_id, camo_name, peculiarity, entry in tile_broadcast:
+        categories = wg_camo.tile_categories_for_entry(
+            entry, masks_mip_index,
+            include_hull=True,
+            mat_extracted_mips=mat_mip_index,
+        )
+        if not categories:
+            continue
+        skins.extend(_emit_palette_skins(
+            entry, categories, db,
+            exterior_id=exterior_id,
+            camo_name=camo_name,
+            peculiarity=peculiarity,
+            display_base=_resolve_skin_display_base(
+                exterior_id, camo_name, warnings=warnings,
+            ),
+        ))
+
+    # ── hull_palette emit (per-part Path A + Path B merge) ───────────
+    # Hybrid Phase A + Path B entries. Pure Path A hull_palette entries
+    # (~932 in corpus, none currently applied to any Vehicle) also
+    # reach here — for those _merged_path_a_b_categories returns the
+    # Path A accessory cats (hull stems covered by per-stem Phase A
+    # cascade in materials/texture_sets).
+    for exterior_id, camo_name, peculiarity, entry in hull_palette:
+        categories = _merged_path_a_b_categories(
+            entry, masks_mip_index, mat_mip_index,
+        )
+        if not categories:
+            continue
+        skins.extend(_emit_palette_skins(
+            entry, categories, db,
+            exterior_id=exterior_id,
+            camo_name=camo_name,
+            peculiarity=peculiarity,
+            display_base=_resolve_skin_display_base(
+                exterior_id, camo_name, warnings=warnings,
+            ),
+        ))
 
     return skins
 

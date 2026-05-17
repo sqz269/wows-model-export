@@ -1519,7 +1519,7 @@ def path_b_categories_for_entry(
     captures pure-Path-B parts (e.g. ``Ernst_Gaede_Pirate``'s
     ``<Director_mgn>``/``<Float_mgn>``/etc., where there's no
     matching ``<Director>``/``<Float>``).  Used by the
-    ``_TOPO_HULL_PALETTE`` emit branch in ``scaffold_ship.py`` to
+    hull_palette emit branch in ``scaffold_ship.py`` to
     surface Path B data for non-mat_* hybrid entries — Phase A's
     per-stem ``materials[i].texture_sets[<scheme>]`` cascade
     independently covers Path A on hull stems, so these Skin records
