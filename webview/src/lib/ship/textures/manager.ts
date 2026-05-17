@@ -616,18 +616,21 @@ export class TextureManager {
       if (matTextures && !variantOptOut && entry.category in matTextures) {
         const matCat = matTextures[entry.category];
         const params = matCat.params ?? null;
-        // Engine per-part rule (selector at +0x188+part*0xc0 in
-        // makeCamoMaterial — RE'd at exe 0x14108ad80): when `<*_mgn>`
-        // exists for the part, Path B wins over the Path A mat_camo
-        // overlay. Mirrors the `categories`-block prefer-mgn dispatch
-        // above. Skipping the binding lets the asset render with its
-        // natural albedo — correct when params default camo_mode = -1
-        // ("no override") which is what hybrid mat_palette skins carry
-        // on their gun/director/misc/wire categories. Full Path B
-        // render is TODO per project_camo_hybrid_path_ab.md.
-        if (matCat.mgn) {
-          // Path B configured — skip Path A.
-        } else if (params && params.camo_mode === 0) {
+        // NOTE: a mat_textures prefer-mgn dispatch (mirroring the
+        // categories block above) is engine-faithful per the
+        // makeCamoMaterial +0x188+part*0xc0 selector, but suppressing
+        // Path A here renders ALL non-themed accessories (vanilla AA
+        // guns, secondaries, decorations) NATURAL under hybrid camos
+        // like mat_Montana_Hoshino — visually a regression. The engine's
+        // "Path B with camoMode=-1 → baseDielectric" interpretation
+        // turns out to NOT match WG's in-game rendering (or our visual
+        // expectation): WG paints non-themed accessories with the Path
+        // A overlay, and the engine's "_9" material-id marker is the
+        // actual gate for the themed exclusions (whale / bage / Hoshino
+        // turret) — covered by `camo_skip_asset_ids`. Keep applying
+        // Path A here; revisit only when the full Path B shader render
+        // (project_camo_hybrid_path_ab.md TODO) is implemented.
+        if (params && params.camo_mode === 0) {
           // Path B explicitly disabled — leave matTex null.
         } else {
           matTex = this.matAlbedoCache.get(matCat.albedo);
