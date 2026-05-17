@@ -6,23 +6,68 @@
 // inside Svelte $derived blocks without churn).
 
 import type {
+  ChipFilter,
   ExtractFilterState,
   FilterOptions,
   Vehicle,
+  VfsIssueStatus,
 } from '$lib/types/extract';
-import { CLASS_ORDER, SKIP_PECULIARITY_FILTER, nationLabel } from './labels';
+import {
+  CLASS_ORDER,
+  SKIP_PECULIARITY_FILTER,
+  VFS_STATUS_ORDER,
+  nationLabel,
+} from './labels';
+
+export type ChipState = 'off' | 'include' | 'exclude';
+
+function emptyChip<T>(): ChipFilter<T> {
+  return { include: new Set<T>(), exclude: new Set<T>() };
+}
 
 export function defaultFilterState(): ExtractFilterState {
   return {
     text: '',
     showTest: false,
     nation: null,
-    classes: new Set(),
-    tiers: new Set(),
-    peculiarities: new Set(),
-    armaments: new Set(),
+    classes: emptyChip(),
+    tiers: emptyChip(),
+    peculiarities: emptyChip(),
+    groups: emptyChip(),
+    vfsStatuses: emptyChip(),
     native: 'any',
   };
+}
+
+/** Resolve a value's tri-state position within a ChipFilter. */
+export function chipState<T>(filter: ChipFilter<T>, value: T): ChipState {
+  if (filter.include.has(value)) return 'include';
+  if (filter.exclude.has(value)) return 'exclude';
+  return 'off';
+}
+
+/** Cycle a chip: off → include → exclude → off. Returns a new ChipFilter
+ *  so callers can spread it back into the reactive filter-state object. */
+export function cycleChip<T>(filter: ChipFilter<T>, value: T): ChipFilter<T> {
+  const include = new Set(filter.include);
+  const exclude = new Set(filter.exclude);
+  if (include.has(value)) {
+    include.delete(value);
+    exclude.add(value);
+  } else if (exclude.has(value)) {
+    exclude.delete(value);
+  } else {
+    include.add(value);
+  }
+  return { include, exclude };
+}
+
+export function chipFilterIsActive<T>(filter: ChipFilter<T>): boolean {
+  return filter.include.size > 0 || filter.exclude.size > 0;
+}
+
+export function chipFilterActiveCount<T>(filter: ChipFilter<T>): number {
+  return filter.include.size + filter.exclude.size;
 }
 
 /** Derive chip-row choices from the corpus. */
@@ -31,7 +76,8 @@ export function deriveFilterOptions(vehicles: Vehicle[]): FilterOptions {
   const classes = new Set<string>();
   const tiers = new Set<number>();
   const pecCounts: Map<string, number> = new Map();
-  const armCounts: Map<string, number> = new Map();
+  const groupCounts: Map<string, number> = new Map();
+  const vfsCounts: Map<VfsIssueStatus, number> = new Map();
 
   for (const v of vehicles) {
     if (v.nation) nations.add(v.nation);
@@ -41,8 +87,14 @@ export function deriveFilterOptions(vehicles: Vehicle[]): FilterOptions {
       if (SKIP_PECULIARITY_FILTER.has(p)) continue;
       pecCounts.set(p, (pecCounts.get(p) ?? 0) + 1);
     }
-    for (const a of v.armaments ?? []) {
-      armCounts.set(a, (armCounts.get(a) ?? 0) + 1);
+    if (v.group) {
+      groupCounts.set(v.group, (groupCounts.get(v.group) ?? 0) + 1);
+    }
+    // `ok` is the silent majority and `unknown` means metadata-dump failed —
+    // neither is actionable as a filter chip.
+    const vs = v.vfs_status;
+    if (vs && vs !== 'ok' && vs !== 'unknown') {
+      vfsCounts.set(vs, (vfsCounts.get(vs) ?? 0) + 1);
     }
   }
 
@@ -63,13 +115,53 @@ export function deriveFilterOptions(vehicles: Vehicle[]): FilterOptions {
     peculiarities: Array.from(pecCounts.entries())
       .map(([key, count]) => ({ key, count }))
       .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key)),
-    // Armament chips: sort by ship-count ASC so RARE types (missiles 9,
-    // lasers 2, wave_artillery 2, sub_torpedoes 1) chip up first — the
-    // common ones are low-priority noise as filter values.
-    armaments: Array.from(armCounts.entries())
+    // Group chips: sort by ship-count DESC so dominant values (upgradeable,
+    // premium, special) lead and rare ones (disabled, unavailable) follow.
+    groups: Array.from(groupCounts.entries())
       .map(([key, count]) => ({ key, count }))
-      .sort((a, b) => a.count - b.count || a.key.localeCompare(b.key)),
+      .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key)),
+    // VFS chips: stable severity order (warn → fail), counts purely tooltip.
+    vfsStatuses: VFS_STATUS_ORDER.filter((k) => vfsCounts.has(k)).map((key) => ({
+      key,
+      count: vfsCounts.get(key) ?? 0,
+    })),
   };
+}
+
+/** Single-value chip filter: include = whitelist; exclude = blacklist.
+ *  Returns false when the vehicle should be dropped. */
+function passSingleChip<T>(
+  filter: ChipFilter<T>,
+  value: T | null | undefined,
+): boolean {
+  if (filter.exclude.size > 0 && value != null && filter.exclude.has(value)) {
+    return false;
+  }
+  if (filter.include.size > 0) {
+    if (value == null || !filter.include.has(value)) return false;
+  }
+  return true;
+}
+
+/** Multi-value chip filter: include = whitelist (any match passes);
+ *  exclude = blacklist (any match drops). */
+function passMultiChip<T>(filter: ChipFilter<T>, values: readonly T[]): boolean {
+  if (filter.exclude.size > 0) {
+    for (const v of values) {
+      if (filter.exclude.has(v)) return false;
+    }
+  }
+  if (filter.include.size > 0) {
+    let hit = false;
+    for (const v of values) {
+      if (filter.include.has(v)) {
+        hit = true;
+        break;
+      }
+    }
+    if (!hit) return false;
+  }
+  return true;
 }
 
 /** Apply the filter predicate to a vehicles array. */
@@ -81,31 +173,18 @@ export function filterVehicles(
   return vehicles.filter((v) => {
     if (!state.showTest && v.is_in_test) return false;
     if (state.nation && v.nation !== state.nation) return false;
-    if (state.classes.size > 0 && !state.classes.has(v.class || '')) return false;
-    if (state.tiers.size > 0 && (v.tier == null || !state.tiers.has(v.tier))) {
-      return false;
-    }
-    // Peculiarity: OR semantics — any match passes.
-    if (state.peculiarities.size > 0) {
-      const pecs = v.peculiarities ?? [];
-      let hit = false;
-      for (const p of pecs) {
-        if (state.peculiarities.has(p)) {
-          hit = true;
-          break;
-        }
-      }
-      if (!hit) return false;
-    }
+    if (!passSingleChip(state.classes, v.class)) return false;
+    if (!passSingleChip(state.tiers, v.tier)) return false;
+    if (!passMultiChip(state.peculiarities, v.peculiarities ?? [])) return false;
     if (state.native === 'has' && !v.native_permoflage) return false;
     if (state.native === 'no' && v.native_permoflage) return false;
-    // Armament: AND semantics — narrows to ships that have ALL selected.
-    if (state.armaments.size > 0) {
-      const have = v.armaments ?? [];
-      for (const need of state.armaments) {
-        if (!have.includes(need)) return false;
-      }
-    }
+    if (!passSingleChip(state.groups, v.group ?? null)) return false;
+    // VFS narrows `ok` + `unknown` out of the chip universe; treat them as
+    // null so they neither match include nor exclude.
+    const vs = v.vfs_status;
+    const vsKey: VfsIssueStatus | null =
+      vs && vs !== 'ok' && vs !== 'unknown' ? vs : null;
+    if (!passSingleChip(state.vfsStatuses, vsKey)) return false;
     if (!q) return true;
     return (
       v.top_key.toLowerCase().includes(q) ||

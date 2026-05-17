@@ -2,7 +2,7 @@
   // Left-column Vehicle picker for the Extract page.
   //
   // - Search + filter chips (nation / class / tier / permoflage type /
-  //   armament + native tri-state + show-in-test).
+  //   group / VFS status + native tri-state + show-in-test).
   // - Grouped ship list: when no text query is active, vehicles sharing a
   //   model_dir collapse into expandable parents (Atago family etc.).
   //   Active text search switches to flat mode so every match is visible.
@@ -13,12 +13,20 @@
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
-  import { defaultFilterState, deriveFilterOptions, filterVehicles, groupByModelDir } from '$lib/extract/filters';
   import {
-    COMMON_ARMAMENT,
+    chipFilterActiveCount,
+    chipState,
+    cycleChip,
+    defaultFilterState,
+    deriveFilterOptions,
+    filterVehicles,
+    groupByModelDir,
+    type ChipState,
+  } from '$lib/extract/filters';
+  import {
     VFS_STATUS_META,
-    armamentLabel,
     fallbackPeculiarityLabel,
+    groupLabel,
     nationLabel,
     statusCategory,
   } from '$lib/extract/labels';
@@ -27,6 +35,7 @@
     NativeFilter,
     PeculiarityLabel,
     Vehicle,
+    VfsIssueStatus,
   } from '$lib/types/extract';
 
   interface Props {
@@ -78,26 +87,27 @@
     }
   });
 
-  // Mutate-and-reassign keeps Svelte 5 reactivity simple for Set toggles.
-  function toggleClass(c: string) {
-    const next = new Set(filterState.classes);
-    next.has(c) ? next.delete(c) : next.add(c);
-    filterState = { ...filterState, classes: next };
+  // Tri-state cycle helpers — each click steps off → include → exclude → off.
+  function cycleClass(c: string) {
+    filterState = { ...filterState, classes: cycleChip(filterState.classes, c) };
   }
-  function toggleTier(t: number) {
-    const next = new Set(filterState.tiers);
-    next.has(t) ? next.delete(t) : next.add(t);
-    filterState = { ...filterState, tiers: next };
+  function cycleTier(t: number) {
+    filterState = { ...filterState, tiers: cycleChip(filterState.tiers, t) };
   }
-  function togglePeculiarity(p: string) {
-    const next = new Set(filterState.peculiarities);
-    next.has(p) ? next.delete(p) : next.add(p);
-    filterState = { ...filterState, peculiarities: next };
+  function cyclePeculiarity(p: string) {
+    filterState = {
+      ...filterState,
+      peculiarities: cycleChip(filterState.peculiarities, p),
+    };
   }
-  function toggleArmament(a: string) {
-    const next = new Set(filterState.armaments);
-    next.has(a) ? next.delete(a) : next.add(a);
-    filterState = { ...filterState, armaments: next };
+  function cycleWgGroup(g: string) {
+    filterState = { ...filterState, groups: cycleChip(filterState.groups, g) };
+  }
+  function cycleVfs(s: VfsIssueStatus) {
+    filterState = {
+      ...filterState,
+      vfsStatuses: cycleChip(filterState.vfsStatuses, s),
+    };
   }
   function setNative(val: 'has' | 'no') {
     filterState = { ...filterState, native: filterState.native === val ? 'any' : (val as NativeFilter) };
@@ -122,6 +132,13 @@
     return `${key} · ${count} ships · ${sourceTag}${samples}`;
   }
 
+  // Discoverability hint surfaced in chip tooltips for the simpler rows
+  // (class / tier) that otherwise have nothing to show.
+  const CHIP_HINT = 'click to cycle: include → exclude → off';
+  function chipTooltip(label: string): string {
+    return `${label}\n${CHIP_HINT}`;
+  }
+
   function groupHeadliner(group: Vehicle[]): { headliner: Vehicle; liveCount: number; headlinerLive: boolean } {
     const live = group.filter((v) => statusCategory(v.group) === 'live');
     const sorted = (live.length > 0 ? live : group)
@@ -139,13 +156,15 @@
   );
 
   // Count of *active* filters (excluding the show-in-test toggle, which
-  // defaults off and is more of a corpus switch than a filter).
+  // defaults off and is more of a corpus switch than a filter). Each
+  // include + exclude chip counts once.
   const activeFilterCount = $derived(
     (filterState.nation ? 1 : 0) +
-      filterState.classes.size +
-      filterState.tiers.size +
-      filterState.peculiarities.size +
-      filterState.armaments.size +
+      chipFilterActiveCount(filterState.classes) +
+      chipFilterActiveCount(filterState.tiers) +
+      chipFilterActiveCount(filterState.peculiarities) +
+      chipFilterActiveCount(filterState.groups) +
+      chipFilterActiveCount(filterState.vfsStatuses) +
       (filterState.native !== 'any' ? 1 : 0),
   );
 
@@ -156,14 +175,18 @@
   });
 </script>
 
-{#snippet chipBtn(active: boolean, onclick: () => void, title: string | null, label: string)}
+{#snippet chipBtn(state: ChipState, onclick: () => void, title: string | null, label: string)}
   <button
     type="button"
     onclick={onclick}
     title={title ?? undefined}
-    class="bg-popover text-foreground border-border hover:bg-accent rounded border px-2 py-[3px] text-[11px] {active
+    aria-pressed={state !== 'off'}
+    class="bg-popover text-foreground border-border hover:bg-accent rounded border px-2 py-[3px] text-[11px] {state ===
+    'include'
       ? 'bg-accent border-l-primary border-l-[2px]'
-      : ''}"
+      : state === 'exclude'
+        ? 'bg-rose-950/40 border-l-rose-500 border-l-[2px] text-rose-200 line-through'
+        : ''}"
   >
     {label}
   </button>
@@ -202,9 +225,6 @@
   {#if v.is_paper}
     {@render badge('paper', 'bg-indigo-900/40 text-indigo-200', 'WG isPaperShip = true')}
   {/if}
-  {#each (v.armaments ?? []).filter((a) => !COMMON_ARMAMENT.has(a)) as a (a)}
-    {@render badge(armamentLabel(a), 'bg-purple-900/40 text-purple-200', `armament: ${a}`)}
-  {/each}
   {#if v.vfs_status && v.vfs_status !== 'ok' && v.vfs_status !== 'unknown'}
     {@const meta = VFS_STATUS_META[v.vfs_status]}
     {@render badge(
@@ -295,7 +315,12 @@
         <div class="text-muted-foreground mb-1 text-[10px] uppercase tracking-wide">Class</div>
         <div class="flex flex-wrap gap-1">
           {#each options.classes as c (c)}
-            {@render chipBtn(filterState.classes.has(c), () => toggleClass(c), null, c)}
+            {@render chipBtn(
+              chipState(filterState.classes, c),
+              () => cycleClass(c),
+              chipTooltip(c),
+              c,
+            )}
           {/each}
         </div>
       </div>
@@ -306,7 +331,12 @@
         <div class="text-muted-foreground mb-1 text-[10px] uppercase tracking-wide">Tier</div>
         <div class="flex flex-wrap gap-1">
           {#each options.tiers as t (t)}
-            {@render chipBtn(filterState.tiers.has(t), () => toggleTier(t), null, String(t))}
+            {@render chipBtn(
+              chipState(filterState.tiers, t),
+              () => cycleTier(t),
+              chipTooltip(`T${t}`),
+              String(t),
+            )}
           {/each}
         </div>
       </div>
@@ -315,8 +345,18 @@
     <div>
       <div class="text-muted-foreground mb-1 text-[10px] uppercase tracking-wide">Native permoflage</div>
       <div class="flex flex-wrap gap-1">
-        {@render chipBtn(filterState.native === 'has', () => setNative('has'), null, 'has native')}
-        {@render chipBtn(filterState.native === 'no', () => setNative('no'), null, 'no native')}
+        {@render chipBtn(
+          filterState.native === 'has' ? 'include' : 'off',
+          () => setNative('has'),
+          null,
+          'has native',
+        )}
+        {@render chipBtn(
+          filterState.native === 'no' ? 'include' : 'off',
+          () => setNative('no'),
+          null,
+          'no native',
+        )}
       </div>
     </div>
 
@@ -327,9 +367,9 @@
           {#each options.peculiarities as { key, count } (key)}
             {@const meta = peculiarityLabels[key]}
             {@render chipBtn(
-              filterState.peculiarities.has(key),
-              () => togglePeculiarity(key),
-              peculiarityTooltip(key, count, meta),
+              chipState(filterState.peculiarities, key),
+              () => cyclePeculiarity(key),
+              `${peculiarityTooltip(key, count, meta)}\n${CHIP_HINT}`,
               meta?.label ?? fallbackPeculiarityLabel(key),
             )}
           {/each}
@@ -337,16 +377,34 @@
       </div>
     {/if}
 
-    {#if options.armaments.length > 0}
+    {#if options.groups.length > 0}
       <div>
-        <div class="text-muted-foreground mb-1 text-[10px] uppercase tracking-wide">Armament</div>
+        <div class="text-muted-foreground mb-1 text-[10px] uppercase tracking-wide">Group</div>
         <div class="flex flex-wrap gap-1">
-          {#each options.armaments as { key, count } (key)}
+          {#each options.groups as { key, count } (key)}
+            {@const cat = statusCategory(key)}
             {@render chipBtn(
-              filterState.armaments.has(key),
-              () => toggleArmament(key),
-              `${key} · ${count} ships`,
-              armamentLabel(key),
+              chipState(filterState.groups, key),
+              () => cycleWgGroup(key),
+              `${key} · ${count} ships · ${cat}\n${CHIP_HINT}`,
+              groupLabel(key),
+            )}
+          {/each}
+        </div>
+      </div>
+    {/if}
+
+    {#if options.vfsStatuses.length > 0}
+      <div>
+        <div class="text-muted-foreground mb-1 text-[10px] uppercase tracking-wide">VFS status</div>
+        <div class="flex flex-wrap gap-1">
+          {#each options.vfsStatuses as { key, count } (key)}
+            {@const meta = VFS_STATUS_META[key]}
+            {@render chipBtn(
+              chipState(filterState.vfsStatuses, key),
+              () => cycleVfs(key),
+              `${meta.title} · ${count} ships\n${CHIP_HINT}`,
+              meta.label,
             )}
           {/each}
         </div>

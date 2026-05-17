@@ -7,7 +7,7 @@ import type {
   StatusCategory,
   Topology,
   Vehicle,
-  VfsStatus,
+  VfsIssueStatus,
 } from '$lib/types/extract';
 
 /** WG `Vehicle.group` → coarse status category. */
@@ -85,34 +85,11 @@ export function fallbackPeculiarityLabel(key: string): string {
   return parts.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') || key;
 }
 
-/** Armament tag → human label. */
-const ARMAMENT_LABELS: Record<string, string> = {
-  main: 'main',
-  secondary: 'secondary',
-  aa: 'AA',
-  torpedoes: 'torpedoes',
-  missiles: 'missiles',
-  aircraft: 'aircraft',
-  depth_charges: 'depth charges',
-  pinger: 'pinger',
-  lasers: 'lasers',
-  wave_artillery: 'wave artillery',
-  sub_torpedoes: 'sub torpedoes',
-};
-
-export function armamentLabel(tag: string): string {
-  return ARMAMENT_LABELS[tag] || tag.replace(/_/g, ' ');
-}
-
-/** Main/secondary/aa/aircraft is the baseline 90 % of ships — render-row
- *  badges skip these so rare types stand out at a glance. */
-export const COMMON_ARMAMENT = new Set(['main', 'secondary', 'aa', 'aircraft']);
-
 /** VFS status badge metadata. `ok` + `unknown` deliberately render nothing —
  *  `ok` is the silent majority, `unknown` fires when the toolkit metadata
  *  dump failed and we don't want to mass-mis-flag healthy ships. */
 export const VFS_STATUS_META: Record<
-  Exclude<VfsStatus, 'ok' | 'unknown'>,
+  VfsIssueStatus,
   { label: string; sev: 'warn' | 'fail'; title: string }
 > = {
   no_splash: {
@@ -139,6 +116,44 @@ export const VFS_STATUS_META: Record<
     title: 'Vehicle has no resolvable model_dir in GameParams.',
   },
 };
+
+/** Severity-ordered VFS statuses for filter chip rows (warn → fail). */
+export const VFS_STATUS_ORDER: VfsIssueStatus[] = [
+  'no_splash',
+  'no_visual',
+  'no_dir',
+  'none',
+];
+
+/** WG `Vehicle.group` → human-readable filter chip label. Anything not in
+ *  this map falls back to a camelCase → "camel case" humanizer so new WG
+ *  values still render reasonably. */
+const GROUP_LABELS: Record<string, string> = {
+  upgradeable: 'upgradeable',
+  special: 'special',
+  ultimate: 'ultimate',
+  superShip: 'super-ship',
+  premium: 'premium',
+  specialUnsellable: 'special (unsellable)',
+  start: 'start',
+  demoWithoutStats: 'demo',
+  demoWithoutStatsPrem: 'demo (prem)',
+  experimental: 'experimental',
+  clan: 'clan',
+  event: 'event',
+  coopOnly: 'coop-only',
+  preserved: 'preserved',
+  disabled: 'disabled',
+  unavailable: 'unavailable',
+};
+
+export function groupLabel(key: string): string {
+  if (GROUP_LABELS[key]) return GROUP_LABELS[key];
+  return key
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/_/g, ' ')
+    .toLowerCase();
+}
 
 /** Suggested filesystem label for a (Vehicle, Permoflage) pair.
  *

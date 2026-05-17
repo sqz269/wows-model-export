@@ -4,6 +4,10 @@
 
 export type VfsStatus = 'ok' | 'no_splash' | 'no_visual' | 'no_dir' | 'none' | 'unknown';
 
+/** Actionable VFS issues (drops the silent `ok` + the metadata-failed `unknown`).
+ *  Used by filter chips and the row badge, which never render those two. */
+export type VfsIssueStatus = Exclude<VfsStatus, 'ok' | 'unknown'>;
+
 export type StatusCategory = 'live' | 'dev' | 'restricted' | 'retired' | 'unknown';
 
 export type Topology =
@@ -37,7 +41,8 @@ export interface Vehicle {
   peculiarities?: string[];
   /** WG `Vehicle.group` — discriminates live ships from dev/clan/event/etc. */
   group?: string | null;
-  /** Canonical armament tags (main / aa / torpedoes / missiles / …). */
+  /** Canonical armament tags (main / aa / torpedoes / missiles / …). Still
+   *  emitted by the snapshot producer but no longer surfaced in the picker. */
   armaments?: string[];
   /** VFS extraction-readiness — `ok` / `no_splash` / `no_visual` / `no_dir` / `none` / `unknown`. */
   vfs_status?: VfsStatus;
@@ -124,14 +129,26 @@ export interface SkinPackForm {
   display_name: string;
 }
 
+/** Tri-state chip filter: off (in neither set), include (in `include`),
+ *  or exclude (in `exclude`). Clicking a chip cycles off → include → exclude
+ *  → off. Predicates apply include as a whitelist (any match passes) and
+ *  exclude as a blacklist (any match drops the ship). */
+export interface ChipFilter<T> {
+  include: Set<T>;
+  exclude: Set<T>;
+}
+
 export interface ExtractFilterState {
   text: string;
   showTest: boolean;
   nation: string | null;
-  classes: Set<string>;
-  tiers: Set<number>;
-  peculiarities: Set<string>;
-  armaments: Set<string>;
+  classes: ChipFilter<string>;
+  tiers: ChipFilter<number>;
+  peculiarities: ChipFilter<string>;
+  /** WG `Vehicle.group` (disabled / unavailable / clan / …). */
+  groups: ChipFilter<string>;
+  /** Extraction-readiness (no_splash / no_visual / no_dir / none). */
+  vfsStatuses: ChipFilter<VfsIssueStatus>;
   native: NativeFilter;
 }
 
@@ -140,5 +157,8 @@ export interface FilterOptions {
   classes: string[];
   tiers: number[];
   peculiarities: { key: string; count: number }[];
-  armaments: { key: string; count: number }[];
+  /** WG group values, ranked by ship-count DESC. */
+  groups: { key: string; count: number }[];
+  /** Non-ok/unknown VFS statuses, in severity order. */
+  vfsStatuses: { key: VfsIssueStatus; count: number }[];
 }
