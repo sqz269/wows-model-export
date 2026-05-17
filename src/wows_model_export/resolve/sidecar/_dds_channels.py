@@ -33,6 +33,12 @@ Two suffix vocabularies coexist on disk:
                  crossover skins — diffuse * mg.B * emissivePower).
   ``_ao``        ambient occlusion (R channel).
   ``_a``         baseColor diffuse (WG's standard albedo suffix).
+  ``_detail``    shared tangent-space detail-normal atlas
+                 (``ship_atlas_detail.dds``) — 2048² tiled DDS bound by
+                 every PBS material that has ``g_detailNormalInfluence``
+                 > 0 in its MFM, sampled at ``vMapUv × (g_detailScaleU,
+                 g_detailScaleV)``. Per-material blend weights live on
+                 the sidecar ``materials[].detail_params`` field.
 
 * **WG-original channels** that loose mods ship before the swizzle pass
   has run (skin_pack invokes ``wowsunpack swizzle-dir`` to produce the
@@ -56,6 +62,7 @@ CHANNEL_SLOTS: tuple[tuple[str, str], ...] = (
     ("_nbmask",   "camoMask"),
     ("_camomask", "camoExclusionMask"),
     ("_normal",   "normal"),
+    ("_detail",   "detail"),
     ("_mr",       "metallicRoughness"),
     ("_ao",       "occlusion"),
     ("_a",        "baseColor"),
@@ -96,6 +103,7 @@ SUFFIX_PRIORITY: dict[str, int] = {
     "_nbmask":   0,
     "_camomask": 0,
     "_normal":   0,
+    "_detail":   0,
     "_mr":       0,
     "_ao":       0,
     "_a":        0,

@@ -2,7 +2,12 @@
 // `updateCamoUniforms` after the active skin / texture-toggle changes.
 
 import * as THREE from 'three';
-import { dummyMaskTexture, dummyMatAlbedoTexture, dummyMgnTexture } from './dummies';
+import {
+  dummyMaskTexture,
+  dummyMatAlbedoTexture,
+  dummyMgnTexture,
+  dummyDetailTexture,
+} from './dummies';
 
 export interface CamoUniforms {
   camoEnable: { value: number };
@@ -70,8 +75,10 @@ export interface CamoUniforms {
   // (reference/topics/camo/camo_path_b_render_re.md §3):
   //   .R = camo gloss override   → blended into roughness via Influence_g
   //   .G = camo metallic override → blended into metalness via Influence_m
-  //   .B / .A = tangent-space normal axis offsets (each signed via 2x-1)
-  //             → added to base normal via Influence_n
+  //   .B = tangent X (nx, along-U) | .A = tangent Y (ny, along-V) — each
+  //        signed via 2x-1, added to base normal via Influence_n. Axis
+  //        assignment resolved 2026-05-17 via gradient-anisotropy probe;
+  //        see reference/topics/camo/camo_mgn_texture_channels.md.
   // The mask is in camoAlbedo.a, NOT camoMGN.a — camoMGN has no alpha mask.
   /** Camo MGN override texture. 1×1 neutral default. */
   catMgnMap: { value: THREE.Texture };
@@ -105,6 +112,40 @@ export interface CamoUniforms {
   wgPackMG: { value: number };
   /** 1.0 → reconstruct normal Z from N.xy (WG `_n.dds` packs B = mask). */
   wgPackN: { value: number };
+
+  // ── Detail-normal atlas overlay ────────────────────────────────────
+  //
+  // WG's ``ship_atlas_detail.dds`` (2048² BC7) is bound by every PBS
+  // material whose MFM declares a non-zero ``g_detail*Influence``.
+  // Engine recipe (PBS_ship_metallic.win.dx11): sample at
+  // ``vMapUv × (scale.x, scale.y)``, decode RG as signed tangent XY,
+  // add to the base ``mapN.xy`` weighted by
+  // ``influence.x × distanceFade(fadeDistance)`` and re-derive Z.
+  // Albedo / gloss variants apply the same texel's other channels with
+  // their own influences.
+  /** Detail-normal atlas. 1×1 neutral default. */
+  detailMap: { value: THREE.Texture };
+  /** 1.0 when a real detail atlas is bound + the material opts in. */
+  detailMapBound: { value: number };
+  /** Per-material UV scale (``g_detailScaleU``, ``g_detailScaleV``). */
+  detailScale: { value: THREE.Vector2 };
+  /**
+   * (normal, albedo, gloss) influence triplet from the MFM —
+   * ``g_detailNormalInfluence`` / ``g_detailAlbedoInfluence`` /
+   * ``g_detailGlossInfluence``. Each in [0,1]; defaults zero so an
+   * always-bound shared map sums to no-op when the material has no
+   * detail.
+   */
+  detailInfluence: { value: THREE.Vector3 };
+  /**
+   * View-distance fade threshold (``g_detailFadeDistance``, world
+   * units). Engine convention seems to be linear falloff from
+   * full-influence at the camera to zero at this distance; without
+   * the exact DXBC for the fade we approximate with
+   * ``saturate(1 - |viewPos| / fadeDistance)`` which is visually
+   * close to the engine's behaviour.
+   */
+  detailFadeDistance: { value: number };
 }
 
 export function makeCamoUniforms(): CamoUniforms {
@@ -136,6 +177,11 @@ export function makeCamoUniforms(): CamoUniforms {
     catUseCamoMaskGlobal: { value: 0.0 },
     wgPackMG: { value: 0.0 },
     wgPackN: { value: 0.0 },
+    detailMap: { value: dummyDetailTexture },
+    detailMapBound: { value: 0.0 },
+    detailScale: { value: new THREE.Vector2(1, 1) },
+    detailInfluence: { value: new THREE.Vector3(0, 0, 0) },
+    detailFadeDistance: { value: 1.0 },
   };
 }
 

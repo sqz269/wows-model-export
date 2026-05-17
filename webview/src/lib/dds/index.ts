@@ -257,6 +257,10 @@ export const DDS_SLOT_SRGB: Record<string, boolean> = {
   normal: false,
   occlusion: false,
   emissive: true,
+  // Detail atlas: tangent-space normal data in RG, linear/categorical
+  // weights in BA. Always sampled linear — the texels are not display-
+  // referred colours.
+  detail: false,
 };
 
 /**

@@ -41,6 +41,11 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.uniforms.catUseCamoMaskGlobal = uniforms.catUseCamoMaskGlobal;
     shader.uniforms.wgPackMG = uniforms.wgPackMG;
     shader.uniforms.wgPackN = uniforms.wgPackN;
+    shader.uniforms.detailMap = uniforms.detailMap;
+    shader.uniforms.detailMapBound = uniforms.detailMapBound;
+    shader.uniforms.detailScale = uniforms.detailScale;
+    shader.uniforms.detailInfluence = uniforms.detailInfluence;
+    shader.uniforms.detailFadeDistance = uniforms.detailFadeDistance;
 
     // Vertex: compute world-space Y + per-mesh camo UV. Toolkit hull GLBs
     // are emitted in metric world space with y=0 at the waterline.
@@ -82,6 +87,11 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
       'uniform float catUseCamoMaskGlobal;\n' +
       'uniform float wgPackMG;\n' +
       'uniform float wgPackN;\n' +
+      'uniform sampler2D detailMap;\n' +
+      'uniform float detailMapBound;\n' +
+      'uniform vec2 detailScale;\n' +
+      'uniform vec3 detailInfluence;\n' +
+      'uniform float detailFadeDistance;\n' +
       'varying float vWorldY;\n' +
       'varying vec2 vCamoUv;\n' +
       shader.fragmentShader
@@ -101,8 +111,10 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
 //                   reference/topics/camo/camo_mgn_texture_channels.md:
 //                     .R = camo gloss override  → roughnessmap chunk
 //                     .G = camo metallic override → metalnessmap chunk
-//                     .B = normal axis (tangent Y per texture-side decode)
-//                     .A = normal axis (tangent X per texture-side decode)
+//                     .B = camo normal X (nx, along-U tangent)
+//                     .A = camo normal Y (ny, along-V tangent)
+//                   Axis assignment resolved 2026-05-17 via gradient-
+//                   anisotropy probe across 5/5 sampled textures.
 float catPaintMask = 1.0;
 vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
 
@@ -367,19 +379,38 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
   // WG _n.dds: B = no-camo mask (not Z). Reconstruct Z when packed.
   float nzRecon = sqrt( max( 0.0, 1.0 - mapN.x * mapN.x - mapN.y * mapN.y ) );
   mapN.z = mix( mapN.z, nzRecon, wgPackN );
+  // ── Detail-normal overlay (shared atlas) ──────────────────────────────
+  // Sample WG's 'ship_atlas_detail.dds' at the per-material UV scale.
+  // RG decoded as signed tangent XY (×2-1). The engine adds it to the
+  // base tangent normal, weighted by 'detailInfluence.x' × a
+  // view-distance fade. Without the exact engine DXBC for the fade we
+  // approximate with 'saturate(1 - |viewPos|/detailFadeDistance)' —
+  // close-up gives full detail, far approaches zero. Gated on
+  // 'detailMapBound' so materials whose MFM didn't opt in pay no
+  // sample cost.
+  if ( detailMapBound > 0.5 ) {
+    vec2 detailUv = vMapUv * detailScale;
+    vec2 detailTangent = texture2D( detailMap, detailUv ).xy * 2.0 - 1.0;
+    float detailDist = length( vViewPosition );
+    float detailFade = clamp( 1.0 - detailDist / detailFadeDistance, 0.0, 1.0 );
+    float detailNormalWeight = detailInfluence.x * detailFade;
+    mapN.xy += detailTangent * detailNormalWeight;
+    mapN.z = sqrt( max( 0.0, 1.0 - dot( mapN.xy, mapN.xy ) ) );
+  }
   // Path B normal perturbation: camoMGN packs two signed tangent-space
   // axis offsets in .B and .A (each via 2x-1). Engine recipe
   // (chunk001:96 / 103-105) adds the camo perturbation to the vertex
   // normal weighted by 'paintMask * Influence_n'. We approximate the
   // engine's cross-product reconstruction with a tangent-space lerp:
   // blend the base tangent normal toward the camo's, then re-derive Z.
-  // X/Y AXIS CAVEAT: per camo_path_b_render_re.md §8 and
-  // camo_mgn_texture_channels.md, .A → tangent X and .B → tangent Y
-  // is the texture-side hypothesis. If normal-map detail appears
-  // rotated 90° in-game vs reference, swap '.a' and '.b' below.
+  // X/Y AXIS — RESOLVED 2026-05-17: .B = tangent X (nx, along-U),
+  // .A = tangent Y (ny, along-V). Decided via gradient-anisotropy probe
+  // across 5/5 WG '_mgn.dds' textures (synthetic-control-validated): A
+  // varies dominantly in V direction, B dominantly in U. See
+  // reference/topics/camo/camo_mgn_texture_channels.md §"Axis resolution".
   float catNormalMix = catPaintMask * catMgnInfluence.z * catMgnBound;
-  vec2 camoAxisAB = catMgnSample.ab * 2.0 - 1.0;  // .A → X, .B → Y
-  mapN.xy = mix( mapN.xy, camoAxisAB, catNormalMix );
+  vec2 camoNormalXY = catMgnSample.ba * 2.0 - 1.0;  // .B → X (nx), .A → Y (ny)
+  mapN.xy = mix( mapN.xy, camoNormalXY, catNormalMix );
   mapN.z = mix( mapN.z, sqrt( max( 0.0, 1.0 - dot( mapN.xy, mapN.xy ) ) ), catNormalMix );
   mapN.xy *= normalScale;
   #ifdef USE_TANGENT

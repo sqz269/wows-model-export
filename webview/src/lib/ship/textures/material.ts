@@ -27,11 +27,30 @@ export interface MaterialClonePolicy {
   waterlineY: number;
 }
 
+/**
+ * Per-material detail-normal blend params (sidecar
+ * ``Material.detail_params``). Plumbed alongside the texture set so
+ * the manager can apply the right influence triplet + UV scale + fade
+ * for each material without re-reading the sidecar at material-build
+ * time. All six fields are required — the sidecar emits them as a
+ * unit whenever any influence is non-zero (see
+ * ``_materials._apply_material_mappings_json`` for the producer).
+ */
+export interface DetailParams {
+  normal_influence: number;
+  albedo_influence: number;
+  gloss_influence: number;
+  fade_distance: number;
+  scale_u: number;
+  scale_v: number;
+}
+
 export function applyTexturesToMaterial(
   original: THREE.Material,
   tex: TextureSetResolved,
   policy: MaterialClonePolicy,
   forceTransparentBlend: boolean = false,
+  detailParams: DetailParams | null = null,
 ): THREE.Material {
   const std = original as THREE.MeshStandardMaterial;
   if (!('isMeshStandardMaterial' in std) || !std.isMeshStandardMaterial) return original;
@@ -134,6 +153,24 @@ export function applyTexturesToMaterial(
     camoUniforms.wgPackN.value = tex.normal.userData?.wgPackN ? 1.0 : 0.0;
   }
 
+  // Detail-atlas binding. The sidecar emits `detail_params` and binds
+  // the `detail` slot together (both or neither — see
+  // ``_materials._apply_material_mappings_json``), so the presence of
+  // `detailParams` implies `tex.detail` is also present. The shader
+  // sums detail onto the base tangent normal weighted by a distance
+  // fade — see `camo/shader.ts` for the engine recipe.
+  if (detailParams) {
+    camoUniforms.detailMap.value = tex.detail!;
+    camoUniforms.detailMapBound.value = 1.0;
+    camoUniforms.detailScale.value.set(detailParams.scale_u, detailParams.scale_v);
+    camoUniforms.detailInfluence.value.set(
+      detailParams.normal_influence,
+      detailParams.albedo_influence,
+      detailParams.gloss_influence,
+    );
+    camoUniforms.detailFadeDistance.value = detailParams.fade_distance;
+  }
+
   c.userData = { ...(c.userData || {}), camoUniforms, mgTex, origMetalness, origRoughness };
   c.needsUpdate = true;
   return c;
@@ -144,9 +181,12 @@ export function buildTextured(
   tex: TextureSetResolved,
   policy: MaterialClonePolicy,
   forceTransparentBlend: boolean = false,
+  detailParams: DetailParams | null = null,
 ): THREE.Material | THREE.Material[] {
   if (Array.isArray(original)) {
-    return original.map((m) => applyTexturesToMaterial(m, tex, policy, forceTransparentBlend));
+    return original.map((m) =>
+      applyTexturesToMaterial(m, tex, policy, forceTransparentBlend, detailParams),
+    );
   }
-  return applyTexturesToMaterial(original, tex, policy, forceTransparentBlend);
+  return applyTexturesToMaterial(original, tex, policy, forceTransparentBlend, detailParams);
 }

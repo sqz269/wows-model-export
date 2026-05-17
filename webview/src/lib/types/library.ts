@@ -92,6 +92,17 @@ export interface TextureSet {
    * `reference/topics/camo/wg_camo_shader_reference.md` §"Path A".
    */
   camoExclusionMask?: string[];
+  /**
+   * Shared tangent-space detail-normal atlas (`ship_atlas_detail.dds`,
+   * 2048² BC7 with mips). Bound by every PBS material whose MFM
+   * declares a non-zero `g_detail*Influence`; the per-material blend
+   * weights + UV scales live on `Material.detail_params`.
+   *
+   * Engine recipe (PBS_ship_metallic.win.dx11): sample at
+   * `vMapUv × (scale_u, scale_v)`, decode RG as signed tangent XY,
+   * add to the base normal weighted by `normal_influence × fade(view)`.
+   */
+  detail?: string[];
   [slot: string]: string[] | undefined;
 }
 

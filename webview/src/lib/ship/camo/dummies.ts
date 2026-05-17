@@ -23,3 +23,10 @@ export const dummyMatAlbedoTexture = makeDummy([255, 255, 255, 255]);
  * neutral defaults are a defense against accidental sampling.
  */
 export const dummyMgnTexture = makeDummy([0, 0, 128, 128]);
+/**
+ * Detail-atlas dummy — RG=(128,128) decodes to (0,0) after 2x-1
+ * (zero tangent-space offset); BA neutral. Gates on
+ * ``detailMapBound`` keep this from being sampled in practice; the
+ * neutral values are a safety net.
+ */
+export const dummyDetailTexture = makeDummy([128, 128, 128, 255]);

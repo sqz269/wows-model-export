@@ -39,6 +39,30 @@ export interface SidecarMaterial {
   material_id?: string;
   shader_intent?: string;
   texture_sets?: Record<string, SidecarTextureScheme>;
+  /**
+   * Per-material detail-normal blend weights (extracted from the MFM's
+   * `g_detail*` scalars). Present only when at least one of
+   * normal/albedo/gloss influence is non-zero — absence means "detail
+   * disabled" for this material. When present, ALL six keys are
+   * populated (the sidecar emits them as a unit; the consumer does not
+   * need `??` fallbacks). Pairs with the shared
+   * `ship_atlas_detail.dds` atlas bound under the `detail` slot of
+   * `texture_sets["main"]`.
+   *
+   * Engine recipe (PBS_ship_metallic.win.dx11 / Path A `ship_camo_material.fx`):
+   * sample detail at `vMapUv × (scale_u, scale_v)`, decode RG as signed
+   * tangent XY, then add to the base tangent normal weighted by
+   * `normal_influence × distance_fade(fade_distance)`. Albedo and gloss
+   * variants apply the detail's other channels with their own influences.
+   */
+  detail_params?: {
+    normal_influence: number;
+    albedo_influence: number;
+    gloss_influence: number;
+    fade_distance: number;
+    scale_u: number;
+    scale_v: number;
+  };
 }
 
 /**

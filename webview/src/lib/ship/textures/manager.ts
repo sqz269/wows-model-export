@@ -22,7 +22,12 @@ import { resolveDdsMipUrls } from '$lib/dds';
 import { classifyPartCategory, classifyPlacementCategory } from '$lib/types';
 import type { ShipPlacement, Skin, SidecarDoc, SidecarTextureScheme, SkinMatCategoryParams, TextureSet } from '$lib/types';
 import { dummyMaskTexture, dummyMatAlbedoTexture, uniformsOf } from '../camo';
-import { applyTexturesToMaterial, buildTextured, type MaterialClonePolicy } from './material';
+import {
+  applyTexturesToMaterial,
+  buildTextured,
+  type DetailParams,
+  type MaterialClonePolicy,
+} from './material';
 import { CategoryMaskCache, MatAlbedoCache, MgnTextureCache } from './category_mask';
 import { DecodedTextureCache } from './decode';
 import type { SlotUrls, TextureMeshEntry, TextureSetResolved } from './types';
@@ -74,6 +79,7 @@ const SLOTS: (keyof TextureSet)[] = [
   'emissive',
   'camoMask',
   'camoExclusionMask',
+  'detail',
 ];
 
 const PARALLEL = 8;
@@ -108,6 +114,11 @@ export class TextureManager {
   // time against `entry.key` (no per-entry cache → no retroactive flip
   // needed when bind/register orderings vary).
   private noCamoKeys = new Set<string>();
+  // Per-key detail-normal blend params from the sidecar's
+  // `materials[*].detail_params`. Read at material-build time and
+  // pushed into the camo shader chunk's `detail*` uniforms. Absent
+  // entries → detail disabled (`detailMapBound = 0.0`).
+  private detailParamsByKey = new Map<string, DetailParams>();
 
   private decodedCache: DecodedTextureCache;
   private categoryMaskCache: CategoryMaskCache;
@@ -245,6 +256,8 @@ export class TextureManager {
       const schemes = this.compileSchemes(mat.texture_sets, hullBaseUrl);
       if (schemes.size > 0) this.bindSchemes(`hull:${matName}`, schemes);
       if (mat.shader_intent === 'transparent') this.markNoCamoKey(`hull:${matName}`);
+      const detail = (mat as { detail_params?: DetailParams }).detail_params;
+      if (detail) this.detailParamsByKey.set(`hull:${matName}`, detail);
     }
   }
 
@@ -297,6 +310,8 @@ export class TextureManager {
       if ((mat as { shader_intent?: string }).shader_intent === 'transparent') {
         this.markNoCamoKey(matKey);
       }
+      const detail = (mat as { detail_params?: DetailParams }).detail_params;
+      if (detail) this.detailParamsByKey.set(matKey, detail);
     }
 
     // Asset-level fallback. Used when per-material is empty (legacy
@@ -596,6 +611,7 @@ export class TextureManager {
     this.schemesByKey.clear();
     this.entriesByKey.clear();
     this.noCamoKeys.clear();
+    this.detailParamsByKey.clear();
     this.categoryMaskCache.clear();
     this.matAlbedoCache.clear();
     this.mgnTextureCache.clear();
@@ -690,7 +706,14 @@ export class TextureManager {
             done++;
             continue;
           }
-          textured = buildTextured(e.untextured, tex, policy, this.noCamoKeys.has(e.key));
+          const detailParams = this.detailParamsByKey.get(e.key) ?? null;
+          textured = buildTextured(
+            e.untextured,
+            tex,
+            policy,
+            this.noCamoKeys.has(e.key),
+            detailParams,
+          );
           e.texturedByScheme.set(cloneKey, textured);
         } else {
           e.texturedByScheme.set(cloneKey, textured);

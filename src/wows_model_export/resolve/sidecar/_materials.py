@@ -644,6 +644,13 @@ _MFM_PROP_TO_PBR_SLOTS: dict[str, tuple[str, ...]] = {
     # UV layout (and inheritance for mesh-swap variants matches the
     # mr/cavity stem the artist used).
     #
+    # `detailMap` is intentionally NOT in this table. The shared
+    # atlas (``ship_atlas_detail.dds``) is bound separately, gated on
+    # the per-material ``g_detail*Influence`` triplet — binding it
+    # unconditionally would attach the atlas to materials that
+    # multiply it by zero, wasting texture-unit + cache bandwidth at
+    # render time. See the ``detail_slot_paths`` resolution below.
+    #
     # Modern extracts always carry the conformant siblings, so the slot
     # lookup goes directly through canonical names. (Pre-May-2026
     # extracts that ship only WG-original `_n` / `_mg` need to be
@@ -653,6 +660,21 @@ _MFM_PROP_TO_PBR_SLOTS: dict[str, tuple[str, ...]] = {
     "metallicGlossMap":     ("metallicRoughness", "camoExclusionMask"),
     "ambientOcclusionMap":  ("occlusion",),
 }
+
+
+#: g_detail* MFM scalar names → sidecar ``detail_params`` field names.
+#: These six scalars are emitted under ``materials[*].floats`` by the
+#: toolkit's ``write_material_mappings_json`` (see ``ship.rs``); the
+#: sidecar normalises them onto a fixed key set so consumers don't have
+#: to deal with the raw WG hash-name layer.
+_DETAIL_FLOAT_KEYS: tuple[tuple[str, str], ...] = (
+    ("g_detailNormalInfluence", "normal_influence"),
+    ("g_detailAlbedoInfluence", "albedo_influence"),
+    ("g_detailGlossInfluence",  "gloss_influence"),
+    ("g_detailFadeDistance",    "fade_distance"),
+    ("g_detailScaleU",          "scale_u"),
+    ("g_detailScaleV",          "scale_v"),
+)
 
 
 def _apply_material_mappings_json(
@@ -779,19 +801,40 @@ def _apply_material_mappings_json(
         for paths in slots_.values():
             paths.sort(key=_mip_rank)
 
-    def _normalise_stem(raw: str) -> tuple[str, str]:
-        """Return (lower, year_stripped_lower) candidate keys for the
-        given raw stem from material_mappings.json."""
+    def _normalise_stem(raw: str) -> tuple[str, ...]:
+        """Return ordered candidate keys for matching a raw MFM stem to
+        a ``dds_index`` key.
+
+        Tries: lowercase as-is → year-stripped → channel-suffix-stripped.
+
+        The channel-suffix strip covers the shared ``ship_atlas_detail``
+        atlas: ``_classify_dds_filename`` indexes ``ship_atlas_detail.dds``
+        as ``stem=ship_atlas`` + ``slot=detail`` (suffix stripped), but
+        the MFM-side stem is ``ship_atlas_detail``. Stripping any known
+        channel suffix off the year-stripped form makes the lookup hit.
+        Falls through cleanly for stems that don't end in a channel
+        suffix.
+        """
         low = raw.lower()
-        return low, _strip_year_token(low)
+        year_stripped = _strip_year_token(low)
+        keys = [low, year_stripped]
+        for chan_sfx, _ in CHANNEL_SLOTS:
+            if year_stripped.endswith(chan_sfx):
+                keys.append(year_stripped[: -len(chan_sfx)])
+                break
+        # Preserve order, drop duplicates.
+        seen: set[str] = set()
+        out: list[str] = []
+        for k in keys:
+            if k not in seen:
+                seen.add(k)
+                out.append(k)
+        return tuple(out)
 
     n_resolved = 0
     for mat in materials:
         if mat.get("shader_intent") not in ("opaque_pbr", "cutout"):
             continue
-        existing_main = (mat.get("texture_sets") or {}).get("main") or {}
-        if existing_main:
-            continue  # already populated by the GLB-driven path
 
         raw_id = mat.get("material_id") or ""
         norm = _strip_tl_prefix(raw_id).lower()
@@ -814,8 +857,47 @@ def _apply_material_mappings_json(
         if chosen is None:
             continue
 
-        textures = chosen.get("textures") or {}
-        if not textures:
+        # Detail params + atlas binding. Toolkit invariant (post-2026-05-17,
+        # see ``write_material_mappings_json`` in ``ship.rs``):
+        #
+        # * Every material entry carries a ``floats`` dict.
+        # * A material whose MFM declared ``g_detail*`` carries all six
+        #   ``g_detail{Normal,Albedo,Gloss}Influence`` /
+        #   ``g_detailFadeDistance`` / ``g_detailScaleU`` /
+        #   ``g_detailScaleV`` keys AND a ``textures.detailMap`` entry.
+        # * A material without detail data carries an empty floats dict
+        #   and no ``textures.detailMap``.
+        #
+        # Emit ``detail_params`` + bind the shared atlas only when at
+        # least one influence is non-zero. Materials whose MFM ships
+        # all-zero influences (every stock PBS hull / deck) pay no
+        # texture-binding cost — the atlas would multiply to zero in
+        # the shader anyway.
+        textures = chosen["textures"]
+        floats = chosen["floats"]
+        detail_slot_paths: list[str] | None = None
+        if (
+            floats["g_detailNormalInfluence"] != 0.0
+            or floats["g_detailAlbedoInfluence"] != 0.0
+            or floats["g_detailGlossInfluence"] != 0.0
+        ):
+            mat["detail_params"] = {
+                side_name: float(floats[mfm_name])
+                for mfm_name, side_name in _DETAIL_FLOAT_KEYS
+            }
+            detail_stem = textures["detailMap"]["stem"]
+            for key in _normalise_stem(detail_stem):
+                if key in dds_index and "detail" in dds_index[key]:
+                    detail_slot_paths = list(dds_index[key]["detail"])
+                    break
+
+        existing_main = (mat.get("texture_sets") or {}).get("main") or {}
+        if existing_main:
+            # GLB-driven path already populated PBR slots. The GLB has
+            # no notion of the shared atlas, so the detail slot is
+            # always missing from existing main — inject it alongside.
+            if detail_slot_paths:
+                existing_main["detail"] = {"dds_mips": detail_slot_paths}
             continue
 
         # Walk per-MFM-property stems and pull canonical slots.
@@ -874,6 +956,9 @@ def _apply_material_mappings_json(
         # AO + glass-token diffuse falls through cleanly.
         if "baseColor" not in slots:
             continue
+
+        if detail_slot_paths and "detail" not in slots:
+            slots["detail"] = {"dds_mips": detail_slot_paths}
 
         ts = mat.setdefault("texture_sets", {})
         ts["main"] = slots
