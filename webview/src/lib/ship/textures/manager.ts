@@ -221,18 +221,20 @@ export class TextureManager {
    * against the hull GLB's directory (so per-stem `_camo_NN.dds` work).
    */
   bindHullMaterials(sidecar: SidecarDoc, hullBaseUrl: string): void {
-    // Union both opt-out sets: variant_swapped_asset_ids covers swap-targets
-    // and bespoke attached children of swapped parents; camo_skip_asset_ids
-    // covers WG's engine-side per-mesh "_9" material-id marker (themed /
-    // skin-exclusive decorative geometry like AM6067_Whale_Hoshino, Azur
-    // Lane secondaries, Ayane gun barrels). Both classes of asset should
-    // bypass camo painting — the runtime engine never enters camo
-    // dispatch for "_9" materials (verified via Ghidra on the static
-    // material-name → part_index table at exe 0x140071a20).
-    this.variantSwappedAssetIds = new Set([
-      ...(sidecar.ship?.variant_swapped_asset_ids ?? []),
-      ...(sidecar.ship?.camo_skip_asset_ids ?? []),
-    ]);
+    // variant_swapped_asset_ids covers swap-targets and bespoke attached
+    // children of swapped parents — those ship bespoke `*_Azur_a.dds`-style
+    // albedos that encode the variant's appearance, so any base-skin
+    // overlay would double-paint. camo_skip_asset_ids (WG's engine-side
+    // "_9" material-id denylist for whale / bage / Hoshino themed
+    // geometry) is NOT unioned in here: the shader now honors
+    // metallicGlossMap.B per-texel, and artists author mg.B=0 on those
+    // parts so paint is suppressed at the texel level without a
+    // mesh-level denylist. The producer still emits camo_skip_asset_ids
+    // for schema stability; visual validation 2026-05-17 confirmed the
+    // texel-level gate is sufficient.
+    this.variantSwappedAssetIds = new Set(
+      sidecar.ship?.variant_swapped_asset_ids ?? [],
+    );
     for (const mat of sidecar.materials ?? []) {
       const matName = mat.material_id;
       if (!matName) continue;
@@ -810,12 +812,14 @@ export class TextureManager {
         matOy = 0.0;
       let matMode = -1.0;
       let matAo = 0.0;
-      if (matTextures && !variantOptOut && entry.category in matTextures) {
+      if (matTextures && entry.category in matTextures) {
         const matCat = matTextures[entry.category];
         const params = matCat.params ?? null;
-        // Path A overlay applied here even when Path B MGN is present.
-        // Engine "_9" themed exclusions (whale, bage, Hoshino) are now
-        // handled per-texel by the shader via camoExclusionMap / mg.B.
+        // mat_albedo overlay applied regardless of variantOptOut.
+        // Engine "_9" themed exclusions (whale, bage, Hoshino) and
+        // variant-swap bespoke albedos both author mg.B=0, so the
+        // shader's per-texel paintMask gate suppresses paint naturally
+        // without a consumer-side opt-out. Visual validation 2026-05-17.
         if (params && params.camo_mode === 0) {
           // Path B explicitly disabled — leave matTex null.
         } else {
