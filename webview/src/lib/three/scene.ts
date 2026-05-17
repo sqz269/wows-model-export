@@ -144,7 +144,15 @@ export function createSceneEnvironment(
 
   const buildComposer = () => {
     if (composer) return;
-    composer = new EffectComposer(renderer);
+    // MSAA-capable target so bloom doesn't kill the edge AA that the
+    // default framebuffer's antialias:true gives. samples=0 on WebGL1
+    // (maxSamples reports 0) → silently falls back to no MSAA.
+    const samples = Math.min(4, renderer.capabilities.maxSamples);
+    const target = new THREE.WebGLRenderTarget(lastSize.w, lastSize.h, {
+      type: THREE.HalfFloatType,
+      samples,
+    });
+    composer = new EffectComposer(renderer, target);
     composer.setSize(lastSize.w, lastSize.h);
     composer.addPass(new RenderPass(scene, camera));
     bloomPass = new UnrealBloomPass(
