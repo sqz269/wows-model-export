@@ -108,7 +108,7 @@ from ._step_runner import StepRunner
 #
 #  * WG-original channels the loose mod folders ship (no swizzle pass):
 #       ``_n``       → raw WG normal (B = camo no-camo mask)
-#       ``_mg``      → raw WG MG (R=cavity, G=metalmask, B=paint mask)
+#       ``_mg``      → raw WG MG (R=gloss, G=metallic, B=binary paint mask)
 #
 # Both routes land in the same canonical glTF slot names so the renderer
 # prefers conformant when present and falls back to raw via the
