@@ -780,6 +780,10 @@ export class ShipViewer {
     this.textures.setPreserveUnderwaterHull(on);
   }
 
+  setNormalScale(value: number): void {
+    this.textures.setNormalScale(value);
+  }
+
   getSkins(): readonly Skin[] {
     return this.textures.getSkins();
   }
@@ -802,6 +806,16 @@ export class ShipViewer {
 
   getPreserveUnderwater(): boolean {
     return this.textures.getPreserveUnderwater();
+  }
+
+  getNormalScale(): number {
+    return this.textures.getNormalScale();
+  }
+
+  /** Diagnostic surface for the normal-map pipeline. See
+   *  `TextureManager.getNormalDiagnostics()`. */
+  getNormalDiagnostics(): ReturnType<TextureManager['getNormalDiagnostics']> {
+    return this.textures.getNormalDiagnostics();
   }
 
   /** Snapshot of camo bindings + per-entry state for the inspector

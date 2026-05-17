@@ -31,6 +31,7 @@ import {
 import { CategoryMaskCache, MatAlbedoCache, MgnTextureCache } from './category_mask';
 import { DecodedTextureCache } from './decode';
 import type { SlotUrls, TextureMeshEntry, TextureSetResolved } from './types';
+import { ensureTangents } from '$lib/three/tangents';
 
 /**
  * Snapshot of the camo binding + per-entry state for the active skin.
@@ -134,6 +135,12 @@ export class TextureManager {
   private aoEnabled = true;
   private mrMapEnabled = false;
   private preserveUnderwater = true;
+  // WG hull normal maps are intrinsically subtle (mean tilt 2-3°; see
+  // tmp/detail_test/probe_normal_intensity.py). Default 2.0 doubles
+  // the apparent perturbation so detail reads under diffuse-dominated
+  // lighting. 1.0 = engine-faithful, 0.0 = flat (normal map disabled
+  // visually). Live-updatable via setNormalScale.
+  private normalScale = 2.0;
 
   private hooks: TextureManagerInit;
 
@@ -602,6 +609,107 @@ export class TextureManager {
     }
   }
 
+  /**
+   * Update the global normal-map intensity. Walks every textured clone
+   * and rewrites `MeshStandardMaterial.normalScale`. Clones built later
+   * pick up the new value via `clonePolicy()`.
+   *
+   * Default 2.0 — WG art convention is very gentle hull perturbation
+   * (see `tmp/detail_test/probe_normal_intensity.py` for tilt-angle
+   * distributions). 1.0 = engine-faithful; values up to ~4 stay
+   * visually plausible.
+   */
+  setNormalScale(value: number): void {
+    if (this.normalScale === value) return;
+    this.normalScale = value;
+    for (const entry of this.entries) {
+      if (!entry.textured) continue;
+      for (const mat of asArray(entry.textured)) {
+        const std = mat as THREE.MeshStandardMaterial;
+        if (!('isMeshStandardMaterial' in std) || !std.isMeshStandardMaterial) continue;
+        if (!std.normalMap) continue;
+        std.normalScale.set(value, value);
+      }
+      // Per-scheme clones too (skin-pack overrides etc.).
+      for (const mat of entry.texturedByScheme.values()) {
+        for (const mm of asArray(mat)) {
+          const std = mm as THREE.MeshStandardMaterial;
+          if (!('isMeshStandardMaterial' in std) || !std.isMeshStandardMaterial) continue;
+          if (!std.normalMap) continue;
+          std.normalScale.set(value, value);
+        }
+      }
+    }
+  }
+
+  getNormalScale(): number {
+    return this.normalScale;
+  }
+
+  /**
+   * Snapshot of normal-map binding state, for runtime diagnostics
+   * (live-inspect via `viewer.getNormalDiagnostics()` in dev console).
+   * Useful when the slider appears to have no effect — surfaces
+   * whether materials actually have `normalMap` bound and what scale
+   * is live on them.
+   */
+  getNormalDiagnostics(): {
+    normalScale: number;
+    totalEntries: number;
+    texturedEntries: number;
+    withNormalMap: number;
+    withoutNormalMap: number;
+    withTangentAttr: number;
+    withoutTangentAttr: number;
+    sample: {
+      key: string;
+      hasNormalMap: boolean;
+      normalScale: [number, number];
+      hasTangentAttr: boolean;
+      wgPackN: boolean;
+    } | null;
+  } {
+    let texturedEntries = 0;
+    let withNormalMap = 0;
+    let withoutNormalMap = 0;
+    let withTangentAttr = 0;
+    let withoutTangentAttr = 0;
+    let sample: ReturnType<TextureManager['getNormalDiagnostics']>['sample'] = null;
+
+    for (const entry of this.entries) {
+      if (!entry.textured) continue;
+      texturedEntries++;
+      const mats = asArray(entry.textured);
+      for (const mat of mats) {
+        const std = mat as THREE.MeshStandardMaterial;
+        if (!('isMeshStandardMaterial' in std) || !std.isMeshStandardMaterial) continue;
+        if (std.normalMap) withNormalMap++; else withoutNormalMap++;
+        const hasTangent = !!entry.mesh.geometry?.attributes?.tangent;
+        if (hasTangent) withTangentAttr++; else withoutTangentAttr++;
+        if (sample === null && std.normalMap) {
+          sample = {
+            key: entry.key,
+            hasNormalMap: true,
+            normalScale: [std.normalScale.x, std.normalScale.y],
+            hasTangentAttr: hasTangent,
+            wgPackN: !!(std.normalMap.userData?.wgPackN),
+          };
+        }
+      }
+    }
+
+    return {
+      normalScale: this.normalScale,
+      totalEntries: this.entries.length,
+      texturedEntries,
+      withNormalMap,
+      withoutNormalMap,
+      withTangentAttr,
+      withoutTangentAttr,
+      sample,
+    };
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────
 
   /** Per-ship cleanup. Drops entries + scheme bindings; KEEPS the decoded
@@ -637,6 +745,7 @@ export class TextureManager {
       aoEnabled: this.aoEnabled,
       mgMapEnabled: this.mrMapEnabled,
       waterlineY: this.preserveUnderwater ? 0.0 : -1e9,
+      normalScale: this.normalScale,
     };
   }
 
@@ -707,6 +816,14 @@ export class TextureManager {
             continue;
           }
           const detailParams = this.detailParamsByKey.get(e.key) ?? null;
+          // If the mesh has a normal map but lacks a TANGENT attribute,
+          // compute one. Hull GLBs ship TANGENT; accessory GLBs don't
+          // (confirmed propeller/barbette/turret = 0/N primitives).
+          // Without tangents, Three.js falls back to perturbNormal2Arb
+          // (screen-space derivative) — visibly weaker than proper TBN.
+          if (tex.normal && e.mesh.geometry) {
+            ensureTangents(e.mesh.geometry);
+          }
           textured = buildTextured(
             e.untextured,
             tex,

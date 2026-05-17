@@ -365,7 +365,7 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
         // Reconstruct Z from the unit-vector identity when wgPackN=1.0.
         .replace(
           '#include <normal_fragment_maps>',
-          `#ifdef OBJECTSPACE_NORMALMAP
+          `#ifdef USE_NORMALMAP_OBJECTSPACE
   normal = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;
   #ifdef FLIP_SIDED
     normal = - normal;
@@ -374,7 +374,7 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
     normal = normal * faceDirection;
   #endif
   normal = normalize( normalMatrix * normal );
-#elif defined( TANGENTSPACE_NORMALMAP )
+#elif defined( USE_NORMALMAP_TANGENTSPACE )
   vec3 mapN = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;
   // WG _n.dds: B = no-camo mask (not Z). Reconstruct Z when packed.
   float nzRecon = sqrt( max( 0.0, 1.0 - mapN.x * mapN.x - mapN.y * mapN.y ) );
@@ -413,11 +413,12 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
   mapN.xy = mix( mapN.xy, camoNormalXY, catNormalMix );
   mapN.z = mix( mapN.z, sqrt( max( 0.0, 1.0 - dot( mapN.xy, mapN.xy ) ) ), catNormalMix );
   mapN.xy *= normalScale;
-  #ifdef USE_TANGENT
-    normal = normalize( vTBN * mapN );
-  #else
-    normal = perturbNormal2Arb( - vViewPosition, normal, mapN, faceDirection );
-  #endif
+  // r165: 'tbn' is defined in <normal_fragment_begin> as
+  //   mat3(vTangent, vBitangent, normal)   when USE_TANGENT is set
+  //   getTangentFrame(-vViewPosition, normal, vNormalMapUv)   otherwise
+  // (the legacy perturbNormal2Arb / vTBN identifiers were removed —
+  // see node_modules/three/src/renderers/shaders/ShaderChunk/normal_fragment_begin.glsl.js)
+  normal = normalize( tbn * mapN );
 #elif defined( USE_BUMPMAP )
   normal = perturbNormalArb( - vViewPosition, normal, dHdxy_fwd(), faceDirection );
 #endif

@@ -48,6 +48,10 @@
     const v = new ShipViewer(host);
     viewer = v;
     bindHandle?.(v);
+    // Dev-console diagnostic surface. Use:
+    //   __shipViewer__.getNormalDiagnostics()
+    //   __shipViewer__.setNormalScale(3.5)
+    (window as unknown as { __shipViewer__: ShipViewer }).__shipViewer__ = v;
 
     const canvas = v.getCanvas();
     const DRAG_THRESHOLD_PX = 4;

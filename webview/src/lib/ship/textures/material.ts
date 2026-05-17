@@ -25,6 +25,16 @@ export interface MaterialClonePolicy {
    * waterline), -1e9 = disable gate.
    */
   waterlineY: number;
+  /**
+   * Three.js `MeshStandardMaterial.normalScale` factor. Default 2.0 —
+   * WG hull normal maps are authored very subtly (mean tilt 2-3°, p95
+   * ~16°; intentional art style for smooth steel plating). Engine-
+   * faithful is 1.0; bumping to 2-3x makes the surface detail readable
+   * under diffuse-dominated lighting without becoming cartoonish. See
+   * `tmp/detail_test/probe_normal_intensity.py` for the underlying
+   * tilt-angle distribution data.
+   */
+  normalScale: number;
 }
 
 /**
@@ -77,7 +87,14 @@ export function applyTexturesToMaterial(
     c.roughness = 0.8;
   }
 
-  if (tex.normal) c.normalMap = tex.normal;
+  if (tex.normal) {
+    c.normalMap = tex.normal;
+    // Three.js `normalScale` defaults to (1, 1); we bump per the
+    // policy so WG's intrinsically-gentle hull normals (2-3° mean
+    // tilt) read at the chosen visibility level. setNormalScale on
+    // the TextureManager updates this live across all clones.
+    c.normalScale.set(policy.normalScale, policy.normalScale);
+  }
   if (tex.occlusion) c.aoMap = tex.occlusion;
   if (tex.emissive) {
     c.emissiveMap = tex.emissive;

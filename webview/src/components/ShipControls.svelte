@@ -80,6 +80,7 @@
   let aoMaps = $state(true);
   let mrMaps = $state(false);
   let preserveUnderwater = $state(true);
+  let normalScale = $state(2.0);
   let bloomEnabled = $state(false);
   let bloomStrength = $state(DEFAULT_BLOOM_PARAMS.strength);
   let bloomRadius = $state(DEFAULT_BLOOM_PARAMS.radius);
@@ -135,6 +136,7 @@
       viewer.setAoEnabled(persisted.aoMaps);
       viewer.setMrMapEnabled(persisted.mrMaps);
       viewer.setPreserveUnderwaterHull(persisted.preserveUnderwater);
+      viewer.setNormalScale(persisted.normalScale);
       // Bloom params must be set BEFORE enabling so the lazy composer
       // build picks them up; the params setter is a no-op until the
       // composer exists, but that's the right order regardless.
@@ -158,6 +160,7 @@
       aoMaps = viewer.getAoEnabled();
       mrMaps = viewer.getMrMapEnabled();
       preserveUnderwater = viewer.getPreserveUnderwater();
+      normalScale = viewer.getNormalScale();
       bloomEnabled = viewer.getBloomEnabled();
       const bp = viewer.getBloomParams();
       bloomStrength = bp.strength;
@@ -289,6 +292,11 @@
     preserveUnderwater = v;
     viewer.setPreserveUnderwaterHull(v);
     patchState({ preserveUnderwater: v });
+  }
+  function setNormalScale(v: number) {
+    normalScale = v;
+    viewer.setNormalScale(v);
+    patchState({ normalScale: v });
   }
   function toggleBloom(v: boolean) {
     bloomEnabled = v;
@@ -538,6 +546,23 @@
           onchange={(e) => togglePreserveUnderwater(e.currentTarget.checked)}
         />
         Preserve underwater hull
+      </label>
+      <label class="{labelCls} {!showTextures ? 'opacity-55' : ''}">
+        <span class="flex items-center justify-between">
+          Normal-map intensity
+          <span class="text-muted-foreground tabular-nums text-[10px]">
+            {normalScale.toFixed(2)}×
+          </span>
+        </span>
+        <input
+          type="range"
+          min="0"
+          max="4"
+          step="0.1"
+          value={normalScale}
+          disabled={!showTextures}
+          oninput={(e) => setNormalScale(parseFloat(e.currentTarget.value))}
+        />
       </label>
     </div>
   </details>
