@@ -813,21 +813,9 @@ export class TextureManager {
       if (matTextures && !variantOptOut && entry.category in matTextures) {
         const matCat = matTextures[entry.category];
         const params = matCat.params ?? null;
-        // NOTE: a mat_textures prefer-mgn dispatch (mirroring the
-        // categories block above) is engine-faithful per the
-        // makeCamoMaterial +0x188+part*0xc0 selector, but suppressing
-        // Path A here renders ALL non-themed accessories (vanilla AA
-        // guns, secondaries, decorations) NATURAL under hybrid camos
-        // like mat_Montana_Hoshino — visually a regression. The engine's
-        // "Path B with camoMode=-1 → baseDielectric" interpretation
-        // turns out to NOT match WG's in-game rendering (or our visual
-        // expectation): WG paints non-themed accessories with the Path
-        // A overlay, and the engine's "_9" material-id marker is the
-        // actual gate for the themed exclusions (whale / bage / Hoshino
-        // turret) — covered by `camo_skip_asset_ids`. Keep applying
-        // Path A here; the per-channel MGN override (bound via mgnTex
-        // above) provides the gloss / metallic / normal modulation that
-        // distinguishes Path B from Path A on these accessories.
+        // Path A overlay applied here even when Path B MGN is present.
+        // Engine "_9" themed exclusions (whale, bage, Hoshino) are now
+        // handled per-texel by the shader via camoExclusionMap / mg.B.
         if (params && params.camo_mode === 0) {
           // Path B explicitly disabled — leave matTex null.
         } else {

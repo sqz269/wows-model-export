@@ -28,6 +28,7 @@ from ._constants import (
     _CHANNEL_SUFFIX_MAP,
     _MFM_STRIP_SUFFIXES,
 )
+from ._dds_channels import CHANNEL_SLOTS, LEGACY_RAW_SUFFIXES
 from ._makers import make_default_skin, make_skin
 
 def _glb_json_chunk(glb_path: str | Path) -> dict[str, Any]:
@@ -228,26 +229,26 @@ def texture_sets_from_dir(
         paths.sort(key=mip_rank)
 
     # Group stems into (variant, slot) using the shared classifier from
-    # `_classify_dds_filename`. That function understands the full suffix
-    # vocabulary including the toolkit-emitted conformant siblings
-    # (`_normal`, `_mr`, `_nbmask`) and routes WG originals (`_n`, `_mg`)
-    # to internal "raw" slot names that the finalisation step
-    # (`_promote_legacy_raw_slots`) collapses.
+    # `_classify_dds_filename`. That function understands the toolkit-
+    # emitted conformant siblings (`_normal`, `_mr`, `_nbmask`,
+    # `_camomask`, `_emissive`, `_ao`, `_a`). Raw WG `_n` / `_mg` files
+    # are pre-filtered (modern extracts always carry the conformant
+    # sibling alongside, making the raw form a redundant artifact).
     sets: dict[str, dict[str, list[str]]] = {}
     for stem, paths in per_stem.items():
+        # Skip WG-original raw siblings — conformant siblings cover the
+        # same content under canonical slot names. Sidecars built before
+        # May 2026 carrying legacy _normalRawOrMgRaw_* slot names need a
+        # re-extract under the current toolkit. The promote-on-load shim
+        # was dropped 2026-05-17.
+        if any(stem.endswith(s) for s in LEGACY_RAW_SUFFIXES):
+            continue
         # `_classify_dds_filename` strips the channel suffix, normalises
         # the camo / dead scheme key, and returns (asset_base, scheme,
         # slot). We don't need asset_base here (the directory boundary
         # already isolates one asset's stems).
         _asset_base, scheme, slot = _classify_dds_filename(stem)
         sets.setdefault(scheme, {}).setdefault(slot, []).extend(paths)
-
-    # Apply the same conformant-sibling-wins finalisation as the per-ship
-    # binder. After this, raw slots (`_normalRawOrMgRaw_*`) are gone:
-    # promoted to the canonical name when no conformant sibling is on
-    # disk, dropped when one exists.
-    for scheme_slots in sets.values():
-        _promote_legacy_raw_slots(scheme_slots)
 
     return sets
 
@@ -525,49 +526,17 @@ def _is_library_stem(stem: str) -> bool:
     fallback search from latching onto cross-ship texture sources."""
     return any(t in stem for t in _SHARED_LIBRARY_TOKENS)
 
-# Channel suffix → glTF slot name. Order matters in two ways:
+# Channel suffix → glTF slot name. The canonical table lives in
+# ``_dds_channels.CHANNEL_SLOTS`` and is shared with the skin-pack
+# producer; see that module's docstring for the conformant vs.
+# raw-WG suffix vocabulary.
 #
-# 1. Longer/more-specific suffixes must come first so we don't strip the
-#    wrong one. `_normal` must be checked before `_n`, `_mr` before `_mg`,
-#    `_nbmask` is unique.
-# 2. WG-original `_n` / `_mg` files map to "raw" slot names that the
-#    finalisation step (`_promote_legacy_raw_slots`) demotes/promotes
-#    based on whether the conformant sibling is present. Keeps backwards
-#    compat: a ship extracted with the pre-2026-04-30 toolkit still binds
-#    correctly via the WG originals; a ship extracted with the new
-#    toolkit binds the conformant siblings and ignores the originals.
-#
-# Conformant siblings (toolkit-emitted, glTF-spec):
-#   `_normal`   → tangent-space normal map (B = reconstructed Z)
-#   `_nbmask`   → camo Path B deny-list mask (BC4 single-channel, .R carries
-#                 `_n.B` — the 4-threshold _n.B paint factor source)
-#   `_camomask` → camo Path A paint mask (BC4 single-channel, .R carries
-#                 `_mg.B` — the WG binary paint-zone mask that
-#                 `ship_camo_material.fx` reads as the per-pixel
-#                 exclusion gate). See `reference/topics/camo/
-#                 wg_camo_shader_reference.md` §"Path A".
-#   `_mr`       → metallic-roughness (G = roughness, B = metallic)
-#
-# WG originals (kept for archaeology / RE — see
-# `reference/topics/texture/texture_conventions.md`):
-#   `_n`      → carries categorical mask in B (NOT Z) — wrong for shading
-#   `_mg`     → R cavity / G metallic / B paint-mask — non-glTF channel order
-_DDS_CHANNEL_TO_SLOT: tuple[tuple[str, str], ...] = (
-    ("_emissive", "emissive"),    # synthesized by tools/shared/synth_emission.py
-    ("_normal",   "normal"),
-    ("_nbmask",   "camoMask"),
-    ("_camomask", "camoExclusionMask"),
-    ("_mr",       "metallicRoughness"),
-    ("_mg",       "_normalRawOrMgRaw_metallicRoughness"),  # demoted in finalisation
-    ("_ao",       "occlusion"),
-    ("_n",        "_normalRawOrMgRaw_normal"),              # demoted in finalisation
-    ("_a",        "baseColor"),
-)
-
-# Slots whose name starts with this prefix are treated as legacy-raw and
-# get promoted to their canonical slot name in finalisation **only if**
-# the canonical slot is empty (i.e. no conformant sibling shipped).
-_LEGACY_RAW_SLOT_PREFIX = "_normalRawOrMgRaw_"
+# Modern extracts always ship the conformant siblings (``_normal`` /
+# ``_mr`` / ``_nbmask`` / ``_camomask``) alongside the raw WG originals
+# (``_n`` / ``_mg``). The classifier loops below operate on the
+# conformant set only — raw forms are pre-filtered via
+# :data:`LEGACY_RAW_SUFFIXES` at each call site so they never enter the
+# DDS index.
 
 
 _YEAR_TOKEN_RE = re.compile(r"_\d{4}(?=_|$)")
@@ -598,7 +567,7 @@ def _classify_dds_filename(stem_and_channel: str) -> tuple[str, str, str]:
 
     Examples:
         ``ASB017_Montana_a``                     → ("asb017_montana", "main",            "baseColor")
-        ``ASB017_Montana_n``                     → ("asb017_montana", "main",            "normal")
+        ``ASB017_Montana_normal``                → ("asb017_montana", "main",            "normal")
         ``ASB017_Montana_camo_01``               → ("asb017_montana", "camo_01",         "baseColor")
         ``ASB017_Montana_camo_01_B``             → ("asb017_montana", "camo_01_B",       "baseColor")
         ``ASB017_Montana_Deckhouse_camo_01``     → ("asb017_montana_deckhouse", "camo_01", "baseColor")
@@ -613,13 +582,20 @@ def _classify_dds_filename(stem_and_channel: str) -> tuple[str, str, str]:
     token is stripped from the material stem at the end so WG's
     inconsistent year-suffix authoring (e.g. Baltimore) doesn't
     fragment the stem index.
+
+    Raw WG ``_n`` / ``_mg`` files are filtered out before this function
+    runs (see :data:`LEGACY_RAW_SUFFIXES`); modern extracts always carry
+    the conformant ``_normal`` / ``_mr`` siblings instead.
     """
     rest = stem_and_channel
 
-    # 1. Trailing channel suffix (only present on `_a`/`_n`/`_mg`/`_ao`
-    #    files; camo variants without a channel default to baseColor).
+    # 1. Trailing channel suffix (only present on `_a`/`_ao`/`_normal`/
+    #    `_mr`/`_nbmask`/`_camomask`/`_emissive` files; camo variants
+    #    without a channel default to baseColor). Raw WG ``_n``/``_mg``
+    #    inputs are filtered out before this function is called — see
+    #    :data:`LEGACY_RAW_SUFFIXES`.
     slot = "baseColor"
-    for chan, slot_name in _DDS_CHANNEL_TO_SLOT:
+    for chan, slot_name in CHANNEL_SLOTS:
         if rest.endswith(chan):
             slot = slot_name
             rest = rest[: -len(chan)]
@@ -658,7 +634,7 @@ _MFM_PROP_TO_PBR_SLOTS: dict[str, tuple[str, ...]] = {
     #
     # `_n` files carry both shading normal AND camo Path B deny mask
     # (the conformant `_normal` + `_nbmask` siblings split them); we pull
-    # all three slots from the normalMap's stem so camoMask follows the
+    # both slots from the normalMap's stem so camoMask follows the
     # base ship's UV layout.
     #
     # `_mg` files similarly carry both PBR M/R/cavity AND the Path A
@@ -668,13 +644,13 @@ _MFM_PROP_TO_PBR_SLOTS: dict[str, tuple[str, ...]] = {
     # UV layout (and inheritance for mesh-swap variants matches the
     # mr/cavity stem the artist used).
     #
-    # `_normalRawOrMgRaw_*` slots are populated only when the toolkit
-    # extracted WG-original `_n` / `_mg` without conformant siblings;
-    # `_promote_legacy_raw_slots` (called in finalisation) collapses them
-    # onto the canonical name.
+    # Modern extracts always carry the conformant siblings, so the slot
+    # lookup goes directly through canonical names. (Pre-May-2026
+    # extracts that ship only WG-original `_n` / `_mg` need to be
+    # re-extracted under the current toolkit.)
     "diffuseMap":           ("baseColor",),
-    "normalMap":            ("normal", "_normalRawOrMgRaw_normal", "camoMask"),
-    "metallicGlossMap":     ("metallicRoughness", "_normalRawOrMgRaw_metallicRoughness", "camoExclusionMask"),
+    "normalMap":            ("normal", "camoMask"),
+    "metallicGlossMap":     ("metallicRoughness", "camoExclusionMask"),
     "ambientOcclusionMap":  ("occlusion",),
 }
 
@@ -763,8 +739,8 @@ def _apply_material_mappings_json(
     # Build a stem-channel-mip index so we can resolve `<stem>_<channel>.dd?`
     # paths without rescanning the directory per material. Key is the
     # ``_classify_dds_filename`` stem (lowercase + year-stripped); slot
-    # is the canonical PBR slot name (or `_normalRawOrMgRaw_*` for raw
-    # WG `_n` / `_mg` files awaiting promotion in finalisation).
+    # is the canonical PBR slot name. Raw WG ``_n`` / ``_mg`` files are
+    # pre-filtered (modern extracts always carry the conformant sibling).
     dds_index: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
     for f in sorted(textures_dds_dir.iterdir()):
         if not f.is_file():
@@ -775,6 +751,10 @@ def _apply_material_mappings_json(
             continue
         stem_and_channel = name[: -len(mip_sfx)]
         if "_blaze" in stem_and_channel.lower():
+            continue
+        # Skip WG-original raw siblings — conformant siblings cover the
+        # same content under canonical slot names.
+        if any(stem_and_channel.endswith(s) for s in LEGACY_RAW_SUFFIXES):
             continue
         # Per-scheme variants (camo_NN, dead, dead_camo_NN) are handled
         # by the heuristic resolver's `_bind_dds_textures_by_name`, which
@@ -958,6 +938,11 @@ def _bind_dds_textures_by_name(
         if "_blaze" in stem_and_channel.lower():
             continue
 
+        # Skip WG-original raw siblings — conformant siblings cover the
+        # same content under canonical slot names.
+        if any(stem_and_channel.endswith(s) for s in LEGACY_RAW_SUFFIXES):
+            continue
+
         stem, scheme, slot = _classify_dds_filename(stem_and_channel)
         stem_index[stem][scheme][slot].append(f"{dds_uri_prefix}{name}")
 
@@ -1095,36 +1080,13 @@ def _bind_dds_textures_by_name(
         target_schemes = [stem_index[t] for t in targets if t in stem_index]
         _merge_multi_targets(mat, target_schemes, existing_main)
 
-    # Finalisation pass: collapse legacy-raw slots (`_n` / `_mg` files)
-    # onto their canonical names only when the conformant sibling is
-    # absent. New extracts (with `_normal` / `_mr` siblings on disk)
-    # ignore the originals; old extracts (no siblings) fall back to the
-    # WG packing.
-    for mat in materials:
-        ts = mat.get("texture_sets") or {}
-        for scheme_slots in ts.values():
-            _promote_legacy_raw_slots(scheme_slots)
+    # Sidecars built before May 2026 carrying legacy _normalRawOrMgRaw_*
+    # slot names need a re-extract under the current toolkit. The
+    # promote-on-load shim was dropped 2026-05-17 — modern extracts
+    # always carry the conformant sibling so the inheritance now goes
+    # directly through canonical slot names.
 
     return unresolved
-
-
-def _promote_legacy_raw_slots(slots: dict[str, Any]) -> None:
-    """In-place: for each `_normalRawOrMgRaw_<canonical>` entry, copy it
-    onto `<canonical>` if `<canonical>` isn't already populated, then
-    drop the raw form. Always drops the raw form even if no promotion
-    occurred — raw slots are internal-only, never serialised.
-
-    Behaviour matrix:
-        canonical present, raw present  → keep canonical, drop raw  (new extract)
-        canonical absent,  raw present  → promote raw → canonical   (old extract)
-        canonical present, raw absent   → no-op
-        canonical absent,  raw absent   → no-op
-    """
-    for raw_slot in [s for s in slots if s.startswith(_LEGACY_RAW_SLOT_PREFIX)]:
-        canonical = raw_slot[len(_LEGACY_RAW_SLOT_PREFIX):]
-        raw_value = slots.pop(raw_slot)
-        if canonical and canonical not in slots:
-            slots[canonical] = raw_value
 
 
 def _resolve_target_stems(
@@ -1181,8 +1143,7 @@ def _resolve_target_stems(
         # base stems don't satisfy any suffix scan but ARE the right
         # source for normal / camoMask / AO on the variant's hull.
         _HULL_LIKE_SLOTS = (
-            "normal", "_normalRawOrMgRaw_normal", "camoMask",
-            "camoExclusionMask", "occlusion",
+            "normal", "camoMask", "camoExclusionMask", "occlusion",
         )
         for s in stem_index:
             if s in candidates:

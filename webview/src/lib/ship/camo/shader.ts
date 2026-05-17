@@ -249,7 +249,21 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
     // texture2D samples in linear space (Three.js auto-converts sRGB)
     // and camoColors are linear floats from <colorN> in camouflages.xml.
     vec4 mask = texture2D( maskMap, vCamoUv );
-    vec3 baseRgb = diffuseColor.rgb * baseSample.rgb;
+    // WG _mg.G is the metallic mask. The engine pre-mixes against
+    // baseLambert = baseAlbedo * (1 - mg.G) per chunk001:24 of
+    // ship_camo_material.fx, so the camo body color isn't applied on
+    // metallic regions (those move to the F0 specular path instead).
+    // For non-metallic surfaces (mg.G == 0) the factor is 1 and this
+    // is a no-op. Source picker parallels the mg.B picker above:
+    //   wgPackMG=1: metalnessMap.g (raw _mg.G)
+    //   wgPackMG=0: metalnessMap.b (conformant _mr.B ≈ mg.G mask)
+    // When no metalnessMap is bound, mgG stays 0 → identity factor 1.
+    float mgG = 0.0;
+    #ifdef USE_METALNESSMAP
+      vec4 mrTexelG = texture2D( metalnessMap, vMetalnessMapUv );
+      mgG = mix( mrTexelG.b, mrTexelG.g, wgPackMG );
+    #endif
+    vec3 baseRgb = diffuseColor.rgb * baseSample.rgb * ( 1.0 - mgG );
     vec3 P0 = mix( baseRgb, camoColors[0].rgb, camoColors[0].a );
     vec3 P1 = mix( baseRgb, camoColors[1].rgb, camoColors[1].a );
     vec3 P2 = mix( baseRgb, camoColors[2].rgb, camoColors[2].a );

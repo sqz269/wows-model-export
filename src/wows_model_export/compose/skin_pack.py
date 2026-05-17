@@ -83,61 +83,28 @@ from ..resolve import exterior_compare as ces
 from ..resolve import mesh_compare as csm
 from ..resolve import sidecar as resolve_sidecar
 from ..resolve import synth_emission
+from ..resolve.sidecar._dds_channels import (
+    SKIN_PACK_CHANNEL_SLOTS as CHANNEL_SLOTS,
+    SUFFIX_PRIORITY as _SUFFIX_PRIORITY,
+)
 from ..types import OnEvent, SkinPackResult
 from ._step_runner import StepRunner
 
 # ---------------------------------------------------------------------------
 # Channel → slot mapping for skin-pack DDS files
 # ---------------------------------------------------------------------------
-
-# Two suffix vocabularies coexist:
 #
-#  * Conformant glTF-style siblings the toolkit's swizzle pass emits when
-#    invoked via ``export-ship --raw-dds-dir``:
-#       ``_normal``   → tangent-space normal (B = reconstructed Z)
-#       ``_mr``       → metallic-roughness (G = roughness, B = metallic)
-#       ``_nbmask``   → BC4 single-channel "no-camo region" mask extracted
-#                       from the WG normal map's B channel (Path B
-#                       4-threshold deny list source)
-#       ``_camomask`` → BC4 single-channel "Path A paint mask" extracted
-#                       from the WG MG map's B channel (the binary
-#                       exclusion gate that ``ship_camo_material.fx``
-#                       reads — see
-#                       ``reference/topics/camo/wg_camo_shader_reference.md``
-#                       §"Path A")
-#
-#  * WG-original channels the loose mod folders ship (no swizzle pass):
-#       ``_n``       → raw WG normal (B = camo no-camo mask)
-#       ``_mg``      → raw WG MG (R=gloss, G=metallic, B=binary paint mask)
-#
-# Both routes land in the same canonical glTF slot names so the renderer
-# prefers conformant when present and falls back to raw via the
-# WgShipStandard shader chunk's WG-pack handling. Order is longest-
-# suffix-first so ``_normal`` matches before ``_n``, ``_mr`` before
-# ``_mg``, ``_camomask`` before ``_camo`` (no such suffix here but
-# defensive against future regressions).
-CHANNEL_SLOTS: tuple[tuple[str, str], ...] = (
-    ("_emissive", "emissive"),
-    ("_nbmask",   "camoMask"),
-    ("_camomask", "camoExclusionMask"),
-    ("_normal",   "normal"),
-    ("_mr",       "metallicRoughness"),
-    ("_ao",       "occlusion"),
-    ("_mg",       "metallicRoughness"),
-    ("_n",        "normal"),
-    ("_a",        "baseColor"),
-)
-
-
-#: Priority per channel suffix; 0 = preferred (glTF-conformant), 1 = raw
-#: WG fallback. When both forms land on disk for the same slot (toolkit's
-#: ``--raw-dds-dir`` emits both), :func:`apply_plan` keeps only the
-#: lower-priority number per ``(stem, slot)``.
-_SUFFIX_PRIORITY: dict[str, int] = {
-    "_emissive": 0,
-    "_nbmask": 0, "_camomask": 0, "_normal": 0, "_mr": 0, "_ao": 0, "_a": 0,
-    "_n": 1, "_mg": 1,
-}
+# ``CHANNEL_SLOTS`` and ``_SUFFIX_PRIORITY`` are imported from
+# :mod:`wows_model_export.resolve.sidecar._dds_channels` (single source
+# of truth, shared with the extract-time binder in
+# :mod:`..resolve.sidecar._materials`). The skin-pack consumer pulls
+# the extended ``SKIN_PACK_CHANNEL_SLOTS`` view so the classifier
+# recognises BOTH conformant siblings (``_normal``, ``_mr``,
+# ``_nbmask``, ``_camomask``) AND raw WG-original ``_n`` / ``_mg``
+# files (loose mods may ship the raw forms before skin_pack's swizzle
+# pass runs). The ``_SUFFIX_PRIORITY`` lookup then dedupes
+# ``(stem, slot)`` pairs at apply time so conformant siblings always
+# win when both land on disk.
 
 
 # Verdicts that mean "mod texture safely applies to vanilla mesh".

@@ -311,8 +311,9 @@ def synthesize_emissive_textures(
       - ``<stem>_emissive.dd0``  (top mip — synthesized from ``_a.dd0`` + ``_mg.dd0``)
       - ``<stem>_emissive.dds``  (low mip — synthesized from ``_a.dds`` + ``_mg.dds``)
 
-    Sidecar's ``_DDS_CHANNEL_TO_SLOT`` then routes these into
-    ``texture_sets[<scheme>]["emissive"]`` automatically.
+    Sidecar's ``CHANNEL_SLOTS`` table (in
+    :mod:`wows_model_export.resolve.sidecar._dds_channels`) then routes
+    these into ``texture_sets[<scheme>]["emissive"]`` automatically.
 
     For mesh-swap variants whose MFM resolves ``_mg`` to a different
     stem, pass ``material_mappings_json`` so synth can swap in the
