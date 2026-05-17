@@ -114,6 +114,13 @@ export class TextureManager {
   // time against `entry.key` (no per-entry cache → no retroactive flip
   // needed when bind/register orderings vary).
   private noCamoKeys = new Set<string>();
+  // Binding keys whose sidecar `shader_intent` says "cutout". Used to
+  // flip `alphaTest = 0.5` on the textured clone (mirrors `noCamoKeys`'s
+  // role for `"transparent"`). WG library shaders 0x00010000 (nets /
+  // grids / fences — single-map alpha-tested) and friends ship through
+  // the toolkit's glTF as `alphaMode: Opaque`, so the GLTFLoader leaves
+  // alpha-test off — without this flag the holes render as solid panels.
+  private cutoutKeys = new Set<string>();
   // Per-key detail-normal blend params from the sidecar's
   // `materials[*].detail_params`. Read at material-build time and
   // pushed into the camo shader chunk's `detail*` uniforms. Absent
@@ -262,6 +269,7 @@ export class TextureManager {
       const schemes = this.compileSchemes(mat.texture_sets, hullBaseUrl);
       if (schemes.size > 0) this.bindSchemes(`hull:${matName}`, schemes);
       if (mat.shader_intent === 'transparent') this.markNoCamoKey(`hull:${matName}`);
+      if (mat.shader_intent === 'cutout') this.cutoutKeys.add(`hull:${matName}`);
       const detail = (mat as { detail_params?: DetailParams }).detail_params;
       if (detail) this.detailParamsByKey.set(`hull:${matName}`, detail);
     }
@@ -313,9 +321,9 @@ export class TextureManager {
       const schemes = this.compileSchemes(mat.texture_sets, tplBase);
       const matKey = `asset:${assetId}:material:${matName}`;
       if (schemes.size > 0) this.bindSchemes(matKey, schemes);
-      if ((mat as { shader_intent?: string }).shader_intent === 'transparent') {
-        this.markNoCamoKey(matKey);
-      }
+      const intent = (mat as { shader_intent?: string }).shader_intent;
+      if (intent === 'transparent') this.markNoCamoKey(matKey);
+      if (intent === 'cutout') this.cutoutKeys.add(matKey);
       const detail = (mat as { detail_params?: DetailParams }).detail_params;
       if (detail) this.detailParamsByKey.set(matKey, detail);
     }
@@ -708,6 +716,7 @@ export class TextureManager {
     this.schemesByKey.clear();
     this.entriesByKey.clear();
     this.noCamoKeys.clear();
+    this.cutoutKeys.clear();
     this.detailParamsByKey.clear();
     this.categoryMaskCache.clear();
     this.matAlbedoCache.clear();
@@ -811,6 +820,7 @@ export class TextureManager {
             policy,
             this.noCamoKeys.has(e.key),
             detailParams,
+            this.cutoutKeys.has(e.key),
           );
           e.texturedByScheme.set(cloneKey, textured);
         } else {

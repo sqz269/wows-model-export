@@ -61,6 +61,7 @@ export function applyTexturesToMaterial(
   policy: MaterialClonePolicy,
   forceTransparentBlend: boolean = false,
   detailParams: DetailParams | null = null,
+  forceAlphaTest: boolean = false,
 ): THREE.Material {
   const std = original as THREE.MeshStandardMaterial;
   if (!('isMeshStandardMaterial' in std) || !std.isMeshStandardMaterial) return original;
@@ -120,6 +121,18 @@ export function applyTexturesToMaterial(
   if (forceTransparentBlend) {
     c.transparent = true;
     c.depthWrite = false;
+  } else if (forceAlphaTest) {
+    // Sidecar marked this as `shader_intent: "cutout"` — alpha-tested
+    // single-map shader (WG `assets.bin shader_id=0x00010000`, used for
+    // nets/grids/fences). Mirrors the transparent branch above: the
+    // toolkit's glTF emit says `alphaMode: Opaque`, so without this flip
+    // baseColor.a is ignored and `<stem>_a.dds`'s alpha=0 texels render
+    // as solid (filled with whatever RGB the artist baked into the
+    // holes — typically a mid-gray that reads as "the parent radar's
+    // own color"). Standard glTF MASK semantics use a 0.5 cutoff.
+    c.alphaTest = 0.5;
+    c.transparent = false;
+    c.depthWrite = true;
   }
 
   // Always attach the camo chunk. Sidecar-transparent materials still
@@ -199,11 +212,12 @@ export function buildTextured(
   policy: MaterialClonePolicy,
   forceTransparentBlend: boolean = false,
   detailParams: DetailParams | null = null,
+  forceAlphaTest: boolean = false,
 ): THREE.Material | THREE.Material[] {
   if (Array.isArray(original)) {
     return original.map((m) =>
-      applyTexturesToMaterial(m, tex, policy, forceTransparentBlend, detailParams),
+      applyTexturesToMaterial(m, tex, policy, forceTransparentBlend, detailParams, forceAlphaTest),
     );
   }
-  return applyTexturesToMaterial(original, tex, policy, forceTransparentBlend, detailParams);
+  return applyTexturesToMaterial(original, tex, policy, forceTransparentBlend, detailParams, forceAlphaTest);
 }
