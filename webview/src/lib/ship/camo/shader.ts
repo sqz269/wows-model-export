@@ -135,32 +135,57 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
     vec4 dsq = min( vec4( 1.0 ), d * d * 1000.0 );
     nbPaint = dsq.x * dsq.y * dsq.z * dsq.w;
   }
-  catPaintMask = nbPaint;
+
+  // ── mg.B paint-mask source picker (engine paint gate) ────────────────
+  // metallicGlossMap.B is the WG MG texture's binary 0/255 paint mask,
+  // authored per-pixel by artists. Both shader variants reach for it:
+  //   • Path A (ship_camo_material.fx)     — always gates by mg.B
+  //   • Path B (ship_camo_mgn_material.fx) — gates by mg.B when the
+  //                                          per-material useCamoMaskGlobal
+  //                                          bool is set (default for hulls
+  //                                          + most accessory categories).
+  //
+  // Source priority (engine-faithful → approximate fallback):
+  //   (a) camoExclusionMap — BC4 sibling `_camomask.dd?` carrying mg.B
+  //       byte-for-byte (post-2026-05-16 toolkit). Canonical engine input.
+  //   (b) Raw `_mg.dd?` bound to metalnessMap with wgPackMG=1.0
+  //       (loose-mod skin packs). mrTexel.b == mg.B directly.
+  //   (c) None — `hasMgB == 0`. Each consumer picks its own fallback:
+  //         Path A → nbPaint   (engine-different but visually similar)
+  //         Path B → 1.0       (drop the mg.B factor; paint per nbPaint
+  //                             alone — avoids nbPaint² over-exclusion).
+  float mgB = 1.0;
+  float hasMgB = 0.0;
+  #ifdef USE_METALNESSMAP
+    vec4 mgTexelB = texture2D( metalnessMap, vMetalnessMapUv );
+    mgB    = mix( mgB,    mgTexelB.b, wgPackMG );  // tier (b)
+    hasMgB = max( hasMgB, wgPackMG );
+  #endif
+  if ( camoExclusionBound > 0.5 ) {
+    mgB    = texture2D( camoExclusionMap, vMapUv ).r;  // tier (a)
+    hasMgB = 1.0;
+  }
+
+  // Path B engine paintMask (chunk001:53-54 of ship_camo_mgn_material.fx):
+  //   paintMask = useCamoMaskGlobal ? (mg.B * nbPaint) : nbPaint
+  // Drives BOTH the mat_albedo diffuse blend below AND the per-channel
+  // MGN overrides in roughnessmap / metalnessmap / normal_fragment_maps.
+  // When mg.B source is unavailable (hasMgB=0), mgB defaults to 1.0 → the
+  // formula degenerates to nbPaint regardless of useCamoMaskGlobal, which
+  // drops the engine's mg.B factor rather than approximating with
+  // nbPaint² (over-exclusion).
+  catPaintMask = mix( nbPaint, nbPaint * mgB, catUseCamoMaskGlobal );
 
   // Underwater gate — separate aesthetic (preserves the wet/dirty base
   // below the waterline). Applies to both Path A and Path B.
   bool aboveWaterline = ( vWorldY >= waterlineY );
 
-  // ── Path B MGN sample + useCamoMaskGlobal gate ───────────────────────
-  // Engine recipe per camo_path_b_render_re.md §1 stages 2 + 4:
-  //   paintMask = useCamoMaskGlobal ? mg.B * nbPaint : nbPaint
-  //   cm = sample( camoMGN, camoUv )
+  // ── Path B MGN texture sample ────────────────────────────────────────
   // Sampled at the same UV transform as camoAlbedo (matAlbedoUv) since
   // the engine treats them as a paired texture pair. For hull_palette
-  // hybrid (Path B-only, no camoAlbedo), matAlbedoUv defaults to
-  // identity (1,1,0,0) → sample at vMapUv directly.
+  // hybrid (Path B-only, no camoAlbedo), matAlbedoUv defaults to identity
+  // (1,1,0,0) → sample at vMapUv directly.
   if ( catMgnBound > 0.5 && aboveWaterline ) {
-    if ( catUseCamoMaskGlobal > 0.5 ) {
-      #ifdef USE_METALNESSMAP
-        // WG _mg.B = gloss = the mask (per project_wg_emissive_mg_b_channel.md
-        // — the same channel WG reuses for the emissive mask gate).
-        // glTF-converted _mr.G = roughness = 1 - gloss. Pick the right
-        // channel using the existing wgPackMG flag.
-        vec4 mrTexel = texture2D( metalnessMap, vMetalnessMapUv );
-        float glossMask = mix( 1.0 - mrTexel.g, mrTexel.b, wgPackMG );
-        catPaintMask *= glossMask;
-      #endif
-    }
     vec2 mgnUv = vMapUv * matAlbedoUv.xy + matAlbedoUv.zw;
     catMgnSample = texture2D( catMgnMap, mgnUv );
   }
@@ -172,8 +197,10 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
     //   matAlbedoMode >= 1.5  → Path B alpha-weighted RGB replace.
     //                            Mode 2 most common (AzurNJ, ARP, Sabaton,
     //                            Aegir AL); modes 1/3 use the same lerp.
-    // Blend the per-pixel camo contribution with the natural diffuse by
-    // 'nbPaint' — engine-faithful soft falloff around the 4 deny bands.
+    // Gate is the engine paintMask (catPaintMask), not raw nbPaint —
+    // honors useCamoMaskGlobal × mg.B per chunk001:53-54. A black
+    // camoExclusionMask suppresses the camo here even where nbmask
+    // would otherwise paint.
     vec2 matUv = vMapUv * matAlbedoUv.xy + matAlbedoUv.zw;
     vec4 matSample = texture2D( matAlbedoMap, matUv );
     vec3 natural = diffuseColor.rgb * baseSample.rgb;
@@ -185,7 +212,7 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
       float aoMod = mix( 1.0, coverage, matAlbedoAo );
       painted = mix( diffuseColor.rgb * aoMod, matSample.rgb, coverage );
     }
-    diffuseColor.rgb = mix( natural, painted, nbPaint );
+    diffuseColor.rgb = mix( natural, painted, catPaintMask );
     diffuseColor.a   = baseSample.a;
   } else if ( camoEnable > 0.5 && aboveWaterline ) {
     // Path A — sequential 4-row palette lerp weighted by mask.RGB,
@@ -206,20 +233,8 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
     //   2. Sequential lerp through all 4 rows weighted by mask.R, then
     //      mask.G, then mask.B — a CONTINUOUS 3-channel weight, not a
     //      thresholded zone classifier.
-    //   3. Final paint/no-paint gate by mg.B (binary 0/255 mask channel
-    //      of metallicGlossMap in WG MG layout).
-    //
-    // mg.B source priority (engine-faithful → approximate fallback):
-    //   (a) camoExclusionMap (post-2026-05-16 toolkit): a BC4 single-
-    //       channel sibling _camomask.dd? carrying the original mg.B
-    //       byte-for-byte. This is the canonical engine input.
-    //   (b) Raw _mg.dd? bound to metalnessMap with wgPackMG=1 (loose-
-    //       mod skin packs): the slot is the raw WG mg layout so
-    //       mrTexel.b == mg.B directly.
-    //   (c) nbPaint from _n.B 4-threshold deny formula: same gate as
-    //       Path B. Engine-different but visually similar — used as a
-    //       last-resort fallback when neither (a) nor (b) is available
-    //       (pre-2026-05-16 toolkit extracts with conformant _mr.dds).
+    //   3. Final paint/no-paint gate by mg.B — see picker above.
+    //      Falls back to nbPaint when no mg.B source is bound.
     //
     // mask.a is NEVER sampled (engine writes r0.xyz only at line 18).
     // texture2D samples in linear space (Three.js auto-converts sRGB)
@@ -233,20 +248,7 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
     vec3 step1 = mix( P0,    P1, mask.r );
     vec3 step2 = mix( step1, P2, mask.g );
     vec3 step3 = mix( step2, P3, mask.b );
-    // Pick the best mg.B source available. Higher priority overrides
-    // lower; nbPaint is the universal fallback.
-    float pathAGate = nbPaint;
-    #ifdef USE_METALNESSMAP
-      // Tier (b): raw WG _mg.dd? bound (loose-mod mode).
-      vec4 mgTexel = texture2D( metalnessMap, vMetalnessMapUv );
-      pathAGate = mix( pathAGate, mgTexel.b, wgPackMG );
-    #endif
-    // Tier (a): dedicated _camomask.dd? sibling (preferred). Bound
-    // when the post-2026-05-16 toolkit extracted the asset; otherwise
-    // camoExclusionBound = 0 and the lower-tier source is kept.
-    if ( camoExclusionBound > 0.5 ) {
-      pathAGate = texture2D( camoExclusionMap, vMapUv ).r;
-    }
+    float pathAGate = mix( nbPaint, mgB, hasMgB );
     diffuseColor.rgb = mix( baseRgb, step3, pathAGate );
     diffuseColor.a    = baseSample.a;
   } else {
