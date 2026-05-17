@@ -31,7 +31,6 @@ import {
 import { CategoryMaskCache, MatAlbedoCache, MgnTextureCache } from './category_mask';
 import { DecodedTextureCache } from './decode';
 import type { SlotUrls, TextureMeshEntry, TextureSetResolved } from './types';
-import { ensureTangents } from '$lib/three/tangents';
 
 /**
  * Snapshot of the camo binding + per-entry state for the active skin.
@@ -659,21 +658,16 @@ export class TextureManager {
     texturedEntries: number;
     withNormalMap: number;
     withoutNormalMap: number;
-    withTangentAttr: number;
-    withoutTangentAttr: number;
     sample: {
       key: string;
       hasNormalMap: boolean;
       normalScale: [number, number];
-      hasTangentAttr: boolean;
       wgPackN: boolean;
     } | null;
   } {
     let texturedEntries = 0;
     let withNormalMap = 0;
     let withoutNormalMap = 0;
-    let withTangentAttr = 0;
-    let withoutTangentAttr = 0;
     let sample: ReturnType<TextureManager['getNormalDiagnostics']>['sample'] = null;
 
     for (const entry of this.entries) {
@@ -684,14 +678,11 @@ export class TextureManager {
         const std = mat as THREE.MeshStandardMaterial;
         if (!('isMeshStandardMaterial' in std) || !std.isMeshStandardMaterial) continue;
         if (std.normalMap) withNormalMap++; else withoutNormalMap++;
-        const hasTangent = !!entry.mesh.geometry?.attributes?.tangent;
-        if (hasTangent) withTangentAttr++; else withoutTangentAttr++;
         if (sample === null && std.normalMap) {
           sample = {
             key: entry.key,
             hasNormalMap: true,
             normalScale: [std.normalScale.x, std.normalScale.y],
-            hasTangentAttr: hasTangent,
             wgPackN: !!(std.normalMap.userData?.wgPackN),
           };
         }
@@ -704,8 +695,6 @@ export class TextureManager {
       texturedEntries,
       withNormalMap,
       withoutNormalMap,
-      withTangentAttr,
-      withoutTangentAttr,
       sample,
     };
   }
@@ -816,14 +805,6 @@ export class TextureManager {
             continue;
           }
           const detailParams = this.detailParamsByKey.get(e.key) ?? null;
-          // If the mesh has a normal map but lacks a TANGENT attribute,
-          // compute one. Hull GLBs ship TANGENT; accessory GLBs don't
-          // (confirmed propeller/barbette/turret = 0/N primitives).
-          // Without tangents, Three.js falls back to perturbNormal2Arb
-          // (screen-space derivative) — visibly weaker than proper TBN.
-          if (tex.normal && e.mesh.geometry) {
-            ensureTangents(e.mesh.geometry);
-          }
           textured = buildTextured(
             e.untextured,
             tex,
