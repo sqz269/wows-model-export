@@ -738,8 +738,22 @@ def resolve_decorative_placements(
     # Surface accumulated warnings through stderr so consumers without an
     # on_event handler still see them; consumers that want structured access
     # listen to the StepEvent stream instead.
+    #
+    # Wrap each write in a guard: on Windows, writing to stderr from a
+    # `ThreadPoolExecutor` worker inside the in-process FastAPI server has
+    # been observed to raise `OSError: [Errno 22] Invalid argument` after
+    # a long-running session — most likely the parent console's pipe state
+    # going bad mid-extract. Warnings are best-effort diagnostic output;
+    # losing one shouldn't fail the whole extract right after `write_output`
+    # already succeeded.
     for w in warnings:
-        print(f"[skel_ext_resolve] warn: {w}", file=sys.stderr)
+        try:
+            print(f"[skel_ext_resolve] warn: {w}", file=sys.stderr, flush=True)
+        except OSError:
+            # stderr is unwritable; further attempts will fail the same way.
+            # Bail out of the warning loop and let the function return
+            # normally — the JSON is already on disk.
+            break
 
     return output_json
 
