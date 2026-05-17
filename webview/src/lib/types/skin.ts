@@ -42,8 +42,8 @@ export interface SkinMatCategoryParams {
    *  3 = split blend. */
   camo_mode: number;
   use_camo_mask_global: boolean;
-  /** (metallic_mix, gloss_mix, normal_mix, 0). */
-  mgn_influence: [number, number, number, number];
+  /** (metallic_mix, gloss_mix, normal_mix) — `.w` was DXBC-confirmed dead. */
+  mgn_influence: [number, number, number];
   /** 0..1 — controls how strongly the mask alpha darkens base albedo. */
   ao_influence: number;
   emission_anim_mode: number;

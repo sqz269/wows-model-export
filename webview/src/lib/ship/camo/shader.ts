@@ -78,7 +78,7 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
       'uniform float camoExclusionBound;\n' +
       'uniform sampler2D catMgnMap;\n' +
       'uniform float catMgnBound;\n' +
-      'uniform vec4 catMgnInfluence;\n' +
+      'uniform vec3 catMgnInfluence;\n' +
       'uniform float catUseCamoMaskGlobal;\n' +
       'uniform float wgPackMG;\n' +
       'uniform float wgPackN;\n' +
@@ -146,11 +146,11 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
   //                                          + most accessory categories).
   //
   // Source priority (engine-faithful → approximate fallback):
-  //   (a) camoExclusionMap — BC4 sibling `_camomask.dd?` carrying mg.B
+  //   (a) camoExclusionMap — BC4 sibling _camomask.dd? carrying mg.B
   //       byte-for-byte (post-2026-05-16 toolkit). Canonical engine input.
-  //   (b) Raw `_mg.dd?` bound to metalnessMap with wgPackMG=1.0
+  //   (b) Raw _mg.dd? bound to metalnessMap with wgPackMG=1.0
   //       (loose-mod skin packs). mrTexel.b == mg.B directly.
-  //   (c) None — `hasMgB == 0`. Each consumer picks its own fallback:
+  //   (c) None — hasMgB == 0. Each consumer picks its own fallback:
   //         Path A → nbPaint   (engine-different but visually similar)
   //         Path B → 1.0       (drop the mg.B factor; paint per nbPaint
   //                             alone — avoids nbPaint² over-exclusion).
@@ -191,28 +191,37 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
   }
 
   if ( matAlbedoEnable > 0.5 && aboveWaterline ) {
-    // mat_* permoflage paint (Path B). Two recipes:
-    //   matAlbedoMode <  0.5  → Path A-style multiplicative atlas overlay
-    //                            (tile / mat_camo without <Part_mgn>).
-    //   matAlbedoMode >= 1.5  → Path B alpha-weighted RGB replace.
-    //                            Mode 2 most common (AzurNJ, ARP, Sabaton,
-    //                            Aegir AL); modes 1/3 use the same lerp.
-    // Gate is the engine paintMask (catPaintMask), not raw nbPaint —
-    // honors useCamoMaskGlobal × mg.B per chunk001:53-54. A black
-    // camoExclusionMask suppresses the camo here even where nbmask
-    // would otherwise paint.
+    // mat_* permoflage paint (Path B) — engine 4-way dispatch on camoMode
+    // per ship_camo_mgn_material.fx chunk001:72-79 (DXBC RE), see
+    // reference/topics/camo/camo_path_b_render_re.md §4. Mode 1 bypasses
+    // useCamoMaskGlobal (raw nbPaint, not catPaintMask); modes 0/2/3 gate
+    // by catPaintMask. Mode 2 dominates the corpus; mode 3 is rare/zero.
     vec2 matUv = vMapUv * matAlbedoUv.xy + matAlbedoUv.zw;
     vec4 matSample = texture2D( matAlbedoMap, matUv );
     vec3 natural = diffuseColor.rgb * baseSample.rgb;
+    float coverage = matSample.a;
+
     vec3 painted;
-    if ( matAlbedoMode < 0.5 ) {
-      painted = diffuseColor.rgb * matSample.rgb;
+    float blendT;
+    if ( matAlbedoMode > 0.5 && matAlbedoMode < 1.5 ) {
+      // Mode 1: paint*ca.a — engine bypasses useCamoMaskGlobal here.
+      painted = matSample.rgb;
+      blendT  = nbPaint * coverage;
+    } else if ( matAlbedoMode > 2.5 ) {
+      // Mode 3: paintMask*ca.a (rare).
+      painted = matSample.rgb;
+      blendT  = catPaintMask * coverage;
+    } else if ( matAlbedoMode > 1.5 ) {
+      // Mode 2: full body color, gated by paintMask. Most common.
+      painted = matSample.rgb;
+      blendT  = catPaintMask;
     } else {
-      float coverage = matSample.a;
+      // Mode -1 / 0: aoMod-modulated base, gated by paintMask.
       float aoMod = mix( 1.0, coverage, matAlbedoAo );
-      painted = mix( diffuseColor.rgb * aoMod, matSample.rgb, coverage );
+      painted = mix( natural * aoMod, matSample.rgb, coverage );
+      blendT  = catPaintMask;
     }
-    diffuseColor.rgb = mix( natural, painted, catPaintMask );
+    diffuseColor.rgb = mix( natural, painted, blendT );
     diffuseColor.a   = baseSample.a;
   } else if ( camoEnable > 0.5 && aboveWaterline ) {
     // Path A — sequential 4-row palette lerp weighted by mask.RGB,

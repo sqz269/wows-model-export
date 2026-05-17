@@ -1678,14 +1678,17 @@ def mgn_params_to_json(p: MgnParams) -> dict:
     ``reference/topics/camo/wg_camo_shader_reference.md`` Path B for
     the full mapping).
 
-    The ``mgn_influence`` shader uniform is a vec4 packing
-    ``(influence_m, influence_g, influence_n, 0)`` — we expose it
-    pre-packed so consumers can write a single uniform.
+    The ``mgn_influence`` shader uniform is a vec3 packing
+    ``(influence_m, influence_g, influence_n)``. The DXBC RE of
+    `ship_camo_mgn_material.fx` (see
+    `reference/topics/camo/camo_path_b_makecamomaterial_re.md §1`)
+    confirmed cb0[17].w is read by no PS chunk — the 4th slot is dead
+    and dropped from the contract.
     """
     return {
         "camo_mode":              p.camo_mode,
         "use_camo_mask_global":   p.use_camo_mask_global,
-        "mgn_influence":          [p.influence_m, p.influence_g, p.influence_n, 0.0],
+        "mgn_influence":          [p.influence_m, p.influence_g, p.influence_n],
         "ao_influence":           p.influence_ao,
         "emission_anim_mode":     p.camo_emission_animation_mode,
         "emission_color_mode":    p.camo_emission_color_mode,

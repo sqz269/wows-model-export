@@ -82,9 +82,8 @@ export interface CamoUniforms {
    *   .x = metallic mix  (paintMask × .x scales camoMGN.G into metalness)
    *   .y = gloss mix     (paintMask × .y blends mg.R toward camoMGN.R)
    *   .z = normal mix    (paintMask × .z scales the tangent-space offset)
-   *   .w = unused (dead slot per DXBC — every chunk; pipeline can drop)
    */
-  catMgnInfluence: { value: THREE.Vector4 };
+  catMgnInfluence: { value: THREE.Vector3 };
   /**
    * Per-pixel mg.B gate. When true, paintMask = mg.B × nbPaint instead
    * of just nbPaint — artists get a second binary mask channel
@@ -94,26 +93,6 @@ export interface CamoUniforms {
    * gate as off — see shader.ts comments).
    */
   catUseCamoMaskGlobal: { value: number };
-
-  // ── Path B emission animation (PHASE 2 — scaffolded, not yet bound) ─
-  //
-  // chunks 24-47 only. ~13% of corpus carries non-default emission
-  // params. Decoded recipe in camo_path_b_render_re.md §5.
-  // Stubbed here so the structure exists for a follow-up; current
-  // shader.ts does NOT consume these uniforms yet.
-  catAnimMap: { value: THREE.Texture };
-  catAnimMapBound: { value: number };
-  catEmissionAnimMode: { value: number };
-  catEmissionColorMode: { value: number };
-  catEmissionBasePower: { value: number };
-  catEmissionAnimMaxPower: { value: number };
-  catMaskSmooth: { value: number };
-  catAnimScale: { value: THREE.Vector3 };
-  catMaskSpeed: { value: THREE.Vector3 };
-  catCamoMaskColor1: { value: THREE.Vector3 };
-  catCamoMaskColor2: { value: THREE.Vector4 };
-  /** Seconds since start, set per frame in the render loop (phase 2). */
-  catTime: { value: number };
 
   // ── WG channel-pack overrides ──────────────────────────────────────
   /**
@@ -151,20 +130,8 @@ export function makeCamoUniforms(): CamoUniforms {
     matAlbedoAo: { value: 0.0 },
     catMgnMap: { value: dummyMgnTexture },
     catMgnBound: { value: 0.0 },
-    catMgnInfluence: { value: new THREE.Vector4(0, 0, 0, 0) },
+    catMgnInfluence: { value: new THREE.Vector3(0, 0, 0) },
     catUseCamoMaskGlobal: { value: 0.0 },
-    catAnimMap: { value: dummyMaskTexture },
-    catAnimMapBound: { value: 0.0 },
-    catEmissionAnimMode: { value: 0 },
-    catEmissionColorMode: { value: 0 },
-    catEmissionBasePower: { value: 0.0 },
-    catEmissionAnimMaxPower: { value: 0.0 },
-    catMaskSmooth: { value: 1.0 },
-    catAnimScale: { value: new THREE.Vector3(1, 1, 1) },
-    catMaskSpeed: { value: new THREE.Vector3(0.1, 0.1, 0.5) },
-    catCamoMaskColor1: { value: new THREE.Vector3(1, 0, 0) },
-    catCamoMaskColor2: { value: new THREE.Vector4(1, 1, 0, 1) },
-    catTime: { value: 0.0 },
     wgPackMG: { value: 0.0 },
     wgPackN: { value: 0.0 },
   };

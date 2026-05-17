@@ -88,10 +88,13 @@ export function applyTexturesToMaterial(
   // `acceptsCamo` (false for sidecar `shader_intent: "transparent"`; set
   // by TextureManager.markNoCamoKey). Fallback: `std.transparent` for
   // materials lacking a sidecar binding (untextured glTF Blend mode).
-  // Engine analog: WG routes transparent materials to `ship_transparent_*.fx`,
-  // which has no camo recipe. MASK (alphaTest > 0, transparent: false)
-  // stays through Path A because the engine itself does `discard_nz` on
-  // diffuse.a in `ship_camo_material.fx`.
+  // Engine analog: per the part_index lookup at exe 0x140071a20 (see
+  // reference/topics/camo/camo_part_index_table.md), transparent
+  // materials carry no enumerated material name, so FUN_14108c360
+  // bails out at LAB_14108c60e and makeCamoMaterial is never invoked.
+  // MASK (alphaTest > 0, transparent: false) stays through Path A
+  // because the engine itself does `discard_nz` on diffuse.a in
+  // `ship_camo_material.fx`.
   if (!acceptsCamo || std.transparent) {
     c.userData = { ...(c.userData || {}), mgTex, origMetalness, origRoughness };
     c.needsUpdate = true;

@@ -20,7 +20,7 @@
 import type * as THREE from 'three';
 import { resolveDdsMipUrls } from '$lib/dds';
 import { classifyPartCategory, classifyPlacementCategory } from '$lib/types';
-import type { ShipPlacement, Skin, SidecarDoc, SidecarTextureScheme, TextureSet } from '$lib/types';
+import type { ShipPlacement, Skin, SidecarDoc, SidecarTextureScheme, SkinMatCategoryParams, TextureSet } from '$lib/types';
 import { dummyMaskTexture, dummyMatAlbedoTexture, uniformsOf } from '../camo';
 import { applyTexturesToMaterial, buildTextured, type MaterialClonePolicy } from './material';
 import { CategoryMaskCache, MatAlbedoCache, MgnTextureCache } from './category_mask';
@@ -757,35 +757,28 @@ export class TextureManager {
 
       // Path B MGN data — both the categories block (Path B-only emit)
       // and the mat_textures block (mat_palette hybrid emit) can surface
-      // `mgn` + `params`. Prefer the mat_textures entry when present
-      // (matched with camoAlbedo + a UV transform); fall back to the
-      // categories entry for hull_palette hybrid Path B-only.
+      // `mgn` + `params`. Per CAMO_SOURCE_OF_TRUTH §4.9, `mat_textures`
+      // wins over `categories` when both exist; the two record shapes
+      // diverge in their non-MGN fields, but both carry `.mgn` + `.params`
+      // identically, so the downstream uniform writes are the same.
+      const pathB: { mgn?: { dds_mips: string[] }; params?: SkinMatCategoryParams } | null =
+        matTextures && entry.category in matTextures && matTextures[entry.category].mgn
+          ? matTextures[entry.category]
+          : categories && entry.category in categories && categories[entry.category].mgn
+            ? categories[entry.category]
+            : null;
       let mgnTex: THREE.Texture | null = null;
-      let mgnInfluence: [number, number, number, number] = [0, 0, 0, 0];
+      let mgnInfluence: [number, number, number] = [0, 0, 0];
       let useCamoMaskGlobal = false;
-      if (
-        matTextures &&
-        !variantOptOut &&
-        entry.category in matTextures &&
-        matTextures[entry.category].mgn
-      ) {
-        const matCat = matTextures[entry.category];
-        mgnTex = this.mgnTextureCache.get(matCat.mgn!);
-        if (matCat.params) {
-          mgnInfluence = matCat.params.mgn_influence;
-          useCamoMaskGlobal = matCat.params.use_camo_mask_global;
-        }
-      } else if (
-        categories &&
-        !variantOptOut &&
-        entry.category in categories &&
-        categories[entry.category].mgn
-      ) {
-        const cat = categories[entry.category];
-        mgnTex = this.mgnTextureCache.get(cat.mgn!);
-        if (cat.params) {
-          mgnInfluence = cat.params.mgn_influence;
-          useCamoMaskGlobal = cat.params.use_camo_mask_global;
+      if (pathB && !variantOptOut) {
+        mgnTex = this.mgnTextureCache.get(pathB.mgn!);
+        if (pathB.params) {
+          // mgn_influence schema is a 4-tuple but the .w slot is a dead
+          // pad (DXBC-confirmed; see camo_path_b_makecamomaterial_re.md §1).
+          // Three.Vector3.set takes 3 args.
+          const mi = pathB.params.mgn_influence;
+          mgnInfluence = [mi[0], mi[1], mi[2]];
+          useCamoMaskGlobal = pathB.params.use_camo_mask_global;
         }
       }
 
@@ -900,13 +893,11 @@ export class TextureManager {
           if (mgnTex) {
             u.catMgnMap.value = mgnTex;
             u.catMgnBound.value = 1.0;
-            u.catMgnInfluence.value.set(
-              mgnInfluence[0], mgnInfluence[1], mgnInfluence[2], mgnInfluence[3],
-            );
+            u.catMgnInfluence.value.set(mgnInfluence[0], mgnInfluence[1], mgnInfluence[2]);
             u.catUseCamoMaskGlobal.value = useCamoMaskGlobal ? 1.0 : 0.0;
           } else {
             u.catMgnBound.value = 0.0;
-            u.catMgnInfluence.value.set(0, 0, 0, 0);
+            u.catMgnInfluence.value.set(0, 0, 0);
             u.catUseCamoMaskGlobal.value = 0.0;
           }
         }

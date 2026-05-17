@@ -201,24 +201,36 @@ def _bespoke_attached_children_for_swap(
 
 # WG runtime gates per-mesh camo binding via a static material-name →
 # part_index lookup table at exe ``0x140071a20`` (verified 2026-05-16 via
-# Ghidra). The 4 lookup groups (Hull-family / Gun-family / Misc-family /
-# Plane-family) enumerate names like ``Hull``, ``DeckHouse``, ``Bulge``,
-# ``Gun``, ``Gun1``, ``Director``, ``Misc``, ``Misc1``, ``Misc_skinned``,
-# etc. ``Misc9`` / ``Gun9`` / ``Catapult9_skinned`` / ``Misc_9`` are
-# **NOT** in any table; meshes carrying those material identifiers never
-# enter the camo dispatch list and render with their natural diffuse.
+# Ghidra; see ``reference/topics/camo/camo_part_index_table.md``). The 4
+# lookup groups (Hull-family / Gun-family / Misc-family / Plane-family)
+# enumerate names like ``Hull``, ``DeckHouse``, ``Bulge``, ``Gun``,
+# ``Gun1``, ``Director``, ``Misc``, ``Misc1``, ``Misc_skinned``, etc.
+# ``Misc9`` / ``Gun9`` / ``Catapult9_skinned`` / ``Misc_9`` are **NOT**
+# in any table; meshes carrying those material identifiers never enter
+# the camo dispatch list and render with their natural diffuse.
 #
 # Empirically the ``9`` digit marks themed / skin-exclusive decorative
 # geometry (Hoshino bow whale, Azur Lane secondaries, Ayane turret
 # barrels, snowman ornaments, …). 220 materials across the live corpus
 # match the pattern.
 #
+# The 8 RE-confirmed skip tokens — every name shape that is BOTH absent
+# from the part_index groups AND occurs in shipped material IDs — are:
+#   Misc, Gun, Catapult, Director, Plane, Hull, DeckHouse, Bulge
+#
+# note: dropped Float (no engine binding — Float materials are
+# placement-side only, never carry a bindable material in any of the 4
+# part_index groups) and Wire (engine slot 9 = paint, not skip — Wire9
+# IS in the Misc-family part_index table, where slot 9 is a wire-overlay
+# paint binding rather than a skip marker; the earlier regex was
+# conflating these). Audit pass 2026-05-17.
+#
 # Mirror the engine rule by collecting placement ``asset_id``s whose
 # library entry carries at least one ``_9``-suffix material. Emitted as
 # ``ship.camo_skip_asset_ids`` and unioned with
 # ``variant_swapped_asset_ids`` in the consumer's ``variantOptOut`` gate.
 _CAMO_SKIP_RE = re.compile(
-    r"_(Misc|Gun|Catapult|Director|Plane|Float|Hull|DeckHouse|Bulge|Wire)"
+    r"_(Misc|Gun|Catapult|Director|Plane|Hull|DeckHouse|Bulge)"
     r"_?9(Dead)?(_skinned)?$",
 )
 
@@ -292,7 +304,6 @@ _TOPO_MAT_ALBEDO = "mat_albedo"
 _TOPO_MAT_PALETTE = "mat_palette"
 _TOPO_HULL_PALETTE = "hull_palette"
 _TOPO_TILE_BROADCAST = "tile_broadcast"
-_TOPO_SKIP = "skip"
 
 _COLOR_SCHEME_PREFIX = "colorScheme"
 
@@ -384,7 +395,7 @@ def _strip_color_scheme_prefix(roll_name: str) -> str:
     return roll_name
 
 
-def _classify_topology(entry: wg_camo.CamoEntry) -> str:
+def _classify_topology(entry: wg_camo.CamoEntry) -> str | None:
     """Classify a ``CamoEntry`` by its ``<Textures>`` shape so the
     walker can route it to the right extraction + skin-emission path.
 
@@ -392,10 +403,16 @@ def _classify_topology(entry: wg_camo.CamoEntry) -> str:
     only carry accessory tags (``<Gun>``/``<Director>``/``<Misc>``)
     without ``<Hull>``/``<DeckHouse>``/``<Bulge>``. ~39 ``mat_Azur_*``
     entries today are authored for not-yet-released ships and would
-    previously fall into ``_TOPO_SKIP``; once WG ships a referencing
-    Vehicle they need a working emit path. The mat_textures_for_entry
-    function handles whatever tags exist, so the mat_albedo branch
-    works for accessory-only entries too.
+    previously fall into a no-route bucket (formerly ``_TOPO_SKIP``,
+    now returns None); once WG ships a referencing Vehicle they need a
+    working emit path. The mat_textures_for_entry function handles
+    whatever tags exist, so the mat_albedo branch works for
+    accessory-only entries too.
+
+    Returns ``None`` for malformed entries with no recognized topology
+    tags — empirically dead after the May 2026 ``is_mat``-escape fix
+    above, but kept as a defensive fallthrough surfaced via stderr so
+    new malformed entries don't silently disappear.
     """
     keys = set(entry.textures)
     has_hull_specific = bool(keys & {"Hull", "DeckHouse", "Bulge"})
@@ -414,7 +431,17 @@ def _classify_topology(entry: wg_camo.CamoEntry) -> str:
         return _TOPO_HULL_PALETTE
     if has_tile and has_palette:
         return _TOPO_TILE_BROADCAST
-    return _TOPO_SKIP
+    # Malformed entry — no recognized topology tags. Inlined stderr
+    # warning (rather than threading ``warnings`` through every caller)
+    # since the audit's recommended outcome was "Replace with explicit
+    # warning log for malformed entries" — fidelity-to-the-original
+    # less important than getting the dead branch removed.
+    print(
+        f"[scaffold_ship] camo entry {entry.name} has no recognized "
+        f"topology tags; skipping",
+        file=sys.stderr,
+    )
+    return None
 
 
 def _resolve_skin_display_base(
@@ -449,7 +476,7 @@ def _emit_permoflage_skins(
     }
     for exterior_id, camo_name, peculiarity, entry in candidates:
         topo = _classify_topology(entry)
-        if topo == _TOPO_SKIP:
+        if topo is None:
             continue
         # Note: hull_palette entries used to short-circuit when neither
         # mgn nor anim_map was present, on the theory that "Phase A
