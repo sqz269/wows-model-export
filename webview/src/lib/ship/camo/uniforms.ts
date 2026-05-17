@@ -2,7 +2,7 @@
 // `updateCamoUniforms` after the active skin / texture-toggle changes.
 
 import * as THREE from 'three';
-import { dummyMaskTexture, dummyMatAlbedoTexture } from './dummies';
+import { dummyMaskTexture, dummyMatAlbedoTexture, dummyMgnTexture } from './dummies';
 
 export interface CamoUniforms {
   camoEnable: { value: number };
@@ -48,6 +48,59 @@ export interface CamoUniforms {
   /** Path B AO darkening: `aoMod = lerp(1, ca.a, aoInfluence)`. */
   matAlbedoAo: { value: number };
 
+  // ── Path B MGN override (camoMGN texture, t6 equivalent) ───────────
+  //
+  // The Path B fragment shader (ship_camo_mgn_material.fx) layers a
+  // metallic / gloss / normal override on top of the camoAlbedo paint.
+  // Channels of the camoMGN texture, per the DXBC RE
+  // (reference/investigations/camo_path_b_render_re.md §3):
+  //   .R = camo gloss override   → blended into roughness via Influence_g
+  //   .G = camo metallic override → blended into metalness via Influence_m
+  //   .B / .A = tangent-space normal axis offsets (each signed via 2x-1)
+  //             → added to base normal via Influence_n
+  // The mask is in camoAlbedo.a, NOT camoMGN.a — camoMGN has no alpha mask.
+  /** Camo MGN override texture. 1×1 neutral default. */
+  catMgnMap: { value: THREE.Texture };
+  /** 1.0 when a real MGN texture is bound. */
+  catMgnBound: { value: number };
+  /**
+   * Influence scalars from `<*_mgn>` params (mgnInfluence):
+   *   .x = metallic mix  (paintMask × .x scales camoMGN.G into metalness)
+   *   .y = gloss mix     (paintMask × .y blends mg.R toward camoMGN.R)
+   *   .z = normal mix    (paintMask × .z scales the tangent-space offset)
+   *   .w = unused (dead slot per DXBC — every chunk; pipeline can drop)
+   */
+  catMgnInfluence: { value: THREE.Vector4 };
+  /**
+   * Per-pixel mg.B gate. When true, paintMask = mg.B × nbPaint instead
+   * of just nbPaint — artists get a second binary mask channel
+   * independent of the `_n.B` 4-threshold deny list. WG art convention
+   * uses values clustered at 0 or 1 (binary). Implemented for WG-pack
+   * mode (wgPackMG=1); glTF-mode behavior is conservative (treats the
+   * gate as off — see shader.ts comments).
+   */
+  catUseCamoMaskGlobal: { value: number };
+
+  // ── Path B emission animation (PHASE 2 — scaffolded, not yet bound) ─
+  //
+  // chunks 24-47 only. ~13% of corpus carries non-default emission
+  // params. Decoded recipe in camo_path_b_render_re.md §5.
+  // Stubbed here so the structure exists for a follow-up; current
+  // shader.ts does NOT consume these uniforms yet.
+  catAnimMap: { value: THREE.Texture };
+  catAnimMapBound: { value: number };
+  catEmissionAnimMode: { value: number };
+  catEmissionColorMode: { value: number };
+  catEmissionBasePower: { value: number };
+  catEmissionAnimMaxPower: { value: number };
+  catMaskSmooth: { value: number };
+  catAnimScale: { value: THREE.Vector3 };
+  catMaskSpeed: { value: THREE.Vector3 };
+  catCamoMaskColor1: { value: THREE.Vector3 };
+  catCamoMaskColor2: { value: THREE.Vector4 };
+  /** Seconds since start, set per frame in the render loop (phase 2). */
+  catTime: { value: number };
+
   // ── WG channel-pack overrides ──────────────────────────────────────
   /**
    * 1.0 → reinterpret bound MR texel as raw WG `_mg`
@@ -80,6 +133,22 @@ export function makeCamoUniforms(): CamoUniforms {
     matAlbedoUv: { value: new THREE.Vector4(1, 1, 0, 0) },
     matAlbedoMode: { value: -1.0 },
     matAlbedoAo: { value: 0.0 },
+    catMgnMap: { value: dummyMgnTexture },
+    catMgnBound: { value: 0.0 },
+    catMgnInfluence: { value: new THREE.Vector4(0, 0, 0, 0) },
+    catUseCamoMaskGlobal: { value: 0.0 },
+    catAnimMap: { value: dummyMaskTexture },
+    catAnimMapBound: { value: 0.0 },
+    catEmissionAnimMode: { value: 0 },
+    catEmissionColorMode: { value: 0 },
+    catEmissionBasePower: { value: 0.0 },
+    catEmissionAnimMaxPower: { value: 0.0 },
+    catMaskSmooth: { value: 1.0 },
+    catAnimScale: { value: new THREE.Vector3(1, 1, 1) },
+    catMaskSpeed: { value: new THREE.Vector3(0.1, 0.1, 0.5) },
+    catCamoMaskColor1: { value: new THREE.Vector3(1, 0, 0) },
+    catCamoMaskColor2: { value: new THREE.Vector4(1, 1, 0, 1) },
+    catTime: { value: 0.0 },
     wgPackMG: { value: 0.0 },
     wgPackN: { value: 0.0 },
   };

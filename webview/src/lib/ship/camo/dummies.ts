@@ -15,3 +15,11 @@ function makeDummy(rgba: [number, number, number, number]): THREE.DataTexture {
 export const dummyMaskTexture = makeDummy([0, 0, 0, 255]);
 /** Opaque white — bound to `matAlbedoMap` default. */
 export const dummyMatAlbedoTexture = makeDummy([255, 255, 255, 255]);
+/**
+ * Neutral camo MGN default — R=0 (no gloss), G=0 (no metallic),
+ * B=128 (normal axis offset = 0 after 2x-1 remap), A=128 (same).
+ * Renders as "flat surface, no MGN modulation". The shader also gates
+ * on `catMgnBound > 0.5` so this dummy is only sampled when bound; the
+ * neutral defaults are a defense against accidental sampling.
+ */
+export const dummyMgnTexture = makeDummy([0, 0, 128, 128]);

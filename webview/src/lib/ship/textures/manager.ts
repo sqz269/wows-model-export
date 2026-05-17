@@ -23,7 +23,7 @@ import { classifyPartCategory, classifyPlacementCategory } from '$lib/types';
 import type { ShipPlacement, Skin, SidecarDoc, SidecarTextureScheme, TextureSet } from '$lib/types';
 import { dummyMaskTexture, dummyMatAlbedoTexture, uniformsOf } from '../camo';
 import { applyTexturesToMaterial, buildTextured, type MaterialClonePolicy } from './material';
-import { CategoryMaskCache, MatAlbedoCache } from './category_mask';
+import { CategoryMaskCache, MatAlbedoCache, MgnTextureCache } from './category_mask';
 import { DecodedTextureCache } from './decode';
 import type { SlotUrls, TextureMeshEntry, TextureSetResolved } from './types';
 
@@ -65,6 +65,7 @@ export class TextureManager {
   private decodedCache: DecodedTextureCache;
   private categoryMaskCache: CategoryMaskCache;
   private matAlbedoCache: MatAlbedoCache;
+  private mgnTextureCache: MgnTextureCache;
 
   private showTexturesActive = false;
   private activeSchemeKey = 'main';
@@ -88,6 +89,7 @@ export class TextureManager {
     this.decodedCache = new DecodedTextureCache(this.renderer);
     this.categoryMaskCache = new CategoryMaskCache(this.renderer, this.repoBaseUrl);
     this.matAlbedoCache = new MatAlbedoCache(this.renderer, this.repoBaseUrl);
+    this.mgnTextureCache = new MgnTextureCache(this.renderer, this.repoBaseUrl);
   }
 
   // ── Bind index ────────────────────────────────────────────────────
@@ -342,6 +344,7 @@ export class TextureManager {
     await this.applyTextureState(this.activeSchemeKey, onProgress);
     await this.categoryMaskCache.ensureForSkin(this.activeSkin);
     await this.matAlbedoCache.ensureForSkin(this.activeSkin);
+    await this.mgnTextureCache.ensureForSkin(this.activeSkin);
     this.updateCamoUniforms(this.activeSkin);
     onProgress?.(`Textures: ${this.decodedCache.size} DDS files decoded`);
   }
@@ -369,6 +372,7 @@ export class TextureManager {
     if (schemeChanged) await this.applyTextureState(schemeKey, onProgress);
     await this.categoryMaskCache.ensureForSkin(this.activeSkin);
     await this.matAlbedoCache.ensureForSkin(this.activeSkin);
+    await this.mgnTextureCache.ensureForSkin(this.activeSkin);
     this.updateCamoUniforms(this.activeSkin);
     onProgress?.(`Active skin: ${skinId}`);
   }
@@ -435,6 +439,7 @@ export class TextureManager {
     this.entriesByKey.clear();
     this.categoryMaskCache.clear();
     this.matAlbedoCache.clear();
+    this.mgnTextureCache.clear();
     this.showTexturesActive = false;
     this.activeSchemeKey = 'main';
     this.activeSkin = null;
@@ -562,13 +567,24 @@ export class TextureManager {
 
     let pathBCount = 0;
     let pathBSuppressedMasks = 0;
-    const pathBCats: string[] = [];
+    const pathBCats = new Set<string>();
     if (categories) {
       for (const [catKey, cat] of Object.entries(categories)) {
         if (cat.mgn || cat.params || cat.anim_map) {
           pathBCount++;
-          pathBCats.push(catKey);
+          pathBCats.add(catKey);
           if (cat.mask) pathBSuppressedMasks++;
+        }
+      }
+    }
+    // mat_textures-side MGN is the other Path B emit path (mat_palette
+    // hybrid skins like mat_Montana_Hoshino — accessories painted with
+    // mat_camo + per-part `<*_mgn>` for gloss/metallic/normal modulation).
+    if (matTextures) {
+      for (const [catKey, matCat] of Object.entries(matTextures)) {
+        if (matCat.mgn || matCat.anim_map) {
+          pathBCount++;
+          pathBCats.add(catKey);
         }
       }
     }
@@ -585,14 +601,48 @@ export class TextureManager {
       const variantOptOut =
         entry.assetId !== null && this.variantSwappedAssetIds.has(entry.assetId);
 
+      // Path B MGN data — both the categories block (Path B-only emit)
+      // and the mat_textures block (mat_palette hybrid emit) can surface
+      // `mgn` + `params`. Prefer the mat_textures entry when present
+      // (matched with camoAlbedo + a UV transform); fall back to the
+      // categories entry for hull_palette hybrid Path B-only.
+      let mgnTex: THREE.Texture | null = null;
+      let mgnInfluence: [number, number, number, number] = [0, 0, 0, 0];
+      let useCamoMaskGlobal = false;
+      if (
+        matTextures &&
+        !variantOptOut &&
+        entry.category in matTextures &&
+        matTextures[entry.category].mgn
+      ) {
+        const matCat = matTextures[entry.category];
+        mgnTex = this.mgnTextureCache.get(matCat.mgn!);
+        if (matCat.params) {
+          mgnInfluence = matCat.params.mgn_influence;
+          useCamoMaskGlobal = matCat.params.use_camo_mask_global;
+        }
+      } else if (
+        categories &&
+        !variantOptOut &&
+        entry.category in categories &&
+        categories[entry.category].mgn
+      ) {
+        const cat = categories[entry.category];
+        mgnTex = this.mgnTextureCache.get(cat.mgn!);
+        if (cat.params) {
+          mgnInfluence = cat.params.mgn_influence;
+          useCamoMaskGlobal = cat.params.use_camo_mask_global;
+        }
+      }
+
       if (palette && categories && !variantOptOut && entry.category in categories) {
         // Step 1: category override. Engine per-part rule: when
         // <*_mgn> exists for the part, Path B wins and Path A mask is
         // ignored. We mirror that by skipping `mask` binding when
         // `cat.mgn` is set, even if `cat.mask` is also present (~17%
-        // of corpus). Full Path B shader render (MGN channel override)
-        // is TODO: bind mgn at a `catMgnMap` uniform + apply per-channel
-        // mix.
+        // of corpus). The MGN texture + channel-mix is bound via
+        // `mgnTex` / `mgnInfluence` above and consumed in the shader's
+        // roughness / metalness / normal chunks.
         const cat = categories[entry.category];
         if (!cat.mgn && cat.mask) {
           mask = this.categoryMaskCache.get(cat.mask);
@@ -628,8 +678,9 @@ export class TextureManager {
         // A overlay, and the engine's "_9" material-id marker is the
         // actual gate for the themed exclusions (whale / bage / Hoshino
         // turret) — covered by `camo_skip_asset_ids`. Keep applying
-        // Path A here; revisit only when the full Path B shader render
-        // (project_camo_hybrid_path_ab.md TODO) is implemented.
+        // Path A here; the per-channel MGN override (bound via mgnTex
+        // above) provides the gloss / metallic / normal modulation that
+        // distinguishes Path B from Path A on these accessories.
         if (params && params.camo_mode === 0) {
           // Path B explicitly disabled — leave matTex null.
         } else {
@@ -685,16 +736,36 @@ export class TextureManager {
             u.maskMap.value = dummyMaskTexture;
             u.camoUV.value.set(1, 1, 0, 0);
           }
+
+          // Path B MGN override — bound independently of the matAlbedo
+          // (Path A color) branch. The shader gates each per-channel
+          // override on `catMgnBound * Influence_<chan>` so a zero
+          // influence is a no-op. When the sidecar carries an `mgn`
+          // texture but the cache didn't load it (missing DDS, etc.),
+          // mgnTex is null → catMgnBound = 0 → safe fallback to base.
+          if (mgnTex) {
+            u.catMgnMap.value = mgnTex;
+            u.catMgnBound.value = 1.0;
+            u.catMgnInfluence.value.set(
+              mgnInfluence[0], mgnInfluence[1], mgnInfluence[2], mgnInfluence[3],
+            );
+            u.catUseCamoMaskGlobal.value = useCamoMaskGlobal ? 1.0 : 0.0;
+          } else {
+            u.catMgnBound.value = 0.0;
+            u.catMgnInfluence.value.set(0, 0, 0, 0);
+            u.catUseCamoMaskGlobal.value = 0.0;
+          }
         }
       }
     }
 
     if (pathBCount > 0) {
+      const catList = Array.from(pathBCats);
       const msg =
         `[ship.camo] skin=${skin?.skin_id ?? '?'} Path B on ` +
-        `${pathBCount} categor${pathBCount === 1 ? 'y' : 'ies'}: ` +
-        `[${pathBCats.join(', ')}]; ${pathBSuppressedMasks} hybrid mask(s) suppressed. ` +
-        'MGN channel override not yet rendered (TODO).';
+        `${catList.length} categor${catList.length === 1 ? 'y' : 'ies'}: ` +
+        `[${catList.join(', ')}]; ${pathBSuppressedMasks} hybrid mask(s) suppressed. ` +
+        'MGN channel override RENDERED (gloss / metallic / normal per Influence_*).';
       if (msg !== this.lastPathBLog) {
         console.log(msg);
         this.lastPathBLog = msg;

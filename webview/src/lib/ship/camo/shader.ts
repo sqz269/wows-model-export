@@ -33,6 +33,10 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.uniforms.matAlbedoUv = uniforms.matAlbedoUv;
     shader.uniforms.matAlbedoMode = uniforms.matAlbedoMode;
     shader.uniforms.matAlbedoAo = uniforms.matAlbedoAo;
+    shader.uniforms.catMgnMap = uniforms.catMgnMap;
+    shader.uniforms.catMgnBound = uniforms.catMgnBound;
+    shader.uniforms.catMgnInfluence = uniforms.catMgnInfluence;
+    shader.uniforms.catUseCamoMaskGlobal = uniforms.catUseCamoMaskGlobal;
     shader.uniforms.wgPackMG = uniforms.wgPackMG;
     shader.uniforms.wgPackN = uniforms.wgPackN;
 
@@ -68,6 +72,10 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
       'uniform float matAlbedoAo;\n' +
       'uniform sampler2D camoMaskMap;\n' +
       'uniform float camoMaskBound;\n' +
+      'uniform sampler2D catMgnMap;\n' +
+      'uniform float catMgnBound;\n' +
+      'uniform vec4 catMgnInfluence;\n' +
+      'uniform float catUseCamoMaskGlobal;\n' +
       'uniform float wgPackMG;\n' +
       'uniform float wgPackN;\n' +
       'varying float vWorldY;\n' +
@@ -76,6 +84,24 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
         .replace(
           '#include <map_fragment>',
           `
+// ── Path B MGN function-scope vars ─────────────────────────────────────
+// Declared OUTSIDE the USE_MAP guard so the downstream roughnessmap /
+// metalnessmap / normal_fragment_maps chunks can read them (they have
+// their own USE_* guards, not USE_MAP). Defaults are neutral: when
+// 'catMgnBound' is 0 the downstream chunks lerp by 0 and pass through
+// unchanged.
+//   catPaintMask  — per-pixel scalar in [0,1] driving the MGN mix
+//                   (= nbPaint from the _n.B deny formula, optionally
+//                   gated by mg.B via 'catUseCamoMaskGlobal')
+//   catMgnSample  — RGBA texel from camoMGN at the camo UV. Channels per
+//                   reference/investigations/camo_mgn_texture_channels.md:
+//                     .R = camo gloss override  → roughnessmap chunk
+//                     .G = camo metallic override → metalnessmap chunk
+//                     .B = normal axis (tangent Y per texture-side decode)
+//                     .A = normal axis (tangent X per texture-side decode)
+float catPaintMask = 1.0;
+vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
+
 #ifdef USE_MAP
   vec4 baseSample = texture2D( map, vMapUv );
 
@@ -103,10 +129,35 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     vec4 dsq = min( vec4( 1.0 ), d * d * 1000.0 );
     nbPaint = dsq.x * dsq.y * dsq.z * dsq.w;
   }
+  catPaintMask = nbPaint;
 
   // Underwater gate — separate aesthetic (preserves the wet/dirty base
   // below the waterline). Applies to both Path A and Path B.
   bool aboveWaterline = ( vWorldY >= waterlineY );
+
+  // ── Path B MGN sample + useCamoMaskGlobal gate ───────────────────────
+  // Engine recipe per camo_path_b_render_re.md §1 stages 2 + 4:
+  //   paintMask = useCamoMaskGlobal ? mg.B * nbPaint : nbPaint
+  //   cm = sample( camoMGN, camoUv )
+  // Sampled at the same UV transform as camoAlbedo (matAlbedoUv) since
+  // the engine treats them as a paired texture pair. For hull_palette
+  // hybrid (Path B-only, no camoAlbedo), matAlbedoUv defaults to
+  // identity (1,1,0,0) → sample at vMapUv directly.
+  if ( catMgnBound > 0.5 && aboveWaterline ) {
+    if ( catUseCamoMaskGlobal > 0.5 ) {
+      #ifdef USE_METALNESSMAP
+        // WG _mg.B = gloss = the mask (per project_wg_emissive_mg_b_channel.md
+        // — the same channel WG reuses for the emissive mask gate).
+        // glTF-converted _mr.G = roughness = 1 - gloss. Pick the right
+        // channel using the existing wgPackMG flag.
+        vec4 mrTexel = texture2D( metalnessMap, vMetalnessMapUv );
+        float glossMask = mix( 1.0 - mrTexel.g, mrTexel.b, wgPackMG );
+        catPaintMask *= glossMask;
+      #endif
+    }
+    vec2 mgnUv = vMapUv * matAlbedoUv.xy + matAlbedoUv.zw;
+    catMgnSample = texture2D( catMgnMap, mgnUv );
+  }
 
   if ( matAlbedoEnable > 0.5 && aboveWaterline ) {
     // mat_* permoflage paint (Path B). Two recipes:
@@ -180,6 +231,13 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
   vec4 texelRoughness = texture2D( roughnessMap, vRoughnessMapUv );
   // glTF: roughness ← G; WG-pack: roughness ← (1 - B)  (gloss → 1−x)
   float roughTexel = mix( texelRoughness.g, 1.0 - texelRoughness.b, wgPackMG );
+  // Path B gloss override: blend roughness toward (1 - camoMGN.R) by
+  //   factor = paintMask * Influence_g * catMgnBound
+  // Engine recipe (chunk001:97-99): r0.y = lerp(base_gloss, cm.r, mask*infl.y)
+  // then roughness = 1 - gloss. Lerp by 0 leaves roughTexel untouched
+  // (factor = 0 when catMgnBound = 0 or Influence_g = 0).
+  float catGlossMix = catPaintMask * catMgnInfluence.y * catMgnBound;
+  roughTexel = mix( roughTexel, 1.0 - catMgnSample.r, catGlossMix );
   roughnessFactor *= roughTexel;
 #endif
 `,
@@ -191,6 +249,14 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
   vec4 texelMetalness = texture2D( metalnessMap, vMetalnessMapUv );
   // glTF: metalness ← B; WG-pack: metalness ← G (binary mask)
   float metalTexel = mix( texelMetalness.b, texelMetalness.g, wgPackMG );
+  // Path B metallic override: blend metalness toward camoMGN.G by
+  //   factor = paintMask * Influence_m * catMgnBound
+  // Engine recipe (chunk001:80): metal_mix = cm.g * mgnInfluence.x.
+  // (The engine then feeds metal_mix into the F0/Lambert split; we
+  // approximate by lerping the metalness factor directly — Three.js's
+  // metalness uniform feeds the same split downstream.)
+  float catMetalMix = catPaintMask * catMgnInfluence.x * catMgnBound;
+  metalTexel = mix( metalTexel, catMgnSample.g, catMetalMix );
   metalnessFactor *= metalTexel;
 #endif
 `,
@@ -216,6 +282,20 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
   // WG _n.dds: B = no-camo mask (not Z). Reconstruct Z when packed.
   float nzRecon = sqrt( max( 0.0, 1.0 - mapN.x * mapN.x - mapN.y * mapN.y ) );
   mapN.z = mix( mapN.z, nzRecon, wgPackN );
+  // Path B normal perturbation: camoMGN packs two signed tangent-space
+  // axis offsets in .B and .A (each via 2x-1). Engine recipe
+  // (chunk001:96 / 103-105) adds the camo perturbation to the vertex
+  // normal weighted by 'paintMask * Influence_n'. We approximate the
+  // engine's cross-product reconstruction with a tangent-space lerp:
+  // blend the base tangent normal toward the camo's, then re-derive Z.
+  // X/Y AXIS CAVEAT: per camo_path_b_render_re.md §8 and
+  // camo_mgn_texture_channels.md, .A → tangent X and .B → tangent Y
+  // is the texture-side hypothesis. If normal-map detail appears
+  // rotated 90° in-game vs reference, swap '.a' and '.b' below.
+  float catNormalMix = catPaintMask * catMgnInfluence.z * catMgnBound;
+  vec2 camoAxisAB = catMgnSample.ab * 2.0 - 1.0;  // .A → X, .B → Y
+  mapN.xy = mix( mapN.xy, camoAxisAB, catNormalMix );
+  mapN.z = mix( mapN.z, sqrt( max( 0.0, 1.0 - dot( mapN.xy, mapN.xy ) ) ), catNormalMix );
   mapN.xy *= normalScale;
   #ifdef USE_TANGENT
     normal = normalize( vTBN * mapN );

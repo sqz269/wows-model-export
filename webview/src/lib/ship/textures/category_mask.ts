@@ -106,3 +106,66 @@ export class MatAlbedoCache {
     this.cache.clear();
   }
 }
+
+/**
+ * Path B camoMGN texture cache. Sampled at LINEAR colorspace (not sRGB)
+ * because the texture packs data: R=gloss override, G=metallic override,
+ * B/A=tangent-space normal axis offsets. Linear sampling preserves the
+ * per-pixel byte values the shader maths against.
+ *
+ * Hybrid skins surface MGN textures in both `Skin.categories[<cat>].mgn`
+ * (Path B-only emit) AND `Skin.mat_textures[<cat>].mgn` (hybrid mat_palette
+ * paired with camoAlbedo). One cache covers both source fields.
+ */
+export class MgnTextureCache {
+  private cache = new Map<string, THREE.Texture>();
+
+  constructor(
+    private renderer: THREE.WebGLRenderer,
+    private repoBaseUrl: string,
+  ) {}
+
+  async ensure(mgn: { dds_mips: string[] }): Promise<THREE.Texture | null> {
+    if (mgn.dds_mips.length === 0) return null;
+    const stemBase = mgn.dds_mips[0].split(/[\\/]/).pop() ?? '';
+    const cacheKey = stemBase.replace(/\.[^.]+$/, '');
+    const cached = this.cache.get(cacheKey);
+    if (cached) return cached;
+
+    const urls = resolveDdsMipUrls(mgn.dds_mips, this.repoBaseUrl);
+    if (urls.length === 0) return null;
+    // sRGB=false: MGN is data (M/G/N channels), not color.
+    const tex = await loadDdsMipChain(urls, /* sRGB */ false, this.renderer);
+    if (!tex) return null;
+    this.cache.set(cacheKey, tex);
+    return tex;
+  }
+
+  get(mgn: { dds_mips: string[] }): THREE.Texture | null {
+    if (mgn.dds_mips.length === 0) return null;
+    const stemBase = mgn.dds_mips[0].split(/[\\/]/).pop() ?? '';
+    const cacheKey = stemBase.replace(/\.[^.]+$/, '');
+    return this.cache.get(cacheKey) ?? null;
+  }
+
+  async ensureForSkin(skin: Skin | null): Promise<void> {
+    if (!skin) return;
+    const tasks: Promise<unknown>[] = [];
+    if (skin.categories) {
+      for (const data of Object.values(skin.categories)) {
+        if (data.mgn) tasks.push(this.ensure(data.mgn));
+      }
+    }
+    if (skin.mat_textures) {
+      for (const data of Object.values(skin.mat_textures)) {
+        if (data.mgn) tasks.push(this.ensure(data.mgn));
+      }
+    }
+    await Promise.all(tasks);
+  }
+
+  clear(): void {
+    for (const t of this.cache.values()) t.dispose();
+    this.cache.clear();
+  }
+}
