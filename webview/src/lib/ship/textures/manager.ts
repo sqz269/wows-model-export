@@ -34,6 +34,7 @@ const SLOTS: (keyof TextureSet)[] = [
   'occlusion',
   'emissive',
   'camoMask',
+  'camoExclusionMask',
 ];
 
 const PARALLEL = 8;

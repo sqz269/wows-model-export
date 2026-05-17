@@ -538,18 +538,25 @@ def _is_library_stem(stem: str) -> bool:
 #    toolkit binds the conformant siblings and ignores the originals.
 #
 # Conformant siblings (toolkit-emitted, glTF-spec):
-#   `_normal` → tangent-space normal map (B = reconstructed Z)
-#   `_nbmask` → camo no-camo-region mask (BC4 single-channel)
-#   `_mr`     → metallic-roughness (G = roughness, B = metallic)
+#   `_normal`   → tangent-space normal map (B = reconstructed Z)
+#   `_nbmask`   → camo Path B deny-list mask (BC4 single-channel, .R carries
+#                 `_n.B` — the 4-threshold _n.B paint factor source)
+#   `_camomask` → camo Path A paint mask (BC4 single-channel, .R carries
+#                 `_mg.B` — the WG binary paint-zone mask that
+#                 `ship_camo_material.fx` reads as the per-pixel
+#                 exclusion gate). See `reference/topics/camo/
+#                 wg_camo_shader_reference.md` §"Path A".
+#   `_mr`       → metallic-roughness (G = roughness, B = metallic)
 #
 # WG originals (kept for archaeology / RE — see
 # `reference/topics/texture/texture_conventions.md`):
 #   `_n`      → carries categorical mask in B (NOT Z) — wrong for shading
-#   `_mg`     → R cavity / G metallic / B gloss — non-glTF channel order
+#   `_mg`     → R cavity / G metallic / B paint-mask — non-glTF channel order
 _DDS_CHANNEL_TO_SLOT: tuple[tuple[str, str], ...] = (
     ("_emissive", "emissive"),    # synthesized by tools/shared/synth_emission.py
     ("_normal",   "normal"),
     ("_nbmask",   "camoMask"),
+    ("_camomask", "camoExclusionMask"),
     ("_mr",       "metallicRoughness"),
     ("_mg",       "_normalRawOrMgRaw_metallicRoughness"),  # demoted in finalisation
     ("_ao",       "occlusion"),
@@ -649,10 +656,17 @@ _MFM_PROP_TO_PBR_SLOTS: dict[str, tuple[str, ...]] = {
     # ARP Takao Red's Hull material has diffuse=JSC508_Red_Arpeggio,
     # mg=JSC507_Arpeggio (Blue inheritance), normal+ao=JSC038_Atago (base).
     #
-    # `_n` files carry both shading normal AND camo no-camo-region mask
+    # `_n` files carry both shading normal AND camo Path B deny mask
     # (the conformant `_normal` + `_nbmask` siblings split them); we pull
     # all three slots from the normalMap's stem so camoMask follows the
     # base ship's UV layout.
+    #
+    # `_mg` files similarly carry both PBR M/R/cavity AND the Path A
+    # paint mask (the conformant `_mr` + `_camomask` siblings split
+    # them); both flow off the metallicGlossMap stem so the new
+    # `camoExclusionMask` slot lines up with the base mg under the same
+    # UV layout (and inheritance for mesh-swap variants matches the
+    # mr/cavity stem the artist used).
     #
     # `_normalRawOrMgRaw_*` slots are populated only when the toolkit
     # extracted WG-original `_n` / `_mg` without conformant siblings;
@@ -660,7 +674,7 @@ _MFM_PROP_TO_PBR_SLOTS: dict[str, tuple[str, ...]] = {
     # onto the canonical name.
     "diffuseMap":           ("baseColor",),
     "normalMap":            ("normal", "_normalRawOrMgRaw_normal", "camoMask"),
-    "metallicGlossMap":     ("metallicRoughness", "_normalRawOrMgRaw_metallicRoughness"),
+    "metallicGlossMap":     ("metallicRoughness", "_normalRawOrMgRaw_metallicRoughness", "camoExclusionMask"),
     "ambientOcclusionMap":  ("occlusion",),
 }
 
@@ -1167,7 +1181,8 @@ def _resolve_target_stems(
         # base stems don't satisfy any suffix scan but ARE the right
         # source for normal / camoMask / AO on the variant's hull.
         _HULL_LIKE_SLOTS = (
-            "normal", "_normalRawOrMgRaw_normal", "camoMask", "occlusion",
+            "normal", "_normalRawOrMgRaw_normal", "camoMask",
+            "camoExclusionMask", "occlusion",
         )
         for s in stem_index:
             if s in candidates:

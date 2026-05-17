@@ -79,10 +79,19 @@ export interface TextureSet {
   /**
    * Toolkit-emitted BC4 single-channel mask carrying WG's categorical
    * "no-camo region" marker (originally packed in the normal map's B
-   * channel). The camo shader gates on this independently of the
-   * normal map.
+   * channel). The Path B fragment shader gates on this via the
+   * 4-threshold deny formula (`nbPaint`).
    */
   camoMask?: string[];
+  /**
+   * Toolkit-emitted BC4 single-channel mask carrying WG's Path A
+   * binary paint-zone gate (originally packed in the metallic-gloss
+   * map's B channel as `_mg.B`). The Path A fragment shader reads this
+   * as the per-pixel exclusion gate that decides whether the palette
+   * mix replaces the base diffuse. See
+   * `reference/topics/camo/wg_camo_shader_reference.md` §"Path A".
+   */
+  camoExclusionMask?: string[];
   [slot: string]: string[] | undefined;
 }
 

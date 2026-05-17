@@ -28,6 +28,8 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.uniforms.camoUV = uniforms.camoUV;
     shader.uniforms.camoMaskMap = uniforms.camoMaskMap;
     shader.uniforms.camoMaskBound = uniforms.camoMaskBound;
+    shader.uniforms.camoExclusionMap = uniforms.camoExclusionMap;
+    shader.uniforms.camoExclusionBound = uniforms.camoExclusionBound;
     shader.uniforms.matAlbedoEnable = uniforms.matAlbedoEnable;
     shader.uniforms.matAlbedoMap = uniforms.matAlbedoMap;
     shader.uniforms.matAlbedoUv = uniforms.matAlbedoUv;
@@ -72,6 +74,8 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
       'uniform float matAlbedoAo;\n' +
       'uniform sampler2D camoMaskMap;\n' +
       'uniform float camoMaskBound;\n' +
+      'uniform sampler2D camoExclusionMap;\n' +
+      'uniform float camoExclusionBound;\n' +
       'uniform sampler2D catMgnMap;\n' +
       'uniform float catMgnBound;\n' +
       'uniform vec4 catMgnInfluence;\n' +
@@ -118,10 +122,12 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
   //     float paint = d.x * d.y * d.z * d.w;     // 0 = SKIP, 1 = PAINT
   //
   // Path A ('ship_camo_material.fx') does NOT sample _n.B — its gate is
-  // the camoColorMask R/G/B/Black zone alpha (zoneColor.a). So nbPaint
-  // multiplies the mat_albedo branch only; the palette branch keeps its
-  // own zone-alpha gate. 'camoMaskBound' defaults the factor to 1
-  // (apply-everywhere) when no nbmask is bound (legacy exports).
+  // metallicGlossMap.B (mg.B = the WG MG texture's binary paint mask).
+  // The Path A branch below uses nbPaint as a FALLBACK gate when the
+  // conformant _mr.dds is bound (mg.B is dropped during toolkit swizzle);
+  // when raw _mg.dd? is bound (wgPackMG=1.0) it reads mg.B directly.
+  // 'camoMaskBound' defaults the factor to 1 (apply-everywhere) when no
+  // nbmask is bound (legacy exports).
   float nbPaint = 1.0;
   if ( camoMaskBound > 0.5 ) {
     float nb = texture2D( camoMaskMap, vMapUv ).r;
@@ -182,35 +188,66 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
     diffuseColor.rgb = mix( natural, painted, nbPaint );
     diffuseColor.a   = baseSample.a;
   } else if ( camoEnable > 0.5 && aboveWaterline ) {
-    // Path A — palette + zoned mask. No nbmask gate; zoneColor.a (zero
-    // in the authored "no-paint" zone) is the engine's deny mechanism.
-    // Mask sampling uses vCamoUv (= vMapUv * camoUV.xy + camoUV.zw) so
-    // tile-pattern accessory masks repeat at WG's per-camo authored
-    // scale. Hull masks have identity camoUV → vCamoUv == vMapUv.
-    vec4 maskSample = texture2D( maskMap, vCamoUv );
-    float r = maskSample.r;
-    float g = maskSample.g;
-    float b = maskSample.b;
-    float threshold = 0.12;
-    // Recipe: straight mix(base, palette[zone], alpha) per the
-    // Armored Patrol "Camouflage: Decoded" 2015 blog. alpha is the
-    // saturation knob — alpha=0 leaves base untouched, alpha=1 fully
-    // replaces with the palette colour. texture2D samples in linear
-    // space (Three.js auto-converts sRGB), and camoColors are linear
-    // floats from <colorN> in camouflages.xml — recipe runs entirely
-    // in linear space.
-    vec4 zoneColor;
-    if ( r > g && r > b && r > threshold ) {
-      zoneColor = camoColors[1];
-    } else if ( g > r && g > b && g > threshold ) {
-      zoneColor = camoColors[2];
-    } else if ( b > r && b > g && b > threshold ) {
-      zoneColor = camoColors[3];
-    } else {
-      zoneColor = camoColors[0];
+    // Path A — sequential 4-row palette lerp weighted by mask.RGB,
+    // gated by mg.B (the WG metallic-gloss texture's B = paint mask).
+    // Engine recipe per chunk001:18-42 of ship_camo_material.fx
+    // (DXBC RE 2026-05-16). See:
+    //   reference/topics/camo/wg_camo_shader_reference.md §"Path A"
+    //   reference/topics/camo/CAMO_SOURCE_OF_TRUTH.md §3.3
+    //   memory/project_camo_path_a_zoned_mask_refuted.md
+    //
+    // The previous "dominant-channel zone-pick with threshold 0.12 +
+    // blend by mask.a*color.a" recipe was fabricated — the engine has
+    // no such instruction. The real algorithm:
+    //
+    //   1. Pre-mix each of the 4 palette rows against the base by the
+    //      row's own .a (= color.a): alpha=0 → row passes base through,
+    //      alpha=1 → row fully replaces base with palette[i].rgb.
+    //   2. Sequential lerp through all 4 rows weighted by mask.R, then
+    //      mask.G, then mask.B — a CONTINUOUS 3-channel weight, not a
+    //      thresholded zone classifier.
+    //   3. Final paint/no-paint gate by mg.B (binary 0/255 mask channel
+    //      of metallicGlossMap in WG MG layout).
+    //
+    // mg.B source priority (engine-faithful → approximate fallback):
+    //   (a) camoExclusionMap (post-2026-05-16 toolkit): a BC4 single-
+    //       channel sibling _camomask.dd? carrying the original mg.B
+    //       byte-for-byte. This is the canonical engine input.
+    //   (b) Raw _mg.dd? bound to metalnessMap with wgPackMG=1 (loose-
+    //       mod skin packs): the slot is the raw WG mg layout so
+    //       mrTexel.b == mg.B directly.
+    //   (c) nbPaint from _n.B 4-threshold deny formula: same gate as
+    //       Path B. Engine-different but visually similar — used as a
+    //       last-resort fallback when neither (a) nor (b) is available
+    //       (pre-2026-05-16 toolkit extracts with conformant _mr.dds).
+    //
+    // mask.a is NEVER sampled (engine writes r0.xyz only at line 18).
+    // texture2D samples in linear space (Three.js auto-converts sRGB)
+    // and camoColors are linear floats from <colorN> in camouflages.xml.
+    vec4 mask = texture2D( maskMap, vCamoUv );
+    vec3 baseRgb = diffuseColor.rgb * baseSample.rgb;
+    vec3 P0 = mix( baseRgb, camoColors[0].rgb, camoColors[0].a );
+    vec3 P1 = mix( baseRgb, camoColors[1].rgb, camoColors[1].a );
+    vec3 P2 = mix( baseRgb, camoColors[2].rgb, camoColors[2].a );
+    vec3 P3 = mix( baseRgb, camoColors[3].rgb, camoColors[3].a );
+    vec3 step1 = mix( P0,    P1, mask.r );
+    vec3 step2 = mix( step1, P2, mask.g );
+    vec3 step3 = mix( step2, P3, mask.b );
+    // Pick the best mg.B source available. Higher priority overrides
+    // lower; nbPaint is the universal fallback.
+    float pathAGate = nbPaint;
+    #ifdef USE_METALNESSMAP
+      // Tier (b): raw WG _mg.dd? bound (loose-mod mode).
+      vec4 mgTexel = texture2D( metalnessMap, vMetalnessMapUv );
+      pathAGate = mix( pathAGate, mgTexel.b, wgPackMG );
+    #endif
+    // Tier (a): dedicated _camomask.dd? sibling (preferred). Bound
+    // when the post-2026-05-16 toolkit extracted the asset; otherwise
+    // camoExclusionBound = 0 and the lower-tier source is kept.
+    if ( camoExclusionBound > 0.5 ) {
+      pathAGate = texture2D( camoExclusionMap, vMapUv ).r;
     }
-    vec3 layered = mix( baseSample.rgb, zoneColor.rgb, zoneColor.a );
-    diffuseColor.rgb *= layered;
+    diffuseColor.rgb = mix( baseRgb, step3, pathAGate );
     diffuseColor.a    = baseSample.a;
   } else {
     diffuseColor *= baseSample;

@@ -24,11 +24,25 @@ export interface CamoUniforms {
    * BC4 single-channel no-camo region mask (`_nbmask.dds`, derived
    * from the WG normal-map B channel). Gates the camo overlay
    * independently of the normal map; defaults to a 1×1 black dummy so
-   * unmapped fragments fail-closed when no mask is bound.
+   * unmapped fragments fail-closed when no mask is bound. This is the
+   * Path B 4-threshold deny-formula source (nbPaint = `f(_n.B)`).
    */
   camoMaskMap: { value: THREE.Texture };
   /** 1.0 if a real `_nbmask` is bound, else 0.0 (apply-everywhere). */
   camoMaskBound: { value: number };
+  /**
+   * BC4 single-channel Path A paint mask (`_camomask.dds`, derived
+   * from the WG metallic-gloss-map B channel). Engine-faithful Path A
+   * exclusion gate: where `_mg.B == 1` paint applies, where `_mg.B == 0`
+   * the base albedo passes through unchanged. See
+   * `reference/topics/camo/wg_camo_shader_reference.md` §"Path A".
+   * Defaults to the same 1×1 black dummy as `maskMap`. When unbound
+   * (no `_camomask.dds` shipped — pre-2026-05-16 toolkit extracts),
+   * the consumer falls back to the `nbPaint`-derived gate.
+   */
+  camoExclusionMap: { value: THREE.Texture };
+  /** 1.0 if a real `_camomask` is bound, else 0.0 (fall back to nbPaint). */
+  camoExclusionBound: { value: number };
 
   // ── mat_albedo path ────────────────────────────────────────────────
   matAlbedoEnable: { value: number };
@@ -128,6 +142,8 @@ export function makeCamoUniforms(): CamoUniforms {
     camoUV: { value: new THREE.Vector4(1, 1, 0, 0) },
     camoMaskMap: { value: dummyMaskTexture },
     camoMaskBound: { value: 0.0 },
+    camoExclusionMap: { value: dummyMaskTexture },
+    camoExclusionBound: { value: 0.0 },
     matAlbedoEnable: { value: 0.0 },
     matAlbedoMap: { value: dummyMatAlbedoTexture },
     matAlbedoUv: { value: new THREE.Vector4(1, 1, 0, 0) },

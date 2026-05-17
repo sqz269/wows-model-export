@@ -4,7 +4,7 @@ Walks a directory of WG-pack DDS files and emits glTF-conformant
 siblings:
 
 - ``<stem>_n.dd?``  → ``<stem>_normal.dd?`` + ``<stem>_nbmask.dd?``
-- ``<stem>_mg.dd?`` → ``<stem>_mr.dd?``
+- ``<stem>_mg.dd?`` → ``<stem>_mr.dd?`` + ``<stem>_camomask.dd?``
 
 Idempotent: existing siblings are skipped.
 
@@ -103,7 +103,7 @@ def swizzle_dir(
         if stem.endswith("_n") or stem.endswith("_mg"):
             sources += 1
         elif (stem.endswith("_normal") or stem.endswith("_nbmask")
-              or stem.endswith("_mr")):
+              or stem.endswith("_mr") or stem.endswith("_camomask")):
             siblings += 1
     print(
         f"warn: swizzle-dir summary regex missed (toolkit wording "

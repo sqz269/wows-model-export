@@ -16,10 +16,23 @@ export interface SidecarTextureScheme {
   occlusion?: SidecarSlot;
   emissive?: SidecarSlot;
   /**
-   * BC4 single-channel mask carrying the categorical no-camo region
-   * marker that used to live in the normal map's B channel.
+   * BC4 single-channel mask carrying the Path B deny-list source
+   * (originally the WG normal map's B channel, repacked as a BC4
+   * sibling `_nbmask.dd?`). Drives the 4-threshold paint factor in
+   * `ship_camo_mgn_material.fx`.
    */
   camoMask?: SidecarSlot;
+  /**
+   * BC4 single-channel mask carrying the Path A binary paint mask
+   * (originally the WG metallic-gloss map's B channel, repacked as a
+   * BC4 sibling `_camomask.dd?`). The engine reads this as the
+   * per-pixel exclusion gate in `ship_camo_material.fx` — see
+   * `reference/topics/camo/wg_camo_shader_reference.md` §"Path A".
+   * Absent on assets extracted with a pre-2026-05-16 toolkit; the
+   * consumer falls back to the `camoMask`-derived nbPaint factor in
+   * that case (visually similar; engine-different).
+   */
+  camoExclusionMask?: SidecarSlot;
 }
 
 export interface SidecarMaterial {

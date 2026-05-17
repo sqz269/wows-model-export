@@ -94,23 +94,32 @@ from ._step_runner import StepRunner
 #
 #  * Conformant glTF-style siblings the toolkit's swizzle pass emits when
 #    invoked via ``export-ship --raw-dds-dir``:
-#       ``_normal``  → tangent-space normal (B = reconstructed Z)
-#       ``_mr``      → metallic-roughness (G = roughness, B = metallic)
-#       ``_nbmask``  → BC4 single-channel "no-camo region" mask extracted
-#                       from the WG normal map's B channel
+#       ``_normal``   → tangent-space normal (B = reconstructed Z)
+#       ``_mr``       → metallic-roughness (G = roughness, B = metallic)
+#       ``_nbmask``   → BC4 single-channel "no-camo region" mask extracted
+#                       from the WG normal map's B channel (Path B
+#                       4-threshold deny list source)
+#       ``_camomask`` → BC4 single-channel "Path A paint mask" extracted
+#                       from the WG MG map's B channel (the binary
+#                       exclusion gate that ``ship_camo_material.fx``
+#                       reads — see
+#                       ``reference/topics/camo/wg_camo_shader_reference.md``
+#                       §"Path A")
 #
 #  * WG-original channels the loose mod folders ship (no swizzle pass):
 #       ``_n``       → raw WG normal (B = camo no-camo mask)
-#       ``_mg``      → raw WG MG (R=cavity, G=metalmask, B=gloss)
+#       ``_mg``      → raw WG MG (R=cavity, G=metalmask, B=paint mask)
 #
 # Both routes land in the same canonical glTF slot names so the renderer
 # prefers conformant when present and falls back to raw via the
 # WgShipStandard shader chunk's WG-pack handling. Order is longest-
 # suffix-first so ``_normal`` matches before ``_n``, ``_mr`` before
-# ``_mg``.
+# ``_mg``, ``_camomask`` before ``_camo`` (no such suffix here but
+# defensive against future regressions).
 CHANNEL_SLOTS: tuple[tuple[str, str], ...] = (
     ("_emissive", "emissive"),
     ("_nbmask",   "camoMask"),
+    ("_camomask", "camoExclusionMask"),
     ("_normal",   "normal"),
     ("_mr",       "metallicRoughness"),
     ("_ao",       "occlusion"),
@@ -126,7 +135,7 @@ CHANNEL_SLOTS: tuple[tuple[str, str], ...] = (
 #: lower-priority number per ``(stem, slot)``.
 _SUFFIX_PRIORITY: dict[str, int] = {
     "_emissive": 0,
-    "_nbmask": 0, "_normal": 0, "_mr": 0, "_ao": 0, "_a": 0,
+    "_nbmask": 0, "_camomask": 0, "_normal": 0, "_mr": 0, "_ao": 0, "_a": 0,
     "_n": 1, "_mg": 1,
 }
 

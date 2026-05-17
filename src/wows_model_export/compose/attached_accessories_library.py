@@ -191,6 +191,7 @@ def _texture_stem_from_path(value: object) -> str | None:
     for suffix in (
         "_normal",
         "_nbmask",
+        "_camomask",
         "_ao",
         "_mr",
         "_mg",

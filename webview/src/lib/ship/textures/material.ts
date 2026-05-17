@@ -76,10 +76,18 @@ export function applyTexturesToMaterial(
 
   // Bind the no-camo region mask (toolkit-emitted `_nbmask.dds`). Without
   // it the shader falls back to apply-everywhere (legacy pre-2026-04-30
-  // behaviour).
+  // behaviour). Path B 4-threshold deny-formula source.
   if (tex.camoMask) {
     camoUniforms.camoMaskMap.value = tex.camoMask;
     camoUniforms.camoMaskBound.value = 1.0;
+  }
+
+  // Bind the Path A binary paint mask (toolkit-emitted `_camomask.dds`,
+  // derived from WG `_mg.B`). Without it the shader falls back to the
+  // nbPaint factor (pre-2026-05-16 toolkit extracts).
+  if (tex.camoExclusionMask) {
+    camoUniforms.camoExclusionMap.value = tex.camoExclusionMask;
+    camoUniforms.camoExclusionBound.value = 1.0;
   }
 
   // WG-pack channel reinterpretation. Decoded textures carry
