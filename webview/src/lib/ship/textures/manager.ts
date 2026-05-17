@@ -922,12 +922,30 @@ export class TextureManager {
             u.catMgnMap.value = mgnTex;
             u.catMgnBound.value = 1.0;
             u.catMgnInfluence.value.set(mgnInfluence[0], mgnInfluence[1], mgnInfluence[2]);
-            u.catUseCamoMaskGlobal.value = useCamoMaskGlobal ? 1.0 : 0.0;
           } else {
             u.catMgnBound.value = 0.0;
             u.catMgnInfluence.value.set(0, 0, 0);
-            u.catUseCamoMaskGlobal.value = 0.0;
           }
+
+          // mg.B paint gate. Engine ties `useCamoMaskGlobal` to Path B's
+          // <*_mgn> params, but the flag's job is to fold the per-pixel
+          // mg.B exclusion into the gate that drives BOTH paint and MGN
+          // overrides. Three sources need it ON:
+          //   • MGN-bound with params.use_camo_mask_global=true (engine
+          //     Path B proper) — preserved as before.
+          //   • mat_albedo bound without MGN (mat_palette hybrid skins
+          //     like mat_Montana_Hoshino — variant tile paint over
+          //     accessories) — needs ON so artist-authored mg.B=0
+          //     regions stay unpainted. Without this, accessory normals
+          //     rarely carry the _n.B 4-threshold deny pattern → nbPaint
+          //     defaults to 1 → catPaintMask collapses to 1 → paint
+          //     applies across the entire mesh including exclusion zones.
+          //   • Path A camoEnable path doesn't use catPaintMask at all
+          //     (it builds `pathAGate = mix(nbPaint, mgB, hasMgB)`
+          //     internally), so leaving the flag set here is a no-op
+          //     for that branch.
+          const useGate = (mgnTex && useCamoMaskGlobal) || !!matTex;
+          u.catUseCamoMaskGlobal.value = useGate ? 1.0 : 0.0;
         }
       }
     }
