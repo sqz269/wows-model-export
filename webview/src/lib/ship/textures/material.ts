@@ -31,7 +31,7 @@ export function applyTexturesToMaterial(
   original: THREE.Material,
   tex: TextureSetResolved,
   policy: MaterialClonePolicy,
-  acceptsCamo: boolean = true,
+  forceTransparentBlend: boolean = false,
 ): THREE.Material {
   const std = original as THREE.MeshStandardMaterial;
   if (!('isMeshStandardMaterial' in std) || !std.isMeshStandardMaterial) return original;
@@ -81,15 +81,22 @@ export function applyTexturesToMaterial(
   // Without this flip, base color alpha is ignored and `transparent_glass_alpha_a.dds`
   // renders solid. `depthWrite: false` is the standard transparent-glass
   // pattern (avoids self-occlusion against opaque geometry behind it).
-  if (!acceptsCamo) {
+  if (forceTransparentBlend) {
     c.transparent = true;
     c.depthWrite = false;
   }
 
-  // Skip camo on transparent materials. Primary signal: caller-provided
-  // `acceptsCamo` (false for sidecar `shader_intent: "transparent"`; set
-  // by TextureManager.markNoCamoKey). Fallback: `std.transparent` for
-  // materials lacking a sidecar binding (untextured glTF Blend mode).
+  // Always attach the camo chunk. Sidecar-transparent materials still
+  // get the chunk, but the manager's dispatch routes their uniform push
+  // down the all-disabled branch (mask=null, matTex=null, mgnTex=null),
+  // and the shader's `else { diffuseColor *= baseSample; }` catch-all
+  // renders identically to stock Three.js <map_fragment>. Skipping the
+  // chunk for transparents was a pre-2026-05-17 optimization that
+  // became a load-bearing gate; splitting it cleared the way for
+  // removing the per-entry acceptsCamo cache (and its retroactive flip
+  // in markNoCamoKey) — the manager now reads noCamoKeys.has(e.key)
+  // at use-time, no per-entry mirror needed.
+  //
   // Engine analog: per the part_index lookup at exe 0x140071a20 (see
   // reference/topics/camo/camo_part_index_table.md), transparent
   // materials carry no enumerated material name, so FUN_14108c360
@@ -97,12 +104,6 @@ export function applyTexturesToMaterial(
   // MASK (alphaTest > 0, transparent: false) stays through Path A
   // because the engine itself does `discard_nz` on diffuse.a in
   // `ship_camo_material.fx`.
-  if (!acceptsCamo || std.transparent) {
-    c.userData = { ...(c.userData || {}), mgTex, origMetalness, origRoughness };
-    c.needsUpdate = true;
-    return c;
-  }
-
   const camoUniforms = attachCamoChunk(c);
   camoUniforms.waterlineY.value = policy.waterlineY;
 
@@ -142,10 +143,10 @@ export function buildTextured(
   original: THREE.Material | THREE.Material[],
   tex: TextureSetResolved,
   policy: MaterialClonePolicy,
-  acceptsCamo: boolean = true,
+  forceTransparentBlend: boolean = false,
 ): THREE.Material | THREE.Material[] {
   if (Array.isArray(original)) {
-    return original.map((m) => applyTexturesToMaterial(m, tex, policy, acceptsCamo));
+    return original.map((m) => applyTexturesToMaterial(m, tex, policy, forceTransparentBlend));
   }
-  return applyTexturesToMaterial(original, tex, policy, acceptsCamo);
+  return applyTexturesToMaterial(original, tex, policy, forceTransparentBlend);
 }

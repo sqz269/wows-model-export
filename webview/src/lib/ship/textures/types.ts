@@ -53,11 +53,11 @@ export interface TextureMeshEntry {
    */
   category: string;
   /**
-   * False for materials the sidecar marks `shader_intent: "transparent"`
-   * (glass, semi-transparent armor visualizers). Engine analog: WG routes
-   * these through `ship_transparent_*.fx` which has no camo recipe.
-   * Cutout (alpha-tested) stays at true — engine's Path A uses its own
-   * `discard_nz` against diffuse.a inside `ship_camo_material.fx`.
+   * Binding key (`hull:<material_id>` or `asset:...`). Stored so the
+   * dispatch + material-build paths can look up the manager's
+   * `noCamoKeys` Set at use-time instead of caching a per-entry flag
+   * (the cache forced a retroactive flip whenever bind ran after
+   * register).
    */
-  acceptsCamo: boolean;
+  key: string;
 }

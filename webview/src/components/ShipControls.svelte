@@ -665,7 +665,7 @@
             <span class="text-muted-foreground">camo on:</span><span>{fmtNum(camoDiag.entryStats.camoEnabled)}</span>
             <span class="text-muted-foreground">mat_albedo on:</span><span>{fmtNum(camoDiag.entryStats.matAlbedoEnabled)}</span>
             <span class="text-muted-foreground">unpainted:</span><span>{fmtNum(camoDiag.entryStats.bothDisabled)}</span>
-            <span class="text-muted-foreground">transparent:</span><span>{fmtNum(camoDiag.entryStats.acceptsCamoFalse)}</span>
+            <span class="text-muted-foreground">transparent:</span><span>{fmtNum(camoDiag.entryStats.noCamoEntries)}</span>
           </div>
         </div>
 

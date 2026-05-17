@@ -56,8 +56,10 @@ export interface CamoDiagnostics {
     matAlbedoEnabled: number;
     /** Both paths off — entry has a textured clone but no paint applied. */
     bothDisabled: number;
-    /** Entries marked `acceptsCamo: false` (sidecar `shader_intent: "transparent"`). */
-    acceptsCamoFalse: number;
+    /** Entries whose binding key is in `noCamoKeys` (sidecar
+     *  `shader_intent: "transparent"`). The camo chunk is still attached
+     *  to their clones but the dispatch forces all uniforms to disabled. */
+    noCamoEntries: number;
   };
   perCategory: Record<string, { total: number; camoOn: number; matOn: number }>;
   /** Full list of binding keys with sidecar `shader_intent: "transparent"`. */
@@ -100,9 +102,11 @@ export class TextureManager {
   private schemesByKey = new Map<string, Map<string, SlotUrls>>();
   private entriesByKey = new Map<string, TextureMeshEntry[]>();
   // Binding keys whose sidecar `shader_intent` says "transparent". Engine
-  // analog: those materials route to `ship_transparent_*.fx` and never
-  // enter camo dispatch. Two-sided pattern — registerMesh reads, bind*
-  // walks `entriesByKey` to retroactively flip already-registered entries.
+  // analog: those materials carry no enumerated name in the part_index
+  // lookup at exe 0x140071a20 so `FUN_14108c360` bails out before
+  // `makeCamoMaterial` is invoked. Checked at dispatch + material-build
+  // time against `entry.key` (no per-entry cache → no retroactive flip
+  // needed when bind/register orderings vary).
   private noCamoKeys = new Set<string>();
 
   private decodedCache: DecodedTextureCache;
@@ -168,7 +172,7 @@ export class TextureManager {
       isAccessoryEntry,
       assetId: placement?.asset_id ?? null,
       category,
-      acceptsCamo: !this.noCamoKeys.has(key),
+      key,
     };
     this.entries.push(entry);
     let bucket = this.entriesByKey.get(key);
@@ -246,13 +250,12 @@ export class TextureManager {
 
   /**
    * Mark a binding key as no-camo (sidecar `shader_intent: "transparent"`).
-   * Retroactively flips already-registered entries via `entriesByKey` so
-   * the bind-then-register and register-then-bind orderings both work.
+   * Order-independent — the dispatch + material-build paths read the
+   * Set directly via `entry.key`, so bind-before-register and
+   * register-before-bind both work without a retroactive flip.
    */
   private markNoCamoKey(key: string): void {
     this.noCamoKeys.add(key);
-    const bucket = this.entriesByKey.get(key);
-    if (bucket) for (const e of bucket) e.acceptsCamo = false;
   }
 
   /**
@@ -427,13 +430,13 @@ export class TextureManager {
     let camoEnabled = 0;
     let matAlbedoEnabled = 0;
     let bothDisabled = 0;
-    let acceptsCamoFalse = 0;
+    let noCamoEntries = 0;
     const perCategory: Record<string, { total: number; camoOn: number; matOn: number }> = {};
 
     for (const e of this.entries) {
       if (e.isAccessoryEntry) accessoryEntries++;
       else hullEntries++;
-      if (e.acceptsCamo === false) acceptsCamoFalse++;
+      if (this.noCamoKeys.has(e.key)) noCamoEntries++;
 
       let camoOn = 0;
       let matOn = 0;
@@ -477,7 +480,7 @@ export class TextureManager {
         camoEnabled,
         matAlbedoEnabled,
         bothDisabled,
-        acceptsCamoFalse,
+        noCamoEntries,
       },
       perCategory,
       noCamoKeys: Array.from(this.noCamoKeys).sort(),
@@ -687,7 +690,7 @@ export class TextureManager {
             done++;
             continue;
           }
-          textured = buildTextured(e.untextured, tex, policy, e.acceptsCamo);
+          textured = buildTextured(e.untextured, tex, policy, this.noCamoKeys.has(e.key));
           e.texturedByScheme.set(cloneKey, textured);
         } else {
           e.texturedByScheme.set(cloneKey, textured);
@@ -746,6 +749,14 @@ export class TextureManager {
     }
 
     for (const entry of this.entries) {
+      // Sidecar-transparent materials get the camo chunk attached at
+      // material-build time (no early skip — see material.ts), but the
+      // dispatch must not enable camo on them. Forcing mask + matTex +
+      // pathB to null below routes their uniform push down the
+      // all-disabled branch, matching the pre-2026-05-17 behaviour
+      // where the chunk wasn't attached at all.
+      const noCamo = this.noCamoKeys.has(entry.key);
+
       let mask: THREE.Texture | null = null;
       let uvScaleX = 1.0,
         uvScaleY = 1.0,
@@ -764,11 +775,13 @@ export class TextureManager {
       // diverge in their non-MGN fields, but both carry `.mgn` + `.params`
       // identically, so the downstream uniform writes are the same.
       const pathB: { mgn?: { dds_mips: string[] }; params?: SkinMatCategoryParams } | null =
-        matTextures && entry.category in matTextures && matTextures[entry.category].mgn
-          ? matTextures[entry.category]
-          : categories && entry.category in categories && categories[entry.category].mgn
-            ? categories[entry.category]
-            : null;
+        noCamo
+          ? null
+          : matTextures && entry.category in matTextures && matTextures[entry.category].mgn
+            ? matTextures[entry.category]
+            : categories && entry.category in categories && categories[entry.category].mgn
+              ? categories[entry.category]
+              : null;
       let mgnTex: THREE.Texture | null = null;
       let mgnInfluence: [number, number, number] = [0, 0, 0];
       let useCamoMaskGlobal = false;
@@ -784,7 +797,7 @@ export class TextureManager {
         }
       }
 
-      if (palette && categories && !variantOptOut && entry.category in categories) {
+      if (!noCamo && palette && categories && !variantOptOut && entry.category in categories) {
         // Step 1: category override. Engine per-part rule: when
         // <*_mgn> exists for the part, Path B wins and Path A mask is
         // ignored. We mirror that by skipping `mask` binding when
@@ -800,7 +813,7 @@ export class TextureManager {
           uvOffsetX = cat.uv.offset[0];
           uvOffsetY = cat.uv.offset[1];
         }
-      } else if (palette) {
+      } else if (!noCamo && palette) {
         // Step 2: per-stem `_camo_NN.dds` cascade.
         mask = entry.maskTextureByScheme.get(this.activeSchemeKey) ?? null;
       }
@@ -812,7 +825,7 @@ export class TextureManager {
         matOy = 0.0;
       let matMode = -1.0;
       let matAo = 0.0;
-      if (matTextures && entry.category in matTextures) {
+      if (!noCamo && matTextures && entry.category in matTextures) {
         const matCat = matTextures[entry.category];
         const params = matCat.params ?? null;
         // mat_albedo overlay applied regardless of variantOptOut.
