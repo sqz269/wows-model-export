@@ -29,6 +29,7 @@ export function applyTexturesToMaterial(
   original: THREE.Material,
   tex: TextureSetResolved,
   policy: MaterialClonePolicy,
+  acceptsCamo: boolean = true,
 ): THREE.Material {
   const std = original as THREE.MeshStandardMaterial;
   if (!('isMeshStandardMaterial' in std) || !std.isMeshStandardMaterial) return original;
@@ -71,6 +72,32 @@ export function applyTexturesToMaterial(
   // clones; this catches ones built later.
   c.aoMapIntensity = policy.aoEnabled ? 1.0 : 0.0;
 
+  // Sidecar marked this as `shader_intent: "transparent"` — force three.js
+  // to alpha-blend. The toolkit's pre-2026-05-16 glTF emit said
+  // `alphaMode: Opaque` for textured-transparent materials (SHIPGLASS,
+  // semi-transparent armor), so the GLTFLoader leaves `transparent: false`.
+  // Without this flip, base color alpha is ignored and `transparent_glass_alpha_a.dds`
+  // renders solid. `depthWrite: false` is the standard transparent-glass
+  // pattern (avoids self-occlusion against opaque geometry behind it).
+  if (!acceptsCamo) {
+    c.transparent = true;
+    c.depthWrite = false;
+  }
+
+  // Skip camo on transparent materials. Primary signal: caller-provided
+  // `acceptsCamo` (false for sidecar `shader_intent: "transparent"`; set
+  // by TextureManager.markNoCamoKey). Fallback: `std.transparent` for
+  // materials lacking a sidecar binding (untextured glTF Blend mode).
+  // Engine analog: WG routes transparent materials to `ship_transparent_*.fx`,
+  // which has no camo recipe. MASK (alphaTest > 0, transparent: false)
+  // stays through Path A because the engine itself does `discard_nz` on
+  // diffuse.a in `ship_camo_material.fx`.
+  if (!acceptsCamo || std.transparent) {
+    c.userData = { ...(c.userData || {}), mgTex, origMetalness, origRoughness };
+    c.needsUpdate = true;
+    return c;
+  }
+
   const camoUniforms = attachCamoChunk(c);
   camoUniforms.waterlineY.value = policy.waterlineY;
 
@@ -110,9 +137,10 @@ export function buildTextured(
   original: THREE.Material | THREE.Material[],
   tex: TextureSetResolved,
   policy: MaterialClonePolicy,
+  acceptsCamo: boolean = true,
 ): THREE.Material | THREE.Material[] {
   if (Array.isArray(original)) {
-    return original.map((m) => applyTexturesToMaterial(m, tex, policy));
+    return original.map((m) => applyTexturesToMaterial(m, tex, policy, acceptsCamo));
   }
-  return applyTexturesToMaterial(original, tex, policy);
+  return applyTexturesToMaterial(original, tex, policy, acceptsCamo);
 }

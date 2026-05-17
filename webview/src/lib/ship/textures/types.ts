@@ -52,4 +52,12 @@ export interface TextureMeshEntry {
    * once at registration; drives `Skin.categories[<cat>]` lookup.
    */
   category: string;
+  /**
+   * False for materials the sidecar marks `shader_intent: "transparent"`
+   * (glass, semi-transparent armor visualizers). Engine analog: WG routes
+   * these through `ship_transparent_*.fx` which has no camo recipe.
+   * Cutout (alpha-tested) stays at true — engine's Path A uses its own
+   * `discard_nz` against diffuse.a inside `ship_camo_material.fx`.
+   */
+  acceptsCamo: boolean;
 }

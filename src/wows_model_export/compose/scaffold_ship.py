@@ -557,8 +557,21 @@ def _emit_permoflage_skins(
         masks_mip_index = wg_camo.list_extracted_mips(wg_camo._masks_dir(config))
         mat_mip_index = wg_camo.list_extracted_mips(wg_camo._mat_dir(config))
         for exterior_id, camo_name, peculiarity, entry in tile:
+            # `include_hull=True` because plain camo_*_tile entries have
+            # NO per-stem hull cascade — the toolkit only bakes per-stem
+            # variant textures for `mat_camo_schemes` (mat_* style camos),
+            # not for plain tile camos. Without this, the hull falls
+            # through to `entry.maskTextureByScheme` which is empty for
+            # the tile-camo scheme key → `camoEnable = 0` → hull renders
+            # unpainted while accessories show the tile pattern. The
+            # docstring on `tile_categories_for_entry` warns of double-
+            # tinting from include_hull=True, but that only applies to
+            # variant-routed bespoke crossovers (Iowa_AzurLane etc.) —
+            # those bespokes live in `texture_sets["main"]`, not in the
+            # tile scheme, so there's no overlap.
             categories = wg_camo.tile_categories_for_entry(
                 entry, masks_mip_index,
+                include_hull=True,
                 mat_extracted_mips=mat_mip_index,
             )
             if not categories:

@@ -55,7 +55,7 @@ import {
 } from './placement';
 import { AccessoryCache } from './accessory_loader';
 import { AttachedDocCache } from './attached_loader';
-import { TextureManager } from './textures';
+import { TextureManager, type CamoDiagnostics } from './textures';
 import { lodLevelOfName } from './visibility';
 
 /**
@@ -802,6 +802,12 @@ export class ShipViewer {
 
   getPreserveUnderwater(): boolean {
     return this.textures.getPreserveUnderwater();
+  }
+
+  /** Snapshot of camo bindings + per-entry state for the inspector
+   *  debug panel. See `TextureManager.getCamoDiagnostics()`. */
+  getCamoDiagnostics(): CamoDiagnostics {
+    return this.textures.getCamoDiagnostics();
   }
 
   // ── Read-only state ───────────────────────────────────────────────────

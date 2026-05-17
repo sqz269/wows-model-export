@@ -25,6 +25,7 @@
   import type { SeamKey, SeamState, ShipSectionKey } from '$lib/types';
   import type { ColorMode, LodPolicy, ShipViewer } from '$lib/ship';
   import { DEFAULT_BLOOM_PARAMS } from '$lib/ship';
+  import type { CamoDiagnostics } from '$lib/ship/textures';
   import { loadState, patchState, patchNestedState, type PanelSection } from '$lib/store';
   import { rowCls, labelCls, inputBoxCls } from '$lib/ui/controls';
 
@@ -87,6 +88,19 @@
   // Panel open/close — UI-only; tracked separately so toggling a section
   // doesn't trigger the larger $effect that re-reads viewer state.
   let panelOpen = $state(loadState().panelOpen);
+
+  // Camo-debug snapshot. Refreshed on demand (panel-open toggle, manual
+  // "Refresh" button) since skin changes don't bump `revision`. Periodic
+  // poll while the panel is open is intentional — cheap O(entries) walk.
+  let camoDiag = $state<CamoDiagnostics | null>(null);
+  let camoDiagTimer: ReturnType<typeof setInterval> | null = null;
+  function refreshCamoDiag() {
+    try {
+      camoDiag = viewer.getCamoDiagnostics();
+    } catch {
+      camoDiag = null;
+    }
+  }
 
   // Sticky-toast id for the texture-toggle async op. Streaming progress
   // callbacks promote on completion; one slot is held across the run.
@@ -315,6 +329,26 @@
   function togglePanel(key: PanelSection, open: boolean) {
     panelOpen[key] = open;
     patchNestedState('panelOpen', { [key]: open });
+    if (key === 'camo-debug') {
+      if (open) {
+        refreshCamoDiag();
+        // Skin changes don't bump `revision`, so poll while the panel is
+        // open. 1s is plenty for a debug surface and the walk is O(entries).
+        camoDiagTimer ??= setInterval(refreshCamoDiag, 1000);
+      } else if (camoDiagTimer) {
+        clearInterval(camoDiagTimer);
+        camoDiagTimer = null;
+      }
+    }
+  }
+
+  // Number formatter for the small camo-debug tables.
+  function fmtNum(n: number | undefined): string {
+    return n === undefined ? '—' : String(n);
+  }
+  function fmtPct(part: number, total: number): string {
+    if (!total) return '—';
+    return `${part}/${total}`;
   }
 
   // Page-local accents for the `<details>` collapsible vocabulary. The
@@ -583,6 +617,131 @@
       >
         Reset
       </Button>
+    </div>
+  </details>
+
+  <details
+    open={panelOpen['camo-debug']}
+    ontoggle={(e) => togglePanel('camo-debug', e.currentTarget.open)}
+    class="group {detailsCls}"
+  >
+    <summary class={summaryCls}>Camo debug</summary>
+    <div class={bodyCls}>
+      {#if !camoDiag}
+        <span class="text-muted-foreground text-[11px]">No data — refresh once textures are on.</span>
+        <Button variant="outline" size="xs" class="w-fit" onclick={refreshCamoDiag}>Refresh</Button>
+      {:else}
+        <div class="flex items-center justify-between">
+          <span class="text-muted-foreground text-[10px] uppercase tracking-wide">Active skin</span>
+          <Button variant="outline" size="xs" class="h-5 px-2 text-[10px]" onclick={refreshCamoDiag}>Refresh</Button>
+        </div>
+        <div class="font-mono text-[11px] leading-snug">
+          <div><span class="text-muted-foreground">id:</span> {camoDiag.activeSkinId ?? '(none)'}</div>
+          <div><span class="text-muted-foreground">scheme:</span> {camoDiag.schemeKey}</div>
+          <div class="flex items-center gap-1">
+            <span class="text-muted-foreground">palette:</span>
+            {#if camoDiag.paletteColors}
+              <div class="flex gap-0.5">
+                {#each camoDiag.paletteColors as c, i (i)}
+                  <span
+                    class="border-border inline-block size-3 border"
+                    style:background-color={`rgba(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)},${c[3]})`}
+                    title={`#${[c[0],c[1],c[2]].map(v=>Math.round(v*255).toString(16).padStart(2,'0')).join('')} a=${c[3].toFixed(2)}`}
+                  ></span>
+                {/each}
+              </div>
+            {:else}
+              <span>—</span>
+            {/if}
+          </div>
+        </div>
+
+        <div class="border-border mt-1 border-t pt-1.5">
+          <div class="text-muted-foreground mb-0.5 text-[10px] uppercase tracking-wide">Entry stats</div>
+          <div class="font-mono text-[11px] leading-snug grid grid-cols-2 gap-x-2">
+            <span class="text-muted-foreground">total:</span><span>{fmtNum(camoDiag.entryStats.total)}</span>
+            <span class="text-muted-foreground">hull:</span><span>{fmtNum(camoDiag.entryStats.hullEntries)}</span>
+            <span class="text-muted-foreground">accessory:</span><span>{fmtNum(camoDiag.entryStats.accessoryEntries)}</span>
+            <span class="text-muted-foreground">camo on:</span><span>{fmtNum(camoDiag.entryStats.camoEnabled)}</span>
+            <span class="text-muted-foreground">mat_albedo on:</span><span>{fmtNum(camoDiag.entryStats.matAlbedoEnabled)}</span>
+            <span class="text-muted-foreground">unpainted:</span><span>{fmtNum(camoDiag.entryStats.bothDisabled)}</span>
+            <span class="text-muted-foreground">transparent:</span><span>{fmtNum(camoDiag.entryStats.acceptsCamoFalse)}</span>
+          </div>
+        </div>
+
+        {#if Object.keys(camoDiag.categories).length > 0}
+          <div class="border-border mt-1 border-t pt-1.5">
+            <div class="text-muted-foreground mb-0.5 text-[10px] uppercase tracking-wide">Skin categories</div>
+            <table class="font-mono text-[10px] w-full">
+              <thead>
+                <tr class="text-muted-foreground">
+                  <th class="text-left font-normal">cat</th>
+                  <th class="text-center font-normal" title="categories[cat].mask">msk</th>
+                  <th class="text-center font-normal" title="categories[cat].mgn (Path B)">mgn</th>
+                  <th class="text-center font-normal" title="mat_textures[cat].albedo">alb</th>
+                  <th class="text-right font-normal" title="entries with camoEnable=1 / total in this category">camo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each Object.keys(camoDiag.categories).sort() as cat (cat)}
+                  {@const c = camoDiag.categories[cat]}
+                  {@const p = camoDiag.perCategory[cat]}
+                  {@const isHull = cat === 'tile' || cat === 'deckhouse' || cat === 'bulge'}
+                  <tr class={isHull ? 'text-amber-400' : ''}>
+                    <td>{cat}</td>
+                    <td class="text-center">{c.hasMask ? '✓' : '·'}</td>
+                    <td class="text-center">{c.hasMgn ? '✓' : '·'}</td>
+                    <td class="text-center">{c.hasMatAlbedo ? '✓' : '·'}</td>
+                    <td class="text-right">{p ? fmtPct(p.camoOn + p.matOn, p.total) : '—'}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+            <div class="text-muted-foreground mt-1 text-[9px]">Hull-side cats in amber. msk = Path A mask, mgn = Path B MGN, alb = mat_albedo atlas.</div>
+          </div>
+
+          {@const catSet = camoDiag.categories}
+          {@const perCat = camoDiag.perCategory}
+          {@const unmatched = Object.keys(perCat).filter((k) => !(k in catSet)).sort()}
+          {#if unmatched.length > 0}
+            <div class="border-border mt-1 border-t pt-1.5">
+              <div class="text-muted-foreground mb-0.5 text-[10px] uppercase tracking-wide">Entries unmatched</div>
+              <table class="font-mono text-[10px] w-full">
+                <thead>
+                  <tr class="text-muted-foreground">
+                    <th class="text-left font-normal">cat</th>
+                    <th class="text-right font-normal">painted</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each unmatched as cat (cat)}
+                    {@const p = perCat[cat]}
+                    <tr class={p.camoOn + p.matOn === 0 ? 'text-red-400' : ''}>
+                      <td>{cat}</td>
+                      <td class="text-right">{fmtPct(p.camoOn + p.matOn, p.total)}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+              <div class="text-muted-foreground mt-1 text-[9px]">Entry categories without a skin-category binding. Red = no paint applied.</div>
+            </div>
+          {/if}
+        {/if}
+
+        {#if camoDiag.noCamoKeys.length > 0}
+          <details class="border-border group/inner mt-1 border-t pt-1.5">
+            <summary class="text-muted-foreground hover:text-foreground mb-0.5 cursor-pointer select-none text-[10px] uppercase tracking-wide [&::-webkit-details-marker]:hidden before:content-[''] before:inline-block before:size-0 before:border-y-[3px] before:border-y-transparent before:border-l-[4px] before:border-l-current before:mr-1 before:transition-transform before:translate-y-[-1px] group-open/inner:before:rotate-90">
+              No-camo keys ({camoDiag.noCamoKeys.length})
+            </summary>
+            <div class="max-h-64 overflow-y-auto pt-0.5 font-mono text-[10px] leading-snug">
+              {#each camoDiag.noCamoKeys as key (key)}
+                <div class="truncate" title={key}>{key}</div>
+              {/each}
+            </div>
+            <div class="text-muted-foreground mt-1 text-[9px]">Materials with sidecar <code>shader_intent: "transparent"</code> — camo override skipped.</div>
+          </details>
+        {/if}
+      {/if}
     </div>
   </details>
 

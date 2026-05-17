@@ -27,7 +27,8 @@ export type PanelSection =
   | 'hull-groups'
   | 'damage'
   | 'textures'
-  | 'effects';
+  | 'effects'
+  | 'camo-debug';
 
 export interface PersistedState {
   /** Helpers (grid + axes). */
@@ -101,6 +102,7 @@ export function defaultState(): PersistedState {
       damage: false,
       textures: false,
       effects: false,
+      'camo-debug': false,
     },
     shipSearch: '',
   };

@@ -27,6 +27,43 @@ import { CategoryMaskCache, MatAlbedoCache, MgnTextureCache } from './category_m
 import { DecodedTextureCache } from './decode';
 import type { SlotUrls, TextureMeshEntry, TextureSetResolved } from './types';
 
+/**
+ * Snapshot of the camo binding + per-entry state for the active skin.
+ * Returned by `TextureManager.getCamoDiagnostics()` and consumed by the
+ * ship inspector's debug panel.
+ */
+export interface CamoDiagnostics {
+  activeSkinId: string | null;
+  schemeKey: string;
+  /** Palette colors (RGBA, 0-1) from `skin.color_scheme.colors`. Null
+   *  when the active skin has no palette (e.g. default/main). */
+  paletteColors: number[][] | null;
+  /** Union of `skin.categories` and `skin.mat_textures` keys, with a
+   *  per-binding summary. `tile/deckhouse/bulge` are hull-side; the rest
+   *  (gun/director/plane/float/misc/wire) are accessory categories. */
+  categories: Record<string, {
+    hasMask: boolean;
+    hasMgn: boolean;
+    hasMatAlbedo: boolean;
+    uvScale?: [number, number];
+    uvOffset?: [number, number];
+  }>;
+  entryStats: {
+    total: number;
+    hullEntries: number;
+    accessoryEntries: number;
+    camoEnabled: number;
+    matAlbedoEnabled: number;
+    /** Both paths off — entry has a textured clone but no paint applied. */
+    bothDisabled: number;
+    /** Entries marked `acceptsCamo: false` (sidecar `shader_intent: "transparent"`). */
+    acceptsCamoFalse: number;
+  };
+  perCategory: Record<string, { total: number; camoOn: number; matOn: number }>;
+  /** Full list of binding keys with sidecar `shader_intent: "transparent"`. */
+  noCamoKeys: string[];
+}
+
 const SLOTS: (keyof TextureSet)[] = [
   'baseColor',
   'metallicRoughness',
@@ -62,6 +99,11 @@ export class TextureManager {
   private entries: TextureMeshEntry[] = [];
   private schemesByKey = new Map<string, Map<string, SlotUrls>>();
   private entriesByKey = new Map<string, TextureMeshEntry[]>();
+  // Binding keys whose sidecar `shader_intent` says "transparent". Engine
+  // analog: those materials route to `ship_transparent_*.fx` and never
+  // enter camo dispatch. Two-sided pattern — registerMesh reads, bind*
+  // walks `entriesByKey` to retroactively flip already-registered entries.
+  private noCamoKeys = new Set<string>();
 
   private decodedCache: DecodedTextureCache;
   private categoryMaskCache: CategoryMaskCache;
@@ -126,6 +168,7 @@ export class TextureManager {
       isAccessoryEntry,
       assetId: placement?.asset_id ?? null,
       category,
+      acceptsCamo: !this.noCamoKeys.has(key),
     };
     this.entries.push(entry);
     let bucket = this.entriesByKey.get(key);
@@ -195,7 +238,19 @@ export class TextureManager {
       if (!matName) continue;
       const schemes = this.compileSchemes(mat.texture_sets, hullBaseUrl);
       if (schemes.size > 0) this.bindSchemes(`hull:${matName}`, schemes);
+      if (mat.shader_intent === 'transparent') this.markNoCamoKey(`hull:${matName}`);
     }
+  }
+
+  /**
+   * Mark a binding key as no-camo (sidecar `shader_intent: "transparent"`).
+   * Retroactively flips already-registered entries via `entriesByKey` so
+   * the bind-then-register and register-then-bind orderings both work.
+   */
+  private markNoCamoKey(key: string): void {
+    this.noCamoKeys.add(key);
+    const bucket = this.entriesByKey.get(key);
+    if (bucket) for (const e of bucket) e.acceptsCamo = false;
   }
 
   /**
@@ -232,7 +287,11 @@ export class TextureManager {
       const matName = mat.material_id;
       if (!matName) continue;
       const schemes = this.compileSchemes(mat.texture_sets, tplBase);
-      if (schemes.size > 0) this.bindSchemes(`asset:${assetId}:material:${matName}`, schemes);
+      const matKey = `asset:${assetId}:material:${matName}`;
+      if (schemes.size > 0) this.bindSchemes(matKey, schemes);
+      if ((mat as { shader_intent?: string }).shader_intent === 'transparent') {
+        this.markNoCamoKey(matKey);
+      }
     }
 
     // Asset-level fallback. Used when per-material is empty (legacy
@@ -328,6 +387,99 @@ export class TextureManager {
 
   getPreserveUnderwater(): boolean {
     return this.preserveUnderwater;
+  }
+
+  /**
+   * Snapshot of the camo binding + per-entry state for the active skin.
+   * Used by the ship inspector's debug panel. Counts walk the entries
+   * lazily — no caching, so call once per refresh / revision bump.
+   *
+   * `painted = matAlbedo OR camo` per entry, mirroring the shader's
+   * "any paint applied" condition (`gate1 || gate2` in shader.ts).
+   */
+  getCamoDiagnostics(): CamoDiagnostics {
+    const skin = this.activeSkin;
+    const cats = skin?.categories ?? {};
+    const matTex = skin?.mat_textures ?? {};
+    const palette = skin?.color_scheme?.colors ?? null;
+
+    const categoryKeys = new Set<string>([
+      ...Object.keys(cats),
+      ...Object.keys(matTex),
+    ]);
+    const categories: CamoDiagnostics['categories'] = {};
+    for (const cat of categoryKeys) {
+      const c = cats[cat];
+      const m = matTex[cat];
+      categories[cat] = {
+        hasMask: !!c?.mask,
+        hasMgn: !!(c?.mgn ?? m?.mgn),
+        hasMatAlbedo: !!m?.albedo,
+        uvScale: (c?.uv?.scale ?? m?.uv?.scale) as [number, number] | undefined,
+        uvOffset: (c?.uv?.offset ?? m?.uv?.offset) as [number, number] | undefined,
+      };
+    }
+
+    let hullEntries = 0;
+    let accessoryEntries = 0;
+    let camoEnabled = 0;
+    let matAlbedoEnabled = 0;
+    let bothDisabled = 0;
+    let acceptsCamoFalse = 0;
+    const perCategory: Record<string, { total: number; camoOn: number; matOn: number }> = {};
+
+    for (const e of this.entries) {
+      if (e.isAccessoryEntry) accessoryEntries++;
+      else hullEntries++;
+      if (e.acceptsCamo === false) acceptsCamoFalse++;
+
+      let camoOn = 0;
+      let matOn = 0;
+      const clones: THREE.Material[] = [];
+      if (e.textured) {
+        if (Array.isArray(e.textured)) clones.push(...e.textured);
+        else clones.push(e.textured);
+      }
+      for (const m of e.texturedByScheme.values()) {
+        const arr = Array.isArray(m) ? m : [m];
+        for (const mm of arr) if (!clones.includes(mm)) clones.push(mm);
+      }
+      for (const m of clones) {
+        const u = (m.userData as { camoUniforms?: { camoEnable: { value: number }; matAlbedoEnable: { value: number } } }).camoUniforms;
+        if (!u) continue;
+        if (u.camoEnable.value > 0.5) camoOn = 1;
+        if (u.matAlbedoEnable.value > 0.5) matOn = 1;
+        break;
+      }
+      camoEnabled += camoOn;
+      matAlbedoEnabled += matOn;
+      if (camoOn === 0 && matOn === 0 && clones.length > 0) bothDisabled++;
+
+      const cat = e.category;
+      const bucket = perCategory[cat] ?? { total: 0, camoOn: 0, matOn: 0 };
+      bucket.total++;
+      bucket.camoOn += camoOn;
+      bucket.matOn += matOn;
+      perCategory[cat] = bucket;
+    }
+
+    return {
+      activeSkinId: skin?.skin_id ?? null,
+      schemeKey: this.activeSchemeKey,
+      paletteColors: palette,
+      categories,
+      entryStats: {
+        total: this.entries.length,
+        hullEntries,
+        accessoryEntries,
+        camoEnabled,
+        matAlbedoEnabled,
+        bothDisabled,
+        acceptsCamoFalse,
+      },
+      perCategory,
+      noCamoKeys: Array.from(this.noCamoKeys).sort(),
+    };
   }
 
   // ── Runtime toggles ───────────────────────────────────────────────
@@ -438,6 +590,7 @@ export class TextureManager {
     this.entries.length = 0;
     this.schemesByKey.clear();
     this.entriesByKey.clear();
+    this.noCamoKeys.clear();
     this.categoryMaskCache.clear();
     this.matAlbedoCache.clear();
     this.mgnTextureCache.clear();
@@ -532,7 +685,7 @@ export class TextureManager {
             done++;
             continue;
           }
-          textured = buildTextured(e.untextured, tex, policy);
+          textured = buildTextured(e.untextured, tex, policy, e.acceptsCamo);
           e.texturedByScheme.set(cloneKey, textured);
         } else {
           e.texturedByScheme.set(cloneKey, textured);
