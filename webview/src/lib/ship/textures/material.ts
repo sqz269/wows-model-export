@@ -13,8 +13,10 @@ export interface MaterialClonePolicy {
   aoEnabled: boolean;
   /**
    * Current MR-maps toggle. Off by default — when the bound texture is
-   * raw WG `_mg.dd0` (G=metalMask, B=gloss), glTF semantics flip the
-   * meaning and the painted dielectric reads as a shiny conductor.
+   * raw WG `_mg.dd0` (R=gloss, G=metallic, B=paint mask) Three.js's
+   * stock glTF MR chunks read the wrong channels and the painted
+   * dielectric reads as a shiny conductor. shader.ts overrides the
+   * roughness/metalness chunks to read the engine-faithful channels.
    * Toggling on/off re-binds and may trigger a one-time recompile.
    */
   mgMapEnabled: boolean;

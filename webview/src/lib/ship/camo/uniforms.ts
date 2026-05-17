@@ -96,9 +96,11 @@ export interface CamoUniforms {
 
   // ── WG channel-pack overrides ──────────────────────────────────────
   /**
-   * 1.0 → reinterpret bound MR texel as raw WG `_mg`
-   * (G=metalMask, B=gloss); 0.0 → glTF semantics (G=roughness,
-   * B=metalness).
+   * 1.0 → bound MR texel is the raw WG `_mg.dds` (R=gloss, G=metallic,
+   * B=binary paint mask, A=unused). 0.0 → it's the toolkit-swizzled
+   * conformant `_mr.dds` (R=gloss preserved, G=`1-paintMask`,
+   * B=metallic). Gloss is always in `.R` in both modes; this flag only
+   * routes the metalness + mg.B reads to the right channel.
    */
   wgPackMG: { value: number };
   /** 1.0 → reconstruct normal Z from N.xy (WG `_n.dds` packs B = mask). */

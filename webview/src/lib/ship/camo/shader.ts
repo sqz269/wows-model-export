@@ -266,19 +266,41 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
 #endif
 `,
         )
-        // WG-pack metallicRoughness override. Three.js's stock chunks
-        // sample G→roughness, B→metalness per glTF spec. WG packs the
-        // same texture as G=metalMask, B=gloss — semantics invert, so
-        // a painted dielectric reads as a shiny conductor under IBL.
-        // Loose-mod skin packs ship the raw `_mg.dd*` form; set
-        // `wgPackMG=1.0` on the per-clone uniform to reinterpret.
+        // WG-pack metallicRoughness override. WG `_mg.dds` ACTUAL layout
+        // (verified 2026-05-17 from ship_camo_material chunk001 DXBC at
+        // lines 23-45 + empirical channel histograms on the Montana hull
+        // _mg.dds):
+        //   R = gloss          (continuous; chunk001:43-45 computes
+        //                       roughness = 1 - R for the BRDF path)
+        //   G = metallic       (chunk001:24-26 feeds the F0/Lambert split)
+        //   B = paint mask     (binary 0/255; chunk001:42 is the camo
+        //                       paint gate. Also reused by `*_emissive.mfm`
+        //                       and Path B's `useCamoMaskGlobal`.)
+        //   A = unused         (BC1 no-alpha)
+        //
+        // The toolkit's "MG→MR" swizzler (fixed 2026-05-17 in
+        // `crates/wowsunpack/src/export/texture.rs`) emits the conformant
+        // `_mr.dds` as (R=gloss preserved, G=`1-gloss`=roughness,
+        // B=metallic, A=255). Pre-fix builds emitted G=`1-paintMask` by
+        // mistake (the original pbr_textures.md §"Phase B" inspection
+        // had R/B swapped). **Re-extract libraries with a post-fix
+        // toolkit to pick up correct rendering** — this shader trusts
+        // the swizzler is the source of truth, not a stack of
+        // shader-side workarounds.
+        //
+        // glTF mode (`_mr.dds`, wgPackMG=0): roughness comes from `.g`
+        // per glTF MR convention.
+        // WG-pack mode (raw `_mg.dds`, wgPackMG=1, loose-mod skin packs):
+        // gloss is in `.R`, so roughness = 1 - `.r`.
         .replace(
           '#include <roughnessmap_fragment>',
           `float roughnessFactor = roughness;
 #ifdef USE_ROUGHNESSMAP
   vec4 texelRoughness = texture2D( roughnessMap, vRoughnessMapUv );
-  // glTF: roughness ← G; WG-pack: roughness ← (1 - B)  (gloss → 1−x)
-  float roughTexel = mix( texelRoughness.g, 1.0 - texelRoughness.b, wgPackMG );
+  // glTF mode (_mr.dds): .g = roughness directly (toolkit's swizzler
+  // emits 255 - mg.R into G).
+  // WG-pack mode (raw _mg.dds): .r = gloss → roughness = 1 - .r.
+  float roughTexel = mix( texelRoughness.g, 1.0 - texelRoughness.r, wgPackMG );
   // Path B gloss override: blend roughness toward (1 - camoMGN.R) by
   //   factor = paintMask * Influence_g * catMgnBound
   // Engine recipe (chunk001:97-99): r0.y = lerp(base_gloss, cm.r, mask*infl.y)
@@ -295,7 +317,8 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
           `float metalnessFactor = metalness;
 #ifdef USE_METALNESSMAP
   vec4 texelMetalness = texture2D( metalnessMap, vMetalnessMapUv );
-  // glTF: metalness ← B; WG-pack: metalness ← G (binary mask)
+  // WG _mg.G is the metallic source. Toolkit's swizzler moves it to
+  // _mr.B (mr.B = mg.G). Pick the right channel per pack mode.
   float metalTexel = mix( texelMetalness.b, texelMetalness.g, wgPackMG );
   // Path B metallic override: blend metalness toward camoMGN.G by
   //   factor = paintMask * Influence_m * catMgnBound
