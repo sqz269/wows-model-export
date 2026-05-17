@@ -854,7 +854,7 @@ class MgnParams:
     read by ``makeCamoMaterial`` and consumed by the MGN-variant pixel
     shader.
 
-    See ``tools/reference/shared/wg_camo_shader_reference.md`` Path B
+    See ``reference/topics/camo/wg_camo_shader_reference.md`` Path B
     for the full blend equation.  Defaults match the shader's "no
     override" state: ``camo_mode = -1`` is the runtime DEFAULT.id-style
     "no camo" path that the C++ side substitutes when a part isn't in
@@ -1675,7 +1675,7 @@ def mgn_params_to_json(p: MgnParams) -> dict:
     dataclass; consumers can dispatch on ``params.camo_mode`` and feed
     the rest verbatim into the
     ``ship_camo_mgn_material.fx`` constant buffer (see
-    ``tools/reference/shared/wg_camo_shader_reference.md`` Path B for
+    ``reference/topics/camo/wg_camo_shader_reference.md`` Path B for
     the full mapping).
 
     The ``mgn_influence`` shader uniform is a vec4 packing

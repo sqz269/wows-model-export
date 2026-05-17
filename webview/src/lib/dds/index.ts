@@ -168,7 +168,7 @@ function makeRgtcDataTexture(
  * UVs passed through unchanged + DDS bytes unflipped makes the raw DDS
  * atlas land right-side-up under a native sample. Do NOT copy the
  * `scale=(1,-1)` V-flip some other consumers apply — see
- * `tools/reference/shared/texture_orientation_investigation.md`.
+ * `reference/topics/texture/texture_orientation_investigation.md`.
  */
 export async function loadDdsMipChain(
   urls: string[],

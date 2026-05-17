@@ -95,7 +95,7 @@ def _normalize_section(segment: str) -> str | None:
 # accessory whose placement is inside a patch's AABB needs to hide with
 # it. This is the only hull-GLB-derived signal the resolver actually
 # needs — section / sub-mesh assignment is WG-authoritative via the
-# `segment` field. See `reference/investigations/near_origin_filter_audit.md`
+# `segment` field. See `reference/topics/audits/near_origin_filter_audit.md`
 # for the audit that led to this slim parse.
 
 
@@ -173,7 +173,7 @@ def _patch_for_position(
 # mesh_aabbs, library_aabbs, is_placement_on_hull, classify_accessory,
 # transform_aabb, aabb_overlap_volume). Replaced by WG-authoritative
 # `segment` field for parent_section + patch-only AABB check for
-# parent_mesh. See `reference/investigations/near_origin_filter_audit.md`.
+# parent_mesh. See `reference/topics/audits/near_origin_filter_audit.md`.
 
 
 # ---------------------------------------------------------------------------

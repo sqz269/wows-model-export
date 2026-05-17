@@ -543,7 +543,7 @@ def _is_library_stem(stem: str) -> bool:
 #   `_mr`     → metallic-roughness (G = roughness, B = metallic)
 #
 # WG originals (kept for archaeology / RE — see
-# `tools/reference/shared/texture_conventions.md`):
+# `reference/topics/texture/texture_conventions.md`):
 #   `_n`      → carries categorical mask in B (NOT Z) — wrong for shading
 #   `_mg`     → R cavity / G metallic / B gloss — non-glTF channel order
 _DDS_CHANNEL_TO_SLOT: tuple[tuple[str, str], ...] = (

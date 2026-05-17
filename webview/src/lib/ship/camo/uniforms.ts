@@ -53,7 +53,7 @@ export interface CamoUniforms {
   // The Path B fragment shader (ship_camo_mgn_material.fx) layers a
   // metallic / gloss / normal override on top of the camoAlbedo paint.
   // Channels of the camoMGN texture, per the DXBC RE
-  // (reference/investigations/camo_path_b_render_re.md §3):
+  // (reference/topics/camo/camo_path_b_render_re.md §3):
   //   .R = camo gloss override   → blended into roughness via Influence_g
   //   .G = camo metallic override → blended into metalness via Influence_m
   //   .B / .A = tangent-space normal axis offsets (each signed via 2x-1)

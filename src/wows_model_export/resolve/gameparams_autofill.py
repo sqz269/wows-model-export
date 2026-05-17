@@ -129,7 +129,7 @@ def resolve_variant_model_dir(
     4. If neither path is set (texture-only camo), return
        ``(None, exterior_id)``.
 
-    See ``tools/reference/ships/mesh_swap_permoflages.md`` for the
+    See ``reference/topics/accessory/mesh_swap_permoflages.md`` for the
     full encoding and the ARP Takao worked example.
     """
     ship = get_ship(vehicle_id, refresh=refresh)
@@ -789,7 +789,7 @@ def autofill_for_hp(
         # render all (legacy)". The companion `miscFilterMode` field
         # is phantom — never read by runtime, dropped 2026-05-09.
         # See `project_misc_filter_whitelist_inverted.md` and
-        # `tools/reference/investigations/misc_filter_per_mount_handoff.md`.
+        # `reference/topics/accessory/misc_filter_per_mount_handoff.md`.
         mf = mount.get("miscFilter")
         if isinstance(mf, list):
             out["misc_filter"] = [str(s) for s in mf]

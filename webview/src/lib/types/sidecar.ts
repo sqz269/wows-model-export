@@ -79,7 +79,7 @@ export interface SidecarShip {
 
 // ─── Particle effects ──────────────────────────────────────────────────────
 // Surface a subset of the parsed Effect record. Full schema lives in
-// `reference/investigations/particle_work/particle_format_spec.md`.
+// `reference/topics/particle/particle_format_spec.md`.
 //
 // The renderer needs: emission rate (Ramp), particle lifetime, initial
 // position cloud (PS_VGT volume), tint Color curve, alpha Ramp,

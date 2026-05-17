@@ -94,7 +94,7 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
 //                   (= nbPaint from the _n.B deny formula, optionally
 //                   gated by mg.B via 'catUseCamoMaskGlobal')
 //   catMgnSample  — RGBA texel from camoMGN at the camo UV. Channels per
-//                   reference/investigations/camo_mgn_texture_channels.md:
+//                   reference/topics/camo/camo_mgn_texture_channels.md:
 //                     .R = camo gloss override  → roughnessmap chunk
 //                     .G = camo metallic override → metalnessmap chunk
 //                     .B = normal axis (tangent Y per texture-side decode)
@@ -111,7 +111,7 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
   // per-pixel paint multiplier via 4 quadratic soft bands around the
   // reserved deny values u8 {136, 187, 221, 238} — verified from DXBC
   // chunk001 lines 613/617/623/627/631/635. See
-  // 'reference/investigations/normal_b_deny_list_re.md'.
+  // 'reference/topics/camo/normal_b_deny_list_re.md'.
   //
   //     float4 t = (-0.533330, -0.733330, -0.866660, -0.933330);
   //     float4 d = abs(_n.b - t); d = min(1, d*d*1000);
