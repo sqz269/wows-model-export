@@ -85,6 +85,13 @@
   let bloomStrength = $state(DEFAULT_BLOOM_PARAMS.strength);
   let bloomRadius = $state(DEFAULT_BLOOM_PARAMS.radius);
   let bloomThreshold = $state(DEFAULT_BLOOM_PARAMS.threshold);
+  // Aim controls — global yaw/pitch driving every turret with a rig
+  // (gun/main + gun/secondary mounts; AA mounts have no rig and are
+  // skipped silently). Stored as degrees in the UI, converted to
+  // radians when handed to the rig manager.
+  let aimYaw = $state(0);
+  let aimPitch = $state(0);
+  let rigCount = $state(0);
 
   // Panel open/close — UI-only; tracked separately so toggling a section
   // doesn't trigger the larger $effect that re-reads viewer state.
@@ -166,6 +173,12 @@
       bloomStrength = bp.strength;
       bloomRadius = bp.radius;
       bloomThreshold = bp.threshold;
+      // Aim resets per ship — no persistence (per-ship inspector state).
+      // Read rig count so the panel can hide aim controls for fleets
+      // where no accessory shipped with a bone tree.
+      aimYaw = 0;
+      aimPitch = 0;
+      rigCount = viewer.getTurretRigManager().size();
       onShowTexturesChange?.(newShowTextures);
       onSeamStatesChange?.(newSeamStates);
 
@@ -297,6 +310,19 @@
     normalScale = v;
     viewer.setNormalScale(v);
     patchState({ normalScale: v });
+  }
+  function setAimYaw(deg: number) {
+    aimYaw = deg;
+    viewer.getTurretRigManager().setGlobalAim((deg * Math.PI) / 180, (aimPitch * Math.PI) / 180);
+  }
+  function setAimPitch(deg: number) {
+    aimPitch = deg;
+    viewer.getTurretRigManager().setGlobalAim((aimYaw * Math.PI) / 180, (deg * Math.PI) / 180);
+  }
+  function resetAim() {
+    aimYaw = 0;
+    aimPitch = 0;
+    viewer.getTurretRigManager().reset();
   }
   function toggleBloom(v: boolean) {
     bloomEnabled = v;
@@ -504,6 +530,53 @@
       </Button>
     </div>
   </details>
+
+  {#if rigCount > 0}
+    <details
+      open={panelOpen.aim}
+      ontoggle={(e) => togglePanel('aim', e.currentTarget.open)}
+      class="group {detailsCls}"
+    >
+      <summary class={summaryCls}>Aim ({rigCount} rigged)</summary>
+      <div class={bodyCls}>
+        <label class={labelCls}>
+          <span class="flex items-center justify-between">
+            Yaw
+            <span class="text-muted-foreground tabular-nums text-[10px]">
+              {aimYaw.toFixed(0)}°
+            </span>
+          </span>
+          <input
+            type="range"
+            min="-180"
+            max="180"
+            step="1"
+            value={aimYaw}
+            oninput={(e) => setAimYaw(parseFloat(e.currentTarget.value))}
+          />
+        </label>
+        <label class={labelCls}>
+          <span class="flex items-center justify-between">
+            Pitch (elevation)
+            <span class="text-muted-foreground tabular-nums text-[10px]">
+              {aimPitch.toFixed(0)}°
+            </span>
+          </span>
+          <input
+            type="range"
+            min="-10"
+            max="45"
+            step="1"
+            value={aimPitch}
+            oninput={(e) => setAimPitch(parseFloat(e.currentTarget.value))}
+          />
+        </label>
+        <Button variant="outline" size="xs" class="mt-1.5 w-fit" onclick={resetAim}>
+          Reset aim
+        </Button>
+      </div>
+    </details>
+  {/if}
 
   <details
     open={panelOpen.textures}

@@ -16,3 +16,5 @@ export {
 } from './visibility';
 export * as camo from './camo';
 export * as textures from './textures';
+export { TurretRigManager } from './turret_rig';
+export type { TurretRig } from './turret_rig';

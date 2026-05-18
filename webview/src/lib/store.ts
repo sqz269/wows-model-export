@@ -26,6 +26,7 @@ export type PanelSection =
   | 'sections'
   | 'hull-groups'
   | 'damage'
+  | 'aim'
   | 'textures'
   | 'effects'
   | 'camo-debug';
@@ -105,6 +106,7 @@ export function defaultState(): PersistedState {
       sections: true,
       'hull-groups': false,
       damage: false,
+      aim: false,
       textures: false,
       effects: false,
       'camo-debug': false,

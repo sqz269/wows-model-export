@@ -57,6 +57,11 @@ import { AccessoryCache } from './accessory_loader';
 import { AttachedDocCache } from './attached_loader';
 import { TextureManager, type CamoDiagnostics } from './textures';
 import { lodLevelOfName } from './visibility';
+import {
+  cloneAccessoryInstance,
+  extractTurretRig,
+  TurretRigManager,
+} from './turret_rig';
 
 /**
  * Info resolved from `userData` on the clicked accessory instance. The
@@ -190,6 +195,11 @@ export class ShipViewer {
   /** Per-level placement meshes — merged from each placement's
    *  `TagResult.meshesByLodLevel` so the cascade can filter by level. */
   private placementMeshesByLodLevel = new Map<number, THREE.Object3D[]>();
+  /** Per-instance turret rigs (yaw / pitch bones) keyed by instance_id.
+   *  Populated as accessory placements are cloned; only assets whose
+   *  source `.visual` had a bone tree register a rig here. UI consumes
+   *  this through `getTurretRigManager()`. */
+  private turretRigs = new TurretRigManager();
 
   // Color
   private colorMaterials: ColorMaterials;
@@ -439,7 +449,10 @@ export class ShipViewer {
         }
 
         for (const e of places) {
-          const inst = tpl.clone(true);
+          // Deep-clone with SkeletonUtils for skinned templates so each
+          // placement has its own bones — sharing a Skeleton would tie
+          // every turret's yaw to the same `Rotate_Y` instance.
+          const inst = cloneAccessoryInstance(tpl);
           applyPlacementMatrix(inst, e.placement.transform.matrix);
           const { colorEntries, meshesByLodLevel } = tagAndIndexInstance(
             inst,
@@ -465,6 +478,11 @@ export class ShipViewer {
             if (!m.isMesh) return;
             this.textures.registerAccessoryMesh(m, e.placement);
           });
+          // Look for WG rig nodes (`Rotate_Y` / `Rotate_X`). Most
+          // gun/main and gun/secondary mounts have them; AA and static
+          // miscs return null silently.
+          const rig = extractTurretRig(inst, e.placement.asset_id, e.placement.instance_id);
+          if (rig) this.turretRigs.register(rig);
           this.sectionGroups[e.section].add(inst);
           renderedPlacements++;
 
@@ -491,7 +509,11 @@ export class ShipViewer {
               const childTpl = attachedChildTpls.get(att.asset_id);
               if (!childTpl) continue;
 
-              const childInst = childTpl.clone(true);
+              // Attached children (catapults, rangefinders, etc.) are
+              // typically static, but use the skin-aware cloner anyway so
+              // the rare rigged child (e.g. some director mounts) gets
+              // its own bones.
+              const childInst = cloneAccessoryInstance(childTpl);
               applyAttachedMatrix(childInst, att.transform.matrix);
               childInst.userData.attached_to_instance_id = e.placement.instance_id;
               childInst.userData.attached_placement_id = att.placement_id;
@@ -591,8 +613,15 @@ export class ShipViewer {
     this.seamStates = defaultSeamStates();
     this.textures.clearShip();
     this.attachedDocCache.clear();
+    this.turretRigs.clear();
     this.sidecar = null;
     this.hullBaseUrl = null;
+  }
+
+  /** Per-instance turret rigs (yaw + pitch bones extracted from each
+   *  placed accessory). Lets the UI drive aim globally or per-section. */
+  getTurretRigManager(): TurretRigManager {
+    return this.turretRigs;
   }
 
   setSectionVisible(section: ShipSectionKey, visible: boolean): void {
