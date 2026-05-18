@@ -41,6 +41,18 @@ export interface TurretRig {
    *  apply rotations relative to bind pose. */
   yawRest: THREE.Quaternion | null;
   pitchRest: THREE.Quaternion[];
+  /** Every named node under `root`, indexed by glTF node name. Lets
+   *  callers grab a bone we don't have a typed handle for yet:
+   *
+   *    rig.nodes.get('Roll_Back1')        // recoil bone parent
+   *    rig.nodes.get('HP_gunFire1')       // muzzle-tip hardpoint
+   *    rig.nodes.get('Root_BlendBone')    // body baseline blend bone
+   *
+   *  Whatever the WG `.visual` declares is here — see
+   *  `reference/topics/turret/turret_skin_pipeline.md` for the
+   *  canonical bone-name list. Adding a new feature against a known
+   *  bone shouldn't need a change to `extractTurretRig`. */
+  nodes: Map<string, THREE.Object3D>;
 }
 
 const YAW_BONE_NAME = 'Rotate_Y';
@@ -76,8 +88,13 @@ export function extractTurretRig(
 ): TurretRig | null {
   let yaw: THREE.Object3D | null = null;
   const pitch: THREE.Object3D[] = [];
+  const nodes = new Map<string, THREE.Object3D>();
   root.traverse((o) => {
     if (!o.name) return;
+    // First-writer wins: the WG bone tree has unique names within a
+    // single visual (verified across 14 assets); if a clone ever
+    // produced collisions we'd rather pin the outermost.
+    if (!nodes.has(o.name)) nodes.set(o.name, o);
     if (o.name === YAW_BONE_NAME && !yaw) {
       yaw = o;
     } else if (PITCH_BONE_NAMES.includes(o.name)) {
@@ -93,6 +110,7 @@ export function extractTurretRig(
     pitch,
     yawRest: yaw ? (yaw as THREE.Object3D).quaternion.clone() : null,
     pitchRest: pitch.map((b) => b.quaternion.clone()),
+    nodes,
   };
 }
 
