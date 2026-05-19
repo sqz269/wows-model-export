@@ -24,7 +24,6 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.uniforms.camoEnable = uniforms.camoEnable;
     shader.uniforms.camoColors = uniforms.camoColors;
     shader.uniforms.maskMap = uniforms.maskMap;
-    shader.uniforms.waterlineY = uniforms.waterlineY;
     shader.uniforms.camoUV = uniforms.camoUV;
     shader.uniforms.camoMaskMap = uniforms.camoMaskMap;
     shader.uniforms.camoMaskBound = uniforms.camoMaskBound;
@@ -47,19 +46,16 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.uniforms.detailInfluence = uniforms.detailInfluence;
     shader.uniforms.detailFadeDistance = uniforms.detailFadeDistance;
 
-    // Vertex: compute world-space Y + per-mesh camo UV. Toolkit hull GLBs
-    // are emitted in metric world space with y=0 at the waterline.
-    // `camoUV` packs (scale.xy, offset.xy); `vCamoUv` is what the
-    // fragment shader samples the mask at — identity (1,1,0,0) for hull
-    // meshes, per-camo authored values for accessories on a shared mask.
+    // Vertex: compute per-mesh camo UV. `camoUV` packs (scale.xy,
+    // offset.xy); `vCamoUv` is what the fragment shader samples the
+    // mask at — identity (1,1,0,0) for hull meshes, per-camo authored
+    // values for accessories on a shared mask.
     shader.vertexShader =
-      'varying float vWorldY;\n' +
       'varying vec2 vCamoUv;\n' +
       'uniform vec4 camoUV;\n' +
       shader.vertexShader.replace(
         '#include <project_vertex>',
         `#include <project_vertex>
-  vWorldY = ( modelMatrix * vec4( transformed, 1.0 ) ).y;
 #ifdef USE_MAP
   vCamoUv = vMapUv * camoUV.xy + camoUV.zw;
 #else
@@ -71,7 +67,6 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
       'uniform float camoEnable;\n' +
       'uniform vec4 camoColors[4];\n' +
       'uniform sampler2D maskMap;\n' +
-      'uniform float waterlineY;\n' +
       'uniform float matAlbedoEnable;\n' +
       'uniform sampler2D matAlbedoMap;\n' +
       'uniform vec4 matAlbedoUv;\n' +
@@ -92,7 +87,6 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
       'uniform vec2 detailScale;\n' +
       'uniform vec3 detailInfluence;\n' +
       'uniform float detailFadeDistance;\n' +
-      'varying float vWorldY;\n' +
       'varying vec2 vCamoUv;\n' +
       shader.fragmentShader
         .replace(
@@ -188,21 +182,27 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
   // nbPaint² (over-exclusion).
   catPaintMask = mix( nbPaint, nbPaint * mgB, catUseCamoMaskGlobal );
 
-  // Underwater gate — separate aesthetic (preserves the wet/dirty base
-  // below the waterline). Applies to both Path A and Path B.
-  bool aboveWaterline = ( vWorldY >= waterlineY );
+  // Underwater hull is gated at the texel level by the engine paint mask
+  // (mg.B == 0 on the anti-fouling region — empirically ~99% of the
+  // underwater UV cluster on Montana hull; verified 2026-05-19). Both
+  // Path A (`pathAGate = mgB`) and Path B with `useCamoMaskGlobal=1`
+  // (hull default, `catPaintMask = nbPaint * mgB`) inherit that for free,
+  // so we don't carry a separate world-Y gate. Previously a viewer-side
+  // "preserve underwater hull" Y-gate stood in for the missing engine
+  // recipe; the new toolkit binds `_camomask.dd?` everywhere, making the
+  // gate redundant.
 
   // ── Path B MGN texture sample ────────────────────────────────────────
   // Sampled at the same UV transform as camoAlbedo (matAlbedoUv) since
   // the engine treats them as a paired texture pair. For hull_palette
   // hybrid (Path B-only, no camoAlbedo), matAlbedoUv defaults to identity
   // (1,1,0,0) → sample at vMapUv directly.
-  if ( catMgnBound > 0.5 && aboveWaterline ) {
+  if ( catMgnBound > 0.5 ) {
     vec2 mgnUv = vMapUv * matAlbedoUv.xy + matAlbedoUv.zw;
     catMgnSample = texture2D( catMgnMap, mgnUv );
   }
 
-  if ( matAlbedoEnable > 0.5 && aboveWaterline ) {
+  if ( matAlbedoEnable > 0.5 ) {
     // mat_* permoflage paint (Path B) — engine 4-way dispatch on camoMode
     // per ship_camo_mgn_material.fx chunk001:72-79 (DXBC RE), see
     // reference/topics/camo/camo_path_b_render_re.md §4. Mode 1 bypasses
@@ -235,7 +235,7 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
     }
     diffuseColor.rgb = mix( natural, painted, blendT );
     diffuseColor.a   = baseSample.a;
-  } else if ( camoEnable > 0.5 && aboveWaterline ) {
+  } else if ( camoEnable > 0.5 ) {
     // Path A — sequential 4-row palette lerp weighted by mask.RGB,
     // gated by mg.B (the WG metallic-gloss texture's B = paint mask).
     // Engine recipe per chunk001:18-42 of ship_camo_material.fx
