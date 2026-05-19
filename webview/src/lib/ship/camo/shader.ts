@@ -151,35 +151,27 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
   //                                          bool is set (default for hulls
   //                                          + most accessory categories).
   //
-  // Source priority (engine-faithful → approximate fallback):
+  // Source priority:
   //   (a) camoExclusionMap — BC4 sibling _camomask.dd? carrying mg.B
   //       byte-for-byte (post-2026-05-16 toolkit). Canonical engine input.
   //   (b) Raw _mg.dd? bound to metalnessMap with wgPackMG=1.0
   //       (loose-mod skin packs). mrTexel.b == mg.B directly.
-  //   (c) None — hasMgB == 0. Each consumer picks its own fallback:
-  //         Path A → nbPaint   (engine-different but visually similar)
-  //         Path B → 1.0       (drop the mg.B factor; paint per nbPaint
-  //                             alone — avoids nbPaint² over-exclusion).
+  // When neither is bound (legacy peculiarity-skin extracts), mgB stays
+  // at the 1.0 default → Path A paints everywhere and Path B's
+  // useCamoMaskGlobal factor degenerates to nbPaint.
   float mgB = 1.0;
-  float hasMgB = 0.0;
   #ifdef USE_METALNESSMAP
     vec4 mgTexelB = texture2D( metalnessMap, vMetalnessMapUv );
-    mgB    = mix( mgB,    mgTexelB.b, wgPackMG );  // tier (b)
-    hasMgB = max( hasMgB, wgPackMG );
+    mgB = mix( mgB, mgTexelB.b, wgPackMG );  // tier (b)
   #endif
   if ( camoExclusionBound > 0.5 ) {
-    mgB    = texture2D( camoExclusionMap, vMapUv ).r;  // tier (a)
-    hasMgB = 1.0;
+    mgB = texture2D( camoExclusionMap, vMapUv ).r;  // tier (a)
   }
 
   // Path B engine paintMask (chunk001:53-54 of ship_camo_mgn_material.fx):
   //   paintMask = useCamoMaskGlobal ? (mg.B * nbPaint) : nbPaint
   // Drives BOTH the mat_albedo diffuse blend below AND the per-channel
   // MGN overrides in roughnessmap / metalnessmap / normal_fragment_maps.
-  // When mg.B source is unavailable (hasMgB=0), mgB defaults to 1.0 → the
-  // formula degenerates to nbPaint regardless of useCamoMaskGlobal, which
-  // drops the engine's mg.B factor rather than approximating with
-  // nbPaint² (over-exclusion).
   catPaintMask = mix( nbPaint, nbPaint * mgB, catUseCamoMaskGlobal );
 
   // Underwater hull is gated at the texel level by the engine paint mask
@@ -255,7 +247,6 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
     //      mask.G, then mask.B — a CONTINUOUS 3-channel weight, not a
     //      thresholded zone classifier.
     //   3. Final paint/no-paint gate by mg.B — see picker above.
-    //      Falls back to nbPaint when no mg.B source is bound.
     //
     // mask.a is NEVER sampled (engine writes r0.xyz only at line 18).
     // texture2D samples in linear space (Three.js auto-converts sRGB)
@@ -283,8 +274,7 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
     vec3 step1 = mix( P0,    P1, mask.r );
     vec3 step2 = mix( step1, P2, mask.g );
     vec3 step3 = mix( step2, P3, mask.b );
-    float pathAGate = mix( nbPaint, mgB, hasMgB );
-    diffuseColor.rgb = mix( baseRgb, step3, pathAGate );
+    diffuseColor.rgb = mix( baseRgb, step3, mgB );
     diffuseColor.a    = baseSample.a;
   } else {
     diffuseColor *= baseSample;

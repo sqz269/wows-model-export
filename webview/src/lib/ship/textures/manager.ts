@@ -1031,9 +1031,8 @@ export class TextureManager {
           //     defaults to 1 → catPaintMask collapses to 1 → paint
           //     applies across the entire mesh including exclusion zones.
           //   • Path A camoEnable path doesn't use catPaintMask at all
-          //     (it builds `pathAGate = mix(nbPaint, mgB, hasMgB)`
-          //     internally), so leaving the flag set here is a no-op
-          //     for that branch.
+          //     (it gates by `mgB` directly), so leaving the flag set
+          //     here is a no-op for that branch.
           const useGate = (mgnTex && useCamoMaskGlobal) || !!matTex;
           u.catUseCamoMaskGlobal.value = useGate ? 1.0 : 0.0;
         }
