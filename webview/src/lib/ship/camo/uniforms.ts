@@ -14,12 +14,6 @@ export interface CamoUniforms {
   camoColors: { value: THREE.Vector4[] };
   maskMap: { value: THREE.Texture };
   /**
-   * World-space waterline. Fragments with `vWorldY < waterlineY` skip
-   * the camo overlay and render base albedo unchanged. Default 0
-   * (toolkit hull GLBs put y=0 at the waterline). -1e9 disables.
-   */
-  waterlineY: { value: number };
-  /**
    * Per-mesh UV transform applied to the mask sample
    * (`vCamoUv = vMapUv * camoUV.xy + camoUV.zw`). Identity `(1,1,0,0)`
    * for hull meshes; non-identity for accessory tile-pattern masks.
@@ -160,7 +154,6 @@ export function makeCamoUniforms(): CamoUniforms {
       ],
     },
     maskMap: { value: dummyMaskTexture },
-    waterlineY: { value: 0.0 },
     camoUV: { value: new THREE.Vector4(1, 1, 0, 0) },
     camoMaskMap: { value: dummyMaskTexture },
     camoMaskBound: { value: 0.0 },

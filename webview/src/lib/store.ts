@@ -54,7 +54,6 @@ export interface PersistedState {
    * `project_raw_dds_mg_unswizzled`) so the underlying signal is
    * correct without the legacy v9 force-off. */
   mrMaps: boolean;
-  preserveUnderwater: boolean;
   /** Normal-map intensity multiplier. WG hull normals are intrinsically
    *  subtle (mean tilt 2-3°); default 2.0 doubles the apparent tilt for
    *  readable detail. 1.0 = engine-faithful. Range: 0.0 – 4.0. */
@@ -95,7 +94,6 @@ export function defaultState(): PersistedState {
     showTextures: false,
     aoMaps: true,
     mrMaps: true,
-    preserveUnderwater: true,
     normalScale: 2.0,
     bloomEnabled: false,
     bloomStrength: 0.6,

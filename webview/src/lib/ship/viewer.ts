@@ -805,10 +805,6 @@ export class ShipViewer {
     this.textures.setMrMapEnabled(on);
   }
 
-  setPreserveUnderwaterHull(on: boolean): void {
-    this.textures.setPreserveUnderwaterHull(on);
-  }
-
   setNormalScale(value: number): void {
     this.textures.setNormalScale(value);
   }
@@ -831,10 +827,6 @@ export class ShipViewer {
 
   getMrMapEnabled(): boolean {
     return this.textures.getMrMapEnabled();
-  }
-
-  getPreserveUnderwater(): boolean {
-    return this.textures.getPreserveUnderwater();
   }
 
   getNormalScale(): number {

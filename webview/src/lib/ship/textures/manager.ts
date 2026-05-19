@@ -8,7 +8,7 @@
 //   • registerMesh / bindSchemes — building the bind index (called during
 //     hull classification + accessory placement)
 //   • setShowTextures / setActiveSkin / setSkinTable — runtime toggles
-//   • setAoEnabled / setMrMapEnabled / setPreserveUnderwaterHull — diagnostics
+//   • setAoEnabled / setMrMapEnabled — diagnostics
 //   • clearShip / dispose — lifecycle
 //
 // Two-sided binding pattern: meshes register before the slot URLs are
@@ -140,7 +140,6 @@ export class TextureManager {
 
   private aoEnabled = true;
   private mrMapEnabled = false;
-  private preserveUnderwater = true;
   // WG hull normal maps are intrinsically subtle (mean tilt 2-3°; see
   // tmp/detail_test/probe_normal_intensity.py). Default 2.0 doubles
   // the apparent perturbation so detail reads under diffuse-dominated
@@ -419,10 +418,6 @@ export class TextureManager {
     return this.mrMapEnabled;
   }
 
-  getPreserveUnderwater(): boolean {
-    return this.preserveUnderwater;
-  }
-
   /**
    * Snapshot of the camo binding + per-entry state for the active skin.
    * Used by the ship inspector's debug panel. Counts walk the entries
@@ -604,18 +599,6 @@ export class TextureManager {
     }
   }
 
-  setPreserveUnderwaterHull(on: boolean): void {
-    if (this.preserveUnderwater === on) return;
-    this.preserveUnderwater = on;
-    const value = on ? 0.0 : -1e9;
-    for (const entry of this.entries) {
-      if (!entry.textured) continue;
-      for (const mat of asArray(entry.textured)) {
-        for (const u of uniformsOf(mat)) u.waterlineY.value = value;
-      }
-    }
-  }
-
   /**
    * Update the global normal-map intensity. Walks every textured clone
    * and rewrites `MeshStandardMaterial.normalScale`. Clones built later
@@ -742,7 +725,6 @@ export class TextureManager {
     return {
       aoEnabled: this.aoEnabled,
       mgMapEnabled: this.mrMapEnabled,
-      waterlineY: this.preserveUnderwater ? 0.0 : -1e9,
       normalScale: this.normalScale,
     };
   }

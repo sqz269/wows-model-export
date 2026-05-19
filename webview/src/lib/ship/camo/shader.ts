@@ -185,11 +185,11 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
   // Underwater hull is gated at the texel level by the engine paint mask
   // (mg.B == 0 on the anti-fouling region — empirically ~99% of the
   // underwater UV cluster on Montana hull; verified 2026-05-19). Both
-  // Path A (`pathAGate = mgB`) and Path B with `useCamoMaskGlobal=1`
-  // (hull default, `catPaintMask = nbPaint * mgB`) inherit that for free,
-  // so we don't carry a separate world-Y gate. Previously a viewer-side
+  // Path A (pathAGate = mgB) and Path B with useCamoMaskGlobal=1 (hull
+  // default, catPaintMask = nbPaint * mgB) inherit that for free, so we
+  // don't carry a separate world-Y gate. Previously a viewer-side
   // "preserve underwater hull" Y-gate stood in for the missing engine
-  // recipe; the new toolkit binds `_camomask.dd?` everywhere, making the
+  // recipe; the new toolkit binds _camomask.dd? everywhere, making the
   // gate redundant.
 
   // ── Path B MGN texture sample ────────────────────────────────────────

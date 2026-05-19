@@ -21,11 +21,6 @@ export interface MaterialClonePolicy {
    */
   mgMapEnabled: boolean;
   /**
-   * Current waterline gate. 0 = preserve underwater (toolkit y=0 at
-   * waterline), -1e9 = disable gate.
-   */
-  waterlineY: number;
-  /**
    * Three.js `MeshStandardMaterial.normalScale` factor. Default 2.0 —
    * WG hull normal maps are authored very subtly (mean tilt 2-3°, p95
    * ~16°; intentional art style for smooth steel plating). Engine-
@@ -154,7 +149,6 @@ export function applyTexturesToMaterial(
   // because the engine itself does `discard_nz` on diffuse.a in
   // `ship_camo_material.fx`.
   const camoUniforms = attachCamoChunk(c);
-  camoUniforms.waterlineY.value = policy.waterlineY;
 
   // Bind the no-camo region mask (toolkit-emitted `_nbmask.dds`). Without
   // it the shader falls back to apply-everywhere (legacy pre-2026-04-30

@@ -79,7 +79,6 @@
   let showTextures = $state(false);
   let aoMaps = $state(true);
   let mrMaps = $state(false);
-  let preserveUnderwater = $state(true);
   let normalScale = $state(2.0);
   let bloomEnabled = $state(false);
   let bloomStrength = $state(DEFAULT_BLOOM_PARAMS.strength);
@@ -142,7 +141,6 @@
       }
       viewer.setAoEnabled(persisted.aoMaps);
       viewer.setMrMapEnabled(persisted.mrMaps);
-      viewer.setPreserveUnderwaterHull(persisted.preserveUnderwater);
       viewer.setNormalScale(persisted.normalScale);
       // Bloom params must be set BEFORE enabling so the lazy composer
       // build picks them up; the params setter is a no-op until the
@@ -166,7 +164,6 @@
       showTextures = newShowTextures;
       aoMaps = viewer.getAoEnabled();
       mrMaps = viewer.getMrMapEnabled();
-      preserveUnderwater = viewer.getPreserveUnderwater();
       normalScale = viewer.getNormalScale();
       bloomEnabled = viewer.getBloomEnabled();
       const bp = viewer.getBloomParams();
@@ -300,11 +297,6 @@
     mrMaps = v;
     viewer.setMrMapEnabled(v);
     patchState({ mrMaps: v });
-  }
-  function togglePreserveUnderwater(v: boolean) {
-    preserveUnderwater = v;
-    viewer.setPreserveUnderwaterHull(v);
-    patchState({ preserveUnderwater: v });
   }
   function setNormalScale(v: number) {
     normalScale = v;
@@ -610,15 +602,6 @@
           onchange={(e) => toggleMr(e.currentTarget.checked)}
         />
         Metallic/roughness maps
-      </label>
-      <label class="{rowCls} {!showTextures ? 'opacity-55' : ''}">
-        <input
-          type="checkbox"
-          checked={preserveUnderwater}
-          disabled={!showTextures}
-          onchange={(e) => togglePreserveUnderwater(e.currentTarget.checked)}
-        />
-        Preserve underwater hull
       </label>
       <label class="{labelCls} {!showTextures ? 'opacity-55' : ''}">
         <span class="flex items-center justify-between">
