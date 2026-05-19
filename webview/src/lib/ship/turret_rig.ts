@@ -16,6 +16,8 @@
 import * as THREE from 'three';
 import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
 
+import { maybeApplyBoneFrameFix, type BoneFrameDiagnostic } from './bone_frame_fix';
+
 /** Per-placement rig handle. Empty for accessories without skin data
  *  (AA mounts, static decoratives) — managers skip those silently. */
 export interface TurretRig {
@@ -53,6 +55,24 @@ export interface TurretRig {
    *  canonical bone-name list. Adding a new feature against a known
    *  bone shouldn't need a change to `extractTurretRig`. */
   nodes: Map<string, THREE.Object3D>;
+  /** ±1 — `applyAim` multiplies pitch angle by this before rotating,
+   *  so positive UI values always elevate. Pitch propagates from
+   *  `Rotate_X` down to the skin palette through the chain that sits
+   *  between them, and any Y180-equivalent transform in that chain
+   *  conjugates `Rx(θ)` into `Rx(-θ)` — observed on AGS145 US BB
+   *  secondaries, where the raw +X rotation depresses instead of
+   *  elevating. Detected at extract time by sampling the
+   *  most-pitch-weighted skinned vertex's world-Y delta under a small
+   *  +X test rotation. Restores WG's `vertSector[1] > 0 = up` contract
+   *  (universal across the 1758 Gun entries in GameParams). */
+  pitchSign: 1 | -1;
+  /** Result of the bone-frame-mismatch fix (see `bone_frame_fix.ts`).
+   *  `applied=true` means the asset's bone tree was Y180-wrapped at
+   *  clone time because the WG `.geometry` and `.visual` were authored
+   *  in 180°-rotated coordinate frames (AGS145 mantlet quirk). Exposed
+   *  here so debug UI can surface the diagnostic without re-running the
+   *  probe — none of the rig consumers branch on it today. */
+  boneFrameFix: BoneFrameDiagnostic;
 }
 
 const YAW_BONE_NAME = 'Rotate_Y';
@@ -72,6 +92,117 @@ export function cloneAccessoryInstance(template: THREE.Object3D): THREE.Object3D
   return skeletonClone(template);
 }
 
+/** Determine whether a positive +X rotation on `pitchBone` actually
+ *  elevates the skinned geometry, or depresses it. Returns +1 for
+ *  elevate, -1 for depress; defaults to +1 when no representative
+ *  pitch-influenced vertex is found (no SkinnedMesh, no skin joints
+ *  descended from `pitchBone`, etc.).
+ *
+ *  Runs the full Three.js skinning math on the CPU for a single
+ *  vertex — the one with the highest summed weight on skin joints
+ *  descended from `pitchBone` — across two states (rest, +0.1 rad).
+ *  The sign of the world-Y delta is `pitchSign`. Vertex selection
+ *  doesn't depend on bone naming, just hierarchy, so the probe stays
+ *  valid if the toolkit ever changes the BlendBone naming convention. */
+function computePitchSign(
+  root: THREE.Object3D,
+  pitchBone: THREE.Object3D,
+  pitchRest: THREE.Quaternion,
+): 1 | -1 {
+  type Sample = {
+    mesh: THREE.SkinnedMesh;
+    vertex: THREE.Vector3;
+    indices: [number, number, number, number];
+    weights: [number, number, number, number];
+  };
+  let sample: Sample | null = null;
+  root.traverse((o) => {
+    if (sample) return;
+    const sm = o as THREE.SkinnedMesh;
+    if (!sm.isSkinnedMesh) return;
+    const validJoints = new Set<number>();
+    for (let i = 0; i < sm.skeleton.bones.length; i++) {
+      let cur: THREE.Object3D | null = sm.skeleton.bones[i];
+      while (cur) {
+        if (cur === pitchBone) { validJoints.add(i); break; }
+        cur = cur.parent;
+      }
+    }
+    if (validJoints.size === 0) return;
+    const pos = sm.geometry.attributes.position;
+    const ji = sm.geometry.attributes.skinIndex;
+    const jw = sm.geometry.attributes.skinWeight;
+    if (!pos || !ji || !jw) return;
+    let bestSum = 0;
+    let bestIdx = -1;
+    for (let v = 0; v < pos.count; v++) {
+      let sumW = 0;
+      for (let k = 0; k < 4; k++) {
+        if (validJoints.has(ji.getComponent(v, k))) {
+          sumW += jw.getComponent(v, k);
+        }
+      }
+      if (sumW > bestSum) {
+        bestSum = sumW;
+        bestIdx = v;
+      }
+    }
+    if (bestIdx < 0) return;
+    sample = {
+      mesh: sm,
+      vertex: new THREE.Vector3().fromBufferAttribute(pos, bestIdx),
+      indices: [
+        ji.getComponent(bestIdx, 0),
+        ji.getComponent(bestIdx, 1),
+        ji.getComponent(bestIdx, 2),
+        ji.getComponent(bestIdx, 3),
+      ],
+      weights: [
+        jw.getComponent(bestIdx, 0),
+        jw.getComponent(bestIdx, 1),
+        jw.getComponent(bestIdx, 2),
+        jw.getComponent(bestIdx, 3),
+      ],
+    };
+  });
+  if (!sample) return 1;
+  // TypeScript's flow analysis doesn't track the closure mutation inside
+  // `traverse`, so the local would otherwise narrow to `never` after the
+  // null guard — explicit cast keeps the rest of the function readable.
+  const s = sample as Sample;
+  const tmpVec = new THREE.Vector3();
+  const tmpMat = new THREE.Matrix4();
+  const skinnedY = (): number => {
+    s.mesh.updateMatrixWorld(true);
+    let y = 0;
+    for (let k = 0; k < 4; k++) {
+      const w = s.weights[k];
+      if (w <= 0) continue;
+      const j = s.indices[k];
+      tmpMat.multiplyMatrices(
+        s.mesh.skeleton.bones[j].matrixWorld,
+        s.mesh.skeleton.boneInverses[j],
+      );
+      tmpVec.copy(s.vertex).applyMatrix4(tmpMat);
+      y += tmpVec.y * w;
+    }
+    return y;
+  };
+  pitchBone.quaternion.copy(pitchRest);
+  root.updateMatrixWorld(true);
+  const yRest = skinnedY();
+  const probe = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(1, 0, 0),
+    0.1,
+  );
+  pitchBone.quaternion.multiplyQuaternions(pitchRest, probe);
+  root.updateMatrixWorld(true);
+  const yPitch = skinnedY();
+  pitchBone.quaternion.copy(pitchRest);
+  root.updateMatrixWorld(true);
+  return yPitch - yRest >= 0 ? 1 : -1;
+}
+
 /** Walk a cloned accessory instance for the canonical WG rig nodes.
  *  Returns `null` when no yaw/pitch nodes are present (e.g. AA mounts
  *  whose visuals are flat). The match is by NAME because Three.js's
@@ -86,6 +217,14 @@ export function extractTurretRig(
   assetId: string,
   instanceId: string,
 ): TurretRig | null {
+  // Bone-frame-mismatch fix MUST run before we capture pitchRest or run
+  // the pitchSign probe — both observe the bones' current state, and the
+  // fix changes the rest orientation (Y180-conjugating subsequent
+  // rotations). The fix is a no-op for the 99% of assets that aren't
+  // misaligned; cheap to call unconditionally. See bone_frame_fix.ts
+  // for the detection threshold + math.
+  const boneFrameFix = maybeApplyBoneFrameFix(root);
+
   let yaw: THREE.Object3D | null = null;
   const pitch: THREE.Object3D[] = [];
   const nodes = new Map<string, THREE.Object3D>();
@@ -102,6 +241,9 @@ export function extractTurretRig(
     }
   });
   if (!yaw && pitch.length === 0) return null;
+  const pitchRest = pitch.map((b) => b.quaternion.clone());
+  const pitchSign =
+    pitch.length > 0 ? computePitchSign(root, pitch[0], pitchRest[0]) : 1;
   return {
     root,
     instanceId,
@@ -109,8 +251,10 @@ export function extractTurretRig(
     yaw,
     pitch,
     yawRest: yaw ? (yaw as THREE.Object3D).quaternion.clone() : null,
-    pitchRest: pitch.map((b) => b.quaternion.clone()),
+    pitchRest,
+    pitchSign,
     nodes,
+    boneFrameFix,
   };
 }
 
@@ -128,7 +272,7 @@ export function applyAim(rig: TurretRig, yawRad: number, pitchRad: number): void
     rig.yaw.quaternion.multiplyQuaternions(rig.yawRest, _q);
   }
   if (rig.pitch.length > 0) {
-    _q.setFromAxisAngle(_x, pitchRad);
+    _q.setFromAxisAngle(_x, pitchRad * rig.pitchSign);
     for (let i = 0; i < rig.pitch.length; i++) {
       const rest = rig.pitchRest[i];
       if (!rest) continue;

@@ -32,6 +32,7 @@
   onMount(() => {
     if (!host) return;
     viewer = new AccessoryViewer(host);
+    (window as unknown as { __accessoryViewer__: AccessoryViewer }).__accessoryViewer__ = viewer;
     bindHandle?.(viewer);
     return () => {
       bindHandle?.(null);

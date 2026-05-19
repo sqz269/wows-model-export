@@ -16,6 +16,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { createSceneEnvironment, type SceneEnvironment } from '$lib/three/scene';
 import { observeResize } from '$lib/three/resize';
 import { startRenderLoop } from '$lib/three/render_loop';
+import { maybeApplyBoneFrameFix } from '$lib/ship/bone_frame_fix';
 import { TextureManager } from '$lib/ship/textures';
 import type {
   LibraryAsset,
@@ -39,6 +40,22 @@ export interface MeshInfo {
   lod: number;
   triangles: number;
   visible: boolean;
+}
+
+export interface BoneInfo {
+  /** glTF node name (e.g. `Rotate_X`, `Rotate_X_BlendBone`, `Roll_Back1`,
+   *  `HP_gunFire1`). */
+  name: string;
+  /** Bind-pose world translation captured at load time. Does not move
+   *  when the user rotates other bones — this is the rest position. */
+  worldPosition: { x: number; y: number; z: number };
+  /** True for `THREE.Bone` instances (members of a `Skin.joints` palette).
+   *  False for plain `Object3D` pivot empties like `Rotate_X` itself,
+   *  which sit above the joints. */
+  isSkinJoint: boolean;
+  /** True if the node has any children — distinguishes leaf hardpoints
+   *  (typically `HP_*` markers) from internal pivot bones. */
+  hasChildren: boolean;
 }
 
 export interface LoadResult {
@@ -109,6 +126,17 @@ export class AccessoryViewer {
    *  Used so `setFlipWinding` etc. don't fight the picker's material
    *  state. */
   private debugSceneActive = false;
+
+  // ── Bone inspector state ──────────────────────────────────────────────
+  // Populated on every `loadGlb` so the Bones tab can list nodes + their
+  // bind-pose world positions, and apply per-bone rotation sliders. Cleared
+  // in `disposeRoot`. The rest-quat map is lazy: a bone enters it only on
+  // the first slider move so we don't pay the per-frame quaternion-clone
+  // cost on assets where the user doesn't touch any sliders.
+  private boneNodes = new Map<string, THREE.Object3D>();
+  private boneInfo: BoneInfo[] = [];
+  private boneRestQuats = new Map<string, THREE.Quaternion>();
+  private boneMarker: THREE.Mesh | null = null;
 
   constructor(container: HTMLElement) {
     // Default container bg is a touch lighter than ShipViewer so single
@@ -183,6 +211,39 @@ export class AccessoryViewer {
         },
       });
     });
+
+    // Bone-frame-mismatch fix (see lib/ship/bone_frame_fix.ts). Runs
+    // before the bone snapshot so the BoneInspector shows world positions
+    // in the corrected frame — pinning Rotate_X lands on the trunnion
+    // instead of the top-back of the housing for affected assets like
+    // AGS145. No-op for the 99% of assets whose bones already align with
+    // their verts. Same call is wired into the ship-view rig extractor
+    // (lib/ship/turret_rig.ts) so both viewers see consistent positions.
+    maybeApplyBoneFrameFix(r);
+
+    // Snapshot the rig bone tree: every named node + its bind-pose world
+    // position. World transforms aren't current until updateMatrixWorld
+    // propagates, so force a pass before capturing. The Bones tab in the
+    // bottom panel reads `boneInfo` directly — sorted lexicographically
+    // here so the UI doesn't need to re-sort on every render.
+    r.updateMatrixWorld(true);
+    const seen = new Set<string>();
+    const collected: BoneInfo[] = [];
+    r.traverse((obj) => {
+      if (!obj.name || seen.has(obj.name)) return;
+      seen.add(obj.name);
+      this.boneNodes.set(obj.name, obj);
+      const p = new THREE.Vector3();
+      obj.getWorldPosition(p);
+      collected.push({
+        name: obj.name,
+        worldPosition: { x: p.x, y: p.y, z: p.z },
+        isSkinJoint: (obj as THREE.Bone).isBone === true,
+        hasChildren: obj.children.length > 0,
+      });
+    });
+    collected.sort((a, b) => a.name.localeCompare(b.name));
+    this.boneInfo = collected;
 
     // Initial material setup: clone-on-first-mutate, then apply side /
     // wireframe in place. The TextureManager (if `lib` is provided) will
@@ -299,6 +360,85 @@ export class AccessoryViewer {
    *  pivot JSON on disk is unchanged. */
   setRigFlip180(on: boolean): void {
     this.rigOverlay.setFlip180(on);
+  }
+
+  // ── Bone inspector ────────────────────────────────────────────────────
+
+  /** Snapshot of every named node in the loaded GLB with its bind-pose
+   *  world position. Sorted alphabetically. Empty until `loadGlb`
+   *  completes. World positions are captured at load time and do NOT
+   *  update when the user rotates bones — they represent the rest
+   *  geometry. */
+  getBones(): BoneInfo[] {
+    return this.boneInfo;
+  }
+
+  /** Apply an Euler rotation (radians, XYZ order) to the named bone
+   *  relative to its rest pose. The first call for a given bone snaps
+   *  the rest quaternion; subsequent calls re-compose `rest × R(x,y,z)`
+   *  so dragging a slider doesn't accumulate. No-op if the name isn't
+   *  in the current bone map. */
+  setBoneEuler(name: string, x: number, y: number, z: number): void {
+    const node = this.boneNodes.get(name);
+    if (!node) return;
+    let rest = this.boneRestQuats.get(name);
+    if (!rest) {
+      rest = node.quaternion.clone();
+      this.boneRestQuats.set(name, rest);
+    }
+    const e = new THREE.Euler(x, y, z, 'XYZ');
+    const q = new THREE.Quaternion().setFromEuler(e);
+    node.quaternion.multiplyQuaternions(rest, q);
+  }
+
+  /** Restore a single bone to its rest pose. Idempotent. */
+  resetBone(name: string): void {
+    const node = this.boneNodes.get(name);
+    const rest = this.boneRestQuats.get(name);
+    if (!node || !rest) return;
+    node.quaternion.copy(rest);
+    this.boneRestQuats.delete(name);
+  }
+
+  /** Restore every bone the user has rotated. Cheap — only iterates
+   *  bones that were actually touched. */
+  resetAllBones(): void {
+    for (const [name, rest] of this.boneRestQuats) {
+      const node = this.boneNodes.get(name);
+      if (node) node.quaternion.copy(rest);
+    }
+    this.boneRestQuats.clear();
+  }
+
+  /** Pin a small marker sphere at the bind-pose world position of the
+   *  named bone — useful for visually verifying where a pivot sits
+   *  relative to the geometry. Pass `null` to hide. The marker reads
+   *  from the snapshot in `boneInfo`, so it tracks rest, not runtime
+   *  motion. Marker radius scales to the model bounds. */
+  highlightBone(name: string | null): void {
+    if (!name) {
+      if (this.boneMarker) this.boneMarker.visible = false;
+      return;
+    }
+    const info = this.boneInfo.find((b) => b.name === name);
+    if (!info) return;
+    if (!this.boneMarker) {
+      const size = new THREE.Vector3();
+      this.bounds.getSize(size);
+      const radius = Math.max(size.x, size.y, size.z, 1) * 0.015;
+      const geom = new THREE.SphereGeometry(radius, 16, 12);
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xff3366,
+        depthTest: false,
+        transparent: true,
+        opacity: 0.85,
+      });
+      this.boneMarker = new THREE.Mesh(geom, mat);
+      this.boneMarker.renderOrder = 999;
+      this.env.scene.add(this.boneMarker);
+    }
+    this.boneMarker.position.set(info.worldPosition.x, info.worldPosition.y, info.worldPosition.z);
+    this.boneMarker.visible = true;
   }
 
   // ── Debug-scene picker (rig editor) ──────────────────────────────────
@@ -446,6 +586,15 @@ export class AccessoryViewer {
     });
     this.root = null;
     this.tracked = [];
+    this.boneNodes.clear();
+    this.boneInfo = [];
+    this.boneRestQuats.clear();
+    if (this.boneMarker) {
+      this.env.scene.remove(this.boneMarker);
+      this.boneMarker.geometry.dispose();
+      (this.boneMarker.material as THREE.Material).dispose();
+      this.boneMarker = null;
+    }
     // Drop the per-load TextureManager state too — schemes / decoded
     // textures the previous asset bound are no longer relevant. Resets
     // the bind index without disposing the manager itself.

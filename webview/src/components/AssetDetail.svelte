@@ -687,5 +687,6 @@
     {viewer}
     assetId={id}
     onCloseRigEditor={onRigEditorClose}
+    loadToken={result}
   />
 </section>

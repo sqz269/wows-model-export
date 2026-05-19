@@ -17,10 +17,18 @@
   import { repoUrl } from '$lib/api';
   import RigEditorPanel from './RigEditorPanel.svelte';
   import DdsTexturePreview from './DdsTexturePreview.svelte';
+  import BoneInspector from './BoneInspector.svelte';
   import type { AccessoryViewer } from '$lib/accessory';
   import type { LibraryAsset, RigPivots, WindingAuditEntry } from '$lib/types';
 
-  export type BottomTab = 'files' | 'lods' | 'textures' | 'winding' | 'rig' | 'rig-editor';
+  export type BottomTab =
+    | 'files'
+    | 'lods'
+    | 'textures'
+    | 'winding'
+    | 'rig'
+    | 'bones'
+    | 'rig-editor';
 
   // Slot ordering for the Textures tab — matches the PBR-conventional
   // read order so albedo lands first, masks last.
@@ -85,6 +93,9 @@
     /** Asset key for the rig editor + override file naming. */
     assetId: string;
     onCloseRigEditor: () => void;
+    /** Bumped on every successful GLB load so the Bones tab knows to
+     *  re-fetch the snapshot from the viewer. Identity-compared. */
+    loadToken?: unknown;
   }
 
   const {
@@ -100,6 +111,7 @@
     viewer,
     assetId,
     onCloseRigEditor,
+    loadToken,
   }: Props = $props();
 
   // Storage keys mirror the Library page namespace.
@@ -128,7 +140,8 @@
         t === 'lods' ||
         t === 'textures' ||
         t === 'winding' ||
-        t === 'rig'
+        t === 'rig' ||
+        t === 'bones'
       ) {
         activeTab = t;
       }
@@ -158,7 +171,8 @@
           t === 'lods' ||
           t === 'textures' ||
           t === 'winding' ||
-          t === 'rig'
+          t === 'rig' ||
+          t === 'bones'
             ? t
             : 'files';
       }
@@ -292,6 +306,7 @@
     { id: 'textures', label: 'Textures', hide: !hasTextures },
     { id: 'winding', label: 'Winding' },
     { id: 'rig', label: 'Rig' },
+    { id: 'bones', label: 'Bones' },
     { id: 'rig-editor', label: 'Rig editor', hide: !rigEditorOpen },
   ]);
 
@@ -541,6 +556,8 @@
             {/if}
           </div>
         {/if}
+      {:else if activeTab === 'bones'}
+        <BoneInspector {viewer} {assetId} {loadToken} />
       {:else if activeTab === 'rig-editor'}
         {#if rigEditorOpen && viewer}
           <RigEditorPanel {assetId} assetGlb={asset.glb} {viewer} onClose={onCloseRigEditor} />
