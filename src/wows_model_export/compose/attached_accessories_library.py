@@ -47,20 +47,15 @@ from ..resolve import skel_ext_hashes
 from ..types import AttachmentResolveStats
 
 SCHEMA_VERSION = "6"
-# Bumped 2026-05-08 alongside toolkit's `write_skel_ext_candidates_json`
-# schema_v2 emit. Matrices are now bone-rest-composed + Ry(180°) baked
-# in, with translation already in metres — consumers decompose the
-# matrix verbatim. v1 data (legacy emit) requires the consumer to apply
-# `S·M·S` Z-mirror conjugation, post-multiplied Ry(180°), and a
-# parent-bone Y rest offset; that consumer-side logic was deleted in
-# the same change.
+# Matrices are bone-rest-composed with Ry(180°) baked in and translations
+# in metres — consumers decompose the matrix verbatim.
 #
-# Bumped 2026-05-10 for Convention-B child-class handling. Candidate
-# schema v3 identifies hosts emitted with ``host_bone_z_mirror == false``.
-# Those candidates already carry the toolkit's X/Z position mirror. Host-
-# space fragments consume that rotation as-is; reusable external props need
-# a rotation-only Ry(180) conjugation with translation preserved. This is
-# equivalent to a parent-frame vertical 180 plus a child-local vertical 180.
+# Candidate schema v3 identifies hosts emitted with
+# ``host_bone_z_mirror == false`` (Convention-B). Those candidates already
+# carry the toolkit's X/Z position mirror. Host-space fragments consume
+# that rotation as-is; reusable external props need a rotation-only
+# Ry(180) conjugation with translation preserved — equivalent to a
+# parent-frame vertical 180 plus a child-local vertical 180.
 
 CANDIDATES_SUFFIX = ".skel_ext_candidates.json"
 ATTACHMENTS_SUFFIX = ".attached_accessories.json"

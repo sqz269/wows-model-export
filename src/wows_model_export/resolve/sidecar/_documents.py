@@ -258,7 +258,6 @@ def geometry_from_hull_glb(
     glb_path: str | Path,
     *,
     group_name: str = "Hull",
-    native_scale_m: float = 1.0,
     waterline_y: float = 0.0,
     keel_y: float | None = None,
     _gltf: dict[str, Any] | None = None,
@@ -267,12 +266,9 @@ def geometry_from_hull_glb(
     by walking the hull GLB and aggregating the AABB of the named
     top-level group.
 
-    The toolkit now emits hull vertices pre-scaled to metres, so
-    ``native_scale_m`` defaults to ``1.0`` (pass-through). Set to ``15.0``
-    only when reading a pre-bake GLB (pre-2026-04-23 exports) that still
-    has native WoWS units (1 u ≈ 15 m). Axis mapping assumes glTF's Y-up
-    convention: ``height_m`` is the Y-extent, ``length_m`` is the max of
-    the other two axes, ``beam_m`` is the min.
+    Toolkit hull GLBs are emitted in metres (Y-up). Axis mapping:
+    ``height_m`` is the Y-extent, ``length_m`` is the max of the other
+    two axes, ``beam_m`` is the min.
 
     Only meshes under the ``group_name`` subtree count (defaults to
     ``"Hull"``), so hitbox cubes + armor meshes don't inflate the bounds.
@@ -284,8 +280,6 @@ def geometry_from_hull_glb(
     Args:
       glb_path:        Path to the hull GLB.
       group_name:      Top-level node to aggregate under. Defaults to ``"Hull"``.
-      native_scale_m:  Multiplier applied to raw GLB extents. Defaults to
-                       1.0 (new metric GLBs). Use 15.0 for legacy native GLBs.
       waterline_y:     Passed through into ``geometry.hull.waterline_y``.
       keel_y:          If ``None``, computed as the AABB min-Y (metric).
       _gltf:           Pre-parsed glTF dict (private). Passed by
@@ -411,12 +405,12 @@ def geometry_from_hull_glb(
     if aabb_min[0] == math.inf:
         return make_geometry(waterline_y=waterline_y)
 
-    extent = [(aabb_max[i] - aabb_min[i]) * native_scale_m for i in range(3)]
+    extent = [aabb_max[i] - aabb_min[i] for i in range(3)]
     # Y-up → height is Y; pick length = longer of remaining two axes.
     height_m = extent[1]
     length_m = max(extent[0], extent[2])
     beam_m   = min(extent[0], extent[2])
-    keel = (aabb_min[1] * native_scale_m) if keel_y is None else keel_y
+    keel = aabb_min[1] if keel_y is None else keel_y
     waterline = waterline_y
     draft_m = max(0.0, waterline - keel)
 
@@ -532,7 +526,7 @@ def geometry_and_hitbox_from_hull_glb(
       glb_path:           Path to the hull GLB.
       geometry_kwargs:    Optional kwargs forwarded to
                           :func:`geometry_from_hull_glb` (e.g.
-                          ``waterline_y``, ``native_scale_m``).
+                          ``waterline_y``, ``keel_y``).
       hitbox_source_glb:  Forwarded to :func:`hitbox_from_hull_glb` as
                           ``source_glb``.
 

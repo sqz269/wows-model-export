@@ -34,19 +34,11 @@ def make_pipeline(
     stages_completed: Iterable[int] = (),
     dcc_version: str = "",
     toolkit_version: str = "",
-    native_scale_m: float = 1.0,
     tool_commits: dict[str, str] | None = None,
     exported_by: str | None = None,
     exported_at: str | None = None,
 ) -> dict[str, Any]:
-    """Build a ``pipeline`` section.
-
-    ``native_scale_m`` defaults to ``1.0`` for the new pipeline: the toolkit
-    emits metric-scaled placements and the DCC exports FBX with
-    ``global_scale=15`` so the sidecar is in metres. Set to ``15.0`` only if
-    you're exporting the FBX in native WoWS units and letting the consumer
-    apply the 15× at import.
-    """
+    """Build a ``pipeline`` section."""
     return {
         "version": version or _today_iso_date(),
         "exported_at": exported_at or _now_iso(),
@@ -55,7 +47,6 @@ def make_pipeline(
         "toolkit_version": toolkit_version,
         "stages_completed": sorted({int(s) for s in stages_completed}),
         "tool_commits": dict(tool_commits or {}),
-        "native_scale_m": float(native_scale_m),
     }
 
 

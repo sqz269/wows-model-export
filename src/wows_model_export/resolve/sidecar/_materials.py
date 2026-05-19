@@ -1426,21 +1426,10 @@ def discover_skins_from_materials(
         if palette_resolver is not None:
             mask_paths = mask_paths_by_scheme.get(scheme_key, [])
             try:
-                result = palette_resolver(scheme_key, mask_paths)
+                camo_name, resolved, categories = palette_resolver(scheme_key, mask_paths)
             except Exception:
                 # Resolver should never raise — but be defensive in
-                # scaffold path. Fall through to legacy behaviour.
-                result = (None, [], {})
-            # Tolerate legacy 2-tuple resolvers (no categories).
-            if isinstance(result, tuple):
-                if len(result) == 3:
-                    camo_name, resolved, categories = result
-                elif len(result) == 2:
-                    camo_name, resolved = result
-                    categories = {}
-                else:
-                    camo_name, resolved, categories = None, [], {}
-            else:
+                # scaffold path. Fall through to the mask-only emit below.
                 camo_name, resolved, categories = None, [], {}
 
         if resolved:

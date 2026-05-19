@@ -166,7 +166,6 @@ _PIPELINE_ORDER: tuple[str, ...] = (
     "toolkit_version",
     "stages_completed",
     "tool_commits",
-    "native_scale_m",
 )
 
 _SHIP_ORDER: tuple[str, ...] = (

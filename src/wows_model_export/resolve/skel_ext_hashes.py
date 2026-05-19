@@ -142,10 +142,6 @@ def parse_placement_string(s: str) -> dict | None:
     return None
 
 
-# Backwards-compat alias.
-parse_mp_string = parse_placement_string
-
-
 # ---------------------------------------------------------------------------
 # assets.bin extraction
 # ---------------------------------------------------------------------------
@@ -173,10 +169,6 @@ def extract_placement_strings(assets_bin_path: Path | str) -> set[str]:
     for m in _PLACEMENT_RE.finditer(data):
         out.add(m.group(0)[:-1].decode("ascii", errors="ignore"))
     return out
-
-
-# Backwards-compat alias.
-extract_mp_strings = extract_placement_strings
 
 
 # ---------------------------------------------------------------------------
@@ -362,9 +354,7 @@ def resolve_candidates(
 __all__ = [
     "murmur3_32",
     "parse_placement_string",
-    "parse_mp_string",
     "extract_placement_strings",
-    "extract_mp_strings",
     "build_table",
     "save_table",
     "load_table",

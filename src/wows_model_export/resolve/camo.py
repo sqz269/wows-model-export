@@ -1756,11 +1756,6 @@ def mat_textures_for_entry(
     """
     out: dict[str, dict] = {}
     for tag, vfs_path in entry.textures.items():
-        # The ``_mgn`` / ``_animmap`` siblings are no longer keyed under
-        # ``entry.textures`` (parser routes them to ``entry.mgn_textures``
-        # / ``entry.anim_maps``); skip the legacy guard.
-        if tag.endswith("_mgn") or tag.endswith("_animmap"):
-            continue
         cat = _tag_to_category(tag)
         mips = _resolve_mips(vfs_path, extracted_mips, mat_base_dir)
         if not mips:

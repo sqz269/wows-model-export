@@ -81,28 +81,23 @@ def apply_variant_asset_swaps(
     doc: dict[str, Any],
     swaps: dict[str, Any],
     *,
-    library_root: Path | None = None,
+    library_root: Path,
     base_aid_by_hp: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], int, set[str]]:
     """Rewrite ``asset_id`` / ``dead_asset_id`` / ``misc_filter`` on every
     placement using a swap table from
     :func:`tools.shared.gameparams.resolve_variant_accessory_swaps`.
 
-    Accepts both shapes the resolver has produced:
-
-      * Current — dict-of-dicts ``{by_asset_id, by_hp_name,
-        dead_by_hp_name, misc_filter_by_hp}``. HP-name-keyed swaps take
-        precedence over asset-id-keyed ones (more specific). Per-HP
-        dead swaps can ADD a ``dead_asset_id`` to a placement that
-        didn't have one (Iowa AzurLane: base Iowa has no dead variant;
-        the Azur skin adds ``AGM652_..._Azur_dead``). Per-HP
-        ``misc_filter`` overrides the vanilla ship's per-HP whitelist
-        with the variant-bundled ``MP_*`` IDs from the Exterior's
-        ``nodesConfig`` — empty list means "drop every bundled misc on
-        this HP under this variant" (common for Azur director HPs).
-      * Legacy — flat ``{base_aid: variant_aid}`` dict from the
-        peculiarityModels-only era. Treated as ``by_asset_id`` only,
-        with no HP-keyed swaps.
+    ``swaps`` is a dict-of-dicts ``{by_asset_id, by_hp_name,
+    dead_by_hp_name, misc_filter_by_hp}``. HP-name-keyed swaps take
+    precedence over asset-id-keyed ones (more specific). Per-HP dead
+    swaps can ADD a ``dead_asset_id`` to a placement that didn't have
+    one (Iowa AzurLane: base Iowa has no dead variant; the Azur skin
+    adds ``AGM652_..._Azur_dead``). Per-HP ``misc_filter`` overrides
+    the vanilla ship's per-HP whitelist with the variant-bundled
+    ``MP_*`` IDs from the Exterior's ``nodesConfig`` — empty list
+    means "drop every bundled misc on this HP under this variant"
+    (common for Azur director HPs).
 
     For mesh-swap permoflages whose Exterior carries per-hardpoint
     accessory swaps (ARP gunmounts → JGM57x_Arpeggio, AzurLane Iowa
@@ -111,25 +106,21 @@ def apply_variant_asset_swaps(
     asset references so downstream consumers bind the variant library
     accessories instead of the base ship's gray turrets.
 
-    Bone-mismatch correction (when ``library_root`` is provided): WG
-    sometimes re-authors the variant's ``.geometry`` pre-flipped 180°
-    around Y *and* sets the variant's ``Rotate_Y_BlendBone`` rest pose
-    to identity instead of Z-mirror. The toolkit correctly bakes
-    ``inverse(source_bone)`` into the placement at base export, but
-    that correction is wrong for the variant once we've swapped the
-    asset_id. When the source and target meshes have opposite
-    forward-Z direction (proxy for ``Rotate_Y_BlendBone.col2.z``
-    sign — see :mod:`tools.shared.wg_bone_orientation`), this
-    post-multiplies the placement matrix by Ry(180°). Confirmed pairs
-    that need this on 2026-05-09: AGM019 → AGM622 (Baltimore Azur
-    main), JGS158 → JGS3094 (Azur Shinano secondary). Pairs that
-    don't need it (AGM034 → AGM652 for Iowa Azur main) collapse to a
-    no-op because both meshes share Z direction. See
-    ``memory/project_variant_swap_bone_mismatch.md`` for the
-    derivation. Without ``library_root``, the correction is skipped
-    (back-compat for callers that don't have the library on disk —
-    in that case any bone-mismatched swaps render 180° wrong, same
-    as pre-2026-05-09 behaviour).
+    Bone-mismatch correction: WG sometimes re-authors the variant's
+    ``.geometry`` pre-flipped 180° around Y *and* sets the variant's
+    ``Rotate_Y_BlendBone`` rest pose to identity instead of Z-mirror.
+    The toolkit correctly bakes ``inverse(source_bone)`` into the
+    placement at base export, but that correction is wrong for the
+    variant once we've swapped the asset_id. When the source and
+    target meshes have opposite forward-Z direction (proxy for
+    ``Rotate_Y_BlendBone.col2.z`` sign — see
+    :mod:`tools.shared.wg_bone_orientation`), this post-multiplies the
+    placement matrix by Ry(180°). Confirmed pairs that need this on
+    2026-05-09: AGM019 → AGM622 (Baltimore Azur main), JGS158 →
+    JGS3094 (Azur Shinano secondary). Pairs that don't need it
+    (AGM034 → AGM652 for Iowa Azur main) collapse to a no-op because
+    both meshes share Z direction. See
+    ``memory/project_variant_swap_bone_mismatch.md`` for the derivation.
 
     ``base_aid_by_hp`` is a per-HP map of the BASE vehicle's
     ``hp_name → asset_id`` (i.e. the pre-swap aids that the toolkit
@@ -199,7 +190,7 @@ def apply_variant_asset_swaps(
         category: str | None,
         subcategory: str | None,
     ) -> int:
-        if not isinstance(asset_id, str) or library_root is None:
+        if not isinstance(asset_id, str):
             return 0
         # Empty / missing taxonomy → can't locate the GLB. Returning 0
         # (no opinion) is safe — no Y flip will be applied.
@@ -325,9 +316,8 @@ def apply_variant_asset_swaps(
             # runs after scaffold), the placement's ``attached_y_flip``
             # flag will be absent. Recover the source aid so the
             # bone-mismatch gate below can re-check the swap pair and
-            # apply the correction now. Gated on ``library_root``
-            # because that's where the bone signs come from. Skipped
-            # when the placement is already flagged. This is what lets
+            # apply the correction now. Skipped when the placement is
+            # already flagged. This is what lets
             # ``<Ship>_accessories.json`` self-heal on a re-scaffold
             # post-library-build — the webview reads accessories.json
             # directly, so the broken matrix sticks until this heal
@@ -356,8 +346,7 @@ def apply_variant_asset_swaps(
             # matrix would never get Ry(180°)-corrected.
             inferred_source_aid: str | None = None
             if (
-                library_root is not None
-                and isinstance(aid, str)
+                isinstance(aid, str)
                 and not p.get("attached_y_flip")
                 and (new_aid is None or new_aid == aid)
             ):
@@ -421,8 +410,7 @@ def apply_variant_asset_swaps(
                 flip_source = inferred_source_aid
                 flip_target = aid
             if (
-                library_root is not None
-                and flip_source is not None
+                flip_source is not None
                 and flip_target is not None
                 and _needs_y_flip(flip_source, flip_target, scope, category, subcategory)
             ):
