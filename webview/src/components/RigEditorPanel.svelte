@@ -141,10 +141,8 @@
       if (!head?.ok) {
         setStatus(
           'fail',
-          `Rebuild succeeded but no <${assetId}.rig.debug.glb> was produced. ` +
-            'The new `wows-turret-autorig` does not emit a debug scene yet — ' +
-            'use the legacy `tools/ship/turret_rig.py --debug-scene` path to ' +
-            'generate one, then reopen the editor.',
+          `Rebuild succeeded but no <${assetId}.rig.debug.glb> was produced — ` +
+            '`wows-turret-autorig` does not emit a debug scene yet.',
         );
         return;
       }
