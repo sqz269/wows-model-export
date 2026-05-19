@@ -662,21 +662,6 @@ _MFM_PROP_TO_PBR_SLOTS: dict[str, tuple[str, ...]] = {
 }
 
 
-#: g_detail* MFM scalar names → sidecar ``detail_params`` field names.
-#: These six scalars are emitted under ``materials[*].floats`` by the
-#: toolkit's ``write_material_mappings_json`` (see ``ship.rs``); the
-#: sidecar normalises them onto a fixed key set so consumers don't have
-#: to deal with the raw WG hash-name layer.
-_DETAIL_FLOAT_KEYS: tuple[tuple[str, str], ...] = (
-    ("g_detailNormalInfluence", "normal_influence"),
-    ("g_detailAlbedoInfluence", "albedo_influence"),
-    ("g_detailGlossInfluence",  "gloss_influence"),
-    ("g_detailFadeDistance",    "fade_distance"),
-    ("g_detailScaleU",          "scale_u"),
-    ("g_detailScaleV",          "scale_v"),
-)
-
-
 def _apply_material_mappings_json(
     materials: list[dict[str, Any]],
     material_mappings_json: str | Path,
@@ -857,36 +842,52 @@ def _apply_material_mappings_json(
         if chosen is None:
             continue
 
-        # Detail params + atlas binding. Toolkit invariant (post-2026-05-17,
-        # see ``write_material_mappings_json`` in ``ship.rs``):
+        # Detail params + atlas binding. The toolkit's
+        # ``write_material_mappings_json`` (see ``ship.rs``) emits the raw
+        # MFM floats verbatim — it does NOT synthesise defaults for keys
+        # the MFM didn't declare. Observed shapes in the wild:
         #
-        # * Every material entry carries a ``floats`` dict and a
-        #   ``textures`` dict.
-        # * A material whose MFM declared the detail-normal layer carries
-        #   all six ``g_detail{Normal,Albedo,Gloss}Influence`` /
-        #   ``g_detailFadeDistance`` / ``g_detailScaleU`` /
-        #   ``g_detailScaleV`` keys AND a ``textures.detailMap`` entry.
-        # * Materials whose MFM doesn't declare detail (most: every
-        #   SHIPWIRE entry, transparent_glass, etc.) carry empty floats
-        #   and no ``textures.detailMap``. The single membership test
-        #   below routes those past the per-material branch.
+        # * Full six-key set — typical (e.g. SHIPMAT_PBS_Hull on every
+        #   stock ship).
+        # * Influence triplet + FadeDistance only, no Scale at all
+        #   (TL2_SHIPMAT_PBS_Gun_skinned on UGS2005,
+        #   TL2_SHIPMAT_EMISSIVE_PBS_Gun_skinned on JGM513_HW19).
+        # * Influence triplet + FadeDistance + ScaleU only, ScaleV absent
+        #   (TL2_SHIPMAT_PBS_Catapult_skinned on AC002_Catapult_2,
+        #   TL2_SHIPMAT_PBS_Misc9 on AM6071_Decal_Montana — both have
+        #   ScaleU=8.0, implying the engine treats the missing axis as
+        #   a uniform-scale shorthand).
+        # * Empty floats — material doesn't declare detail (every
+        #   SHIPWIRE entry, transparent_glass, etc.); skipped by the
+        #   ``g_detailNormalInfluence in floats`` gate below.
         #
-        # Emit ``detail_params`` + bind the shared atlas only when at
-        # least one influence is non-zero. Materials whose MFM ships
-        # all-zero influences (every stock PBS hull / deck) pay no
-        # texture-binding cost — the atlas would multiply to zero in
-        # the shader anyway.
+        # Emit ``detail_params`` + bind the shared atlas only when the
+        # influence triplet is present AND at least one is non-zero. For
+        # missing Scale keys, fall back to the present axis (uniform
+        # scale) or 1.0 (engine default = no UV repeat).
         textures = chosen["textures"]
         floats = chosen["floats"]
         detail_slot_paths: list[str] | None = None
         if "g_detailNormalInfluence" in floats and (
-            floats["g_detailNormalInfluence"] != 0.0
-            or floats["g_detailAlbedoInfluence"] != 0.0
-            or floats["g_detailGlossInfluence"] != 0.0
+            floats.get("g_detailNormalInfluence", 0.0) != 0.0
+            or floats.get("g_detailAlbedoInfluence", 0.0) != 0.0
+            or floats.get("g_detailGlossInfluence", 0.0) != 0.0
         ):
+            scale_u = floats.get("g_detailScaleU")
+            scale_v = floats.get("g_detailScaleV")
+            if scale_u is None and scale_v is None:
+                scale_u = scale_v = 1.0
+            elif scale_u is None:
+                scale_u = scale_v
+            elif scale_v is None:
+                scale_v = scale_u
             mat["detail_params"] = {
-                side_name: float(floats[mfm_name])
-                for mfm_name, side_name in _DETAIL_FLOAT_KEYS
+                "normal_influence": float(floats.get("g_detailNormalInfluence", 0.0)),
+                "albedo_influence": float(floats.get("g_detailAlbedoInfluence", 0.0)),
+                "gloss_influence":  float(floats.get("g_detailGlossInfluence", 0.0)),
+                "fade_distance":    float(floats.get("g_detailFadeDistance", 0.0)),
+                "scale_u":          float(scale_u),
+                "scale_v":          float(scale_v),
             }
             detail_stem = textures["detailMap"]["stem"]
             for key in _normalise_stem(detail_stem):
