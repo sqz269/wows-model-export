@@ -60,7 +60,7 @@ from ..errors import CancelledError
 from ..types import StepEvent
 
 JobState = Literal["running", "done", "failed", "cancelled"]
-JobKind = Literal["extract", "skin", "bootstrap", "rig"]
+JobKind = Literal["extract", "skin", "bootstrap", "rig", "consumer"]
 
 # 1 hour. The client polls completed jobs for a while after they finish
 # to render the final log tail; keeping a generous retention window

@@ -60,6 +60,11 @@ export function gameParamsHref(): string {
     : '#/gameparams';
 }
 
+/** Topnav href for the Consumers tab. No sub-routes today. */
+export function consumersHref(): string {
+  return '#/consumers';
+}
+
 /** Topnav href for the Settings tab. No sub-routes today — kept as a
  *  helper so the topnav reads identically to the other tabs. */
 export function settingsHref(): string {

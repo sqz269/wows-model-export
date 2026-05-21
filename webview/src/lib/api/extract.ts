@@ -98,7 +98,7 @@ export function runSkinPack(body: RunSkinBody): Promise<{ ok: boolean; status: n
 interface JobsResponse {
   jobs?: Array<{
     id: string;
-    kind: 'extract' | 'skin';
+    kind: import('$lib/types/extract').JobKind;
     label: string;
     state: 'running' | 'done' | 'failed' | 'cancelled';
     started_at: number;
