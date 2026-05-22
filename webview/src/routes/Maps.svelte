@@ -143,6 +143,13 @@
   // playable foreground.
   let showLandscape = $state(true);
 
+  // Whether to render water opaquely (engine-faithful: water plane
+  // occludes underwater geometry from above-water camera angles).
+  // Default ON — the engine doesn't show-through; the GLB's alpha=0.85
+  // is a producer artefact. Toggle OFF to inspect submerged geometry.
+  let opaqueWater = $state(true);
+
+
   // Live handles to the scene root + env so the showLandscape toggle
   // doesn't need to rebuild the whole scene. Set by the load effect;
   // cleared on teardown.
@@ -231,6 +238,35 @@
       if (ud && ud.is_landscape) {
         o.visible = show;
       }
+    });
+  }
+
+
+  /** Force the Water plane to write depth so underwater geometry is
+   *  occluded from an overview camera — matching how the engine renders
+   *  water opaquely + writes depth (refraction is in the water shader,
+   *  not in glTF alpha-blend). The toolkit emits Water as alphaMode=BLEND
+   *  with alpha=0.85, which three.js maps to transparent=true,
+   *  depthWrite=false — so submerged LNR landmasses + obstacles show
+   *  through from above and create apparent "overlap". */
+  function fixupWaterDepth(root: THREE.Object3D, opaqueWater: boolean): void {
+    root.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh || mesh.name !== 'Water') return;
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      if (Array.isArray(mat)) return;
+      if (opaqueWater) {
+        mat.transparent = false;
+        mat.depthWrite = true;
+        // Keep the toolkit's intended blue tint but force alpha=1.
+        if (mat.color) mat.color.setRGB(0.1, 0.3, 0.5);
+        mat.opacity = 1.0;
+      } else {
+        mat.transparent = true;
+        mat.depthWrite = false;
+        mat.opacity = 0.85;
+      }
+      mat.needsUpdate = true;
     });
   }
 
@@ -345,9 +381,10 @@
           engineFogDensity = null;
         }
 
-        // Apply current landscape filter (default ON) + expose the root
-        // so the toggle effect below can re-apply without a full reload.
+        // Apply current filters (default ON) + expose the root so the
+        // toggle effects below can re-apply without a full reload.
         applyLandscapeFilter(loadedRoot, showLandscape);
+        fixupWaterDepth(loadedRoot, opaqueWater);
         activeRoot = loadedRoot;
 
         // Frame camera using engine bounds when present (preferred — it's
@@ -399,6 +436,13 @@
     const root = activeRoot;
     if (!root) return;
     applyLandscapeFilter(root, showLandscape);
+  });
+
+  // Live toggle for water opacity.
+  $effect(() => {
+    const root = activeRoot;
+    if (!root) return;
+    fixupWaterDepth(root, opaqueWater);
   });
 
   // Live fog-density slider — re-scales the engine density into the
@@ -548,6 +592,10 @@
                 </span>
               </label>
             {/if}
+            <label class="flex items-center gap-1.5">
+              <input type="checkbox" bind:checked={opaqueWater} />
+              <span>Opaque water</span>
+            </label>
             {#if viewerStats.fogDensity != null}
               <label
                 class="text-muted-foreground/70 flex items-center gap-1.5"
