@@ -24,6 +24,7 @@ htmlcov/
 .vscode/
 .idea/
 *.swp
+*.code-workspace
 .DS_Store
 Thumbs.db
 
@@ -61,3 +62,4 @@ tmp/
 # in server/static.py falls back to webview/dist when this is empty) or
 # by CI before wheel/exe builds. Not source — never commit.
 /src/wows_model_export/_static/webview/
+tools/*
