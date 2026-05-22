@@ -9,6 +9,7 @@
     extractHref,
     gameParamsHref,
     libraryHref,
+    mapsHref,
     settingsHref,
     shipsHref,
   } from '$lib/nav_state.svelte';
@@ -19,6 +20,7 @@
   import Settings from '$routes/Settings.svelte';
   import GameParams from '$routes/GameParams.svelte';
   import Consumers from '$routes/Consumers.svelte';
+  import Maps from '$routes/Maps.svelte';
   import HelpDialog from '$components/HelpDialog.svelte';
 
   let route = $state<RouteState>(readRoute());
@@ -70,6 +72,10 @@
           e.preventDefault();
           return;
         case '6':
+          navigate(mapsHref());
+          e.preventDefault();
+          return;
+        case '7':
           navigate(settingsHref());
           e.preventDefault();
           return;
@@ -94,7 +100,8 @@
     { page: 'library', href: libraryHref(), label: 'Library', keyHint: '3' },
     { page: 'gameparams', href: gameParamsHref(), label: 'GameParams', keyHint: '4' },
     { page: 'consumers', href: consumersHref(), label: 'Consumers', keyHint: '5' },
-    { page: 'settings', href: settingsHref(), label: 'Settings', keyHint: '6' },
+    { page: 'maps', href: mapsHref(), label: 'Maps', keyHint: '6' },
+    { page: 'settings', href: settingsHref(), label: 'Settings', keyHint: '7' },
   ]);
 
   function go(e: MouseEvent, href: string) {
@@ -185,6 +192,12 @@
   </div>
   <div class={route.page === 'consumers' ? 'flex flex-1 min-w-0' : 'hidden'}>
     <Consumers active={route.page === 'consumers'} />
+  </div>
+  <div class={route.page === 'maps' ? 'flex flex-1 min-w-0' : 'hidden'}>
+    <Maps
+      spaceName={route.page === 'maps' ? route.spaceName : null}
+      active={route.page === 'maps'}
+    />
   </div>
   <div class={route.page === 'settings' ? 'flex flex-1 min-w-0' : 'hidden'}>
     <Settings />

@@ -54,13 +54,21 @@ export type ConsumersRoute = {
   path: string;
 };
 
+export type MapsRoute = {
+  page: 'maps';
+  path: string;
+  /** Selected space name from `#/maps/<name>`. Null on bare `#/maps`. */
+  spaceName: string | null;
+};
+
 export type RouteState =
   | LibraryRoute
   | ShipsRoute
   | ExtractRoute
   | SettingsRoute
   | GameParamsRoute
-  | ConsumersRoute;
+  | ConsumersRoute
+  | MapsRoute;
 
 function parseHash(hash: string): RouteState {
   const path = hash.replace(/^#\/?/, '');
@@ -80,6 +88,9 @@ function parseHash(hash: string): RouteState {
   }
   if (head === 'consumers') {
     return { page: 'consumers', path };
+  }
+  if (head === 'maps' || head === 'map') {
+    return { page: 'maps', path, spaceName: rest ?? null };
   }
   // Default + `library` + `asset/...` all route to the library page.
   return { page: 'library', path, assetId: rest ?? null };

@@ -24,6 +24,7 @@ class NavState {
   lastAssetId = $state<string | null>(null);
   lastVehicleId = $state<string | null>(null);
   lastGameParamId = $state<string | null>(null);
+  lastSpaceName = $state<string | null>(null);
 }
 
 export const navState = new NavState();
@@ -69,4 +70,12 @@ export function consumersHref(): string {
  *  helper so the topnav reads identically to the other tabs. */
 export function settingsHref(): string {
   return '#/settings';
+}
+
+/** Topnav href for the Maps tab. Falls back to bare `#/maps` when no
+ *  space has been opened this session. */
+export function mapsHref(): string {
+  return navState.lastSpaceName
+    ? `#/maps/${encodeURIComponent(navState.lastSpaceName)}`
+    : '#/maps';
 }
