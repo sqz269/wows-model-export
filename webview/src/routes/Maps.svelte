@@ -135,6 +135,12 @@
     bbox: { min: [number, number, number]; max: [number, number, number] } | null;
     landscapeCount: number;
     fogDensity: number | null;
+    lodCullableCount: number;
+    lightCount: number;
+    vegetationSpecies: number;
+    vegetationInstances: number;
+    dyedInstances: number;
+    materialOverrideInstances: number;
   } | null>(null);
 
   // Whether to render landscape-flagged instances (the LNR* / TILEDLAND
@@ -149,6 +155,26 @@
   // is a producer artefact. Toggle OFF to inspect submerged geometry.
   let opaqueWater = $state(true);
 
+  // Per-LOD extent culling. Engine semantics: when camera distance to an
+  // instance exceeds the instance's outermost LOD extent (last element of
+  // `lod_extents`), the engine stops drawing that asset entirely. Hard
+  // cut, not soft fade. Toggle OFF to inspect culled content.
+  let lodCullEnabled = $state(true);
+
+  // Engine point lights from `space.bin` pointLights[] (stride 0xc0).
+  // Toggle ON to add the engine's atmospheric/accent lights; OFF to inspect
+  // the unlit scene. Lights are small-radius accents (~1-5m) and won't be
+  // visible from an overview camera unless the user zooms in.
+  let showLights = $state(true);
+  let lightObjects: THREE.PointLight[] = [];
+
+  // Vegetation rendering. The toolkit emits one `Tree_<species>_<i>` node
+  // per tree instance — for Okinawa that's ~5,269 individual nodes. We
+  // collapse them into one `THREE.InstancedMesh` per species at load time,
+  // cutting draw calls from thousands to single digits. Toggleable; the
+  // whole `Vegetation` group's `.visible` flips in one assignment.
+  let showVegetation = $state(true);
+  let vegetationGroup: THREE.Group | null = null;
 
   // Live handles to the scene root + env so the showLandscape toggle
   // doesn't need to rebuild the whole scene. Set by the load effect;
@@ -156,6 +182,18 @@
   let activeRoot = $state<THREE.Object3D | null>(null);
   let activeFog = $state<THREE.FogExp2 | null>(null);
   let engineFogDensity = $state<number | null>(null);
+
+  // Pre-collected list of instance nodes that carry a `lod_extents` array.
+  // Built once per load; the render loop walks this list per-frame instead
+  // of traversing the whole scene tree. World position is cached because
+  // map placements are static — they never animate.
+  interface LodInstance {
+    node: THREE.Object3D;
+    worldPos: THREE.Vector3;
+    maxExtentSq: number;
+    isLandscape: boolean;
+  }
+  let lodInstances: LodInstance[] = [];
 
   // Engine fog density is tuned for a ship-level (~30m altitude) camera
   // where 1-2 km is the practical visibility envelope. Our overview
@@ -177,6 +215,17 @@
       fog_near_distance: number;
       far_plane: number;
     };
+    lights?: MapLight[];
+  }
+
+  /** A single engine point-light, world-space. RGBA convention: RGB is
+   *  linear color, A is the intensity multiplier. */
+  interface MapLight {
+    type: 'point';
+    position: [number, number, number];
+    color: [number, number, number, number];
+    radius: number;
+    min_quality: number;
   }
 
   /** Per-instance extras emitted by the toolkit. See
@@ -185,21 +234,44 @@
     is_landscape?: boolean;
     min_quality_level?: number;
     lod_extents?: number[];
+    /** `[[matter_id, replaces_id], ...]` — opaque u32 pairs identifying
+     *  per-instance dye overrides. Themed event maps carry hundreds;
+     *  "plain" maps zero. Webview v1 surfaces the count only and doesn't
+     *  yet apply the override — the matter_id needs a hash-table lookup
+     *  to resolve to an actual texture/color tweak. */
+    dyes?: [number, number][];
+    /** Count of materialInstances[] overrides on this instance. v1
+     *  surfaces the count; decoding the 0x70-byte
+     *  MaterialInstancePrototype records is a follow-up. */
+    material_instance_count?: number;
   }
 
   /** Build a world bbox suitable for camera framing. Prefers scene.extras
    *  bounds (engine-authoritative playable extent) over a Terrain mesh
-   *  scan. Falls back to a full content bbox when neither is available. */
+   *  scan. Falls back to a full content bbox when neither is available.
+   *  Returns mesh + per-instance-override counts collected in the same
+   *  pass (saving a second traversal). */
   function computeFrameBox(
     root: THREE.Object3D,
     sceneExtras: MapSceneExtras,
-  ): { box: THREE.Box3; meshCount: number; landscapeCount: number } {
+  ): {
+    box: THREE.Box3;
+    meshCount: number;
+    landscapeCount: number;
+    dyedInstances: number;
+    materialOverrideInstances: number;
+  } {
     let meshCount = 0;
     let landscapeCount = 0;
+    let dyedInstances = 0;
+    let materialOverrideInstances = 0;
     root.traverse((o) => {
       if ((o as THREE.Mesh).isMesh) meshCount++;
       const ud = o.userData as InstanceExtras;
-      if (ud && ud.is_landscape) landscapeCount++;
+      if (!ud) return;
+      if (ud.is_landscape) landscapeCount++;
+      if (ud.dyes && ud.dyes.length > 0) dyedInstances++;
+      if ((ud.material_instance_count ?? 0) > 0) materialOverrideInstances++;
     });
 
     // Prefer engine bounds. Y comes from terrain min/max (the engine
@@ -228,10 +300,12 @@
       });
     }
 
-    return { box, meshCount, landscapeCount };
+    return { box, meshCount, landscapeCount, dyedInstances, materialOverrideInstances };
   }
 
-  /** Toggle visibility on landscape-flagged instance nodes. */
+  /** Toggle visibility on landscape-flagged instance nodes. Covers nodes
+   *  without `lod_extents`; the per-frame LOD pass owns visibility for
+   *  those that have extents. */
   function applyLandscapeFilter(root: THREE.Object3D, show: boolean): void {
     root.traverse((o) => {
       const ud = o.userData as InstanceExtras;
@@ -239,6 +313,180 @@
         o.visible = show;
       }
     });
+  }
+
+  /** Walk the scene once and gather every instance node that carries a
+   *  non-empty `lod_extents` array. Caches the world position because
+   *  map placements never animate, so re-querying each frame would just
+   *  burn CPU on parent-chain matrix walks. Invariant: no caller mutates
+   *  ancestor transforms of these nodes after this returns — if that ever
+   *  changes (recenter, scale toggle), the cache must be invalidated.
+   *
+   *  `maxExtent` uses `Math.max` rather than `ext[length-1]` so a
+   *  mis-sorted producer array still picks the outermost cap. Engine LODs
+   *  are authored finest-first, but defensive in case that ever changes. */
+  function collectLodInstances(root: THREE.Object3D): LodInstance[] {
+    const out: LodInstance[] = [];
+    root.updateMatrixWorld(true);
+    root.traverse((o) => {
+      const ud = o.userData as InstanceExtras | undefined;
+      const ext = ud?.lod_extents;
+      if (!ext || ext.length === 0) return;
+      let maxExtent = 0;
+      for (const e of ext) {
+        if (Number.isFinite(e) && e > maxExtent) maxExtent = e;
+      }
+      if (maxExtent <= 0) return;
+      const worldPos = new THREE.Vector3();
+      o.getWorldPosition(worldPos);
+      out.push({
+        node: o,
+        worldPos,
+        maxExtentSq: maxExtent * maxExtent,
+        isLandscape: !!ud?.is_landscape,
+      });
+    });
+    return out;
+  }
+
+  /** Collapse per-tree `Tree_<species>_<i>` nodes (emitted as ~5K
+   *  individual meshes by the toolkit) into one `THREE.InstancedMesh`
+   *  per species. Returns the new `Vegetation` Group (added under root)
+   *  plus counts for stats. World matrices of the original tree nodes
+   *  are baked into the per-instance matrices via the root's inverse,
+   *  so the result is positionally identical regardless of any
+   *  hierarchy quirks. Trees with a material array (multi-primitive
+   *  glTF mesh) are left alone — `InstancedMesh` doesn't support that
+   *  case and they're rare in practice. */
+  function collapseVegetation(
+    root: THREE.Object3D,
+  ): { group: THREE.Group | null; speciesCount: number; instanceCount: number } {
+    interface SpeciesBucket {
+      meshes: THREE.Mesh[];
+      geometry: THREE.BufferGeometry;
+      material: THREE.Material;
+    }
+    const bySpecies = new Map<string, SpeciesBucket>();
+    const toRemove: THREE.Object3D[] = [];
+    const TREE_NAME = /^Tree_(\d+)_\d+$/;
+
+    root.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const match = mesh.name.match(TREE_NAME);
+      if (!match) return;
+      if (Array.isArray(mesh.material)) return;
+      const speciesIdx = match[1];
+      let bucket = bySpecies.get(speciesIdx);
+      if (!bucket) {
+        bucket = { meshes: [], geometry: mesh.geometry, material: mesh.material as THREE.Material };
+        bySpecies.set(speciesIdx, bucket);
+      } else if (mesh.geometry !== bucket.geometry || mesh.material !== bucket.material) {
+        // GLTFLoader shares geometry+material across nodes referencing the
+        // same glTF mesh, so this should never trip. If it does, the
+        // species has unexpected per-instance overrides we'd silently
+        // collapse — bail out for this mesh and leave it as a Mesh.
+        return;
+      }
+      bucket.meshes.push(mesh);
+      toRemove.push(mesh);
+    });
+
+    if (bySpecies.size === 0) {
+      return { group: null, speciesCount: 0, instanceCount: 0 };
+    }
+
+    // One root-wide matrixWorld update suffices for every descendant — no
+    // need to re-call per-mesh inside the species loop.
+    root.updateMatrixWorld(true);
+    const rootInv = new THREE.Matrix4().copy(root.matrixWorld).invert();
+    const tmp = new THREE.Matrix4();
+
+    const group = new THREE.Group();
+    group.name = 'Vegetation';
+    let totalInstances = 0;
+
+    for (const [speciesIdx, bucket] of bySpecies) {
+      const im = new THREE.InstancedMesh(bucket.geometry, bucket.material, bucket.meshes.length);
+      im.name = `Vegetation_${speciesIdx}`;
+      for (let i = 0; i < bucket.meshes.length; i++) {
+        tmp.copy(rootInv).multiply(bucket.meshes[i].matrixWorld);
+        im.setMatrixAt(i, tmp);
+      }
+      im.instanceMatrix.needsUpdate = true;
+      // Compute the full instance bounding sphere so frustum culling works
+      // correctly — without this, three.js culls based on a single tree's
+      // geometry bbox and the entire species pops in/out as that one
+      // reference tree drifts in/out of view.
+      im.computeBoundingSphere();
+      group.add(im);
+      totalInstances += bucket.meshes.length;
+    }
+
+    for (const n of toRemove) n.parent?.remove(n);
+    root.add(group);
+
+    return { group, speciesCount: bySpecies.size, instanceCount: totalInstances };
+  }
+
+  /** Instantiate engine point lights from scene extras. Each emitted as a
+   *  `THREE.PointLight` with `distance = radius`, `decay = 2` (physical
+   *  inverse-square — matches "small accent radius" lighting better than
+   *  the linear default). Lights are attached to the scene root so the
+   *  existing teardown removes them when the scene root is removed.
+   *
+   *  HDR handling: the engine encodes light strength in RGB magnitude
+   *  (alpha is observed ≡ 1.0 across the Okinawa sample). We normalize
+   *  color to its peak channel and push the magnitude into intensity, so
+   *  a dim grey light (RGB=0.3) renders as white@0.3 intensity instead
+   *  of grey@1.0 (which doesn't read as dim from typical viewing angles),
+   *  and an HDR amber RGB=(1.57, 0.79, 0.34) keeps its hue with
+   *  intensity 1.57. */
+  function instantiateLights(root: THREE.Object3D, lights: MapLight[]): THREE.PointLight[] {
+    const out: THREE.PointLight[] = [];
+    for (const l of lights) {
+      if (l.type !== 'point') continue;
+      if (!Array.isArray(l.position) || l.position.length < 3) continue;
+      if (!Array.isArray(l.color) || l.color.length < 4) continue;
+      const [px, py, pz] = l.position;
+      if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(pz)) continue;
+      const r = Math.max(0, l.color[0]);
+      const g = Math.max(0, l.color[1]);
+      const b = Math.max(0, l.color[2]);
+      const a = Math.max(0, l.color[3]);
+      const peak = Math.max(r, g, b);
+      if (peak <= 0) continue;
+      const color = new THREE.Color(r / peak, g / peak, b / peak);
+      const intensity = a * peak;
+      const radius = Number.isFinite(l.radius) && l.radius > 0 ? l.radius : 1;
+      const light = new THREE.PointLight(color, intensity, radius, 2);
+      light.position.set(px, py, pz);
+      root.add(light);
+      out.push(light);
+    }
+    return out;
+  }
+
+  /** Per-frame visibility update for LOD-tagged instances. Composes the
+   *  landscape toggle (forces hidden when `is_landscape && !showLandscape`)
+   *  with the engine's hard far-cull at the outermost LOD extent. When
+   *  `lodCullEnabled` is OFF, only the landscape filter applies.
+   *
+   *  Writes `node.visible` only when it changes — three.js doesn't care
+   *  either way, but skipping ~all writes after settle avoids unnecessary
+   *  property churn. */
+  function updateLodVisibility(cameraPos: THREE.Vector3): void {
+    const cullEnabled = lodCullEnabled;
+    const showLand = showLandscape;
+    for (const inst of lodInstances) {
+      let visible = true;
+      if (inst.isLandscape && !showLand) {
+        visible = false;
+      } else if (cullEnabled) {
+        visible = cameraPos.distanceToSquared(inst.worldPos) < inst.maxExtentSq;
+      }
+      if (inst.node.visible !== visible) inst.node.visible = visible;
+    }
   }
 
 
@@ -339,6 +587,9 @@
         stopLoop = startRenderLoop(() => {
           if (!env) return;
           env.controls.update();
+          if (lodInstances.length > 0) {
+            updateLodVisibility(env.camera.position);
+          }
           env.render();
         });
 
@@ -390,12 +641,39 @@
         // Frame camera using engine bounds when present (preferred — it's
         // the authoritative playable extent). Mesh-scan fallback uses the
         // Terrain node.
-        const { box, meshCount, landscapeCount } = computeFrameBox(loadedRoot, sceneExtras);
+        const { box, meshCount, landscapeCount, dyedInstances, materialOverrideInstances } =
+          computeFrameBox(loadedRoot, sceneExtras);
         frameToBox(box, env.camera, env.controls);
+
+        // Pre-collect LOD-cullable instances so the per-frame pass doesn't
+        // re-traverse the scene tree. Must run after frameToBox so the
+        // camera matrix is settled before the first cull pass.
+        lodInstances = collectLodInstances(loadedRoot);
+
+        // Instantiate engine point lights. Toggled visible/invisible via
+        // the `showLights` $state through the effect below. Always reset
+        // `lightObjects` here even when the list is empty, so a re-load
+        // doesn't leak the prior selection's lights into the count.
+        const sceneLights = sceneExtras.lights ?? [];
+        lightObjects = sceneLights.length > 0 ? instantiateLights(loadedRoot, sceneLights) : [];
+        for (const lt of lightObjects) lt.visible = showLights;
+
+        // Collapse per-tree nodes into InstancedMesh per species. Cuts
+        // ~5K draw calls down to ~5 on a typical map.
+        const veg = collapseVegetation(loadedRoot);
+        vegetationGroup = veg.group;
+        if (vegetationGroup) vegetationGroup.visible = showVegetation;
+
         viewerStats = {
           nodes: meshCount,
           landscapeCount,
           fogDensity,
+          lodCullableCount: lodInstances.length,
+          lightCount: lightObjects.length,
+          vegetationSpecies: veg.speciesCount,
+          vegetationInstances: veg.instanceCount,
+          dyedInstances,
+          materialOverrideInstances,
           bbox: box.isEmpty()
             ? null
             : {
@@ -415,6 +693,9 @@
       activeRoot = null;
       activeFog = null;
       engineFogDensity = null;
+      lodInstances = [];
+      lightObjects = [];
+      vegetationGroup = null;
       stopLoop?.();
       stopResize?.();
       if (loadedRoot && env) {
@@ -443,6 +724,21 @@
     const root = activeRoot;
     if (!root) return;
     fixupWaterDepth(root, opaqueWater);
+  });
+
+  // Live toggle for engine point lights. Cheap visibility flip — lights
+  // stay attached to the scene root so reactivation is instant.
+  $effect(() => {
+    const show = showLights;
+    if (lightObjects.length === 0) return;
+    for (const lt of lightObjects) lt.visible = show;
+  });
+
+  // Live toggle for vegetation — single visibility flip on the parent
+  // group hides all species' InstancedMeshes in one operation.
+  $effect(() => {
+    const show = showVegetation;
+    if (vegetationGroup) vegetationGroup.visible = show;
   });
 
   // Live fog-density slider — re-scales the engine density into the
@@ -596,6 +892,48 @@
               <input type="checkbox" bind:checked={opaqueWater} />
               <span>Opaque water</span>
             </label>
+            {#if viewerStats.lodCullableCount > 0}
+              <label
+                class="flex items-center gap-1.5"
+                title="Hide each instance once camera distance exceeds the prototype's outermost LOD extent. Engine-faithful hard cut. Landscape (LNR*) proxies often declare a 50 km sentinel so the cull rarely fires on them — the toggle is mostly visible on close-detail decoratives."
+              >
+                <input type="checkbox" bind:checked={lodCullEnabled} />
+                <span>LOD cull ({viewerStats.lodCullableCount} eligible)</span>
+              </label>
+            {/if}
+            {#if viewerStats.lightCount > 0}
+              <label
+                class="flex items-center gap-1.5"
+                title="Engine point lights from space.bin (small-radius accents — typically only visible when the camera is close to ground level)."
+              >
+                <input type="checkbox" bind:checked={showLights} />
+                <span>Lights ({viewerStats.lightCount})</span>
+              </label>
+            {/if}
+            {#if viewerStats.vegetationInstances > 0}
+              <label
+                class="flex items-center gap-1.5"
+                title="Toggle vegetation (trees + foliage). Collapsed into one InstancedMesh per species at load — far fewer draw calls than the per-instance scene nodes the toolkit emits."
+              >
+                <input type="checkbox" bind:checked={showVegetation} />
+                <span>Vegetation ({viewerStats.vegetationSpecies}sp × {viewerStats.vegetationInstances})</span>
+              </label>
+            {/if}
+            {#if viewerStats.dyedInstances > 0 || viewerStats.materialOverrideInstances > 0}
+              <span
+                class="text-muted-foreground/70 flex items-center gap-1.5"
+                title="Per-instance overrides emitted by the toolkit but not yet applied by the webview. Dye keys are 8-byte (matter_id, replaces_id) pairs; the engine resolves them via a hash table not yet RE'd. Material override count refers to MaterialInstancePrototype records (0x70 stride) — decoding is a follow-up."
+              >
+                overrides: {[
+                  viewerStats.dyedInstances > 0 ? `${viewerStats.dyedInstances} dyed` : null,
+                  viewerStats.materialOverrideInstances > 0
+                    ? `${viewerStats.materialOverrideInstances} matlInst`
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join(', ')}
+              </span>
+            {/if}
             {#if viewerStats.fogDensity != null}
               <label
                 class="text-muted-foreground/70 flex items-center gap-1.5"
