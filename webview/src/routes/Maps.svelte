@@ -133,38 +133,105 @@
   let viewerStats = $state<{
     nodes: number;
     bbox: { min: [number, number, number]; max: [number, number, number] } | null;
+    landscapeCount: number;
+    fogDensity: number | null;
   } | null>(null);
 
-  /** Compute the Terrain mesh's world bbox — this is the playable map
-   *  extent and the right thing to frame the camera on. Maps emit a
-   *  single `Terrain` node covering the full bounds in `space.settings`
-   *  (typically ±900m for 1.8km maps). Falls back to "every mesh" if
-   *  no Terrain node exists. */
-  function computeFrameBox(root: THREE.Object3D): {
-    box: THREE.Box3;
-    meshCount: number;
-    usingTerrain: boolean;
-  } {
-    const terrainBox = new THREE.Box3();
-    const allBox = new THREE.Box3();
+  // Whether to render landscape-flagged instances (the LNR* / TILEDLAND
+  // backdrop proxies). Default ON — they're real engine content and
+  // belong in the scene. Toggle for users who want to inspect just the
+  // playable foreground.
+  let showLandscape = $state(true);
+
+  // Live handles to the scene root + env so the showLandscape toggle
+  // doesn't need to rebuild the whole scene. Set by the load effect;
+  // cleared on teardown.
+  let activeRoot = $state<THREE.Object3D | null>(null);
+  let activeFog = $state<THREE.FogExp2 | null>(null);
+  let engineFogDensity = $state<number | null>(null);
+
+  // Engine fog density is tuned for a ship-level (~30m altitude) camera
+  // where 1-2 km is the practical visibility envelope. Our overview
+  // camera typically sits ~1500m above sea level, so the same density
+  // fogs out the entire scene from the user's vantage. Divide the
+  // engine value by this scale factor for the initial render; expose a
+  // slider so users can dial back toward the engine value when they
+  // zoom in to ground level.
+  const FOG_OVERVIEW_SCALE_DEFAULT = 30;
+  let fogScale = $state(FOG_OVERVIEW_SCALE_DEFAULT);
+
+  /** Scene-level extras emitted by the toolkit. See the toolkit's
+   *  `build_scene_extras` in gltf_export.rs. */
+  interface MapSceneExtras {
+    bounds?: { min_x: number; max_x: number; min_z: number; max_z: number };
+    fog?: {
+      fog_color: [number, number, number, number];
+      fog_density: number;
+      fog_near_distance: number;
+      far_plane: number;
+    };
+  }
+
+  /** Per-instance extras emitted by the toolkit. See
+   *  `build_instance_extras`. */
+  interface InstanceExtras {
+    is_landscape?: boolean;
+    min_quality_level?: number;
+    lod_extents?: number[];
+  }
+
+  /** Build a world bbox suitable for camera framing. Prefers scene.extras
+   *  bounds (engine-authoritative playable extent) over a Terrain mesh
+   *  scan. Falls back to a full content bbox when neither is available. */
+  function computeFrameBox(
+    root: THREE.Object3D,
+    sceneExtras: MapSceneExtras,
+  ): { box: THREE.Box3; meshCount: number; landscapeCount: number } {
     let meshCount = 0;
-    let foundTerrain = false;
+    let landscapeCount = 0;
     root.traverse((o) => {
-      const mesh = o as THREE.Mesh;
-      if (!mesh.isMesh) return;
-      meshCount++;
-      const b = new THREE.Box3().setFromObject(mesh);
-      allBox.union(b);
-      if (mesh.name === 'Terrain') {
-        terrainBox.union(b);
-        foundTerrain = true;
+      if ((o as THREE.Mesh).isMesh) meshCount++;
+      const ud = o.userData as InstanceExtras;
+      if (ud && ud.is_landscape) landscapeCount++;
+    });
+
+    // Prefer engine bounds. Y comes from terrain min/max (the engine
+    // doesn't store vertical extent in space.settings).
+    const box = new THREE.Box3();
+    if (sceneExtras.bounds) {
+      const b = sceneExtras.bounds;
+      let yMin = 0;
+      let yMax = 60;
+      root.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh && mesh.name === 'Terrain') {
+          const tb = new THREE.Box3().setFromObject(mesh);
+          yMin = Math.min(yMin, tb.min.y);
+          yMax = Math.max(yMax, tb.max.y);
+        }
+      });
+      box.min.set(b.min_x, yMin, b.min_z);
+      box.max.set(b.max_x, yMax, b.max_z);
+    } else {
+      root.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh && mesh.name !== 'Terrain') {
+          box.union(new THREE.Box3().setFromObject(mesh));
+        }
+      });
+    }
+
+    return { box, meshCount, landscapeCount };
+  }
+
+  /** Toggle visibility on landscape-flagged instance nodes. */
+  function applyLandscapeFilter(root: THREE.Object3D, show: boolean): void {
+    root.traverse((o) => {
+      const ud = o.userData as InstanceExtras;
+      if (ud && ud.is_landscape) {
+        o.visible = show;
       }
     });
-    return {
-      box: foundTerrain ? terrainBox : allBox,
-      meshCount,
-      usingTerrain: foundTerrain,
-    };
   }
 
   /** Frame the camera so `box` fills the viewport with a small margin.
@@ -214,25 +281,17 @@
       viewerStats = null;
       try {
         env = createSceneEnvironment(container, {
-          // Initial defaults; frameToBox overrides after GLB loads.
+          // Initial defaults; overridden below after we read scene
+          // extras (fog color + far plane come from the engine).
           cameraPosition: [1500, 800, 1500],
           far: 50000,
           gridSize: 2000,
           gridDivisions: 20,
           axesSize: 100,
-          background: 0x8aa4b8, // hazy horizon color so fog blends
+          background: 0x8aa4b8,
         });
         env.controls.target.set(0, 0, 0);
         env.controls.update();
-
-        // Match the engine's atmospheric fade. Density 0.00015 gives
-        // ~10% fog at 1 km, ~50% at 5.5 km, ~95% at 11 km — keeps the
-        // playable 1.8 km area crisp while distant LOD proxies
-        // (LNR*/TILEDLAND, last-LOD extent 50 km) fade into haze
-        // instead of clipping through the foreground. Tunable per-map
-        // once we surface space.settings fog params (`farPlane`,
-        // `fogColor`).
-        env.scene.fog = new THREE.FogExp2(0x8aa4b8, 0.00015);
 
         stopResize = observeResize({
           container,
@@ -256,15 +315,50 @@
         loadedRoot = gltf.scene;
         env.scene.add(loadedRoot);
 
-        // Frame camera to the Terrain node's bbox — that's the playable
-        // map extent (typically ±900m for 1.8km maps). Landscape LOD
-        // proxies (LNR*/TILEDLAND, extent up to 50 km) would swamp the
-        // bbox if we framed on everything. Fog handles the clipping for
-        // distant proxies; this gets the user looking at the map itself.
-        const { box, meshCount, usingTerrain } = computeFrameBox(loadedRoot);
+        // Drive fog + background + camera-far from the engine's per-map
+        // params surfaced in scene.extras (see toolkit
+        // build_scene_extras). Falls back to a sensible default when the
+        // GLB predates the toolkit fix.
+        const sceneExtras = (gltf.scene.userData ?? {}) as MapSceneExtras;
+        let fogDensity: number | null = null;
+        if (sceneExtras.fog) {
+          const c = sceneExtras.fog.fog_color;
+          const col = new THREE.Color(c[0], c[1], c[2]);
+          engineFogDensity = sceneExtras.fog.fog_density;
+          // Scale engine density down for the overview camera. See
+          // `fogScale` for the rationale (engine tunes density for a
+          // ship-level camera ~30m up; we sit ~1500m up).
+          const fog = new THREE.FogExp2(col, sceneExtras.fog.fog_density / fogScale);
+          env.scene.fog = fog;
+          env.scene.background = col;
+          activeFog = fog;
+          // Use the engine far plane only if it's larger than the camera
+          // would need for the playable area; some maps cap far at 5000 m
+          // and we still want LOD proxies visible behind that — clamp the
+          // user-visible far to scene bounds + a margin.
+          env.camera.far = Math.max(sceneExtras.fog.far_plane, 10000);
+          env.camera.updateProjectionMatrix();
+          fogDensity = sceneExtras.fog.fog_density;
+        } else {
+          // Pre-fix GLB; keep a sane default so the viewer is still usable.
+          env.scene.fog = new THREE.FogExp2(0x8aa4b8, 0.00015);
+          engineFogDensity = null;
+        }
+
+        // Apply current landscape filter (default ON) + expose the root
+        // so the toggle effect below can re-apply without a full reload.
+        applyLandscapeFilter(loadedRoot, showLandscape);
+        activeRoot = loadedRoot;
+
+        // Frame camera using engine bounds when present (preferred — it's
+        // the authoritative playable extent). Mesh-scan fallback uses the
+        // Terrain node.
+        const { box, meshCount, landscapeCount } = computeFrameBox(loadedRoot, sceneExtras);
         frameToBox(box, env.camera, env.controls);
         viewerStats = {
           nodes: meshCount,
+          landscapeCount,
+          fogDensity,
           bbox: box.isEmpty()
             ? null
             : {
@@ -272,7 +366,6 @@
                 max: [box.max.x, box.max.y, box.max.z],
               },
         };
-        void usingTerrain;
       } catch (err) {
         viewerError = err instanceof Error ? err.message : String(err);
       } finally {
@@ -282,6 +375,9 @@
 
     return () => {
       cancelled = true;
+      activeRoot = null;
+      activeFog = null;
+      engineFogDensity = null;
       stopLoop?.();
       stopResize?.();
       if (loadedRoot && env) {
@@ -295,6 +391,23 @@
         container.removeChild(env.renderer.domElement);
       }
     };
+  });
+
+  // Live toggle for the landscape filter — flips visibility on the
+  // already-loaded scene without a re-fetch.
+  $effect(() => {
+    const root = activeRoot;
+    if (!root) return;
+    applyLandscapeFilter(root, showLandscape);
+  });
+
+  // Live fog-density slider — re-scales the engine density into the
+  // current FogExp2 without re-loading the scene.
+  $effect(() => {
+    const fog = activeFog;
+    const eng = engineFogDensity;
+    if (!fog || eng == null) return;
+    fog.density = eng / Math.max(1, fogScale);
   });
 
   function formatBytes(n: number | null | undefined): string {
@@ -419,15 +532,44 @@
 
       {#if selected.exported}
         <!-- Three.js GLB viewer; mounts via $effect when canvasContainer
-             is wired AND selected.exported is true. 1:1 with the GLB:
-             no content filters. -->
-        {#if viewerStats}
-          <div
-            class="text-muted-foreground border-border flex flex-none items-center gap-3 border-b px-4 py-1 text-xs"
-          >
+             is wired AND selected.exported is true. Engine ground-truth
+             rendering: fog + far-plane from scene extras, no content
+             filtering beyond the landscape toggle. -->
+        <div
+          class="text-muted-foreground border-border flex flex-none items-center gap-3 border-b px-4 py-1 text-xs"
+        >
+          {#if viewerStats}
             <span>{viewerStats.nodes} meshes</span>
+            {#if viewerStats.landscapeCount > 0}
+              <label class="flex items-center gap-1.5">
+                <input type="checkbox" bind:checked={showLandscape} />
+                <span>
+                  Show landscape ({viewerStats.landscapeCount} of {viewerStats.nodes})
+                </span>
+              </label>
+            {/if}
+            {#if viewerStats.fogDensity != null}
+              <label
+                class="text-muted-foreground/70 flex items-center gap-1.5"
+                title="Engine fog density (ρ) is tuned for ship-level cameras. Slider divides ρ for the overview camera; 1 = engine value."
+              >
+                <span>fog ρ ÷</span>
+                <input
+                  type="range"
+                  min="1"
+                  max="200"
+                  step="1"
+                  bind:value={fogScale}
+                  class="w-20"
+                />
+                <span class="font-mono">{fogScale}</span>
+                <span class="text-muted-foreground/50">
+                  (engine: {viewerStats.fogDensity.toFixed(4)})
+                </span>
+              </label>
+            {/if}
             {#if viewerStats.bbox}
-              <span>
+              <span class="ml-auto text-muted-foreground/70">
                 bbox X[{viewerStats.bbox.min[0].toFixed(0)}, {viewerStats.bbox.max[0].toFixed(
                   0,
                 )}] Y[{viewerStats.bbox.min[1].toFixed(
@@ -437,8 +579,8 @@
                 )}, {viewerStats.bbox.max[2].toFixed(0)}] m
               </span>
             {/if}
-          </div>
-        {/if}
+          {/if}
+        </div>
         <div class="relative flex flex-1 min-h-0 min-w-0">
           <div bind:this={canvasContainer} class="flex-1"></div>
           {#if viewerLoading}
