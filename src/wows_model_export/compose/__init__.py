@@ -49,6 +49,13 @@ from . import (
 # but get shadowed in the package binding by the function.
 from .accessory_library import build_accessory_library
 from .ammo_profiles import build_ammo_profiles
+from .clean_workspace import (
+    ShipReplayPlan,
+    SkinReplayPlan,
+    clean_and_reextract,
+    clean_workspace,
+    scan_extracted_ships,
+)
 from .decal_library import build_decal_library
 from .find_ship_variants import find_ship_variants
 from .ingest_ship import ingest_ship, resolve_ship_identity
@@ -77,6 +84,12 @@ __all__ = [
     "resolve_ship_identity",
     "find_ship_variants",
     "teardown_ship",
+    # Workspace-wide cleanup + replay
+    "clean_workspace",
+    "clean_and_reextract",
+    "scan_extracted_ships",
+    "ShipReplayPlan",
+    "SkinReplayPlan",
     # Fleet-wide composers
     "build_projectile_library",
     "build_decal_library",

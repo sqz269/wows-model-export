@@ -23,6 +23,7 @@ from fastapi import FastAPI
 from ..config import PipelineConfig
 from .routes import (
     bootstrap,
+    cleanup,
     consumers,
     extract,
     gameparams,
@@ -80,6 +81,7 @@ def create_app(config: PipelineConfig) -> FastAPI:
     app.include_router(extract.make_router(config), prefix="/api")
     app.include_router(settings.make_router(config), prefix="/api")
     app.include_router(bootstrap.make_router(config), prefix="/api")
+    app.include_router(cleanup.make_router(config), prefix="/api")
     app.include_router(jobs.make_router(), prefix="/api")
     app.include_router(winding.make_router(config), prefix="/api")
     app.include_router(rig.make_router(config), prefix="/api")

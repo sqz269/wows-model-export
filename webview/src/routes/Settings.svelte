@@ -15,17 +15,22 @@
   import {
     buildBootstrapTarget,
     fetchBootstrap,
+    fetchCleanupStatus,
     fetchSettings,
     resetBootstrapTarget,
+    runCleanup,
     saveSettings,
     waitForJob,
     type BootstrapStatus,
     type BootstrapTarget,
+    type CleanupMode,
+    type CleanupStatus,
     type SettingsPatch,
     type SettingsResponse,
     type SettingSource,
   } from '$lib/api';
   import { invalidateLibrary } from '$lib/api/library';
+  import { invalidateShips } from '$lib/api/ships';
   import { toast } from 'svelte-sonner';
 
   let data = $state<SettingsResponse | null>(null);
@@ -43,6 +48,18 @@
     snapshot: false,
     library: false,
   });
+
+  // ── Workspace cleanup state ────────────────────────────────────────
+  let cleanup = $state<CleanupStatus | null>(null);
+  /** Truthy (job_id) while a cleanup job is in flight; disables both
+   *  cleanup buttons so the user can't double-click. */
+  let cleanupRunning = $state<string | null>(null);
+  /** Knob mirrored by both cleanup buttons. Default true (matches the
+   *  "Ships + library" scope the user picked). */
+  let cleanupPruneLibrary = $state(true);
+  /** Knob for re-extract mode. Default true; replays skin packs after
+   *  the base ingest. */
+  let cleanupReplaySkins = $state(true);
 
   // Form state. Initialised from `data.fields[k].value`, but `null` on
   // the wire maps to empty string in the input so the textbox renders
@@ -78,11 +95,18 @@
   async function load() {
     loadError = null;
     try {
-      // Settings + bootstrap are independent calls; firing them in
-      // parallel halves the first-paint latency.
-      const [res, boot] = await Promise.all([fetchSettings(), fetchBootstrap()]);
+      // Settings + bootstrap + cleanup are independent calls; firing
+      // them in parallel halves the first-paint latency. Cleanup
+      // failure isn't fatal — the inventory walk can race a workspace
+      // change; the section just hides until the next reload succeeds.
+      const [res, boot, clean] = await Promise.all([
+        fetchSettings(),
+        fetchBootstrap(),
+        fetchCleanupStatus().catch(() => null),
+      ]);
       data = res;
       bootstrap = boot;
+      cleanup = clean;
       const next = {
         game_dir: res.fields.game_dir.value ?? '',
         toolkit_bin: res.fields.toolkit_bin.value ?? '',
@@ -257,6 +281,135 @@
       resetting[target] = false;
       await reloadBootstrap();
     }
+  }
+
+  /** Refresh just the cleanup section — used after a cleanup job
+   *  finishes so the ship count + sizes update without re-fetching
+   *  settings (which would clobber unsaved edits). */
+  async function reloadCleanup() {
+    try {
+      cleanup = await fetchCleanupStatus();
+    } catch (err) {
+      console.warn('cleanup reload failed:', err);
+    }
+  }
+
+  /** Run a workspace cleanup. `mode="wipe"` tears down every ship
+   *  (and optionally the library); `mode="reextract"` follows up with
+   *  a re-ingest of each ship. Polls the spawned job and surfaces
+   *  progress through a sticky toast. After completion, invalidates
+   *  the ship + library caches so the rest of the app re-fetches. */
+  async function onCleanup(mode: CleanupMode) {
+    if (cleanupRunning) return;
+    if (!cleanup) return;
+
+    const sizeBits: string[] = [];
+    if (cleanup.ships.on_disk > 0) {
+      sizeBits.push(
+        `${cleanup.ships.on_disk} ship(s) (${fmtMb(cleanup.ships.size_mb)})`,
+      );
+    }
+    if (cleanupPruneLibrary && cleanup.library.present) {
+      sizeBits.push(`libraries/accessories (${fmtMb(cleanup.library.size_mb)})`);
+    }
+    const inventory = sizeBits.length ? sizeBits.join(' + ') : 'nothing on disk';
+
+    const planned = cleanup.ships.planned;
+    const fallback = cleanup.ships.fallback;
+    const unrecov = cleanup.ships.unrecoverable.length;
+
+    let warning = '';
+    if (mode === 'reextract') {
+      if (unrecov > 0) {
+        warning += `\n\n${unrecov} ship(s) cannot be re-extracted (sidecar missing/unreadable) — they'll be torn down but not restored.`;
+      }
+      if (fallback > 0) {
+        warning += `\n\n${fallback} of ${planned} replay plans have no stamped provenance — they'll re-extract with permoflage="auto" (may differ from the original choice for mesh-swap variants).`;
+      }
+    }
+
+    const action = mode === 'reextract' ? 'Clean and re-extract' : 'Clean';
+    const ok = window.confirm(
+      `${action} workspace?\n\n` +
+        `This will delete:\n  ${inventory}\n\n` +
+        (mode === 'reextract'
+          ? `Then re-ingest ${planned} ship(s)${cleanupReplaySkins ? ' + replay their skin packs' : ''}.`
+          : `Nothing will be re-extracted automatically. Use "Clean & re-extract" instead if you want a one-shot rebuild.`) +
+        warning,
+    );
+    if (!ok) return;
+
+    const action_label = mode === 'reextract' ? 'Clean + re-extract' : 'Clean';
+    const tid = toast.loading(`Starting ${action_label}…`, {
+      duration: Number.POSITIVE_INFINITY,
+    });
+    try {
+      const { job_id } = await runCleanup({
+        mode,
+        prune_library: cleanupPruneLibrary,
+        replay_skins: cleanupReplaySkins,
+      });
+      cleanupRunning = job_id;
+      const final = await waitForJob(job_id, (j) => {
+        // Compact last-line tail in the toast — full log lives in the
+        // /api/jobs/{id} response if the user wants to fish it out.
+        const tail = (j.stdout || j.stderr || '')
+          .split('\n')
+          .filter((s) => s.trim().length > 0)
+          .slice(-1)[0]
+          ?.slice(0, 120);
+        toast.loading(
+          `${action_label} running… ${tail ? `· ${tail}` : ''}`,
+          { id: tid, duration: Number.POSITIVE_INFINITY },
+        );
+      });
+      // Both modes mutate ships/ and (typically) libraries/accessories/;
+      // drop the in-memory caches so the Ships + Library pages re-fetch.
+      invalidateShips();
+      invalidateLibrary();
+
+      if (final.state === 'done') {
+        toast.success(`${action_label} complete`, {
+          id: tid,
+          description: `job ${job_id}`,
+          duration: 6000,
+        });
+      } else if (final.state === 'cancelled') {
+        toast.warning(`${action_label} cancelled`, {
+          id: tid,
+          description: `job ${job_id} — workspace is in a partial state`,
+          duration: 10000,
+        });
+      } else {
+        const tail = (final.stderr || final.stdout || '')
+          .split('\n')
+          .slice(-3)
+          .join(' / ')
+          .slice(0, 240);
+        toast.error(`${action_label} failed`, {
+          id: tid,
+          description: tail || `job ${job_id} exited ${final.exit_code}`,
+          duration: 10000,
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`${action_label} failed`, {
+        id: tid,
+        description: msg,
+        duration: 10000,
+      });
+    } finally {
+      cleanupRunning = null;
+      await reloadCleanup();
+      // Bootstrap status also moves (library presence may flip) — refresh.
+      await reloadBootstrap();
+    }
+  }
+
+  function fmtMb(mb: number): string {
+    if (mb < 1024) return `${mb.toFixed(0)} MB`;
+    return `${(mb / 1024).toFixed(2)} GB`;
   }
 
   function fmtMtime(ms: number | null): string {
@@ -546,6 +699,140 @@
               </div>
             </div>
           {/each}
+        </section>
+      {/if}
+
+      <!--
+        Workspace cleanup. Destructive ops; kept below the artifact
+        section because the bootstrap reset buttons are scoped (one
+        target) while these are workspace-wide.
+      -->
+      {#if cleanup}
+        {@const shipsEmpty = cleanup.ships.on_disk === 0}
+        {@const libraryEmpty = !cleanup.library.present}
+        {@const cleanupDisabled =
+          cleanupRunning !== null || (shipsEmpty && (!cleanupPruneLibrary || libraryEmpty))}
+        {@const reextractDisabled =
+          cleanupRunning !== null || cleanup.ships.planned === 0}
+        <section class="flex flex-col gap-3 border-t border-border pt-5">
+          <div
+            class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold"
+          >
+            Workspace cleanup
+          </div>
+          <p class="text-muted-foreground text-xs m-0 max-w-[60ch]">
+            Tear down every extracted ship at once. "Clean & re-extract"
+            captures each ship's ingest args from the sidecar
+            (<code>provenance.extract_args</code>, or a fallback synthesised
+            from <code>ship.wg_ship_full_id</code>) and replays them after
+            the cleanup. Long-running — runs as a background job.
+          </p>
+
+          <!-- Inventory + knobs -->
+          <div
+            class="rounded border border-border bg-popover/40 px-3 py-2.5 flex flex-col gap-2"
+          >
+            <dl
+              class="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs [&_dt]:text-muted-foreground [&_dd]:m-0"
+            >
+              <dt>Ships on disk</dt>
+              <dd>
+                {cleanup.ships.on_disk}
+                {#if cleanup.ships.on_disk > 0}
+                  <span class="text-muted-foreground">
+                    ({fmtMb(cleanup.ships.size_mb)})
+                  </span>
+                {/if}
+              </dd>
+              <dt>Replay plans</dt>
+              <dd>
+                {cleanup.ships.planned} ready
+                {#if cleanup.ships.stamped > 0 || cleanup.ships.fallback > 0}
+                  <span class="text-muted-foreground">
+                    ({cleanup.ships.stamped} stamped, {cleanup.ships.fallback} fallback)
+                  </span>
+                {/if}
+                {#if cleanup.ships.unrecoverable.length > 0}
+                  <span class="text-amber-400 ml-1">
+                    · {cleanup.ships.unrecoverable.length} unrecoverable
+                  </span>
+                {/if}
+              </dd>
+              <dt>Skin packs</dt>
+              <dd>{cleanup.ships.total_skins} to replay</dd>
+              <dt>Library</dt>
+              <dd>
+                {#if cleanup.library.present}
+                  present ({fmtMb(cleanup.library.size_mb)})
+                {:else}
+                  not present
+                {/if}
+              </dd>
+            </dl>
+
+            <!-- Knobs share one row; keep stacked vertically on narrow widths. -->
+            <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs pt-1">
+              <label class="inline-flex items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  bind:checked={cleanupPruneLibrary}
+                  disabled={cleanupRunning !== null}
+                />
+                <span>
+                  Also wipe <code>libraries/accessories/</code>
+                </span>
+              </label>
+              <label class="inline-flex items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  bind:checked={cleanupReplaySkins}
+                  disabled={cleanupRunning !== null}
+                />
+                <span>Replay skin packs (re-extract mode only)</span>
+              </label>
+            </div>
+
+            {#if cleanup.ships.fallback > 0}
+              <p class="text-amber-400 text-[11px] m-0">
+                {cleanup.ships.fallback} ship(s) lack stamped provenance —
+                re-extract will fall back to
+                <code>permoflage="auto"</code>. Mesh-swap variants
+                (<code>__</code>-suffixed labels) may render differently
+                from the original choice until they're re-extracted once
+                under the stamped pipeline.
+              </p>
+            {/if}
+
+            <div class="flex items-center gap-3 pt-1.5">
+              <Button
+                size="sm"
+                variant="destructive"
+                disabled={cleanupDisabled}
+                onclick={() => onCleanup('wipe')}
+              >
+                {cleanupRunning !== null
+                  ? 'Cleanup running…'
+                  : 'Clean ships' +
+                    (cleanupPruneLibrary && cleanup.library.present
+                      ? ' + library'
+                      : '')}
+              </Button>
+              <Button
+                size="sm"
+                disabled={reextractDisabled}
+                onclick={() => onCleanup('reextract')}
+              >
+                {cleanupRunning !== null
+                  ? 'Cleanup running…'
+                  : `Clean & re-extract ${cleanup.ships.planned} ship(s)`}
+              </Button>
+              {#if cleanupRunning !== null}
+                <span class="text-muted-foreground text-[11px]">
+                  job <code>{cleanupRunning}</code>
+                </span>
+              {/if}
+            </div>
+          </div>
         </section>
       {/if}
     {/if}

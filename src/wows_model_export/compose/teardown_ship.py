@@ -414,7 +414,7 @@ def teardown_ship(
                 },
             )
 
-    report["step_timings_ms"] = dict(runner.spans)
+    report["step_timings_ms"] = dict(runner.step_timings_ms)
     return report
 
 

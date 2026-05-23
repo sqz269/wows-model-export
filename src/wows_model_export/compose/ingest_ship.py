@@ -75,6 +75,7 @@ import re
 import sys
 import tempfile
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ..config import PipelineConfig
@@ -646,6 +647,45 @@ def ingest_ship(
                     f"post-library scaffold refresh failed: "
                     f"{type(e).__name__}: {e}"
                 )
+
+    # ------------------------------------------------------------------
+    # Step: stamp_provenance
+    # ------------------------------------------------------------------
+    # Record the args this ingest was called with into the sidecar so a
+    # later "clean and re-extract" pass can replay the run lossless-ly
+    # (compose.clean_workspace reads this block; falls back to
+    # ship.wg_ship_full_id + permoflage="auto" when absent).
+    #
+    # Soft-fail: we treat a read/write hiccup as a warning rather than
+    # aborting the whole ingest — the workspace artifacts are already
+    # written by this point and the provenance block is recovery-only.
+    sidecar_to_stamp = scaffold_result.sidecar_path
+    if sidecar_to_stamp is None or not sidecar_to_stamp.is_file():
+        timer.skip("stamp_provenance", detail="sidecar missing")
+    else:
+        timer.start("stamp_provenance", detail=sidecar_to_stamp.name)
+        try:
+            doc = _sidecar.read(sidecar_to_stamp)
+            doc["provenance"] = {
+                "extract_args": {
+                    "vehicle":       gameparams_ship_id or toolkit_name,
+                    "label":         label,
+                    "permoflage":    variant_permoflage,
+                    "build_library": bool(build_library),
+                },
+                "extracted_at": datetime.now(UTC).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+            }
+            _sidecar.write(doc, sidecar_to_stamp)
+            timer.complete(detail="extract_args recorded")
+        except Exception as e:
+            timer.fail("stamp_provenance", detail=f"{type(e).__name__}: {e}")
+            warnings.append(
+                f"provenance stamp failed ({type(e).__name__}: {e}); "
+                f"re-extract via compose.clean_workspace will fall back "
+                f"to permoflage=\"auto\" for this ship."
+            )
 
     # ------------------------------------------------------------------
     # Step: publish

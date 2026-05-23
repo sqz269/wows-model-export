@@ -5,5 +5,6 @@ export * from './repo';
 export * from './extract';
 export * from './settings';
 export * from './bootstrap';
+export * from './cleanup';
 export * from './gameparams';
 export * from './consumers';
