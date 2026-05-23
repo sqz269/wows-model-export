@@ -24,6 +24,7 @@ class NavState {
   lastAssetId = $state<string | null>(null);
   lastVehicleId = $state<string | null>(null);
   lastGameParamId = $state<string | null>(null);
+  lastParticlePath = $state<string | null>(null);
 }
 
 export const navState = new NavState();
@@ -34,6 +35,16 @@ export function shipsHref(): string {
   return navState.lastShipName
     ? `#/ship/${encodeURIComponent(navState.lastShipName)}`
     : '#/ships';
+}
+
+/** Topnav href for the Particles tab. Holds the last inspected XML
+ *  path so a tab switch lands back on the same effect. The path is
+ *  kept verbatim — the router's `parseHash` splits on the first slash
+ *  only, so embedded `/`s pass through without URL-encoding. */
+export function particlesHref(): string {
+  return navState.lastParticlePath
+    ? `#/particles/${navState.lastParticlePath}`
+    : '#/particles';
 }
 
 /** Topnav href for the Library tab. Falls back to `#/library` when

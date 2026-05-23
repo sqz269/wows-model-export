@@ -28,6 +28,7 @@ from .routes import (
     gameparams,
     jobs,
     library,
+    particles,
     repo,
     rig,
     settings,
@@ -84,6 +85,7 @@ def create_app(config: PipelineConfig) -> FastAPI:
     app.include_router(winding.make_router(config), prefix="/api")
     app.include_router(rig.make_router(config), prefix="/api")
     app.include_router(consumers.make_router(config), prefix="/api")
+    app.include_router(particles.make_router(config), prefix="/api")
 
     # /repo/* static workspace file service. Mounted at /repo so the
     # path parameter captures the remainder.

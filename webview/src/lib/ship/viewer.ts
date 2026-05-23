@@ -62,6 +62,11 @@ import {
   extractTurretRig,
   TurretRigManager,
 } from './turret_rig';
+import {
+  ParticleScene,
+  type ParticleAttachmentHandle,
+} from '$lib/three/particles';
+import type { ParticleAttachment } from '$lib/types/sidecar';
 
 /**
  * Info resolved from `userData` on the clicked accessory instance. The
@@ -217,6 +222,14 @@ export class ShipViewer {
    *  to build absolute URLs the same way the texture manager does. */
   private hullBaseUrl: string | null = null;
 
+  // Particle effect scene. Built when the sidecar carries an
+  // `effects` block; CPU-driven, ticked from the render loop. The
+  // WebGL renderer is wired in during construction (post-env setup) so
+  // the DDS texture loader has the GL context for compressed-texture
+  // uploads.
+  private particleScene: ParticleScene;
+  private particleAttachments: ParticleAttachmentHandle[] = [];
+
   // Visibility state
   private seamStates: Record<SeamKey, SeamState> = defaultSeamStates();
   private lodPolicy: LodPolicy = 'lod0';
@@ -239,6 +252,14 @@ export class ShipViewer {
       }),
     ) as Record<ShipSectionKey, THREE.Group>;
 
+    // Particle effects layer hangs off shipRoot so the camera frames
+    // them alongside the hull/accessories and the ship's overall
+    // transform applies uniformly. The renderer is passed in so the
+    // particle scene can upload compressed DDS textures (BC1/BC3/BC7)
+    // through the same loader the main texture pipeline uses.
+    this.particleScene = new ParticleScene(this.env.renderer);
+    this.shipRoot.add(this.particleScene.root);
+
     this.colorMaterials = createColorMaterials();
 
     this.textures = new TextureManager({
@@ -260,8 +281,14 @@ export class ShipViewer {
 
     this.stopLoop = startRenderLoop(() => {
       this.env.controls.update();
+      this.particleScene.tick();
       this.env.render();
     });
+
+    // Expose for in-browser debugging.
+    if (typeof window !== 'undefined') {
+      (window as unknown as { __wowsShipViewer__?: unknown }).__wowsShipViewer__ = this;
+    }
   }
 
   // ── Public API ────────────────────────────────────────────────────────
@@ -567,6 +594,21 @@ export class ShipViewer {
     // Apply current visibility state across hull + cascaded placements.
     this.applyAllStates();
 
+    // Build the particle effects scene from the sidecar. MVP — nodes
+    // are resolved by best-effort name matching against the hull's
+    // EP_*/HP_Ship_death_* bones; unresolved entries land at the ship
+    // origin with a stagger so they don't overlap visually.
+    if (sidecar?.effects) {
+      const resolver = this.buildEffectNodeResolver();
+      this.particleAttachments = this.particleScene.build(
+        sidecar.effects.attachments ?? [],
+        sidecar.effects.particles ?? {},
+        resolver,
+      );
+    } else {
+      this.particleAttachments = [];
+    }
+
     const loadMs = performance.now() - t0;
     report(`Loaded in ${(loadMs / 1000).toFixed(1)}s.`);
 
@@ -616,6 +658,111 @@ export class ShipViewer {
     this.turretRigs.clear();
     this.sidecar = null;
     this.hullBaseUrl = null;
+    this.particleScene.clear();
+    this.particleAttachments = [];
+  }
+
+  // ── Particle effects API ────────────────────────────────────────────
+
+  /**
+   * Return the list of effect attachments currently in the scene. UI
+   * panels iterate this to render per-attachment toggles + status.
+   */
+  getParticleAttachments(): ParticleAttachmentHandle[] {
+    return this.particleAttachments;
+  }
+
+  /** Toggle one particle attachment on/off. */
+  setParticleAttachmentActive(
+    handle: ParticleAttachmentHandle, active: boolean,
+  ): void {
+    this.particleScene.setAttachmentActive(handle, active);
+  }
+
+  /** Toggle every particle attachment. */
+  setAllParticlesActive(active: boolean): void {
+    this.particleScene.setAllActive(active);
+  }
+
+  /**
+   * Map a particle attachment's `node` name to a Vector3 in ship-local
+   * space. The new collector (2026-05-16 evening) stamps gun-mount
+   * hardpoint names (HP_AGM_1 / HP_AGS_1 / HP_AGA_10) on per-gun
+   * attachments, so muzzle / damage / purging effects can land on the
+   * turret instead of the staging grid.
+   *
+   * Resolution strategy (first-match wins):
+   *
+   *   1. Direct hit  — `a.node` matches a bone in the hull GLB. Covers
+   *      arbitrary `HP_*` bones already in the hull skeleton.
+   *   2. HP_* placement — `a.node` matches a placement's `hp_name` in
+   *      any of the typed section groups (turrets / secondaries /
+   *      antiair / torpedoes / accessories). Used by every gun-mount
+   *      muzzle / damage effect. World position is the placement root's
+   *      matrixWorld translation (the gun's hull-anchor); per-barrel
+   *      `HP_gunFire<N>` resolution would need to walk the placement
+   *      clone's internal bones — not done here, but the gun base is a
+   *      reasonable approximation for a 100-200 m ship.
+   *   3. EP_Death_N → HP_Ship_death_N alias (the only EP_* the toolkit
+   *      currently surfaces — see toolkit's dump-bones).
+   *
+   * Unresolved nodes return null; the ParticleScene stages them on a
+   * grid at Y=60 m. AA-aura and shell-impact effects have empty `node`
+   * by design (no fixed anchor on the ship) — they always stage.
+   */
+  private buildEffectNodeResolver():
+    (a: ParticleAttachment) => THREE.Vector3 | null
+  {
+    const bones = new Map<string, THREE.Vector3>();
+    if (this.hullRoot) {
+      this.hullRoot.traverse((o) => {
+        const name = o.name ?? '';
+        if (!name) return;
+        // Bones come in as `Section / Bone_Name` in the hull GLB — also
+        // index by the leaf name so a callsite using just `HP_Ship_death_1`
+        // resolves the same way.
+        bones.set(name, o.getWorldPosition(new THREE.Vector3()));
+        const leaf = name.includes('/') ? name.split('/').pop()!.trim() : name;
+        if (leaf !== name) bones.set(leaf, o.getWorldPosition(new THREE.Vector3()));
+      });
+    }
+    // Index every placement root by its hp_name. tagAndIndexInstance
+    // stamps userData.hp_name during placement build. Skip falsy entries
+    // (decorative placements without a hardpoint binding).
+    const placementByHp = new Map<string, THREE.Vector3>();
+    // Flush matrix updates first — placements are added to section
+    // groups synchronously above but their matrixWorld won't be current
+    // until a render pass touches them.
+    for (const section of SHIP_SECTIONS) this.sectionGroups[section].updateMatrixWorld(true);
+    for (const section of SHIP_SECTIONS) {
+      this.sectionGroups[section].traverse((o) => {
+        const hp = o.userData?.hp_name;
+        if (typeof hp !== 'string' || !hp) return;
+        // Each placement root carries one hp_name. We pick the FIRST
+        // root we encounter for a given hp_name — typed sections are
+        // pre-grouped so this is the section-natural placement (e.g.
+        // HP_AGM_1 from turrets, not an accessory that happens to be
+        // anchored at HP_AGM_1).
+        if (placementByHp.has(hp)) return;
+        placementByHp.set(hp, o.getWorldPosition(new THREE.Vector3()));
+      });
+    }
+    return (a: ParticleAttachment): THREE.Vector3 | null => {
+      // 1. Direct hit in the hull's bone tree.
+      const direct = bones.get(a.node);
+      if (direct) return direct.clone();
+      // 2. HP_* on a typed placement (gun mounts / accessories).
+      const pl = placementByHp.get(a.node);
+      if (pl) return pl.clone();
+      // 3. EP_Death_N → HP_Ship_death_N alias.
+      const m = /^EP_Death_(\d+)$/.exec(a.node);
+      if (m) {
+        const hp = `HP_Ship_death_${m[1]}`;
+        const w = bones.get(hp);
+        if (w) return w.clone();
+      }
+      return null;
+    };
   }
 
   /** Per-instance turret rigs (yaw + pitch bones extracted from each
@@ -912,6 +1059,7 @@ export class ShipViewer {
     this.stopLoop();
     this.stopResize();
     this.clearShip();
+    this.particleScene.dispose();
     this.textures.dispose();
     await this.accessoryCache.dispose();
     disposeColorMaterials(this.colorMaterials);

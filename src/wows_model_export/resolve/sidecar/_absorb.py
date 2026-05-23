@@ -1009,6 +1009,47 @@ def absorb_gameparams_torpedoes(
     return merge_preserving(doc, {"ballistics": {"torpedoes": update_torps}})
 
 
+def absorb_gameparams_effects(
+    doc: dict[str, Any],
+    *,
+    attachments: list[dict[str, Any]],
+    particles: dict[str, Any],
+) -> dict[str, Any]:
+    """Stamp per-ship particle effect attachments + their resolved effect
+    data into ``doc.effects``.
+
+    ``attachments`` is a list of ``{group, node, particle_path}`` dicts
+    derived from the active hull's ``effects`` table in GameParams.
+    ``particles`` is a dict keyed by particle path (e.g.
+    ``"particles/vehicles/Fire_big_2.xml"``) whose values are the
+    parsed Effect-blob records (see
+    :class:`wows_model_export.read.particles.ParticleStore`).
+
+    Both inputs are typically produced by the
+    :mod:`wows_model_export.compose.particles_library` builder. Empty
+    inputs short-circuit — no ``effects`` section is created.
+
+    **Replace-by-section semantics.** Re-running the absorb overwrites
+    the previous ``effects`` block. This matches ballistics — the
+    particle data is fully toolkit/assets.bin-derived, so hand-edits
+    don't belong here.
+    """
+    if not attachments and not particles:
+        return doc
+    effects_block: dict[str, Any] = {
+        "source": {"generated_at": _now_iso()},
+        "attachments": attachments,
+        "particles": particles,
+    }
+    # Strip any existing effects block first so removed entries (e.g.
+    # ship that no longer ships fire4) don't linger.
+    new_doc = _deepcopy_jsonish(doc)
+    if "effects" in new_doc:
+        del new_doc["effects"]
+    new_doc["effects"] = effects_block
+    return new_doc
+
+
 def absorb_ballistics_json(
     doc: dict[str, Any],
     ballistics: str | Path | dict[str, Any],

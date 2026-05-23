@@ -8,6 +8,7 @@
     "dev": "concurrently --names backend,frontend --kill-others-on-fail \"npm:dev:backend\" \"npm:dev:frontend\"",
     "dev:frontend": "vite",
     "dev:backend": "wows-webview-serve --port 5180 --reload",
+    "dev:kill": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/kill-dev.ps1",
     "free-port": "pwsh -NoProfile -File scripts/free-port.ps1",
     "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
     "preview": "vite preview",

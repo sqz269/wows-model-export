@@ -73,6 +73,7 @@ export function tagAndIndexInstance(
   root.userData.section = section;
   root.userData.asset_id = p.asset_id;
   root.userData.instance_id = p.instance_id;
+  root.userData.hp_name = p.hp_name ?? null;
   root.userData.parent_section = p.parent_section ?? null;
   root.userData.parent_mesh = p.parent_mesh ?? null;
 

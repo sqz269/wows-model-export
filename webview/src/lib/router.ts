@@ -54,13 +54,25 @@ export type ConsumersRoute = {
   path: string;
 };
 
+export type ParticlesRoute = {
+  page: 'particles';
+  path: string;
+  /** Selected particle XML path from `#/particles/<vfs-path>` (e.g.
+   *  `#/particles/particles/vehicles/Fire_big_2.xml`). Null on bare
+   *  `#/particles`. The path is captured verbatim — slashes inside it
+   *  are NOT URL-encoded (the router splits on the first slash only
+   *  and treats the rest as the param). */
+  particlePath: string | null;
+};
+
 export type RouteState =
   | LibraryRoute
   | ShipsRoute
   | ExtractRoute
   | SettingsRoute
   | GameParamsRoute
-  | ConsumersRoute;
+  | ConsumersRoute
+  | ParticlesRoute;
 
 function parseHash(hash: string): RouteState {
   const path = hash.replace(/^#\/?/, '');
@@ -71,6 +83,9 @@ function parseHash(hash: string): RouteState {
   }
   if (head === 'ships' || head === 'ship') {
     return { page: 'ships', path, shipName: rest ?? null };
+  }
+  if (head === 'particles' || head === 'particle') {
+    return { page: 'particles', path, particlePath: rest ?? null };
   }
   if (head === 'settings') {
     return { page: 'settings', path };
