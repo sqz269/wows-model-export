@@ -265,16 +265,20 @@ export interface ParticleGeneralSection {
 }
 
 /**
- * Renderer block surfaced from the Effect blob. Only the byte-mapped
- * trio is populated today: `textureName0` / `textureName1` (VFS paths,
- * pool-form ResourceRefs) and `yawRateRamp`. Tail fields (`blendType`,
- * `tilingU`/`V`, `billboard`, lighting params) live at unmapped offsets
- * and aren't surfaced yet — see particle_render_roadmap P3.
+ * Renderer block surfaced from the Effect blob. Texture refs
+ * (`textureName0`/`textureName1`) and `yawRateRamp` are byte-mapped
+ * at +0x00/+0x10/+0x20 within the 0xa0-byte struct. The tail offsets
+ * (`rotationCenter`/`blendType`/`sortType`/`tilingU`/`tilingV`) at
+ * +0x80..+0x94 landed 2026-05-23 via corpus-wide statistical probe.
  *
- * `textureUrl0` / `textureUrl1` are stamped by the pipeline-side
- * texture-extract pass (`compose/effects_textures.py`) and carry a
- * workspace-relative path that the webview hands to `repoUrl()` to load
- * the DDS via the standard texture machinery.
+ * The 16-float lighting cluster at +0x30..+0x7f and trailing bool
+ * quartets at +0x98/+0x9c are documented in particle_format_spec.md
+ * but per-field byte offsets aren't RE'd yet — needs Ghidra.
+ *
+ * `textureUrl0` / `textureUrl1` are stamped by the library builder
+ * (`compose/library_particles.py`) and carry a workspace-relative
+ * path that the webview hands to `repoUrl()` to load the DDS via the
+ * standard texture machinery.
  */
 export interface ParticleRenderer {
   textureName0?: string;
@@ -282,18 +286,56 @@ export interface ParticleRenderer {
   textureUrl0?: string;
   textureUrl1?: string;
   yawRateRamp?: ParticleRamp;
+  /** PS_RRC label (4 values: center / topLeft / topRight / bottomLeft).
+   *  Labels are tentative — names need Ghidra to confirm. */
+  rotationCenter?: string;
+  /** PS_RBT label (10 values) — drives the per-system blending mode.
+   *  Maps to THREE.* blending: ADDITIVE -> AdditiveBlending, BLENDED ->
+   *  NormalBlending, others need custom shader paths (see particle
+   *  render roadmap). */
+  blendType?: string;
+  /** Raw i32 sort-type — enum labels TBD (3 values; likely
+   *  AGE / DISTANCE / NONE per BigWorld convention). */
+  sortType?: number;
+  /** Per-system UV tiling factors; default 1.0/1.0. */
+  tilingU?: number;
+  tilingV?: number;
 }
 
 /**
- * Animation block. Only `frameRateRamp` and `motionVectorsTexture` are
- * byte-mapped today; the sprite-atlas grid (`framesPerX`/`framesPerY`,
- * `framesRangeBegin`/`framesRangeEnd`, `animationPeriod`) sits in the
- * tail at unmapped offsets — see particle_render_roadmap P2.
+ * Animation block — sprite-atlas grid + motion vectors. All fields
+ * byte-mapped 2026-05-23 (empirical, 91.3% cross-validation that
+ * framesPerX * framesPerY == framesRangeEnd).
+ *
+ * For systems with `framesPerX > 1 || framesPerY > 1`, the renderer
+ * samples the texture at cell `(currentFrame % framesPerX, currentFrame
+ * / framesPerX)` where `currentFrame` is driven by the particle age +
+ * `animationPeriod` + `framesRangeBegin/End`. `animationType` (PS_PAT
+ * label) chooses between the 3 wrap modes (loop / once / pingPong —
+ * labels tentative until Ghidra).
  */
 export interface ParticleAnimation {
   frameRateRamp?: ParticleRamp;
   motionVectorsTexture?: string;
   motionVectorsTextureUrl?: string;
+  /** Sprite-sheet column count. 1 means "no atlas". */
+  framesPerX?: number;
+  /** Sprite-sheet row count. 1 means "no atlas". */
+  framesPerY?: number;
+  /** First active frame index; usually 0. */
+  framesRangeBegin?: number;
+  /** Last active frame index (exclusive); usually == framesPerX*framesPerY. */
+  framesRangeEnd?: number;
+  /** Total animation cycle length in seconds. */
+  animationPeriod?: number;
+  /** MV distortion factor (small, typically 0..0.017). */
+  motionVectorsDistortion?: number;
+  /** PS_PAT label (3 values; labels tentative). */
+  animationType?: string;
+  /** Read emission alpha from the motion-vector texture's alpha. */
+  useEmissionAlphaFromMV?: boolean;
+  /** Pick one random frame per particle instead of animating. */
+  randomFrameOnly?: boolean;
 }
 
 export interface ParticleSystem {
