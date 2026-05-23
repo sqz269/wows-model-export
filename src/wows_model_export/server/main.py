@@ -21,6 +21,7 @@ import logging
 from fastapi import FastAPI
 
 from ..config import PipelineConfig
+from . import queue as _queue
 from .routes import (
     bootstrap,
     cleanup,
@@ -29,6 +30,7 @@ from .routes import (
     gameparams,
     jobs,
     library,
+    queue,
     repo,
     rig,
     settings,
@@ -82,6 +84,7 @@ def create_app(config: PipelineConfig) -> FastAPI:
     app.include_router(settings.make_router(config), prefix="/api")
     app.include_router(bootstrap.make_router(config), prefix="/api")
     app.include_router(cleanup.make_router(config), prefix="/api")
+    app.include_router(queue.make_router(config), prefix="/api")
     app.include_router(jobs.make_router(), prefix="/api")
     app.include_router(winding.make_router(config), prefix="/api")
     app.include_router(rig.make_router(config), prefix="/api")
@@ -97,6 +100,11 @@ def create_app(config: PipelineConfig) -> FastAPI:
     # (logs a warning, serves API only) so dev workflows that rely on
     # `npm run dev`'s Vite proxy are unaffected.
     mount_webview(app)
+
+    # Load any persisted extract queue + start the worker thread.
+    # Idempotent across uvicorn --reload — the queue module re-uses an
+    # already-running daemon thread when configure() is called again.
+    _queue.configure(config)
 
     return app
 

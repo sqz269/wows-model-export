@@ -12,9 +12,23 @@
     extractedShips: ExtractedShip[];
     activeJob: JobState | null;
     onRun: () => void;
+    /** Append this ship's resolved args to the persistent extract queue.
+     *  Picker selection is preserved so the user can pick another ship
+     *  immediately. */
+    onEnqueue: () => void;
+    /** True while an enqueue POST is in flight. Disables the button. */
+    enqueueBusy: boolean;
   }
 
-  const { vehicle, permoflage, extractedShips, activeJob, onRun }: Props = $props();
+  const {
+    vehicle,
+    permoflage,
+    extractedShips,
+    activeJob,
+    onRun,
+    onEnqueue,
+    enqueueBusy,
+  }: Props = $props();
 
   const label = $derived(suggestedLabel(vehicle, permoflage));
   const alreadyExtracted = $derived(extractedShips.some((s) => s.name === label));
@@ -56,7 +70,7 @@
   </div>
   <pre
     class="bg-popover text-foreground border-border max-h-60 overflow-auto rounded border px-2.5 py-2 font-mono text-[11px] leading-snug">{commandLines.join(' \\\n')}</pre>
-  <div class="mt-2.5 flex items-center gap-3">
+  <div class="mt-2.5 flex flex-wrap items-center gap-3">
     <button
       type="button"
       disabled={running}
@@ -65,8 +79,17 @@
     >
       {running ? 'Run in progress…' : 'Run extract'}
     </button>
+    <button
+      type="button"
+      disabled={enqueueBusy}
+      onclick={() => onEnqueue()}
+      title="Append to the persistent queue and keep this selection so you can pick another ship."
+      class="border border-border hover:bg-popover/60 rounded px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      {enqueueBusy ? 'Queueing…' : '+ Queue'}
+    </button>
     <span class="text-muted-foreground text-[11px]">
-      spawns <code>wows-ingest-ship</code> via <code>POST /api/extract/run</code>
+      <strong>Run</strong> spawns immediately; <strong>+ Queue</strong> appends to the queue panel below.
     </span>
   </div>
 </section>

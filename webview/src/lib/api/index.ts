@@ -8,3 +8,4 @@ export * from './bootstrap';
 export * from './cleanup';
 export * from './gameparams';
 export * from './consumers';
+export * from './queue';

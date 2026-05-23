@@ -22,6 +22,7 @@
   import { hasModifier, isTypingContext } from '$lib/shortcuts';
   import {
     cancelExtractJob,
+    enqueueExtract,
     fetchExtractJob,
     fetchExtractJobs,
     fetchExtractSnapshot,
@@ -30,6 +31,7 @@
     runExtract,
     runSkinPack,
   } from '$lib/api';
+  import type { QueueSnapshot } from '$lib/api';
   import { formatRelativeTime, suggestedLabel } from '$lib/extract/labels';
   import type {
     ExtractedShip,
@@ -46,6 +48,7 @@
   import ExtractRunPanel from '$components/ExtractRunPanel.svelte';
   import ExtractSkinPackForm from '$components/ExtractSkinPackForm.svelte';
   import ExtractJobPanel from '$components/ExtractJobPanel.svelte';
+  import ExtractQueuePanel from '$components/ExtractQueuePanel.svelte';
 
   interface Props {
     /** Vehicle id from the URL (`#/extract/<top_key_or_param_index>`),
@@ -281,6 +284,51 @@
     toast.success(`Extract started: ${label}`, { description: `job ${result.body.job_id}`, duration: 3000 });
   }
 
+  // ── Enqueue (add to persistent queue without spawning now) ───────────
+  let enqueueBusy = $state(false);
+  async function onEnqueueExtract() {
+    const v = selectedVehicle;
+    if (!v || enqueueBusy) return;
+    const p = selectedPermoflage;
+    const label = suggestedLabel(v, p);
+    enqueueBusy = true;
+    try {
+      await enqueueExtract({
+        vehicle:       v.top_key || v.param_index,
+        label,
+        permoflage:    p ? p.exterior_id : 'none',
+        build_library: true,
+      });
+      toast.success(`Queued: ${label}`, {
+        description: 'Worker will pick it up next. Picker selection preserved — pick another ship to queue more.',
+        duration: 3500,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`Queue failed`, { description: msg, duration: 6000 });
+    } finally {
+      enqueueBusy = false;
+    }
+  }
+
+  // Queue panel feeds us its snapshot on each poll. When a new running
+  // job appears (worker just started one) and we don't already have it
+  // as activeJob, adopt it so the existing job panel + completion-event
+  // plumbing handles it. Lets the queue-spawned run drive the same
+  // toast / ship-list-refresh logic the direct "Run extract" path uses.
+  function onQueueSnapshot(snap: QueueSnapshot) {
+    if (!snap.running_job_id) return;
+    const current = untrack(() => activeJob);
+    if (current && current.id === snap.running_job_id) return;
+    if (current && current.state === 'running') return;
+    void (async () => {
+      const detail = await fetchExtractJob(snap.running_job_id!);
+      if (!detail) return;
+      activeJob = detail;
+      if (detail.state === 'running') startPolling();
+    })();
+  }
+
   async function onRunSkin(form: SkinPackForm) {
     const body = {
       ship: form.ship,
@@ -406,7 +454,7 @@
       </div>
     {:else if !selectedVehicle}
       <div class="flex-1 overflow-auto">
-        <div class="text-muted-foreground flex h-full items-center justify-center px-6 py-8 text-xs">
+        <div class="text-muted-foreground flex items-center justify-center px-6 py-8 text-xs">
           Pick a ship (and optionally a permoflage) to see the resolved extract command.
         </div>
         {#if activeJob}
@@ -417,6 +465,7 @@
             onDismiss={onDismissJob}
           />
         {/if}
+        <ExtractQueuePanel onSnapshot={onQueueSnapshot} />
       </div>
     {:else}
       <div class="flex-1 overflow-auto">
@@ -431,6 +480,8 @@
           {extractedShips}
           {activeJob}
           onRun={onRunExtract}
+          onEnqueue={onEnqueueExtract}
+          {enqueueBusy}
         />
         <ExtractSkinPackForm
           {extractedShips}
@@ -447,6 +498,7 @@
             onDismiss={onDismissJob}
           />
         {/if}
+        <ExtractQueuePanel onSnapshot={onQueueSnapshot} />
       </div>
     {/if}
   </section>
