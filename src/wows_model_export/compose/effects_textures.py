@@ -22,6 +22,7 @@ flag so the consumer can render the diagnostic without re-walking.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 from collections.abc import Iterable
@@ -39,6 +40,23 @@ TEXTURE_CACHE_ROOT = Path("content") / "effects_textures"
 # Texture extensions we care about; everything else (e.g. ``.vfd``
 # velocityField sources) is referenced via a different code path.
 _TEXTURE_EXTS = frozenset({".dds", ".dd0", ".dd1", ".dd2", ".tga", ".bmp", ".png"})
+
+# Manifest binding ``<name> -> (atlas page DDS, UV rect)`` for the 117
+# authoring-side ``.tga`` refs that WG bakes into 6 shipped atlas pages.
+ATLAS_MANIFEST_VFS_PATH = "particles/textures/particles.atlas"
+
+# Atlas manifest line patterns. Format is a libGDX-ish text grammar:
+#   page "particles1.dds" 4096 4096
+#   {
+#       "Blast"  { 0.751953 0.125977 0.814453 0.188477 }
+#       ...
+#   }
+_ATLAS_PAGE_RE = re.compile(r'page\s+"([^"]+)"\s+(\d+)\s+(\d+)')
+_ATLAS_ENTRY_RE = re.compile(
+    r'"([^"]+)"\s*\{\s*'
+    r'([+-]?\d*\.?\d+)\s+([+-]?\d*\.?\d+)\s+'
+    r'([+-]?\d*\.?\d+)\s+([+-]?\d*\.?\d+)\s*\}'
+)
 
 
 def collect_texture_paths(particles: dict[str, Any]) -> set[str]:
@@ -261,9 +279,147 @@ def stamp_texture_urls(
     return n
 
 
+def parse_atlas_manifest(manifest_path: Path) -> dict[str, dict[str, Any]]:
+    """Parse ``particles/textures/particles.atlas`` into a name lookup.
+
+    The manifest is a libGDX-style text file. Returns a mapping
+    ``{name: {"page": "particlesN.dds", "rect": [u0, v0, u1, v1]}}``
+    suitable for resolving authoring-side ``.tga`` references to atlas
+    page + UV rect. Names match the ``textureName0`` / ``textureName1``
+    basename without the ``.tga`` extension.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    current_page: str | None = None
+    try:
+        text = manifest_path.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m_page = _ATLAS_PAGE_RE.match(stripped)
+        if m_page:
+            current_page = m_page.group(1)
+            continue
+        if current_page is None:
+            continue
+        m_entry = _ATLAS_ENTRY_RE.match(stripped)
+        if m_entry:
+            name = m_entry.group(1)
+            rect = [float(m_entry.group(i + 2)) for i in range(4)]
+            out[name] = {"page": current_page, "rect": rect}
+    return out
+
+
+def ensure_atlas_assets_on_disk(
+    *,
+    config: PipelineConfig | None = None,
+    workspace_override: Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Extract the atlas manifest + every DDS page it references.
+
+    Returns the parsed ``{name: {page, rect}}`` mapping (empty dict on
+    failure). The 6 atlas DDS pages land under
+    ``content/effects_textures/particles/textures/`` alongside the
+    directly-referenced textures. Idempotent: a second call reuses the
+    on-disk manifest + pages.
+    """
+    cfg = config or PipelineConfig.load()
+    workspace = (workspace_override or cfg.workspace).resolve()
+    cache_root = (workspace / TEXTURE_CACHE_ROOT).resolve()
+
+    # Step 1: extract the manifest itself.
+    resolved, _ = ensure_textures_on_disk(
+        [ATLAS_MANIFEST_VFS_PATH],
+        config=cfg,
+        workspace_override=workspace_override,
+    )
+    if ATLAS_MANIFEST_VFS_PATH not in resolved:
+        return {}
+
+    manifest_path = cache_root / _strip_content_prefix(ATLAS_MANIFEST_VFS_PATH)
+    atlas_map = parse_atlas_manifest(manifest_path)
+    if not atlas_map:
+        return {}
+
+    # Step 2: extract every atlas page referenced by the manifest.
+    pages = {entry["page"] for entry in atlas_map.values()}
+    page_paths = [f"particles/textures/{p}" for p in pages]
+    ensure_textures_on_disk(
+        page_paths, config=cfg, workspace_override=workspace_override,
+    )
+
+    return atlas_map
+
+
+def stamp_atlas_urls(
+    particles: dict[str, Any], atlas_map: dict[str, dict[str, Any]],
+) -> int:
+    """Stamp ``textureAtlas0`` / ``textureAtlas1`` /
+    ``motionVectorsTextureAtlas`` on every renderer/animation block
+    whose ``textureName*`` basename appears in ``atlas_map`` and which
+    wasn't already resolved to a direct DDS via :func:`stamp_texture_urls`.
+
+    Each stamp is a dict ``{"page": "<workspace-rel DDS url>", "rect":
+    [u0, v0, u1, v1]}``. Consumers prefer ``textureUrl*`` when present;
+    ``textureAtlas*`` is the atlas-mapped fallback.
+
+    Returns the count of stamped fields.
+    """
+    if not atlas_map:
+        return 0
+    n = 0
+    page_rel_root = (TEXTURE_CACHE_ROOT / "particles" / "textures").as_posix()
+    for rec in particles.values():
+        if not isinstance(rec, dict):
+            continue
+        for system in rec.get("systems") or []:
+            if not isinstance(system, dict):
+                continue
+            rend = system.get("renderer")
+            if isinstance(rend, dict):
+                for src_key, url_key, atlas_key in (
+                    ("textureName0", "textureUrl0", "textureAtlas0"),
+                    ("textureName1", "textureUrl1", "textureAtlas1"),
+                ):
+                    p = rend.get(src_key)
+                    if not isinstance(p, str) or not p:
+                        continue
+                    if url_key in rend:
+                        # Direct extract worked — atlas is a fallback only.
+                        continue
+                    entry = atlas_map.get(Path(p).stem)
+                    if entry:
+                        rend[atlas_key] = {
+                            "page": f"{page_rel_root}/{entry['page']}",
+                            "rect": entry["rect"],
+                        }
+                        n += 1
+            anim = system.get("animation")
+            if isinstance(anim, dict):
+                p = anim.get("motionVectorsTexture")
+                if not isinstance(p, str) or not p:
+                    continue
+                if "motionVectorsTextureUrl" in anim:
+                    continue
+                entry = atlas_map.get(Path(p).stem)
+                if entry:
+                    anim["motionVectorsTextureAtlas"] = {
+                        "page": f"{page_rel_root}/{entry['page']}",
+                        "rect": entry["rect"],
+                    }
+                    n += 1
+    return n
+
+
 __all__ = [
     "TEXTURE_CACHE_ROOT",
+    "ATLAS_MANIFEST_VFS_PATH",
     "collect_texture_paths",
     "ensure_textures_on_disk",
     "stamp_texture_urls",
+    "parse_atlas_manifest",
+    "ensure_atlas_assets_on_disk",
+    "stamp_atlas_urls",
 ]

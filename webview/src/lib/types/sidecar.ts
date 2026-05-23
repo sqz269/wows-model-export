@@ -115,6 +115,21 @@ export interface SidecarShip {
 }
 
 // ─── Particle effects ──────────────────────────────────────────────────────
+
+/**
+ * One entry from the ``particles/textures/particles.atlas`` manifest.
+ * Resolves an authoring-side ``.tga`` filename (the basename of
+ * ``textureName0/1`` / ``motionVectorsTexture``) to a named region
+ * inside one of the 6 shipped atlas DDS pages.
+ *
+ * `page` is a workspace-relative URL the webview hands to ``repoUrl()``;
+ * `rect` is a normalised UV rect ``[u0, v0, u1, v1]`` within the page.
+ */
+export interface ParticleAtlasRect {
+  page: string;
+  rect: [number, number, number, number];
+}
+
 // Surface a subset of the parsed Effect record. Full schema lives in
 // `reference/topics/particle/particle_format_spec.md`.
 //
@@ -285,6 +300,11 @@ export interface ParticleRenderer {
   textureName1?: string;
   textureUrl0?: string;
   textureUrl1?: string;
+  /** Atlas-mapped fallback for textureName0 when it's a ``.tga`` ref
+   *  whose name appears in the atlas manifest. Mutually exclusive with
+   *  ``textureUrl0`` — direct extract takes precedence. */
+  textureAtlas0?: ParticleAtlasRect;
+  textureAtlas1?: ParticleAtlasRect;
   yawRateRamp?: ParticleRamp;
   /** PS_RRC label (4 values: center / topLeft / topRight / bottomLeft).
    *  Labels are tentative — names need Ghidra to confirm. */
@@ -318,6 +338,10 @@ export interface ParticleAnimation {
   frameRateRamp?: ParticleRamp;
   motionVectorsTexture?: string;
   motionVectorsTextureUrl?: string;
+  /** Atlas-mapped fallback for motionVectorsTexture when it's a ``.tga``
+   *  ref whose name appears in the atlas manifest. Mutually exclusive
+   *  with ``motionVectorsTextureUrl``. */
+  motionVectorsTextureAtlas?: ParticleAtlasRect;
   /** Sprite-sheet column count. 1 means "no atlas". */
   framesPerX?: number;
   /** Sprite-sheet row count. 1 means "no atlas". */

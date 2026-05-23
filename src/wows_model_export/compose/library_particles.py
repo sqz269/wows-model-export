@@ -98,6 +98,8 @@ def build(
 
     textures_extracted = 0
     textures_missing: set[str] = set()
+    atlas_stamped = 0
+    atlas_entries = 0
     if extract_textures and records:
         tex_paths = _eff_tex.collect_texture_paths(records)
         if tex_paths:
@@ -106,6 +108,15 @@ def build(
             )
             _eff_tex.stamp_texture_urls(records, resolved_urls)
             textures_extracted = len(resolved_urls)
+
+        # Atlas-mapped textures: the 117 ``.tga`` refs that don't ship
+        # individually but live as named UV regions inside the 6
+        # ``particles*.dds`` atlas pages. The manifest extraction also
+        # pulls the 6 atlas DDS pages into the texture cache.
+        atlas_map = _eff_tex.ensure_atlas_assets_on_disk(config=cfg)
+        if atlas_map:
+            atlas_entries = len(atlas_map)
+            atlas_stamped = _eff_tex.stamp_atlas_urls(records, atlas_map)
 
     # Atomic write: a SIGINT mid-write would otherwise leave a truncated
     # records.json that ``is_current`` then accepts (mtime updated before
@@ -124,6 +135,8 @@ def build(
                 "unresolved_count": len(unresolved),
                 "textures_extracted": textures_extracted,
                 "textures_missing": len(textures_missing),
+                "atlas_entries": atlas_entries,
+                "atlas_stamped": atlas_stamped,
                 "paths": sorted(records.keys()),
             },
             indent=2,
@@ -137,6 +150,8 @@ def build(
         "paths_unresolved": len(unresolved),
         "textures_extracted": textures_extracted,
         "textures_missing": len(textures_missing),
+        "atlas_entries": atlas_entries,
+        "atlas_stamped": atlas_stamped,
         "records_path": str(paths["records"]),
         "index_path": str(paths["index"]),
     }
