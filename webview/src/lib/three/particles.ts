@@ -229,6 +229,12 @@ class SystemRenderer {
   private posAttr: THREE.BufferAttribute;
   private colorAttr: THREE.BufferAttribute;
   private sizeAttr: THREE.BufferAttribute;
+  /** Packed (compacted to the front, matching pos/color/size) age values
+   *  for the GPU. Drives the fragment shader's atlas grid frame index.
+   *  Kept separate from ``age[]`` (which is the per-slot CPU truth
+   *  source). */
+  private ageGpu: Float32Array;
+  private ageAttr: THREE.BufferAttribute;
 
   // Accumulator for the emission rate (particles per second).
   private emissionAccumulator = 0;
@@ -319,6 +325,7 @@ class SystemRenderer {
     this.lifetime = new Float32Array(this.capacity);
     this.colorRGBA = new Float32Array(this.capacity * 4);
     this.sizeArr = new Float32Array(this.capacity);
+    this.ageGpu = new Float32Array(this.capacity);
     for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
 
     // Geometry: one vertex per particle. Three.js's `Points` renders
@@ -331,9 +338,12 @@ class SystemRenderer {
     this.colorAttr.setUsage(THREE.DynamicDrawUsage);
     this.sizeAttr = new THREE.BufferAttribute(this.sizeArr, 1);
     this.sizeAttr.setUsage(THREE.DynamicDrawUsage);
+    this.ageAttr = new THREE.BufferAttribute(this.ageGpu, 1);
+    this.ageAttr.setUsage(THREE.DynamicDrawUsage);
     geom.setAttribute('position', this.posAttr);
     geom.setAttribute('color', this.colorAttr);
     geom.setAttribute('size', this.sizeAttr);
+    geom.setAttribute('age', this.ageAttr);
     geom.setDrawRange(0, 0);
     this.points = new THREE.Points(geom, material);
     this.points.frustumCulled = false;
@@ -423,7 +433,9 @@ class SystemRenderer {
 
     // Update geometry attribute buffers + draw range. We pack the live
     // particles to the front; saves GPU vertex count vs. always drawing
-    // `capacity` slots.
+    // `capacity` slots. ``ageGpu`` is always packed (unlike ``age[]``,
+    // which stays slot-indexed as the CPU truth source — see field
+    // comment) so the fragment shader's grid math reads the right value.
     let writeIdx = 0;
     for (let i = 0; i < this.capacity; i++) {
       if (this.age[i] < 0) continue;
@@ -437,12 +449,14 @@ class SystemRenderer {
         this.colorRGBA[writeIdx * 4 + 3] = this.colorRGBA[i * 4 + 3];
         this.sizeArr[writeIdx] = this.sizeArr[i];
       }
+      this.ageGpu[writeIdx] = this.age[i];
       writeIdx++;
     }
     this.points.geometry.setDrawRange(0, writeIdx);
     this.posAttr.needsUpdate = true;
     this.colorAttr.needsUpdate = true;
     this.sizeAttr.needsUpdate = true;
+    this.ageAttr.needsUpdate = true;
   }
 
   private spawnParticle(): void {
@@ -489,33 +503,119 @@ class SystemRenderer {
 // Per-system point-sprite material
 // ---------------------------------------------------------------------------
 
+interface ParticleMaterialOptions {
+  /** PS_RBT label (10 values). Drives the THREE.* blend equation. */
+  blendType?: string;
+  /** Sprite-sheet grid (animation block). Defaults to 1x1 (no animation). */
+  framesPerX?: number;
+  framesPerY?: number;
+  /** Active frame range [begin, end); ``end - begin`` is the total frame
+   *  count animated through. Defaults to 0..0 (no animation). */
+  framesRangeBegin?: number;
+  framesRangeEnd?: number;
+  /** Animation cycle length in seconds. 0 disables animation. */
+  animationPeriod?: number;
+  /** Manifest-resolved atlas UV rect ``[u0, v0, u1, v1]`` (sidecar's
+   *  ``textureAtlas0``). When set, the fragment shader maps
+   *  ``gl_PointCoord`` through this rect instead of sampling the full
+   *  page (animation grid is ignored — atlas refs are static stamps). */
+  atlasRect?: [number, number, number, number];
+}
+
+/**
+ * Map PS_RBT enum label -> THREE.js blending parameters. Five modes have
+ * direct equivalents (ADDITIVE, BLENDED, BLENDED_UNDERWATER,
+ * BLENDED_WATER_SURFACE, ADDITIVE_WATER_SURFACE); five need custom
+ * shader paths (GRADIENT_MAP, UNDERWATER_GRADIENT_MAP, SHIMMER,
+ * DEFORM_WATER_SURFACE, BLENDED_GLOW). For now the custom-shader modes
+ * fall back to NormalBlending as a visually neutral placeholder so they
+ * at least don't read as additive (the previous default).
+ */
+function blendConfigForPsRbt(label: string | undefined): {
+  blending: THREE.Blending;
+  blendSrc?: THREE.BlendingSrcFactor;
+  blendDst?: THREE.BlendingDstFactor;
+} {
+  switch (label) {
+    case 'ADDITIVE':
+    case 'ADDITIVE_WATER_SURFACE':
+      return { blending: THREE.AdditiveBlending };
+    case 'BLENDED':
+    case 'BLENDED_UNDERWATER':
+    case 'BLENDED_WATER_SURFACE':
+      return { blending: THREE.NormalBlending };
+    case 'BLENDED_GLOW':
+      // Premultiplied-additive: dst stays, src adds scaled by its alpha.
+      return {
+        blending: THREE.CustomBlending,
+        blendSrc: THREE.SrcAlphaFactor,
+        blendDst: THREE.OneFactor,
+      };
+    case 'GRADIENT_MAP':
+    case 'UNDERWATER_GRADIENT_MAP':
+    case 'SHIMMER':
+    case 'DEFORM_WATER_SURFACE':
+      // Need bespoke shader paths; placeholder until they land.
+      return { blending: THREE.NormalBlending };
+    default:
+      // Unknown / missing label — keep the historical additive default
+      // so behaviour matches the pre-blendType-RE'd renderer.
+      return { blending: THREE.AdditiveBlending };
+  }
+}
+
 /**
  * Build a per-system point-sprite material. Each SystemRenderer owns
- * its own copy so per-system texture binding doesn't clobber siblings.
+ * its own copy so per-system uniforms (atlas rect, frame grid, texture
+ * binding) don't clobber siblings.
  *
- * The fragment shader branches on a `useMap` uniform: when a DDS map is
- * bound it samples the texture at `gl_PointCoord` and tints by the
- * per-vertex color attribute. Otherwise it falls back to the procedural
- * soft-circular falloff used pre-texturing — useful for particles whose
- * Renderer fields weren't surfaced or whose DDS extraction missed.
- *
- * Blending: additive by default (fire / sparks / glow). PS_RBT_* dispatch
- * — to switch to alpha / screen blending per system — is queued on the
- * roadmap; needs the byte offset of Renderer.blendType RE'd first.
+ * Fragment shader paths:
+ *   useMap=0                 -> procedural soft-disc falloff (no texture)
+ *   useMap=1, useAtlasRect=1 -> sample texture at lerp(rect.xy, rect.zw,
+ *                               gl_PointCoord)  (manifest atlas region)
+ *   useMap=1, grid>1, grid frames>0, period>0 -> animate frame index from
+ *                               per-particle vAge, sample cell within
+ *                               framesPerX x framesPerY grid
+ *   useMap=1 otherwise       -> sample full texture at gl_PointCoord
  */
-function buildParticleMaterial(): THREE.ShaderMaterial {
-  return new THREE.ShaderMaterial({
+function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.ShaderMaterial {
+  const blend = blendConfigForPsRbt(opts.blendType);
+  const rect = opts.atlasRect;
+  const mat = new THREE.ShaderMaterial({
     uniforms: {
       map: { value: null as THREE.Texture | null },
       useMap: { value: 0 },
+      // Manifest atlas rect (u0, v0, u1, v1). useAtlasRect=1 routes the
+      // fragment shader through the rect-lerp branch.
+      atlasRect: {
+        value: new THREE.Vector4(
+          rect?.[0] ?? 0, rect?.[1] ?? 0, rect?.[2] ?? 1, rect?.[3] ?? 1,
+        ),
+      },
+      useAtlasRect: { value: rect ? 1 : 0 },
+      // Animation grid (framesPerX, framesPerY) + range (begin, end) +
+      // period. The shader skips the grid sample unless framesPerX*Y > 1
+      // AND (end - begin) > 0 AND period > 0.
+      framesPerXY: {
+        value: new THREE.Vector2(opts.framesPerX ?? 1, opts.framesPerY ?? 1),
+      },
+      frameRange: {
+        value: new THREE.Vector2(
+          opts.framesRangeBegin ?? 0, opts.framesRangeEnd ?? 0,
+        ),
+      },
+      animationPeriod: { value: opts.animationPeriod ?? 0 },
     },
     vertexShader: /* glsl */ `
       attribute vec4 color;
       attribute float size;
+      attribute float age;
       varying vec4 vColor;
+      varying float vAge;
 
       void main() {
         vColor = color;
+        vAge = age;
         vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * mvPosition;
         // size is metres (world space); divide by distance for perspective.
@@ -525,11 +625,36 @@ function buildParticleMaterial(): THREE.ShaderMaterial {
     fragmentShader: /* glsl */ `
       uniform sampler2D map;
       uniform float useMap;
+      uniform vec4 atlasRect;
+      uniform float useAtlasRect;
+      uniform vec2 framesPerXY;
+      uniform vec2 frameRange;
+      uniform float animationPeriod;
       varying vec4 vColor;
+      varying float vAge;
+
       void main() {
         vec4 base;
         if (useMap > 0.5) {
-          base = texture2D(map, gl_PointCoord);
+          vec2 puv = gl_PointCoord;
+          if (useAtlasRect > 0.5) {
+            // Manifest-mapped atlas region — lerp through the rect.
+            puv = mix(atlasRect.xy, atlasRect.zw, puv);
+          } else {
+            float fx = framesPerXY.x;
+            float fy = framesPerXY.y;
+            float total = frameRange.y - frameRange.x;
+            if (fx * fy > 1.0 && total > 0.0 && animationPeriod > 0.0) {
+              // Driven by particle age. fps = totalFrames / period;
+              // current frame loops within [begin, end).
+              float fps = total / animationPeriod;
+              float idx = mod(floor(vAge * fps), total) + frameRange.x;
+              float col = mod(idx, fx);
+              float row = floor(idx / fx);
+              puv = (vec2(col, row) + puv) / vec2(fx, fy);
+            }
+          }
+          base = texture2D(map, puv);
         } else {
           vec2 c = gl_PointCoord - vec2(0.5);
           float r = length(c) * 2.0;
@@ -541,10 +666,13 @@ function buildParticleMaterial(): THREE.ShaderMaterial {
         gl_FragColor = vec4(vColor.rgb * base.rgb, vColor.a * base.a);
       }
     `,
-    blending: THREE.AdditiveBlending,
+    blending: blend.blending,
     transparent: true,
     depthWrite: false,
   });
+  if (blend.blendSrc !== undefined) mat.blendSrc = blend.blendSrc;
+  if (blend.blendDst !== undefined) mat.blendDst = blend.blendDst;
+  return mat;
 }
 
 // ---------------------------------------------------------------------------
@@ -639,14 +767,32 @@ export class ParticleScene {
       this.root.add(grp);
       const systems: SystemRenderer[] = [];
       for (const sys of rec.systems) {
-        const mat = buildParticleMaterial();
+        const r = sys.renderer;
+        const anim = sys.animation;
+        // Prefer the direct DDS URL when available (texture extracted as
+        // its own file). Fall back to the manifest atlas mapping (the
+        // .tga ref resolves to a named region inside a shared atlas
+        // page). The shader reads `atlasRect` + `useAtlasRect` from the
+        // uniforms; we only enable `useAtlasRect` when the direct URL
+        // isn't present (Url path uses raw or grid-animated sampling).
+        const useAtlas = !r?.textureUrl0 && !!r?.textureAtlas0;
+        const mat = buildParticleMaterial({
+          blendType: r?.blendType,
+          framesPerX: anim?.framesPerX,
+          framesPerY: anim?.framesPerY,
+          framesRangeBegin: anim?.framesRangeBegin,
+          framesRangeEnd: anim?.framesRangeEnd,
+          animationPeriod: anim?.animationPeriod,
+          atlasRect: useAtlas ? r!.textureAtlas0!.rect : undefined,
+        });
         const renderer = new SystemRenderer(sys, mat);
         renderer.setActive(false);   // start inactive — UI toggles on
         grp.add(renderer.points);
         systems.push(renderer);
-        // Kick off DDS texture load if the parser surfaced a refs.
-        // Errors degrade silently to the procedural-disc fallback.
-        const texPath = sys.renderer?.textureUrl0;
+        // Texture binding: direct URL takes precedence; otherwise load
+        // the manifest atlas page (the rect is already in the material's
+        // uniforms via buildParticleMaterial).
+        const texPath = r?.textureUrl0 ?? (useAtlas ? r!.textureAtlas0!.page : undefined);
         if (texPath) {
           void this.bindTexture(mat, texPath);
         }
