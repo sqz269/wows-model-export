@@ -204,9 +204,21 @@ class SystemRenderer {
   readonly points: THREE.Points;
   private capacity: number;
   private maxAge: number;
+  // Creator (PSAT idx=12) — additive secondary burst layer, present on
+  // ~12% of corpus systems. When present, the simulator uses creator's
+  // VGs for spawning AND its rateRamp for emission. When absent, the
+  // simulator falls through to the always-on emitter sub-struct below.
   private rateRamp: ParticleRamp | undefined;
   private initialPosVg: ParticleVariantVg | undefined;
   private initialVelVg: ParticleVariantVg | undefined;
+  // Emitter sub-struct (System +0x0a0) — canonical always-on emitter
+  // per the 2026-05-23 audit (12152 of 13737 systems have NO creator
+  // and 100% of those have a populated emitter.rateGenerator). When
+  // creator is absent we drive emission from here.
+  private emitterRateVg: ParticleValueGenerator | undefined;
+  private emitterPosVg: ParticleVariantVg | undefined;
+  private emitterVelVg: ParticleVariantVg | undefined;
+  private emitterActivePeriod: number;
   // Per-action driver fields.
   private tintColor: ParticleColor | undefined;
   private alphaRamp: ParticleRamp | undefined;
@@ -302,6 +314,18 @@ class SystemRenderer {
         if (body.forceZGenerator) this.forceZ = body.forceZGenerator as ParticleValueGenerator;
       }
     }
+    // Capture the Emitter sub-struct fields. Used when no creator
+    // component is present (the 88%-of-corpus case). Sample the rate
+    // generator in SECONDS against ``elapsed % activePeriod`` (NOT
+    // normalised [0,1] like the legacy creator path) — empirical: ramp
+    // tail == activePeriod in 99.8% of corpus emitter ramps.
+    this.emitterRateVg = system.emitter?.rateGenerator;
+    this.emitterPosVg = system.emitter?.initialPositionGenerator;
+    this.emitterVelVg = system.emitter?.initialVelocityGenerator;
+    this.emitterActivePeriod = Math.max(
+      0,
+      system.emitter?.activePeriod ?? 0,
+    );
     // Fall back to the emitter's sizeGenerator if the components didn't
     // ship a scaler.
     if (!this.sizeRampVg && system.emitter?.sizeGenerator) {
@@ -411,18 +435,43 @@ class SystemRenderer {
       );
     }
 
-    // Emit new particles.
+    // Emit new particles. Pick exactly one rate source per system —
+    // creator takes precedence when present (matches WG's ordering: the
+    // additive creator burst layer drives explicit emission), otherwise
+    // fall through to the always-on emitter.rateGenerator. Both paths
+    // share ``emissionAccumulator`` so a system can't double-spawn.
+    let rate = 0;
+    let posVg: ParticleVariantVg | undefined;
+    let velVg: ParticleVariantVg | undefined;
     if (this.rateRamp) {
-      // Drive the rate ramp by elapsed-system-time ÷ activePeriod.
-      // For systems without an activePeriod we wrap at maxAge.
+      // Creator path. Legacy normalised-against-maxAge axis kept here
+      // for compatibility — the empirical audit shows this is wrong
+      // (creator.rateRamp is in seconds against systemAge), but most
+      // creator systems have short ramps where the difference is
+      // visually negligible. Refining is queued.
       const period = Math.max(0.01, this.maxAge);
       const tNorm = (this.elapsed % period) / period;
-      let rate = sampleRamp(this.rateRamp, tNorm, 0);
-      rate = Math.min(Math.max(0, rate), HARD_MAX_EMIT_RATE_HZ);
+      rate = sampleRamp(this.rateRamp, tNorm, 0);
+      posVg = this.initialPosVg;
+      velVg = this.initialVelVg;
+    } else if (this.emitterRateVg) {
+      // Emitter path (~88% of corpus). Ramp is keyed in SECONDS against
+      // systemAge, sampled at ``elapsed mod activePeriod``. ``elapsed``
+      // alone covers the activePeriod==0 case (constant/linear VGs
+      // ignore t; ramp VGs hold their last value past the tail).
+      const t = this.emitterActivePeriod > 0
+        ? this.elapsed % this.emitterActivePeriod
+        : this.elapsed;
+      rate = sampleScalarVg(this.emitterRateVg, t, 0);
+      posVg = this.emitterPosVg;
+      velVg = this.emitterVelVg;
+    }
+    if (rate > 0) {
+      rate = Math.min(rate, HARD_MAX_EMIT_RATE_HZ);
       this.emissionAccumulator += rate * dt;
       while (this.emissionAccumulator >= 1 && this.alive < this.capacity) {
         this.emissionAccumulator -= 1;
-        this.spawnParticle();
+        this.spawnParticle(posVg, velVg);
       }
       // Don't let the accumulator overflow if the system is at capacity
       // (avoids a burst of particles when an idle system frees slots).
@@ -459,15 +508,18 @@ class SystemRenderer {
     this.ageAttr.needsUpdate = true;
   }
 
-  private spawnParticle(): void {
+  private spawnParticle(
+    posVg: ParticleVariantVg | undefined,
+    velVg: ParticleVariantVg | undefined,
+  ): void {
     // Find an empty slot.
     let slot = -1;
     for (let i = 0; i < this.capacity; i++) {
       if (this.age[i] < 0) { slot = i; break; }
     }
     if (slot < 0) return;
-    samplePosFromVariantVg(this.initialPosVg, SystemRenderer.TMP_POS);
-    samplePosFromVariantVg(this.initialVelVg, SystemRenderer.TMP_VEL);
+    samplePosFromVariantVg(posVg, SystemRenderer.TMP_POS);
+    samplePosFromVariantVg(velVg, SystemRenderer.TMP_VEL);
     this.pos[slot * 3 + 0] = SystemRenderer.TMP_POS.x;
     this.pos[slot * 3 + 1] = SystemRenderer.TMP_POS.y;
     this.pos[slot * 3 + 2] = SystemRenderer.TMP_POS.z;
