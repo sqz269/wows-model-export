@@ -28,8 +28,11 @@ from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
 from ...compose.effects_textures import (
+    ATLAS_MANIFEST_VFS_PATH,
     TEXTURE_CACHE_ROOT,
     _strip_content_prefix,
+    parse_atlas_manifest,
+    stamp_atlas_urls,
 )
 from ...config import PipelineConfig
 from ...read.particles import ParticleStore
@@ -93,6 +96,32 @@ def make_router(config: PipelineConfig) -> APIRouter:
     # time open against parallel inbound requests.
     _store_lock = threading.Lock()
     _store_ref: dict[str, ParticleStore | None] = {"v": None}
+
+    # Lazy-initialised atlas manifest. Empty dict when no manifest is on
+    # disk (library_particles.build() hasn't run yet — manifest extract
+    # happens during the build pass).
+    _atlas_lock = threading.Lock()
+    _atlas_ref: dict[str, dict[str, Any] | None] = {"v": None}
+
+    def _get_atlas_map() -> dict[str, Any]:
+        if _atlas_ref["v"] is not None:
+            return _atlas_ref["v"]
+        with _atlas_lock:
+            if _atlas_ref["v"] is not None:
+                return _atlas_ref["v"]
+            manifest_path = (
+                config.workspace
+                / TEXTURE_CACHE_ROOT
+                / _strip_content_prefix(ATLAS_MANIFEST_VFS_PATH)
+            )
+            atlas_map: dict[str, Any] = {}
+            if manifest_path.is_file():
+                try:
+                    atlas_map = parse_atlas_manifest(manifest_path)
+                except Exception:  # noqa: BLE001
+                    atlas_map = {}
+            _atlas_ref["v"] = atlas_map
+            return atlas_map
 
     def _get_store() -> ParticleStore | str:
         """Return the cached ParticleStore, opening it on demand.
@@ -174,6 +203,15 @@ def make_router(config: PipelineConfig) -> APIRouter:
         rec = copy.deepcopy(rec)
 
         stamped, missing = _stamp_existing_texture_urls(rec, config.workspace)
+        # Atlas mapping: stamp `textureAtlas0/1` / `motionVectorsTextureAtlas`
+        # on every renderer/animation block whose `textureName*` basename
+        # appears in the cached manifest. The manifest is built by
+        # library_particles.build(); when absent (cold workspace), atlas
+        # refs simply fall through to the procedural-disc fallback.
+        atlas_map = _get_atlas_map()
+        atlas_stamped = (
+            stamp_atlas_urls({path: rec}, atlas_map) if atlas_map else 0
+        )
         return JSONResponse(
             content={
                 "ok": True,
@@ -185,6 +223,7 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 "record": rec,
                 "textures_stamped": stamped,
                 "textures_missing": missing,
+                "atlas_stamped": atlas_stamped,
             },
             headers={"Cache-Control": "no-cache"},
         )

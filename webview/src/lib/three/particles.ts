@@ -516,20 +516,28 @@ interface ParticleMaterialOptions {
   /** Animation cycle length in seconds. 0 disables animation. */
   animationPeriod?: number;
   /** Manifest-resolved atlas UV rect ``[u0, v0, u1, v1]`` (sidecar's
-   *  ``textureAtlas0``). When set, the fragment shader maps
-   *  ``gl_PointCoord`` through this rect instead of sampling the full
-   *  page (animation grid is ignored — atlas refs are static stamps). */
+   *  ``textureAtlas0``). When set, the fragment shader maps the (already
+   *  grid-sampled) UV through this rect — composes with the grid rather
+   *  than replacing it, because ~20% of atlas-mapped systems also carry
+   *  a non-trivial framesPerX*Y grid (the rect bounds the whole grid in
+   *  the parent atlas page). */
   atlasRect?: [number, number, number, number];
+  /** PS_RBT modes that read textureName0 as a grayscale luminance map
+   *  and remap it via a color LUT in textureName1 (GRADIENT_MAP,
+   *  UNDERWATER_GRADIENT_MAP). The fragment shader switches to
+   *  ``texture2D(lut, vec2(base.r, 0.5)).rgb`` when ``useLut=1``. */
+  useLut?: boolean;
 }
 
 /**
- * Map PS_RBT enum label -> THREE.js blending parameters. Five modes have
- * direct equivalents (ADDITIVE, BLENDED, BLENDED_UNDERWATER,
- * BLENDED_WATER_SURFACE, ADDITIVE_WATER_SURFACE); five need custom
- * shader paths (GRADIENT_MAP, UNDERWATER_GRADIENT_MAP, SHIMMER,
- * DEFORM_WATER_SURFACE, BLENDED_GLOW). For now the custom-shader modes
- * fall back to NormalBlending as a visually neutral placeholder so they
- * at least don't read as additive (the previous default).
+ * Map PS_RBT enum label -> THREE.js blending parameters. Six modes have
+ * direct equivalents; GRADIENT_MAP / UNDERWATER_GRADIENT_MAP additionally
+ * trigger LUT remap (driven by ``useLut`` in the material options, where
+ * the renderer's ``textureName1`` is bound as the color ramp). SHIMMER
+ * and DEFORM_WATER_SURFACE still lack bespoke shaders; they use
+ * AdditiveBlending as a visually-louder placeholder than the previous
+ * NormalBlending one (most shimmer/foam authoring is bright-on-water,
+ * so additive at least makes them visible).
  */
 function blendConfigForPsRbt(label: string | undefined): {
   blending: THREE.Blending;
@@ -553,16 +561,29 @@ function blendConfigForPsRbt(label: string | undefined): {
       };
     case 'GRADIENT_MAP':
     case 'UNDERWATER_GRADIENT_MAP':
+      // LUT remap applies via the fragment shader (useLut). The blend
+      // itself is additive — fire/explosion gradient sheets are
+      // authored to add light, not occlude.
+      return { blending: THREE.AdditiveBlending };
     case 'SHIMMER':
     case 'DEFORM_WATER_SURFACE':
-      // Need bespoke shader paths; placeholder until they land.
-      return { blending: THREE.NormalBlending };
+      // Need bespoke shader paths; AdditiveBlending placeholder until
+      // they land (water-deform / refraction effects are usually bright
+      // on dark water — additive at least keeps them visible).
+      return { blending: THREE.AdditiveBlending };
     default:
       // Unknown / missing label — keep the historical additive default
       // so behaviour matches the pre-blendType-RE'd renderer.
       return { blending: THREE.AdditiveBlending };
   }
 }
+
+/** PS_RBT labels that should sample textureName1 as a 1D color LUT and
+ *  remap textureName0's red channel through it. */
+const PS_RBT_LUT_MODES = new Set([
+  'GRADIENT_MAP',
+  'UNDERWATER_GRADIENT_MAP',
+]);
 
 /**
  * Build a per-system point-sprite material. Each SystemRenderer owns
@@ -585,8 +606,16 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
     uniforms: {
       map: { value: null as THREE.Texture | null },
       useMap: { value: 0 },
-      // Manifest atlas rect (u0, v0, u1, v1). useAtlasRect=1 routes the
-      // fragment shader through the rect-lerp branch.
+      // LUT (textureName1) for GRADIENT_MAP / UNDERWATER_GRADIENT_MAP.
+      // useLut=1 routes the fragment shader through the LUT remap.
+      // Initialised to 0 — flipped to 1 by bindLutTexture only after
+      // the LUT DDS loads successfully (BC6H HDR isn't supported by
+      // the worker yet; failing-but-still-set useLut would render
+      // black against the null sampler).
+      lut: { value: null as THREE.Texture | null },
+      useLut: { value: 0 },
+      // Manifest atlas rect (u0, v0, u1, v1). useAtlasRect=1 lerps the
+      // (already grid-sampled) UV through the rect — composes with grid.
       atlasRect: {
         value: new THREE.Vector4(
           rect?.[0] ?? 0, rect?.[1] ?? 0, rect?.[2] ?? 1, rect?.[3] ?? 1,
@@ -625,6 +654,8 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
     fragmentShader: /* glsl */ `
       uniform sampler2D map;
       uniform float useMap;
+      uniform sampler2D lut;
+      uniform float useLut;
       uniform vec4 atlasRect;
       uniform float useAtlasRect;
       uniform vec2 framesPerXY;
@@ -636,25 +667,36 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       void main() {
         vec4 base;
         if (useMap > 0.5) {
+          // Compose UV transforms in order: grid -> atlas rect.
+          // gl_PointCoord starts as the sprite-local UV; the grid math
+          // (if active) maps it to the current frame's cell within the
+          // texture's own framesPerX x framesPerY layout; the atlas
+          // rect (if active) then maps that cell-local UV into the
+          // parent atlas page's [u0,v0,u1,v1] sub-region.
           vec2 puv = gl_PointCoord;
+          float fx = framesPerXY.x;
+          float fy = framesPerXY.y;
+          float total = frameRange.y - frameRange.x;
+          if (fx * fy > 1.0 && total > 0.0 && animationPeriod > 0.0) {
+            // Driven by particle age. fps = totalFrames / period;
+            // current frame loops within [begin, end).
+            float fps = total / animationPeriod;
+            float idx = mod(floor(vAge * fps), total) + frameRange.x;
+            float col = mod(idx, fx);
+            float row = floor(idx / fx);
+            puv = (vec2(col, row) + puv) / vec2(fx, fy);
+          }
           if (useAtlasRect > 0.5) {
-            // Manifest-mapped atlas region — lerp through the rect.
             puv = mix(atlasRect.xy, atlasRect.zw, puv);
-          } else {
-            float fx = framesPerXY.x;
-            float fy = framesPerXY.y;
-            float total = frameRange.y - frameRange.x;
-            if (fx * fy > 1.0 && total > 0.0 && animationPeriod > 0.0) {
-              // Driven by particle age. fps = totalFrames / period;
-              // current frame loops within [begin, end).
-              float fps = total / animationPeriod;
-              float idx = mod(floor(vAge * fps), total) + frameRange.x;
-              float col = mod(idx, fx);
-              float row = floor(idx / fx);
-              puv = (vec2(col, row) + puv) / vec2(fx, fy);
-            }
           }
           base = texture2D(map, puv);
+          if (useLut > 0.5) {
+            // Remap luminance via the color LUT (textureName1).
+            // WG's GRADIENT_MAP shader keys the LUT by texture red;
+            // alpha stays from the base (the "shape" channel).
+            vec3 remapped = texture2D(lut, vec2(base.r, 0.5)).rgb;
+            base = vec4(remapped, base.a);
+          }
         } else {
           vec2 c = gl_PointCoord - vec2(0.5);
           float r = length(c) * 2.0;
@@ -769,13 +811,15 @@ export class ParticleScene {
       for (const sys of rec.systems) {
         const r = sys.renderer;
         const anim = sys.animation;
-        // Prefer the direct DDS URL when available (texture extracted as
-        // its own file). Fall back to the manifest atlas mapping (the
-        // .tga ref resolves to a named region inside a shared atlas
-        // page). The shader reads `atlasRect` + `useAtlasRect` from the
-        // uniforms; we only enable `useAtlasRect` when the direct URL
-        // isn't present (Url path uses raw or grid-animated sampling).
+        // Texture source: prefer the direct DDS URL when present (the
+        // texture was extracted as its own file); otherwise route
+        // through the manifest atlas mapping (the .tga ref resolves to
+        // a named region inside a shared atlas page — the rect uniform
+        // narrows gl_PointCoord into that sub-region). Both paths
+        // compose with the animation grid if framesPerX*Y > 1.
         const useAtlas = !r?.textureUrl0 && !!r?.textureAtlas0;
+        const useLut = !!r?.blendType && PS_RBT_LUT_MODES.has(r.blendType)
+          && !!r?.textureUrl1;
         const mat = buildParticleMaterial({
           blendType: r?.blendType,
           framesPerX: anim?.framesPerX,
@@ -784,6 +828,7 @@ export class ParticleScene {
           framesRangeEnd: anim?.framesRangeEnd,
           animationPeriod: anim?.animationPeriod,
           atlasRect: useAtlas ? r!.textureAtlas0!.rect : undefined,
+          useLut,
         });
         const renderer = new SystemRenderer(sys, mat);
         renderer.setActive(false);   // start inactive — UI toggles on
@@ -795,6 +840,9 @@ export class ParticleScene {
         const texPath = r?.textureUrl0 ?? (useAtlas ? r!.textureAtlas0!.page : undefined);
         if (texPath) {
           void this.bindTexture(mat, texPath);
+        }
+        if (useLut && r?.textureUrl1) {
+          void this.bindLutTexture(mat, r.textureUrl1);
         }
       }
       const handle: ParticleAttachmentHandle = {
@@ -831,6 +879,30 @@ export class ParticleScene {
     if (!tex) return;
     material.uniforms.map.value = tex;
     material.uniforms.useMap.value = 1;
+    material.needsUpdate = true;
+  }
+
+  /** Bind ``workspaceRelPath`` as the LUT sampler used by GRADIENT_MAP /
+   *  UNDERWATER_GRADIENT_MAP. Same cache as ``bindTexture`` — many fire
+   *  systems share the same ``fire_yellow_*.dds`` ramp. */
+  private async bindLutTexture(
+    material: THREE.ShaderMaterial, workspaceRelPath: string,
+  ): Promise<void> {
+    const r = this.renderer;
+    if (!r) return;
+    const url = repoUrl(workspaceRelPath);
+    let pending = this.textureCache.get(url);
+    if (!pending) {
+      pending = loadDdsMipChain([url], false, r).catch((err) => {
+        console.warn('[particles] LUT DDS load failed', workspaceRelPath, err);
+        return null;
+      });
+      this.textureCache.set(url, pending);
+    }
+    const tex = await pending;
+    if (!tex) return;
+    material.uniforms.lut.value = tex;
+    material.uniforms.useLut.value = 1;
     material.needsUpdate = true;
   }
 
