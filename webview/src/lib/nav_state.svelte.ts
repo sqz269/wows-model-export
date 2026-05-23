@@ -24,6 +24,7 @@ class NavState {
   lastAssetId = $state<string | null>(null);
   lastVehicleId = $state<string | null>(null);
   lastGameParamId = $state<string | null>(null);
+  lastProjectileId = $state<string | null>(null);
 }
 
 export const navState = new NavState();
@@ -63,6 +64,14 @@ export function gameParamsHref(): string {
 /** Topnav href for the Consumers tab. No sub-routes today. */
 export function consumersHref(): string {
   return '#/consumers';
+}
+
+/** Topnav href for the Projectiles tab. Falls back to bare
+ *  `#/projectiles` when no entry has been opened this session. */
+export function projectilesHref(): string {
+  return navState.lastProjectileId
+    ? `#/projectile/${encodeURIComponent(navState.lastProjectileId)}`
+    : '#/projectiles';
 }
 
 /** Topnav href for the Settings tab. No sub-routes today — kept as a

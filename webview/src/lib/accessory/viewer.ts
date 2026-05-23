@@ -77,6 +77,13 @@ export interface LibraryContext {
   assetId: string;
   asset: LibraryAsset;
   variant?: 'main' | 'dead';
+  /**
+   * Sub-directory under `<workspace>/libraries/` where this asset's
+   * GLB + DDS textures live. Defaults to `'accessories'` so the
+   * existing Library + Ships pages keep working unchanged. Set to
+   * `'projectiles'` from the Projectiles route.
+   */
+  libraryRoot?: string;
 }
 
 interface TrackedMesh {
@@ -551,7 +558,9 @@ export class AccessoryViewer {
     // No sidecar → no skin overrides → asset-level `main` scheme wins.
     // Empty `hullBaseUrl` is unused on this path (texture paths inside
     // libEntry resolve against the libEntry.glb location).
-    this.textures.bindLibraryAsset(lib.assetId, lib.asset, null, '');
+    this.textures.bindLibraryAsset(
+      lib.assetId, lib.asset, null, '', lib.libraryRoot ?? 'accessories',
+    );
     this.textures.setActiveSchemeKey(lib.variant ?? 'main');
     // Flip textures on only when the user wants them — registration
     // above survives across toggles so a later setShowTextures(true)

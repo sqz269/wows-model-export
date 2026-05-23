@@ -9,3 +9,4 @@ export * from './cleanup';
 export * from './gameparams';
 export * from './consumers';
 export * from './queue';
+export * from './projectiles';

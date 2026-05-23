@@ -306,8 +306,16 @@ export class TextureManager {
     },
     sidecar: SidecarDoc | null,
     hullBaseUrl: string,
+    /**
+     * Sub-directory under `<workspace>/libraries/` where this asset
+     * lives. Defaults to `'accessories'` for backwards compatibility
+     * with every existing caller; the Projectiles route overrides
+     * with `'projectiles'` so DDS paths in texture_sets resolve
+     * against `/repo/libraries/projectiles/...` instead.
+     */
+    libraryRoot: string = 'accessories',
   ): void {
-    const tplUrl = `/repo/libraries/accessories/${libEntry.glb
+    const tplUrl = `/repo/libraries/${encodeURIComponent(libraryRoot)}/${libEntry.glb
       .split(/[\\/]/)
       .map(encodeURIComponent)
       .join('/')}`;

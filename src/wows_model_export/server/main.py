@@ -30,6 +30,7 @@ from .routes import (
     gameparams,
     jobs,
     library,
+    projectiles,
     queue,
     repo,
     rig,
@@ -78,6 +79,7 @@ def create_app(config: PipelineConfig) -> FastAPI:
 
     # /api/* routers
     app.include_router(library.make_router(config), prefix="/api")
+    app.include_router(projectiles.make_router(config), prefix="/api")
     app.include_router(ships.make_router(config), prefix="/api")
     app.include_router(gameparams.make_router(config), prefix="/api")
     app.include_router(extract.make_router(config), prefix="/api")

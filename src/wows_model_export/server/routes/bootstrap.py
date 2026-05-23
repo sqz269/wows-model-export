@@ -45,7 +45,44 @@ from ... import compose
 from ...config import PipelineConfig
 from ..jobs import JobLockedError, list_jobs, spawn_job
 
-BootstrapTarget = Literal["snapshot", "library"]
+BootstrapTarget = Literal["snapshot", "library", "projectiles"]
+
+
+def _build_projectiles_combined(
+    *,
+    workspace: Path,
+    config: PipelineConfig,
+    on_event: Any = None,
+    cancel: Any = None,
+) -> dict[str, Any]:
+    """Chain build_projectile_library + build_ammo_profiles into one job.
+
+    The Projectiles tab needs BOTH the geometry index AND the ammo
+    profiles JSON to render. Combining them in one dispatch means the
+    bootstrap "projectiles" target builds everything the tab needs in
+    a single click. Step events from both composers flow through the
+    parent's ``on_event`` verbatim; the ``step`` field names disambiguate
+    the source (``build_projectile_library:…`` vs ``write_profiles``).
+
+    Returns the merged outcome so the job log carries useful summary
+    data (asset_count + profile_count).
+    """
+    lib_result = compose.build_projectile_library(
+        workspace=workspace,
+        config=config,
+        on_event=on_event,
+        cancel=cancel,
+    )
+    ammo_result = compose.build_ammo_profiles(
+        workspace=workspace,
+        config=config,
+        on_event=on_event,
+        cancel=cancel,
+    )
+    return {
+        "library":      lib_result,
+        "ammo_profiles": ammo_result,
+    }
 
 
 class BootstrapBuildBody(BaseModel):
@@ -91,6 +128,7 @@ def make_router(config: PipelineConfig) -> APIRouter:
     cache_dir = config.cache_dir or (workspace / ".cache")
     snapshot_path = cache_dir / "snapshot.json"
     library_path = workspace / "libraries" / "accessories" / "index.json"
+    projectiles_index_path = workspace / "libraries" / "projectiles" / "index.json"
 
     # Per-target dispatch table. Stage 3: each entry pairs the composer
     # callable with a kwargs builder that closes over the request-time
@@ -119,6 +157,19 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 compose.build_accessory_library,
                 lambda: {"config": config},
                 ["compose.build_accessory_library"],
+            )
+        if target == "projectiles":
+            return (
+                _build_projectiles_combined,
+                lambda: {
+                    "workspace": workspace,
+                    "config":    config,
+                },
+                [
+                    "compose.build_projectile_library",
+                    "&&",
+                    "compose.build_ammo_profiles",
+                ],
             )
         raise ValueError(f"unknown bootstrap target: {target}")  # pragma: no cover
 
@@ -170,6 +221,19 @@ def make_router(config: PipelineConfig) -> APIRouter:
                     "requires_config": [],
                     **_target_status(library_path),
                 },
+                "projectiles": {
+                    "label": "Projectile library + ammo profiles",
+                    "description": (
+                        "Exports every shell / torpedo / bomb / depth "
+                        "charge mesh from GameParams + builds the per-"
+                        "ammo ballistic profile JSON. The Projectiles "
+                        "tab won't load without both files."
+                    ),
+                    "job_label": "bootstrap:projectiles",
+                    "cmd": _cmd_for("projectiles"),
+                    "requires_config": ["game_dir", "toolkit_bin"],
+                    **_target_status(projectiles_index_path),
+                },
             },
         }
 
@@ -180,9 +244,12 @@ def make_router(config: PipelineConfig) -> APIRouter:
         # stderr. The Settings UI already disables the button on
         # missing config, but a direct API caller deserves the same
         # error.
-        if body.target == "snapshot":
+        if body.target in ("snapshot", "projectiles"):
             # wows-snapshot needs game_dir + toolkit_bin to run
-            # ensure_dump.
+            # ensure_dump. The projectiles dispatch chains
+            # build_projectile_library + build_ammo_profiles, both of
+            # which call into the toolkit (geometry export + GameParams
+            # parse) so the same pre-check applies.
             live = PipelineConfig.load()
             if live.game_dir is None or live.toolkit_bin is None:
                 raise HTTPException(
@@ -191,7 +258,7 @@ def make_router(config: PipelineConfig) -> APIRouter:
                         "ok": False,
                         "error": (
                             "game_dir and toolkit_bin must be configured "
-                            "before building the snapshot. Set them on "
+                            f"before building {body.target}. Set them on "
                             "the Settings page first."
                         ),
                     },
@@ -237,6 +304,11 @@ def make_router(config: PipelineConfig) -> APIRouter:
     #              every shared GLB + textures dir, the winding audit, and
     #              flip_overrides.json (which the rebuild re-applies from a
     #              fresh score pass).
+    #
+    #   projectiles → wipes libraries/projectiles/ entirely. Drops the
+    #              index.json + ammo_profiles.json + every projectile
+    #              GLB + DDS chain. Rebuild walks GameParams +
+    #              re-exports from the toolkit.
     @router.post("/bootstrap/reset")
     def post_bootstrap_reset(body: BootstrapResetBody) -> dict[str, Any]:
         # 409 if a build for this target is in flight — would race with
@@ -260,6 +332,8 @@ def make_router(config: PipelineConfig) -> APIRouter:
             path = cache_dir
         elif body.target == "library":
             path = workspace / "libraries" / "accessories"
+        elif body.target == "projectiles":
+            path = workspace / "libraries" / "projectiles"
         else:  # pragma: no cover - pydantic Literal already gates this
             raise HTTPException(
                 status_code=400,

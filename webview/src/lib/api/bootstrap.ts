@@ -8,7 +8,7 @@
 
 import { fetchJson } from './client';
 
-export type BootstrapTarget = 'snapshot' | 'library';
+export type BootstrapTarget = 'snapshot' | 'library' | 'projectiles';
 
 export interface BootstrapTargetStatus {
   label: string;

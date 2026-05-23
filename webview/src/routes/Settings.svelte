@@ -30,6 +30,7 @@
     type SettingSource,
   } from '$lib/api';
   import { invalidateLibrary } from '$lib/api/library';
+  import { invalidateProjectiles } from '$lib/api/projectiles';
   import { invalidateShips } from '$lib/api/ships';
   import { toast } from 'svelte-sonner';
 
@@ -41,12 +42,14 @@
   let building = $state<Record<BootstrapTarget, string | null>>({
     snapshot: null,
     library: null,
+    projectiles: null,
   });
   /** Map target → true while the reset POST is in flight; disables both
    *  Build and Reset for that row so the user can't double-click. */
   let resetting = $state<Record<BootstrapTarget, boolean>>({
     snapshot: false,
     library: false,
+    projectiles: false,
   });
 
   // ── Workspace cleanup state ────────────────────────────────────────
@@ -215,6 +218,9 @@
         });
       });
       if (final.state === 'done') {
+        // Drop dependent caches so the next page mount re-fetches.
+        if (target === 'library') invalidateLibrary();
+        if (target === 'projectiles') invalidateProjectiles();
         toast.success(`${targetLabel} built`, {
           id: tid,
           description: final.cmd.join(' '),
@@ -267,9 +273,10 @@
     });
     try {
       const res = await resetBootstrapTarget(target);
-      // Drop the in-memory library cache so the Library/Ships pages
-      // re-fetch on next mount (they'd see a stale index otherwise).
+      // Drop the in-memory caches so dependent pages re-fetch on next
+      // mount (they'd see a stale index otherwise).
       if (target === 'library') invalidateLibrary();
+      if (target === 'projectiles') invalidateProjectiles();
       toast.success(
         res.existed ? `${targetLabel} reset` : `${targetLabel} was already empty`,
         { id: tid, description: res.path, duration: 5000 },

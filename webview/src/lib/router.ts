@@ -54,13 +54,23 @@ export type ConsumersRoute = {
   path: string;
 };
 
+export type ProjectilesRoute = {
+  page: 'projectiles';
+  path: string;
+  /** Selected asset_id OR ammo_id from `#/projectile/<id>`. Mode is
+   *  inferred by the route component based on which index the id
+   *  resolves into. Null on bare `#/projectiles`. */
+  projectileId: string | null;
+};
+
 export type RouteState =
   | LibraryRoute
   | ShipsRoute
   | ExtractRoute
   | SettingsRoute
   | GameParamsRoute
-  | ConsumersRoute;
+  | ConsumersRoute
+  | ProjectilesRoute;
 
 function parseHash(hash: string): RouteState {
   const path = hash.replace(/^#\/?/, '');
@@ -80,6 +90,9 @@ function parseHash(hash: string): RouteState {
   }
   if (head === 'consumers') {
     return { page: 'consumers', path };
+  }
+  if (head === 'projectiles' || head === 'projectile') {
+    return { page: 'projectiles', path, projectileId: rest ?? null };
   }
   // Default + `library` + `asset/...` all route to the library page.
   return { page: 'library', path, assetId: rest ?? null };
