@@ -1013,33 +1013,25 @@ def absorb_gameparams_effects(
     doc: dict[str, Any],
     *,
     attachments: list[dict[str, Any]],
-    particles: dict[str, Any],
 ) -> dict[str, Any]:
-    """Stamp per-ship particle effect attachments + their resolved effect
-    data into ``doc.effects``.
+    """Stamp per-ship particle attachments into ``doc.effects``.
 
-    ``attachments`` is a list of ``{group, node, particle_path}`` dicts
-    derived from the active hull's ``effects`` table in GameParams.
-    ``particles`` is a dict keyed by particle path (e.g.
-    ``"particles/vehicles/Fire_big_2.xml"``) whose values are the
-    parsed Effect-blob records (see
-    :class:`wows_model_export.read.particles.ParticleStore`).
-
-    Both inputs are typically produced by the
-    :mod:`wows_model_export.compose.particles_library` builder. Empty
-    inputs short-circuit — no ``effects`` section is created.
+    ``attachments`` is a list of ``{group, node, particle_path, source,
+    source_id}`` dicts derived from the active hull's ``effects`` table
+    in GameParams. The matching Effect records live in the shared
+    ``library/particles/records.json`` artefact (see
+    :mod:`wows_model_export.compose.library_particles`); consumers
+    join by ``particle_path``.
 
     **Replace-by-section semantics.** Re-running the absorb overwrites
-    the previous ``effects`` block. This matches ballistics — the
-    particle data is fully toolkit/assets.bin-derived, so hand-edits
-    don't belong here.
+    the previous ``effects`` block. Particle data is fully
+    toolkit/assets.bin-derived, so hand-edits don't belong here.
     """
-    if not attachments and not particles:
+    if not attachments:
         return doc
     effects_block: dict[str, Any] = {
         "source": {"generated_at": _now_iso()},
         "attachments": attachments,
-        "particles": particles,
     }
     # Strip any existing effects block first so removed entries (e.g.
     # ship that no longer ships fire4) don't linger.

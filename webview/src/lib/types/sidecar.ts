@@ -375,7 +375,9 @@ export interface ParticleAttachment {
 export interface SidecarEffects {
   source?: { generated_at?: string };
   attachments: ParticleAttachment[];
-  particles: Record<string, ParticleRecord>;
+  // particles field removed in schema v4 — Effect records now live in
+  // the shared `library/particles/records.json` artefact. Consumers
+  // join by `attachment.particle_path`.
 }
 
 export interface SidecarDoc {
