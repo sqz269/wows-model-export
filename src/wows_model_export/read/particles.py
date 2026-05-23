@@ -92,6 +92,31 @@ PS_VALG_RAMP_PARAMETER = {
 }
 PS_VALG_RAMP_SAMPLING = {0: "loop", 1: "once", 2: "pingPong"}
 
+# PS_RBT — Render Blend Type. Stored at Renderer +0x88 (i32). Offsets
+# empirically determined 2026-05-22 via corpus-wide statistical probe
+# (10/10 values present, semantic correlation with effect names).
+PS_RBT = {
+    0: "BLENDED_WATER_SURFACE",
+    1: "DEFORM_WATER_SURFACE",
+    2: "ADDITIVE",
+    3: "BLENDED_UNDERWATER",
+    4: "ADDITIVE_WATER_SURFACE",
+    5: "UNDERWATER_GRADIENT_MAP",
+    6: "BLENDED_GLOW",
+    7: "GRADIENT_MAP",
+    8: "SHIMMER",
+    9: "BLENDED",
+}
+
+# PS_RRC — Rotation Center reference. Renderer +0x80 (i32, 4 values).
+# Name set is tentative — needs Ghidra to confirm the labels (the slot
+# count matches the spec doc's 4-value PS_RRC enum).
+PS_RRC = {0: "center", 1: "topLeft", 2: "topRight", 3: "bottomLeft"}
+
+# PS_PAT — Particle Animation Type. Animation +0x38 (u32, 3 values).
+# Enum labels unverified — corpus only shows distribution 0/1/2.
+PS_PAT = {0: "type_0", 1: "type_1", 2: "type_2"}
+
 
 # ---------------------------------------------------------------------------
 # Dataclasses (parser output)
@@ -661,13 +686,20 @@ def _decode_renderer(
 ) -> dict:
     """Decode the Renderer block at System +0x000 (0xa0 bytes).
 
-    Only the byte-mapped trio is surfaced today: ``textureName0`` and
-    ``textureName1`` (16-byte ResourceRefs at +0x00 / +0x10) plus
-    ``yawRateRamp`` (16-byte Ramp at +0x20). The remaining 29 fields
-    (blendType / tilingU / tilingV / billboard flags / lighting params)
-    are documented by name in particle_format_spec but their per-field
-    byte offsets within the 0xa0-byte struct are not RE'd yet. Surfacing
-    them is tracked in ``particle_render_roadmap.md`` P3.
+    Surfaced fields:
+      +0x00 ``textureName0`` (16 B ResourceRef)
+      +0x10 ``textureName1`` (16 B ResourceRef)
+      +0x20 ``yawRateRamp``  (16 B Ramp)
+      +0x80 ``rotationCenter`` i32 -> PS_RRC label
+      +0x88 ``blendType`` i32 -> PS_RBT label
+      +0x8c ``sortType`` i32 (raw — enum labels TBD)
+      +0x90 ``tilingU`` f32, +0x94 ``tilingV`` f32
+
+    The 16-float cluster at +0x30..+0x7f (lighting/billboard/orient
+    floats) and the two trailing bool quartets at +0x98 / +0x9c are
+    documented in particle_format_spec.md but their per-field
+    boundaries aren't byte-mapped yet (low-confidence empirical layer
+    in the 2026-05-22 probe; needs Ghidra to confirm).
     """
     base = sys_off  # Renderer is the first sub-struct
     out: dict[str, Any] = {}
@@ -678,6 +710,15 @@ def _decode_renderer(
     if t1:
         out["textureName1"] = t1
     out["yawRateRamp"] = _decode_ramp(buf, base + 0x20, file_end)
+    rotation_center, _flag_84, blend_type, sort_type = struct.unpack_from(
+        "<4i", buf, base + 0x80,
+    )
+    tiling_u, tiling_v = struct.unpack_from("<2f", buf, base + 0x90)
+    out["rotationCenter"] = PS_RRC.get(int(rotation_center), str(rotation_center))
+    out["blendType"] = PS_RBT.get(int(blend_type), str(blend_type))
+    out["sortType"] = int(sort_type)
+    out["tilingU"] = float(tiling_u)
+    out["tilingV"] = float(tiling_v)
     return out
 
 
@@ -686,11 +727,22 @@ def _decode_animation(
 ) -> dict:
     """Decode the Animation block at System +0x130 (0x40 bytes).
 
-    Only the byte-mapped pair is surfaced today: ``frameRateRamp`` at
-    +0x00 (16 B) and ``motionVectorsTexture`` at +0x10 (16 B). The sprite
-    atlas grid (``framesPerX`` / ``framesPerY`` / ``framesRangeBegin`` /
-    ``framesRangeEnd`` / ``animationPeriod`` / ``animationType``) lives
-    in the tail and isn't RE'd yet — see particle_render_roadmap P2.
+    Surfaced fields (all empirically validated 2026-05-22 across
+    20,030 animation blocks; framesPerX * framesPerY == framesRangeEnd
+    held 91.3% of the time, and animationType at +0x38 has exactly the
+    three distinct values {0,1,2} matching the PS_PAT enum):
+
+      +0x00 ``frameRateRamp``           (16 B Ramp)
+      +0x10 ``motionVectorsTexture``    (16 B ResourceRef)
+      +0x20 ``framesPerY`` u32          \\
+      +0x24 ``framesPerX`` u32           |  sprite atlas grid
+      +0x28 ``framesRangeBegin`` u32     |  (animationType=0 + grid=1x1
+      +0x2c ``framesRangeEnd`` u32      /   means "no animation")
+      +0x30 ``animationPeriod`` f32
+      +0x34 ``motionVectorsDistortion`` f32
+      +0x38 ``animationType`` u32 -> PS_PAT label
+      +0x3c ``useEmissionAlphaFromMV`` u8 bool
+      +0x3d ``randomFrameOnly`` u8 bool
     """
     base = sys_off + 0x130
     out: dict[str, Any] = {}
@@ -698,6 +750,20 @@ def _decode_animation(
     mv = _read_texture_ref(buf, base + 0x10, file_end)
     if mv:
         out["motionVectorsTexture"] = mv
+    fp_y, fp_x, rng_begin, rng_end = struct.unpack_from(
+        "<4I", buf, base + 0x20,
+    )
+    anim_period, mv_distortion = struct.unpack_from("<2f", buf, base + 0x30)
+    anim_type = struct.unpack_from("<I", buf, base + 0x38)[0]
+    out["framesPerY"] = int(fp_y)
+    out["framesPerX"] = int(fp_x)
+    out["framesRangeBegin"] = int(rng_begin)
+    out["framesRangeEnd"] = int(rng_end)
+    out["animationPeriod"] = float(anim_period)
+    out["motionVectorsDistortion"] = float(mv_distortion)
+    out["animationType"] = PS_PAT.get(int(anim_type), str(anim_type))
+    out["useEmissionAlphaFromMV"] = bool(buf[base + 0x3c])
+    out["randomFrameOnly"] = bool(buf[base + 0x3d])
     return out
 
 

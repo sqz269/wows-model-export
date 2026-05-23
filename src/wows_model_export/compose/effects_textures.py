@@ -84,6 +84,22 @@ def _strip_content_prefix(vfs_path: str) -> str:
     return norm
 
 
+# Note on the 117 unresolvable ``.tga`` refs in 2230-record corpus:
+# they all live under ``particles/textures/`` and reference individual
+# textures (Blast.tga, Glow_1.tga, circle.tga, donut.tga, ...) — the
+# WG VFS doesn't ship those individually as either ``.tga`` or ``.dds``.
+# What ships under ``particles/textures/`` is a 6-DDS atlas
+# (``particles.dds``, ``particles0..4.dds``) plus one ``.atlas`` file
+# and 124 ``.contours`` files (one ``<tga>_<fx>_<fy>_<begin>_<size>.contours``
+# per authoring filename). The runtime joins ``textureName0=Blast.tga``
+# to a region inside one of the 6 atlas DDS via the AtlasContour
+# database (Effect blob 9 in ``assets.bin``, already cracked — see
+# ``reference/topics/particle/stage_h_atlas_contour.md``). Decoding that
+# blob + emitting the atlas-id + UV-rect onto each renderer block is
+# the queued fix; until then the consumer falls back to the procedural
+# disc for atlas-mapped systems.
+
+
 def ensure_textures_on_disk(
     paths: Iterable[str],
     *,
