@@ -21,6 +21,7 @@ records artefact is missing or older than the cached ``assets.bin``.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,18 @@ def is_current(records_path: Path, assets_bin_path: Path) -> bool:
     if not records_path.is_file() or not assets_bin_path.is_file():
         return False
     return records_path.stat().st_mtime >= assets_bin_path.stat().st_mtime
+
+
+def _atomic_write_text(target: Path, content: str) -> None:
+    """Write ``content`` to ``target`` atomically.
+
+    Writes to a sibling ``<target>.tmp`` then ``os.replace`` swaps it
+    into place. Survives SIGINT and cross-device tmp paths (the tmp
+    file lives next to the target, same volume).
+    """
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, target)
 
 
 def build(
@@ -94,11 +107,15 @@ def build(
             _eff_tex.stamp_texture_urls(records, resolved_urls)
             textures_extracted = len(resolved_urls)
 
-    paths["records"].write_text(
+    # Atomic write: a SIGINT mid-write would otherwise leave a truncated
+    # records.json that ``is_current`` then accepts (mtime updated before
+    # content). Pattern matches ``effects_textures.ensure_textures_on_disk``.
+    _atomic_write_text(
+        paths["records"],
         json.dumps(records, indent=2, sort_keys=True),
-        encoding="utf-8",
     )
-    paths["index"].write_text(
+    _atomic_write_text(
+        paths["index"],
         json.dumps(
             {
                 "schema_version": SCHEMA_VERSION,
@@ -112,7 +129,6 @@ def build(
             indent=2,
             sort_keys=True,
         ),
-        encoding="utf-8",
     )
 
     return {

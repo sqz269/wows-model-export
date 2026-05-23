@@ -710,11 +710,16 @@ def _decode_renderer(
     if t1:
         out["textureName1"] = t1
     out["yawRateRamp"] = _decode_ramp(buf, base + 0x20, file_end)
-    rotation_center, _flag_84, blend_type, sort_type = struct.unpack_from(
+    rotation_center, blend_flag_84, blend_type, sort_type = struct.unpack_from(
         "<4i", buf, base + 0x80,
     )
     tiling_u, tiling_v = struct.unpack_from("<2f", buf, base + 0x90)
     out["rotationCenter"] = PS_RRC.get(int(rotation_center), str(rotation_center))
+    # +0x84 carries 2 distinct values per corpus probe; perfectly
+    # co-varies with GRADIENT_MAP blends — likely a sub-mode flag
+    # ("uses gradient LUT") set at bake time. Kept raw so a future
+    # Ghidra pass can name it; consumers ignore for now.
+    out["blendFlag84"] = int(blend_flag_84)
     out["blendType"] = PS_RBT.get(int(blend_type), str(blend_type))
     out["sortType"] = int(sort_type)
     out["tilingU"] = float(tiling_u)
