@@ -16,8 +16,6 @@
 import * as THREE from 'three';
 import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
 
-import { maybeApplyBoneFrameFix, type BoneFrameDiagnostic } from './bone_frame_fix';
-
 /** Per-mount firing-arc limits, resolved from the sidecar mount entry
  *  (GameParams `horizSector` / `vertSector` / `deadZone`). All angles in
  *  DEGREES, in the mount's rest-relative frame (0° = bind/rest heading, the
@@ -86,13 +84,6 @@ export interface TurretRig {
   /** Per-mount firing-arc limits from the sidecar (`null` = no clamp). Yaw
    *  is clamped to `yawRangeDeg`, pitch to `elevRangeDeg`, in `applyAim`. */
   limits: MountArcLimits | null;
-  /** Result of the bone-frame-mismatch fix (see `bone_frame_fix.ts`).
-   *  `applied=true` means the asset's bone tree was Y180-wrapped at
-   *  clone time because the WG `.geometry` and `.visual` were authored
-   *  in 180°-rotated coordinate frames (AGS145 mantlet quirk). Exposed
-   *  here so debug UI can surface the diagnostic without re-running the
-   *  probe — none of the rig consumers branch on it today. */
-  boneFrameFix: BoneFrameDiagnostic;
 }
 
 const YAW_BONE_NAME = 'Rotate_Y';
@@ -238,13 +229,10 @@ export function extractTurretRig(
   instanceId: string,
   limits: MountArcLimits | null = null,
 ): TurretRig | null {
-  // Bone-frame-mismatch fix MUST run before we capture pitchRest or run
-  // the pitchSign probe — both observe the bones' current state, and the
-  // fix changes the rest orientation (Y180-conjugating subsequent
-  // rotations). The fix is a no-op for the 99% of assets that aren't
-  // misaligned; cheap to call unconditionally. See bone_frame_fix.ts
-  // for the detection threshold + math.
-  const boneFrameFix = maybeApplyBoneFrameFix(root);
+  // The Y180 bone-frame fix is now baked into the GLB by the toolkit
+  // (`gltf_export.rs`, for det(Rotate_Y_BlendBone)<0 guns): the cloned root
+  // already carries the `BoneFrameFixY180` wrapper, so the pitchSign probe
+  // below observes the correct (conjugated) frame with no runtime fix.
 
   let yaw: THREE.Object3D | null = null;
   const pitch: THREE.Object3D[] = [];
@@ -276,7 +264,6 @@ export function extractTurretRig(
     pitchSign,
     limits,
     nodes,
-    boneFrameFix,
   };
 }
 

@@ -16,7 +16,6 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { createSceneEnvironment, type SceneEnvironment } from '$lib/three/scene';
 import { observeResize } from '$lib/three/resize';
 import { startRenderLoop } from '$lib/three/render_loop';
-import { maybeApplyBoneFrameFix } from '$lib/ship/bone_frame_fix';
 import { TextureManager } from '$lib/ship/textures';
 import type {
   LibraryAsset,
@@ -219,14 +218,10 @@ export class AccessoryViewer {
       });
     });
 
-    // Bone-frame-mismatch fix (see lib/ship/bone_frame_fix.ts). Runs
-    // before the bone snapshot so the BoneInspector shows world positions
-    // in the corrected frame — pinning Rotate_X lands on the trunnion
-    // instead of the top-back of the housing for affected assets like
-    // AGS145. No-op for the 99% of assets whose bones already align with
-    // their verts. Same call is wired into the ship-view rig extractor
-    // (lib/ship/turret_rig.ts) so both viewers see consistent positions.
-    maybeApplyBoneFrameFix(r);
+    // The Y180 bone-frame fix is baked into the GLB by the toolkit now, so
+    // the cloned root already carries the corrected (BoneFrameFixY180-wrapped)
+    // bone tree — the BoneInspector snapshot below reads the corrected world
+    // positions with no runtime fix.
 
     // Snapshot the rig bone tree: every named node + its bind-pose world
     // position. World transforms aren't current until updateMatrixWorld
