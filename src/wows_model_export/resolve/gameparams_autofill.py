@@ -887,7 +887,20 @@ def _fill_gun_fields(
         out["barrel_count"] = barrels
     horiz = mount.get("horizSector")
     if isinstance(horiz, list) and len(horiz) == 2:
-        out["yaw_range_deg"] = [float(horiz[0]), float(horiz[1])]
+        lo, hi = float(horiz[0]), float(horiz[1])
+        # WG encodes a full-360° (no azimuth limit) GUN mount as
+        # horizSector [0, 0] — the sentinel used by every Cleveland /
+        # Worcester / Seattle main turret and Prinz Heinrich's #4 (430 main
+        # + 64 secondary mounts corpus-wide). The actual no-fire wedge, if
+        # any, lives in `deadZone`. Emitting the literal [0, 0] would clamp
+        # the turret to a zero-width arc downstream (frozen); map it to a
+        # full ±180 traverse so consumers treat it as free rotation while
+        # still drawing the dead-zone fan. (Fixed mounts that genuinely
+        # don't traverse — torpedo / DCharge / missile — are handled by
+        # their own fillers and keep [0, 0].)
+        if lo == 0.0 and hi == 0.0:
+            lo, hi = -180.0, 180.0
+        out["yaw_range_deg"] = [lo, hi]
     vert = mount.get("vertSector")
     if isinstance(vert, list) and len(vert) == 2:
         out["elev_range_deg"] = [float(vert[0]), float(vert[1])]

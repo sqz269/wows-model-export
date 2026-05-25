@@ -432,8 +432,17 @@ function fanMeshFromRim(
   const colors: number[] = [];
   const GREEN: [number, number, number] = [0.25, 0.9, 0.35];
   const RED: [number, number, number] = [0.95, 0.25, 0.2];
+  // A dead zone is `[start, end]` in the same rest-relative frame as the
+  // sweep. WG wrap-encodes stern wedges that cross the ±180 seam with
+  // `start > end` (e.g. `[154, -154]` = the ~52° wedge through 180°, NOT the
+  // 308° span from -154 to 154). `yaw_range_deg` gets re-expressed min-360 in
+  // viewer.ts; dead zones are left raw and disambiguated here by sense.
   const inDead = (deg: number) =>
-    dead.some((dz) => deg >= Math.min(dz[0], dz[1]) && deg <= Math.max(dz[0], dz[1]));
+    dead.some((dz) =>
+      dz[0] > dz[1]
+        ? deg >= dz[0] || deg <= dz[1] // wrap-encoded wedge (crosses ±180)
+        : deg >= dz[0] && deg <= dz[1],
+    );
   for (let i = 0; i < rim.length - 1; i++) {
     const a = rim[i];
     const b = rim[i + 1];
