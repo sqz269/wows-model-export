@@ -336,18 +336,39 @@ export function buildFiringArcFan(rig: TurretRig): THREE.Mesh | null {
   const range = rig.limits?.yawRangeDeg;
   if (!yawBone || !yawBone.parent || !range || range.length !== 2) return null;
   const parent = yawBone.parent;
-  const yawRest = rig.yawRest ?? new THREE.Quaternion();
   const d0 = Math.min(range[0], range[1]);
   const d1 = Math.max(range[0], range[1]);
   if (d1 - d0 < 0.5) return null;
   const dead = rig.limits?.yawDeadZonesDeg ?? [];
 
-  // Direction reference(s) for the aim bearing. A SINGLE off-centre barrel
-  // (HP_gunFire1 is e.g. the right barrel of a triple turret, ~2 m off-axis)
-  // would skew the fan by atan2(offset, barrelLength) ≈ 7–12°, so prefer the
-  // centerline muzzle-FX node; else AVERAGE all per-barrel muzzles (a
-  // symmetric layout averages to the centerline); else the elevation trunnion
-  // (Rotate_X, which sits on the yaw axis).
+  rig.root.updateMatrixWorld(true);
+
+  // Rest aim direction (parent-local, horizontal), derived DETERMINISTICALLY
+  // from the rig's own orientation rather than by posing the yaw bone and
+  // sampling barrel geometry. WG's `Rotate_Y_BlendBone` rest matrix encodes
+  // the mount's canonical facing (3x3 det = ±1); `-sign(det) * (+Z axis)`, rel.
+  // the yaw bone's parent, is the installed forward — the same frame the engine
+  // anchors `horizSector` against (Ghidra: artilleryGunPositionToYaw @0x14037b960).
+  // Correct for both Z-mirror (det<0) and identity (det>0) authoring and robust
+  // to housing/breech shape (the geometry sampler measured JGS026-class guns
+  // ~180° off). This is the placement matrix's +Z expressed accessory-locally;
+  // mirrors Unity's AccessoryPrefabBuilder.MeasureRestAimLocal.
+  const restDir = new THREE.Vector3();
+  const bb = rig.nodes.get('Rotate_Y_BlendBone');
+  if (bb) {
+    const mRel = parent.matrixWorld.clone().invert().multiply(bb.matrixWorld);
+    const e = mRel.elements;
+    const det =
+      e[0] * (e[5] * e[10] - e[6] * e[9]) -
+      e[4] * (e[1] * e[10] - e[2] * e[9]) +
+      e[8] * (e[1] * e[6] - e[2] * e[5]);
+    restDir.setFromMatrixColumn(mRel, 2).multiplyScalar(-Math.sign(det));
+    restDir.y = 0; // flatten to horizontal
+  }
+
+  // Tip nodes (centerline FX anchor, else per-barrel muzzles): used for the fan
+  // RADIUS (≈ barrel length) and as the rest-direction fallback for a rig that
+  // somehow lacks `Rotate_Y_BlendBone`.
   const tipNodes: THREE.Object3D[] = [];
   const effNode = rig.nodes.get('HP_gunFireEffect');
   if (effNode) {
@@ -356,54 +377,43 @@ export function buildFiringArcFan(rig: TurretRig): THREE.Mesh | null {
     for (const [name, node] of rig.nodes) {
       if (name.startsWith('HP_gunFire')) tipNodes.push(node);
     }
-    if (tipNodes.length === 0 && rig.pitch[0]) tipNodes.push(rig.pitch[0]);
   }
 
-  const savedYaw = yawBone.quaternion.clone();
-  const root = rig.root;
+  const pivotL = new THREE.Vector3().setFromMatrixPosition(yawBone.matrixWorld);
+  parent.worldToLocal(pivotL);
+  let radius = 0;
+  if (tipNodes.length > 0) {
+    const tipL = new THREE.Vector3();
+    const acc = new THREE.Vector3();
+    for (const t of tipNodes) {
+      acc.setFromMatrixPosition(t.matrixWorld);
+      parent.worldToLocal(acc);
+      tipL.add(acc);
+    }
+    tipL.multiplyScalar(1 / tipNodes.length);
+    const tipDir = tipL.sub(pivotL);
+    tipDir.y = 0;
+    radius = tipDir.length();
+    if (restDir.lengthSq() < 1e-6) restDir.copy(tipDir); // no-BlendBone fallback
+  }
+  if (restDir.lengthSq() < 1e-6) return null;
+  restDir.normalize();
+  if (radius < 1e-3) radius = 5; // degenerate (no usable tip offset)
+
+  // Sweep the rest direction across [d0, d1] analytically — rotating about the
+  // (parent-local) yaw axis is exactly what posing the yaw bone did, without
+  // mutating the scene.
   const axisY = new THREE.Vector3(0, 1, 0);
   const ry = new THREE.Quaternion();
-  const pivotL = new THREE.Vector3();
-  const tipL = new THREE.Vector3();
-  const acc = new THREE.Vector3();
   const dir = new THREE.Vector3();
   const N = Math.min(180, Math.max(8, Math.round((d1 - d0) / 2)));
   const rim: { x: number; z: number; deg: number }[] = [];
-  let radius = 0;
-
-  try {
-    for (let i = 0; i <= N; i++) {
-      const deg = d0 + ((d1 - d0) * i) / N;
-      ry.setFromAxisAngle(axisY, deg * _DEG);
-      yawBone.quaternion.multiplyQuaternions(yawRest, ry);
-      root.updateMatrixWorld(true);
-      pivotL.setFromMatrixPosition(yawBone.matrixWorld);
-      parent.worldToLocal(pivotL);
-      if (tipNodes.length > 0) {
-        tipL.set(0, 0, 0);
-        for (const t of tipNodes) {
-          acc.setFromMatrixPosition(t.matrixWorld);
-          parent.worldToLocal(acc);
-          tipL.add(acc);
-        }
-        tipL.multiplyScalar(1 / tipNodes.length);
-        dir.subVectors(tipL, pivotL);
-      } else {
-        dir.set(0, 0, -1).applyQuaternion(yawBone.quaternion);
-      }
-      dir.y = 0; // flatten to horizontal (mount parent ≈ ship-upright)
-      const len = dir.length();
-      if (len > radius) radius = len;
-      dir.normalize();
-      rim.push({ x: dir.x, z: dir.z, deg });
-    }
-  } finally {
-    yawBone.quaternion.copy(savedYaw);
-    root.updateMatrixWorld(true);
+  for (let i = 0; i <= N; i++) {
+    const deg = d0 + ((d1 - d0) * i) / N;
+    ry.setFromAxisAngle(axisY, deg * _DEG);
+    dir.copy(restDir).applyQuaternion(ry);
+    rim.push({ x: dir.x, z: dir.z, deg });
   }
-  if (radius < 1e-3) radius = 5; // degenerate (no usable tip offset)
-
-  // Pivot is constant across the sweep — use the bone's parent-local position.
   const center = { x: yawBone.position.x, y: yawBone.position.y, z: yawBone.position.z };
   return fanMeshFromRim(center, rim, radius, dead);
 }
