@@ -61,6 +61,7 @@ import {
   cloneAccessoryInstance,
   extractTurretRig,
   TurretRigManager,
+  type MountArcLimits,
 } from './turret_rig';
 
 /**
@@ -347,6 +348,10 @@ export class ShipViewer {
     // Keyed by instance_id since hp_name is only unique within a typed
     // group, not across them.
     const miscFilterByInstanceId = new Map<string, string[]>();
+    // Per-mount firing-arc limits (yaw/elev range + no-fire dead zones),
+    // keyed by instance_id. Sourced from the sidecar's gameplay autofill —
+    // the render-source placements doc (accessories.json) doesn't carry them.
+    const arcLimitsByInstanceId = new Map<string, MountArcLimits>();
     if (sidecar) {
       const groups: (typeof sidecar.turrets)[] = [
         sidecar.turrets,
@@ -361,6 +366,21 @@ export class ShipViewer {
           if (!m.instance_id) continue;
           if (m.misc_filter !== undefined) {
             miscFilterByInstanceId.set(m.instance_id, m.misc_filter);
+          }
+          if (m.yaw_range_deg || m.elev_range_deg || m.yaw_dead_zones_deg) {
+            // WG wrap-encodes some stern mounts as [min, max] with min > max
+            // (e.g. [210, 150] == [-150, 150]; Baltimore's [202, 0] == [-158, 0]).
+            // Re-express the wrapped min as a negative so a plain min/max clamp
+            // + the fan see a normal contiguous range.
+            let yawRange = m.yaw_range_deg;
+            if (yawRange && yawRange[0] > yawRange[1]) {
+              yawRange = [yawRange[0] - 360, yawRange[1]];
+            }
+            arcLimitsByInstanceId.set(m.instance_id, {
+              yawRangeDeg: yawRange,
+              elevRangeDeg: m.elev_range_deg,
+              yawDeadZonesDeg: m.yaw_dead_zones_deg,
+            });
           }
         }
       }
@@ -481,7 +501,12 @@ export class ShipViewer {
           // Look for WG rig nodes (`Rotate_Y` / `Rotate_X`). Most
           // gun/main and gun/secondary mounts have them; AA and static
           // miscs return null silently.
-          const rig = extractTurretRig(inst, e.placement.asset_id, e.placement.instance_id);
+          const rig = extractTurretRig(
+            inst,
+            e.placement.asset_id,
+            e.placement.instance_id,
+            arcLimitsByInstanceId.get(e.placement.instance_id) ?? null,
+          );
           if (rig) this.turretRigs.register(rig);
           this.sectionGroups[e.section].add(inst);
           renderedPlacements++;

@@ -18,6 +18,23 @@ import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
 
 import { maybeApplyBoneFrameFix, type BoneFrameDiagnostic } from './bone_frame_fix';
 
+/** Per-mount firing-arc limits, resolved from the sidecar mount entry
+ *  (GameParams `horizSector` / `vertSector` / `deadZone`). All angles in
+ *  DEGREES, in the mount's rest-relative frame (0° = bind/rest heading, the
+ *  same frame `applyAim` rotates in). `null`/absent fields mean "no limit"
+ *  (free rotation), matching the pre-clamp behaviour for AA + unrigged
+ *  mounts. */
+export interface MountArcLimits {
+  /** `[min, max]` yaw traverse, degrees. Absent = free yaw. */
+  yawRangeDeg?: [number, number];
+  /** `[depression, elevation]` degrees; positive = up. Absent = free pitch. */
+  elevRangeDeg?: [number, number];
+  /** `[[start, end], …]` no-fire wedges inside the yaw range — the mount can
+   *  rotate here but won't fire (points at its own ship). Visualised by the
+   *  firing-arc fan; NOT a rotation clamp. */
+  yawDeadZonesDeg?: [number, number][];
+}
+
 /** Per-placement rig handle. Empty for accessories without skin data
  *  (AA mounts, static decoratives) — managers skip those silently. */
 export interface TurretRig {
@@ -66,6 +83,9 @@ export interface TurretRig {
    *  +X test rotation. Restores WG's `vertSector[1] > 0 = up` contract
    *  (universal across the 1758 Gun entries in GameParams). */
   pitchSign: 1 | -1;
+  /** Per-mount firing-arc limits from the sidecar (`null` = no clamp). Yaw
+   *  is clamped to `yawRangeDeg`, pitch to `elevRangeDeg`, in `applyAim`. */
+  limits: MountArcLimits | null;
   /** Result of the bone-frame-mismatch fix (see `bone_frame_fix.ts`).
    *  `applied=true` means the asset's bone tree was Y180-wrapped at
    *  clone time because the WG `.geometry` and `.visual` were authored
@@ -216,6 +236,7 @@ export function extractTurretRig(
   root: THREE.Object3D,
   assetId: string,
   instanceId: string,
+  limits: MountArcLimits | null = null,
 ): TurretRig | null {
   // Bone-frame-mismatch fix MUST run before we capture pitchRest or run
   // the pitchSign probe — both observe the bones' current state, and the
@@ -253,9 +274,25 @@ export function extractTurretRig(
     yawRest: yaw ? (yaw as THREE.Object3D).quaternion.clone() : null,
     pitchRest,
     pitchSign,
+    limits,
     nodes,
     boneFrameFix,
   };
+}
+
+const _DEG = Math.PI / 180;
+
+/** Clamp a radian value to a degree `[min, max]` range (order-agnostic).
+ *  Returns the input unchanged when the range is absent — preserving the
+ *  pre-clamp free-rotation behaviour for mounts without arc data. */
+function clampRadToDegRange(
+  valRad: number,
+  rangeDeg: [number, number] | undefined,
+): number {
+  if (!rangeDeg || rangeDeg.length !== 2) return valRad;
+  const lo = Math.min(rangeDeg[0], rangeDeg[1]) * _DEG;
+  const hi = Math.max(rangeDeg[0], rangeDeg[1]) * _DEG;
+  return Math.max(lo, Math.min(hi, valRad));
 }
 
 /** Apply a yaw + pitch delta (radians, relative to bind pose) to a rig.
@@ -267,12 +304,19 @@ const _q = new THREE.Quaternion();
 const _y = new THREE.Vector3(0, 1, 0);
 const _x = new THREE.Vector3(1, 0, 0);
 export function applyAim(rig: TurretRig, yawRad: number, pitchRad: number): void {
+  // Clamp to the mount's traverse / elevation limits when known. `horizSector`
+  // / `vertSector` are rest-relative (0 = bind), the same frame these
+  // rotations use, so the clamp is a direct min/max. Dead zones are NOT
+  // clamped here — the mount can rotate into them, it just can't fire (the
+  // firing-arc fan shades them).
+  const yaw = clampRadToDegRange(yawRad, rig.limits?.yawRangeDeg);
+  const pitch = clampRadToDegRange(pitchRad, rig.limits?.elevRangeDeg);
   if (rig.yaw && rig.yawRest) {
-    _q.setFromAxisAngle(_y, yawRad);
+    _q.setFromAxisAngle(_y, yaw);
     rig.yaw.quaternion.multiplyQuaternions(rig.yawRest, _q);
   }
   if (rig.pitch.length > 0) {
-    _q.setFromAxisAngle(_x, pitchRad * rig.pitchSign);
+    _q.setFromAxisAngle(_x, pitch * rig.pitchSign);
     for (let i = 0; i < rig.pitch.length; i++) {
       const rest = rig.pitchRest[i];
       if (!rest) continue;
@@ -290,6 +334,110 @@ export function resetAim(rig: TurretRig): void {
   }
 }
 
+/** Build a flat firing-arc fan for a rigged mount, laid in the horizontal
+ *  plane at the yaw pivot. Green = can fire; red = no-fire dead zone (the
+ *  mount can rotate there but won't shoot — it's pointing at its own ship).
+ *  Returns `null` when the mount has no yaw bone or no `yawRangeDeg`.
+ *
+ *  Robust to barrel-forward authoring (±Z) and rotation sense: rather than
+ *  assume a local axis, it SAMPLES the real barrel-tip direction across the
+ *  traverse range by briefly posing the yaw bone (then restoring it), so the
+ *  fan always points where the gun actually trains. Built in the yaw bone's
+ *  PARENT-local frame; add it to that parent. Fan radius ≈ barrel length. */
+export function buildFiringArcFan(rig: TurretRig): THREE.Mesh | null {
+  const yawBone = rig.yaw;
+  const range = rig.limits?.yawRangeDeg;
+  if (!yawBone || !yawBone.parent || !range || range.length !== 2) return null;
+  const parent = yawBone.parent;
+  const yawRest = rig.yawRest ?? new THREE.Quaternion();
+  const d0 = Math.min(range[0], range[1]);
+  const d1 = Math.max(range[0], range[1]);
+  if (d1 - d0 < 0.5) return null;
+  const dead = rig.limits?.yawDeadZonesDeg ?? [];
+
+  // Reference "tip" whose offset from the pivot reveals the barrel bearing.
+  const tip =
+    rig.nodes.get('HP_gunFire1') ??
+    rig.nodes.get('HP_gunFire') ??
+    rig.pitch[0] ??
+    null;
+
+  const savedYaw = yawBone.quaternion.clone();
+  const root = rig.root;
+  const axisY = new THREE.Vector3(0, 1, 0);
+  const ry = new THREE.Quaternion();
+  const pivotL = new THREE.Vector3();
+  const tipL = new THREE.Vector3();
+  const dir = new THREE.Vector3();
+  const N = Math.min(180, Math.max(8, Math.round((d1 - d0) / 2)));
+  const rim: { x: number; z: number; deg: number }[] = [];
+  let radius = 0;
+
+  try {
+    for (let i = 0; i <= N; i++) {
+      const deg = d0 + ((d1 - d0) * i) / N;
+      ry.setFromAxisAngle(axisY, deg * _DEG);
+      yawBone.quaternion.multiplyQuaternions(yawRest, ry);
+      root.updateMatrixWorld(true);
+      pivotL.setFromMatrixPosition(yawBone.matrixWorld);
+      parent.worldToLocal(pivotL);
+      if (tip) {
+        tipL.setFromMatrixPosition(tip.matrixWorld);
+        parent.worldToLocal(tipL);
+        dir.subVectors(tipL, pivotL);
+      } else {
+        dir.set(0, 0, -1).applyQuaternion(yawBone.quaternion);
+      }
+      dir.y = 0; // flatten to horizontal (mount parent ≈ ship-upright)
+      const len = dir.length();
+      if (len > radius) radius = len;
+      dir.normalize();
+      rim.push({ x: dir.x, z: dir.z, deg });
+    }
+  } finally {
+    yawBone.quaternion.copy(savedYaw);
+    root.updateMatrixWorld(true);
+  }
+  if (radius < 1e-3) radius = 5; // degenerate (no usable tip offset)
+
+  // Pivot is constant across the sweep — use the bone's parent-local position.
+  const cx = yawBone.position.x;
+  const cy = yawBone.position.y;
+  const cz = yawBone.position.z;
+  const inDead = (deg: number) =>
+    dead.some((dz) => deg >= Math.min(dz[0], dz[1]) && deg <= Math.max(dz[0], dz[1]));
+
+  const positions: number[] = [];
+  const colors: number[] = [];
+  const GREEN: [number, number, number] = [0.25, 0.9, 0.35];
+  const RED: [number, number, number] = [0.95, 0.25, 0.2];
+  for (let i = 0; i < rim.length - 1; i++) {
+    const a = rim[i];
+    const b = rim[i + 1];
+    const c = inDead((a.deg + b.deg) / 2) ? RED : GREEN;
+    positions.push(cx, cy, cz);
+    positions.push(cx + a.x * radius, cy, cz + a.z * radius);
+    positions.push(cx + b.x * radius, cy, cz + b.z * radius);
+    for (let k = 0; k < 3; k++) colors.push(c[0], c[1], c[2]);
+  }
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  const mat = new THREE.MeshBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.3,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.name = '__firingArcFan';
+  mesh.userData.firingArcFan = true;
+  mesh.renderOrder = 998;
+  return mesh;
+}
+
 /** Section-keyed bucket of rigs. The viewer registers each placed
  *  accessory; the UI reads the bucket to drive turret yaw/pitch
  *  globally or by section ("rotate all main turrets to 30°"). */
@@ -299,6 +447,11 @@ export class TurretRigManager {
   /** Last applied global aim — radians, relative to bind pose. */
   private globalYaw = 0;
   private globalPitch = 0;
+  /** Lazily-built firing-arc fan meshes, keyed by instance_id. Visibility
+   *  is a cross-ship UI preference (`fansVisible`); the meshes themselves
+   *  are per-ship and disposed on `clear()`. */
+  private fans = new Map<string, THREE.Mesh>();
+  private fansVisible = false;
 
   register(rig: TurretRig): void {
     this.rigs.set(rig.instanceId, rig);
@@ -308,12 +461,37 @@ export class TurretRigManager {
     if (this.globalYaw !== 0 || this.globalPitch !== 0) {
       applyAim(rig, this.globalYaw, this.globalPitch);
     }
+    if (this.fansVisible) this.ensureFan(rig);
+  }
+
+  /** Build + attach a fan for one rig if it doesn't have one yet. */
+  private ensureFan(rig: TurretRig): void {
+    if (this.fans.has(rig.instanceId)) return;
+    const fan = buildFiringArcFan(rig);
+    if (fan && rig.yaw?.parent) {
+      fan.visible = this.fansVisible;
+      rig.yaw.parent.add(fan);
+      this.fans.set(rig.instanceId, fan);
+    }
+  }
+
+  private disposeFans(): void {
+    for (const fan of this.fans.values()) {
+      fan.parent?.remove(fan);
+      fan.geometry.dispose();
+      const m = fan.material;
+      (Array.isArray(m) ? m : [m]).forEach((x) => x.dispose());
+    }
+    this.fans.clear();
   }
 
   clear(): void {
+    this.disposeFans();
     this.rigs.clear();
     this.globalYaw = 0;
     this.globalPitch = 0;
+    // `fansVisible` is a UI preference — preserved across ship swaps so the
+    // next ship's rigs rebuild their fans on register().
   }
 
   /** True when at least one placement has a rig. The UI hides the aim
@@ -350,5 +528,28 @@ export class TurretRigManager {
     for (const rig of this.rigs.values()) {
       resetAim(rig);
     }
+  }
+
+  /** Toggle the per-mount firing-arc fans (green = can fire, red = no-fire
+   *  dead zone). Fans are built lazily on first show. */
+  setFiringArcsVisible(visible: boolean): void {
+    this.fansVisible = visible;
+    if (visible) {
+      for (const rig of this.rigs.values()) this.ensureFan(rig);
+    }
+    for (const fan of this.fans.values()) fan.visible = visible;
+  }
+
+  isFiringArcsVisible(): boolean {
+    return this.fansVisible;
+  }
+
+  /** Number of rigs that carry yaw traverse limits (drives a UI hint). */
+  countWithLimits(): number {
+    let n = 0;
+    for (const rig of this.rigs.values()) {
+      if (rig.limits?.yawRangeDeg) n += 1;
+    }
+    return n;
   }
 }

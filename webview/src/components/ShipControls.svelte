@@ -91,6 +91,11 @@
   let aimYaw = $state(0);
   let aimPitch = $state(0);
   let rigCount = $state(0);
+  // Per-mount yaw/elev clamp is automatic (the rig reads sidecar arcs); this
+  // toggles the firing-arc fan overlay (green = can fire, red = no-fire dead
+  // zone). `arcCount` = rigs that actually carry traverse limits.
+  let aimArcs = $state(false);
+  let arcCount = $state(0);
 
   // Panel open/close — UI-only; tracked separately so toggling a section
   // doesn't trigger the larger $effect that re-reads viewer state.
@@ -176,6 +181,10 @@
       aimYaw = 0;
       aimPitch = 0;
       rigCount = viewer.getTurretRigManager().size();
+      // Firing-arc visibility persists across ship swaps (held on the rig
+      // manager); re-read it so the checkbox reflects the live state.
+      aimArcs = viewer.getTurretRigManager().isFiringArcsVisible();
+      arcCount = viewer.getTurretRigManager().countWithLimits();
       onShowTexturesChange?.(newShowTextures);
       onSeamStatesChange?.(newSeamStates);
 
@@ -315,6 +324,10 @@
     aimYaw = 0;
     aimPitch = 0;
     viewer.getTurretRigManager().reset();
+  }
+  function toggleAimArcs(v: boolean) {
+    aimArcs = v;
+    viewer.getTurretRigManager().setFiringArcsVisible(v);
   }
   function toggleBloom(v: boolean) {
     bloomEnabled = v;
@@ -556,13 +569,37 @@
           </span>
           <input
             type="range"
-            min="-10"
-            max="45"
+            min="-15"
+            max="90"
             step="1"
             value={aimPitch}
             oninput={(e) => setAimPitch(parseFloat(e.currentTarget.value))}
           />
         </label>
+        <p class="text-muted-foreground text-[10px] leading-snug">
+          Yaw + pitch are clamped per mount to their GameParams arcs
+          ({arcCount}/{rigCount} have traverse limits).
+        </p>
+        {#if arcCount > 0}
+          <label class={rowCls}>
+            <input
+              type="checkbox"
+              checked={aimArcs}
+              onchange={(e) => toggleAimArcs(e.currentTarget.checked)}
+            />
+            Show firing arcs
+            <span
+              class="inline-block size-2 rounded-sm"
+              style="background:#40e659"
+              title="can fire"
+            ></span>
+            <span
+              class="inline-block size-2 rounded-sm"
+              style="background:#f24033"
+              title="no-fire dead zone"
+            ></span>
+          </label>
+        {/if}
         <Button variant="outline" size="xs" class="mt-1.5 w-fit" onclick={resetAim}>
           Reset aim
         </Button>

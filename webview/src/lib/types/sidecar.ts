@@ -84,6 +84,25 @@ export interface SidecarMount {
   ammo_ids?: string[];
   misc_filter?: string[];
   /**
+   * Yaw traverse limits `[min, max]` in degrees, in the mount's rest-relative
+   * frame (0° = bind/rest heading — the rig's `Rotate_Y` bind). The arc the
+   * mount can physically rotate through. Absent on AA (omnidirectional) and
+   * fixed mounts. Sourced from GameParams `horizSector`.
+   */
+  yaw_range_deg?: [number, number];
+  /**
+   * Elevation limits `[depression, elevation]` in degrees. `[0]` ≤ 0 (below
+   * horizontal), `[1]` > 0 (above). Positive = up. From GameParams `vertSector`.
+   */
+  elev_range_deg?: [number, number];
+  /**
+   * No-fire wedges `[[start, end], …]` in degrees, same frame as
+   * `yaw_range_deg`. The mount can rotate INTO these (they sit inside the
+   * traverse arc) but will not FIRE — it's pointing at the ship's own
+   * superstructure. From GameParams `deadZone`. Absent when empty.
+   */
+  yaw_dead_zones_deg?: [number, number][];
+  /**
    * Diagnostic flag stamped by `apply_variant_asset_swaps` when the host
    * placement matrix was Ry(180°)-corrected to absorb a bone mismatch.
    * No longer acted on by the renderer — schema_v6 attached_accessories
