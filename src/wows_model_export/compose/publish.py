@@ -20,11 +20,17 @@ What it copies (per domain):
                     skipping the large ``.skel_ext_candidates.json``
                     inputs (~10 MB per asset).
 * ``projectiles`` — ``libraries/projectiles/`` GLBs + JSON + DDS.
-* ``decals``      — ``libraries/camo_masks/`` + ``libraries/camo_mat/``
-                    DDS atlases (the two camo-shared subtrees ride
-                    alongside the accessory library in the I:-side CLI
-                    via ``--accessories``; here they live under one
-                    ``decals`` domain so callers can opt-out cleanly).
+* ``decals``      — the dynamic-decal library ``libraries/decals/``
+                    (WG ``dyndecals/`` mirror: ``*_{d,p,e}.{dds,dd?}``
+                    textures + the ``manifest.json`` prototype table)
+                    copied to ``decals/``, PLUS the two camo-shared atlas
+                    subtrees ``libraries/camo_masks/`` +
+                    ``libraries/camo_mat/`` (DDS only). All three ride
+                    under one ``decals`` domain — opted in via the
+                    I:-side ``--accessories`` flag, or ``--all``. The
+                    decal library must be built first with
+                    ``wows-build-decal-library``; when it's absent the
+                    copy is a graceful no-op.
 
 Canonical :class:`StepEvent` step names emitted to ``on_event``:
 
@@ -457,7 +463,21 @@ def publish(
                 target_dir / "camo_mat",
                 force=force,
             )
-            decals_counts = _combine_counts(masks, mats)
+            # Dynamic-decal library (dyndecals mirror + manifest.json),
+            # built one-time by `wows-build-decal-library`. Flat layout,
+            # so `_publish_tree` picks up the `*_{d,p,e}.{dds,dd?}`
+            # textures AND the `manifest.json` the consumer needs to read
+            # the prototype table. No-op when the library hasn't been
+            # built (the source dir simply isn't there).
+            decal_lib = _publish_tree(
+                workspace / "libraries" / "decals",
+                target_dir / "decals",
+                force=force,
+                allow_json=True,
+                allow_glb=False,
+                allow_dds=True,
+            )
+            decals_counts = _combine_counts(masks, mats, decal_lib)
             ctx.annotate(
                 f"copied={decals_counts.copied} skipped={decals_counts.skipped}",
                 data={
@@ -468,6 +488,10 @@ def publish(
                     },
                     "camo_mat":   {
                         "copied":  mats.copied,  "skipped":  mats.skipped,
+                    },
+                    "decal_library": {
+                        "copied":  decal_lib.copied,
+                        "skipped": decal_lib.skipped,
                     },
                 },
             )
