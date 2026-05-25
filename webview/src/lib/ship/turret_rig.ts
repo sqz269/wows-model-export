@@ -401,26 +401,35 @@ export function buildFiringArcFan(rig: TurretRig): THREE.Mesh | null {
   if (radius < 1e-3) radius = 5; // degenerate (no usable tip offset)
 
   // Pivot is constant across the sweep — use the bone's parent-local position.
-  const cx = yawBone.position.x;
-  const cy = yawBone.position.y;
-  const cz = yawBone.position.z;
-  const inDead = (deg: number) =>
-    dead.some((dz) => deg >= Math.min(dz[0], dz[1]) && deg <= Math.max(dz[0], dz[1]));
+  const center = { x: yawBone.position.x, y: yawBone.position.y, z: yawBone.position.z };
+  return fanMeshFromRim(center, rim, radius, dead);
+}
 
+/** Shared wedge-mesh builder: a flat triangle fan from `center` out to
+ *  `radius`, one slice per `rim` entry, coloured green (can fire) or red
+ *  (no-fire dead zone) per `dead`. `rim` holds unit directions in the XZ
+ *  plane tagged with their degree angle. */
+function fanMeshFromRim(
+  center: { x: number; y: number; z: number },
+  rim: { x: number; z: number; deg: number }[],
+  radius: number,
+  dead: [number, number][],
+): THREE.Mesh {
   const positions: number[] = [];
   const colors: number[] = [];
   const GREEN: [number, number, number] = [0.25, 0.9, 0.35];
   const RED: [number, number, number] = [0.95, 0.25, 0.2];
+  const inDead = (deg: number) =>
+    dead.some((dz) => deg >= Math.min(dz[0], dz[1]) && deg <= Math.max(dz[0], dz[1]));
   for (let i = 0; i < rim.length - 1; i++) {
     const a = rim[i];
     const b = rim[i + 1];
     const c = inDead((a.deg + b.deg) / 2) ? RED : GREEN;
-    positions.push(cx, cy, cz);
-    positions.push(cx + a.x * radius, cy, cz + a.z * radius);
-    positions.push(cx + b.x * radius, cy, cz + b.z * radius);
+    positions.push(center.x, center.y, center.z);
+    positions.push(center.x + a.x * radius, center.y, center.z + a.z * radius);
+    positions.push(center.x + b.x * radius, center.y, center.z + b.z * radius);
     for (let k = 0; k < 3; k++) colors.push(c[0], c[1], c[2]);
   }
-
   const geom = new THREE.BufferGeometry();
   geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
@@ -438,6 +447,63 @@ export function buildFiringArcFan(rig: TurretRig): THREE.Mesh | null {
   return mesh;
 }
 
+/** Build a firing-arc fan for a STATIC mount that has no rig bone — torpedo
+ *  tubes are static meshes the engine rotates wholesale, so they carry a
+ *  `yawRangeDeg` but no `Rotate_Y` to sample. The fan is built in the cloned
+ *  instance's local frame (0° = local −Z, the authored launch/forward axis;
+ *  WG tubes extend along −Z) and added to that instance, so the placement
+ *  matrix orients it into ship space. Visualisation only — the mesh doesn't
+ *  animate. `root` must already be in the scene graph (matrices current). */
+export function buildStaticArcFan(
+  root: THREE.Object3D,
+  limits: MountArcLimits,
+): THREE.Mesh | null {
+  const range = limits.yawRangeDeg;
+  if (!range || range.length !== 2) return null;
+  const d0 = Math.min(range[0], range[1]);
+  const d1 = Math.max(range[0], range[1]);
+  if (d1 - d0 < 0.5) return null;
+  const dead = limits.yawDeadZonesDeg ?? [];
+
+  // Local-frame bbox (geometry extents relative to `root`) → fan radius +
+  // height. Local (not world) so the radius is in the same units the fan
+  // mesh lives in regardless of the placement's scale.
+  root.updateWorldMatrix(true, false);
+  const rootInv = new THREE.Matrix4().copy(root.matrixWorld).invert();
+  const box = new THREE.Box3();
+  const rel = new THREE.Matrix4();
+  const tmp = new THREE.Box3();
+  root.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh || !m.geometry) return;
+    if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
+    const bb = m.geometry.boundingBox;
+    if (!bb) return;
+    o.updateWorldMatrix(true, false);
+    rel.copy(rootInv).multiply(o.matrixWorld);
+    tmp.copy(bb).applyMatrix4(rel);
+    box.union(tmp);
+  });
+  let radius = 5;
+  let baseY = 0;
+  if (!box.isEmpty()) {
+    const size = box.getSize(new THREE.Vector3());
+    radius = 0.6 * Math.max(size.x, size.z, size.y);
+    baseY = (box.min.y + box.max.y) / 2;
+  }
+
+  const N = Math.min(180, Math.max(8, Math.round((d1 - d0) / 2)));
+  const rim: { x: number; z: number; deg: number }[] = [];
+  for (let i = 0; i <= N; i++) {
+    const deg = d0 + ((d1 - d0) * i) / N;
+    const t = deg * _DEG;
+    // 0° = −Z; +deg rotates toward −X (matches the +Y rotation sense the
+    // rigged fan uses, so both look consistent).
+    rim.push({ x: -Math.sin(t), z: -Math.cos(t), deg });
+  }
+  return fanMeshFromRim({ x: 0, y: baseY, z: 0 }, rim, radius, dead);
+}
+
 /** Section-keyed bucket of rigs. The viewer registers each placed
  *  accessory; the UI reads the bucket to drive turret yaw/pitch
  *  globally or by section ("rotate all main turrets to 30°"). */
@@ -452,6 +518,12 @@ export class TurretRigManager {
    *  are per-ship and disposed on `clear()`. */
   private fans = new Map<string, THREE.Mesh>();
   private fansVisible = false;
+  /** Static (non-rigged) mounts that still carry a traverse arc — torpedo
+   *  tubes are static meshes the engine rotates wholesale, so they have a
+   *  `yawRangeDeg` but no `Rotate_Y` bone and thus no rig. We can't animate
+   *  them, but we can draw their firing arc. Keyed by instance_id; disjoint
+   *  from `rigs` (a mount is one or the other). */
+  private staticArcs = new Map<string, { root: THREE.Object3D; limits: MountArcLimits }>();
 
   register(rig: TurretRig): void {
     this.rigs.set(rig.instanceId, rig);
@@ -464,6 +536,15 @@ export class TurretRigManager {
     if (this.fansVisible) this.ensureFan(rig);
   }
 
+  /** Register a static (non-rigged) mount's traverse arc — torpedo tubes,
+   *  etc. The mount can't be animated, but its firing arc is drawn when the
+   *  fans are shown. */
+  registerStaticArc(instanceId: string, root: THREE.Object3D, limits: MountArcLimits): void {
+    if (!limits.yawRangeDeg) return;
+    this.staticArcs.set(instanceId, { root, limits });
+    if (this.fansVisible) this.ensureStaticFan(instanceId);
+  }
+
   /** Build + attach a fan for one rig if it doesn't have one yet. */
   private ensureFan(rig: TurretRig): void {
     if (this.fans.has(rig.instanceId)) return;
@@ -472,6 +553,19 @@ export class TurretRigManager {
       fan.visible = this.fansVisible;
       rig.yaw.parent.add(fan);
       this.fans.set(rig.instanceId, fan);
+    }
+  }
+
+  /** Build + attach a placement-based fan for one static mount. */
+  private ensureStaticFan(instanceId: string): void {
+    if (this.fans.has(instanceId)) return;
+    const entry = this.staticArcs.get(instanceId);
+    if (!entry) return;
+    const fan = buildStaticArcFan(entry.root, entry.limits);
+    if (fan) {
+      fan.visible = this.fansVisible;
+      entry.root.add(fan);
+      this.fans.set(instanceId, fan);
     }
   }
 
@@ -488,6 +582,7 @@ export class TurretRigManager {
   clear(): void {
     this.disposeFans();
     this.rigs.clear();
+    this.staticArcs.clear();
     this.globalYaw = 0;
     this.globalPitch = 0;
     // `fansVisible` is a UI preference — preserved across ship swaps so the
@@ -536,6 +631,7 @@ export class TurretRigManager {
     this.fansVisible = visible;
     if (visible) {
       for (const rig of this.rigs.values()) this.ensureFan(rig);
+      for (const id of this.staticArcs.keys()) this.ensureStaticFan(id);
     }
     for (const fan of this.fans.values()) fan.visible = visible;
   }
@@ -544,9 +640,10 @@ export class TurretRigManager {
     return this.fansVisible;
   }
 
-  /** Number of rigs that carry yaw traverse limits (drives a UI hint). */
+  /** Number of mounts that carry a yaw traverse arc — rigged guns plus
+   *  static torpedo tubes (drives the firing-arc UI hint + toggle gating). */
   countWithLimits(): number {
-    let n = 0;
+    let n = this.staticArcs.size;
     for (const rig of this.rigs.values()) {
       if (rig.limits?.yawRangeDeg) n += 1;
     }

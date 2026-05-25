@@ -501,13 +501,21 @@ export class ShipViewer {
           // Look for WG rig nodes (`Rotate_Y` / `Rotate_X`). Most
           // gun/main and gun/secondary mounts have them; AA and static
           // miscs return null silently.
+          const arcLimits = arcLimitsByInstanceId.get(e.placement.instance_id) ?? null;
           const rig = extractTurretRig(
             inst,
             e.placement.asset_id,
             e.placement.instance_id,
-            arcLimitsByInstanceId.get(e.placement.instance_id) ?? null,
+            arcLimits,
           );
-          if (rig) this.turretRigs.register(rig);
+          if (rig) {
+            this.turretRigs.register(rig);
+          } else if (arcLimits?.yawRangeDeg) {
+            // Static mount with a traverse arc — torpedo tubes are static
+            // meshes (no Rotate_Y bone), so draw their firing arc without
+            // animating them.
+            this.turretRigs.registerStaticArc(e.placement.instance_id, inst, arcLimits);
+          }
           this.sectionGroups[e.section].add(inst);
           renderedPlacements++;
 

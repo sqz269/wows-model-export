@@ -536,51 +536,55 @@
     </div>
   </details>
 
-  {#if rigCount > 0}
+  {#if rigCount > 0 || arcCount > 0}
     <details
       open={panelOpen.aim}
       ontoggle={(e) => togglePanel('aim', e.currentTarget.open)}
       class="group {detailsCls}"
     >
-      <summary class={summaryCls}>Aim ({rigCount} rigged)</summary>
+      <summary class={summaryCls}>Aim{rigCount > 0 ? ` (${rigCount} rigged)` : ''}</summary>
       <div class={bodyCls}>
-        <label class={labelCls}>
-          <span class="flex items-center justify-between">
-            Yaw
-            <span class="text-muted-foreground tabular-nums text-[10px]">
-              {aimYaw.toFixed(0)}°
+        {#if rigCount > 0}
+          <label class={labelCls}>
+            <span class="flex items-center justify-between">
+              Yaw
+              <span class="text-muted-foreground tabular-nums text-[10px]">
+                {aimYaw.toFixed(0)}°
+              </span>
             </span>
-          </span>
-          <input
-            type="range"
-            min="-180"
-            max="180"
-            step="1"
-            value={aimYaw}
-            oninput={(e) => setAimYaw(parseFloat(e.currentTarget.value))}
-          />
-        </label>
-        <label class={labelCls}>
-          <span class="flex items-center justify-between">
-            Pitch (elevation)
-            <span class="text-muted-foreground tabular-nums text-[10px]">
-              {aimPitch.toFixed(0)}°
+            <input
+              type="range"
+              min="-180"
+              max="180"
+              step="1"
+              value={aimYaw}
+              oninput={(e) => setAimYaw(parseFloat(e.currentTarget.value))}
+            />
+          </label>
+          <label class={labelCls}>
+            <span class="flex items-center justify-between">
+              Pitch (elevation)
+              <span class="text-muted-foreground tabular-nums text-[10px]">
+                {aimPitch.toFixed(0)}°
+              </span>
             </span>
-          </span>
-          <input
-            type="range"
-            min="-15"
-            max="90"
-            step="1"
-            value={aimPitch}
-            oninput={(e) => setAimPitch(parseFloat(e.currentTarget.value))}
-          />
-        </label>
-        <p class="text-muted-foreground text-[10px] leading-snug">
-          Yaw + pitch are clamped per mount to their GameParams arcs
-          ({arcCount}/{rigCount} have traverse limits).
-        </p>
+            <input
+              type="range"
+              min="-15"
+              max="90"
+              step="1"
+              value={aimPitch}
+              oninput={(e) => setAimPitch(parseFloat(e.currentTarget.value))}
+            />
+          </label>
+        {/if}
         {#if arcCount > 0}
+          <p class="text-muted-foreground text-[10px] leading-snug">
+            {rigCount > 0 ? 'Aim is clamped per mount to its GameParams arc. ' : ''}{arcCount} mount{arcCount ===
+            1
+              ? ''
+              : 's'} carry a firing arc (incl. static torpedo tubes).
+          </p>
           <label class={rowCls}>
             <input
               type="checkbox"
@@ -600,9 +604,11 @@
             ></span>
           </label>
         {/if}
-        <Button variant="outline" size="xs" class="mt-1.5 w-fit" onclick={resetAim}>
-          Reset aim
-        </Button>
+        {#if rigCount > 0}
+          <Button variant="outline" size="xs" class="mt-1.5 w-fit" onclick={resetAim}>
+            Reset aim
+          </Button>
+        {/if}
       </div>
     </details>
   {/if}
