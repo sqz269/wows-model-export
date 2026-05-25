@@ -355,12 +355,22 @@ export function buildFiringArcFan(rig: TurretRig): THREE.Mesh | null {
   if (d1 - d0 < 0.5) return null;
   const dead = rig.limits?.yawDeadZonesDeg ?? [];
 
-  // Reference "tip" whose offset from the pivot reveals the barrel bearing.
-  const tip =
-    rig.nodes.get('HP_gunFire1') ??
-    rig.nodes.get('HP_gunFire') ??
-    rig.pitch[0] ??
-    null;
+  // Direction reference(s) for the aim bearing. A SINGLE off-centre barrel
+  // (HP_gunFire1 is e.g. the right barrel of a triple turret, ~2 m off-axis)
+  // would skew the fan by atan2(offset, barrelLength) ≈ 7–12°, so prefer the
+  // centerline muzzle-FX node; else AVERAGE all per-barrel muzzles (a
+  // symmetric layout averages to the centerline); else the elevation trunnion
+  // (Rotate_X, which sits on the yaw axis).
+  const tipNodes: THREE.Object3D[] = [];
+  const effNode = rig.nodes.get('HP_gunFireEffect');
+  if (effNode) {
+    tipNodes.push(effNode);
+  } else {
+    for (const [name, node] of rig.nodes) {
+      if (name.startsWith('HP_gunFire')) tipNodes.push(node);
+    }
+    if (tipNodes.length === 0 && rig.pitch[0]) tipNodes.push(rig.pitch[0]);
+  }
 
   const savedYaw = yawBone.quaternion.clone();
   const root = rig.root;
@@ -368,6 +378,7 @@ export function buildFiringArcFan(rig: TurretRig): THREE.Mesh | null {
   const ry = new THREE.Quaternion();
   const pivotL = new THREE.Vector3();
   const tipL = new THREE.Vector3();
+  const acc = new THREE.Vector3();
   const dir = new THREE.Vector3();
   const N = Math.min(180, Math.max(8, Math.round((d1 - d0) / 2)));
   const rim: { x: number; z: number; deg: number }[] = [];
@@ -381,9 +392,14 @@ export function buildFiringArcFan(rig: TurretRig): THREE.Mesh | null {
       root.updateMatrixWorld(true);
       pivotL.setFromMatrixPosition(yawBone.matrixWorld);
       parent.worldToLocal(pivotL);
-      if (tip) {
-        tipL.setFromMatrixPosition(tip.matrixWorld);
-        parent.worldToLocal(tipL);
+      if (tipNodes.length > 0) {
+        tipL.set(0, 0, 0);
+        for (const t of tipNodes) {
+          acc.setFromMatrixPosition(t.matrixWorld);
+          parent.worldToLocal(acc);
+          tipL.add(acc);
+        }
+        tipL.multiplyScalar(1 / tipNodes.length);
         dir.subVectors(tipL, pivotL);
       } else {
         dir.set(0, 0, -1).applyQuaternion(yawBone.quaternion);
@@ -449,11 +465,13 @@ function fanMeshFromRim(
 
 /** Build a firing-arc fan for a STATIC mount that has no rig bone — torpedo
  *  tubes are static meshes the engine rotates wholesale, so they carry a
- *  `yawRangeDeg` but no `Rotate_Y` to sample. The fan is built in the cloned
- *  instance's local frame (0° = local −Z, the authored launch/forward axis;
- *  WG tubes extend along −Z) and added to that instance, so the placement
- *  matrix orients it into ship space. Visualisation only — the mesh doesn't
- *  animate. `root` must already be in the scene graph (matrices current). */
+ *  `yawRangeDeg` but no `Rotate_Y` (and no muzzle node) to sample. The fan is
+ *  built in the cloned instance's local frame and added to that instance, so
+ *  the placement matrix orients it into ship space. 0° (rest-forward) is
+ *  inferred from the tube mesh's bounding box — the long horizontal axis,
+ *  signed toward the protruding (tube) end. Visualisation only — the mesh
+ *  doesn't animate. `root` must already be in the scene graph (matrices
+ *  current). */
 export function buildStaticArcFan(
   root: THREE.Object3D,
   limits: MountArcLimits,
@@ -486,10 +504,24 @@ export function buildStaticArcFan(
   });
   let radius = 5;
   let baseY = 0;
+  // Forward axis (0° of the arc): torpedo GLBs carry no muzzle node to
+  // sample, so infer the launch direction from the tube geometry — the long
+  // horizontal axis, signed toward the end that protrudes furthest from the
+  // pivot (the tubes). Falls back to −Z. yaw_range is rest-relative, so 0°
+  // must equal this rest-forward.
+  let fx = 0;
+  let fz = -1;
   if (!box.isEmpty()) {
     const size = box.getSize(new THREE.Vector3());
     radius = 0.6 * Math.max(size.x, size.z, size.y);
     baseY = (box.min.y + box.max.y) / 2;
+    if (size.z >= size.x) {
+      fx = 0;
+      fz = Math.abs(box.max.z) >= Math.abs(box.min.z) ? 1 : -1;
+    } else {
+      fx = Math.abs(box.max.x) >= Math.abs(box.min.x) ? 1 : -1;
+      fz = 0;
+    }
   }
 
   const N = Math.min(180, Math.max(8, Math.round((d1 - d0) / 2)));
@@ -497,9 +529,12 @@ export function buildStaticArcFan(
   for (let i = 0; i <= N; i++) {
     const deg = d0 + ((d1 - d0) * i) / N;
     const t = deg * _DEG;
-    // 0° = −Z; +deg rotates toward −X (matches the +Y rotation sense the
-    // rigged fan uses, so both look consistent).
-    rim.push({ x: -Math.sin(t), z: -Math.cos(t), deg });
+    // dir(θ) = Ry(θ) · forward, +deg around +Y (same sense as the rigged fan).
+    rim.push({
+      x: fx * Math.cos(t) + fz * Math.sin(t),
+      z: -fx * Math.sin(t) + fz * Math.cos(t),
+      deg,
+    });
   }
   return fanMeshFromRim({ x: 0, y: baseY, z: 0 }, rim, radius, dead);
 }
