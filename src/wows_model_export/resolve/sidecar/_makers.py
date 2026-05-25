@@ -352,6 +352,8 @@ def _add_gameplay_fields(
     sigma: float | None,
     yaw_range_deg: Iterable[float] | None,
     elev_range_deg: Iterable[float] | None,
+    yaw_dead_zones_deg: Iterable[Iterable[float]] | None = None,
+    pitch_dead_zones_deg: Iterable[Iterable[float]] | None = None,
     traverse_rate: float | None,
     elev_rate: float | None,
     reload_s: float | None,
@@ -370,6 +372,10 @@ def _add_gameplay_fields(
         out["yaw_range_deg"] = [float(v) for v in yaw_range_deg]
     if elev_range_deg is not None:
         out["elev_range_deg"] = [float(v) for v in elev_range_deg]
+    if yaw_dead_zones_deg is not None:
+        out["yaw_dead_zones_deg"] = [[float(x) for x in pair] for pair in yaw_dead_zones_deg]
+    if pitch_dead_zones_deg is not None:
+        out["pitch_dead_zones_deg"] = [[float(x) for x in pair] for pair in pitch_dead_zones_deg]
     if traverse_rate is not None:
         out["traverse_rate"] = float(traverse_rate)
     if elev_rate is not None:
@@ -394,6 +400,8 @@ def make_turret(
     sigma: float | None = None,
     yaw_range_deg: Iterable[float] | None = None,
     elev_range_deg: Iterable[float] | None = None,
+    yaw_dead_zones_deg: Iterable[Iterable[float]] | None = None,
+    pitch_dead_zones_deg: Iterable[Iterable[float]] | None = None,
     traverse_rate: float | None = None,
     elev_rate: float | None = None,
     reload_s: float | None = None,
@@ -411,6 +419,7 @@ def make_turret(
         display_name=display_name, caliber_mm=caliber_mm,
         barrel_count=barrel_count, ammo_types=ammo_types, sigma=sigma,
         yaw_range_deg=yaw_range_deg, elev_range_deg=elev_range_deg,
+        yaw_dead_zones_deg=yaw_dead_zones_deg, pitch_dead_zones_deg=pitch_dead_zones_deg,
         traverse_rate=traverse_rate, elev_rate=elev_rate, reload_s=reload_s,
     )
     return out
@@ -432,6 +441,8 @@ def make_secondary(
     sigma: float | None = None,
     yaw_range_deg: Iterable[float] | None = None,
     elev_range_deg: Iterable[float] | None = None,
+    yaw_dead_zones_deg: Iterable[Iterable[float]] | None = None,
+    pitch_dead_zones_deg: Iterable[Iterable[float]] | None = None,
     traverse_rate: float | None = None,
     elev_rate: float | None = None,
     reload_s: float | None = None,
@@ -449,6 +460,7 @@ def make_secondary(
         display_name=display_name, caliber_mm=caliber_mm,
         barrel_count=barrel_count, ammo_types=ammo_types, sigma=sigma,
         yaw_range_deg=yaw_range_deg, elev_range_deg=elev_range_deg,
+        yaw_dead_zones_deg=yaw_dead_zones_deg, pitch_dead_zones_deg=pitch_dead_zones_deg,
         traverse_rate=traverse_rate, elev_rate=elev_rate, reload_s=reload_s,
     )
     return out
@@ -468,6 +480,8 @@ def make_antiair(
     barrel_count: int | None = None,
     yaw_range_deg: Iterable[float] | None = None,
     elev_range_deg: Iterable[float] | None = None,
+    yaw_dead_zones_deg: Iterable[Iterable[float]] | None = None,
+    pitch_dead_zones_deg: Iterable[Iterable[float]] | None = None,
     traverse_rate: float | None = None,
     elev_rate: float | None = None,
     aa_range_km: float | None = None,
@@ -492,6 +506,7 @@ def make_antiair(
         barrel_count=barrel_count,
         ammo_types=None, sigma=None,
         yaw_range_deg=yaw_range_deg, elev_range_deg=elev_range_deg,
+        yaw_dead_zones_deg=yaw_dead_zones_deg, pitch_dead_zones_deg=pitch_dead_zones_deg,
         traverse_rate=traverse_rate, elev_rate=elev_rate, reload_s=None,
     )
     if aa_range_km is not None:
@@ -514,6 +529,10 @@ def make_torpedo(
     tube_count: int | None = None,
     reload_s: float | None = None,
     yaw_range_deg: Iterable[float] | None = None,
+    yaw_dead_zones_deg: Iterable[Iterable[float]] | None = None,
+    shoot_sector_deg: Iterable[float] | None = None,
+    additional_aim_sector_deg: Iterable[float] | None = None,
+    torpedo_angles_deg: Iterable[float] | None = None,
     traverse_rate: float | None = None,
     attach_to: str | None = None,
     casts_shadow: bool = True,
@@ -532,6 +551,14 @@ def make_torpedo(
         out["reload_s"] = float(reload_s)
     if yaw_range_deg is not None:
         out["yaw_range_deg"] = [float(v) for v in yaw_range_deg]
+    if yaw_dead_zones_deg is not None:
+        out["yaw_dead_zones_deg"] = [[float(x) for x in pair] for pair in yaw_dead_zones_deg]
+    if shoot_sector_deg is not None:
+        out["shoot_sector_deg"] = [float(v) for v in shoot_sector_deg]
+    if additional_aim_sector_deg is not None:
+        out["additional_aim_sector_deg"] = [float(v) for v in additional_aim_sector_deg]
+    if torpedo_angles_deg is not None:
+        out["torpedo_angles_deg"] = [float(v) for v in torpedo_angles_deg]
     if traverse_rate is not None:
         out["traverse_rate"] = float(traverse_rate)
     return out

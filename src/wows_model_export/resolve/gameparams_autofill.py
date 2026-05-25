@@ -497,9 +497,15 @@ def resolve_components(
       ``A_Hull`` / ``B_Hull`` slot name (so callers building a ``variants``
       summary don't have to re-walk).
     """
-    if hull_choice not in ("upgraded", "stock"):
+    # ``hull_choice`` is normally "upgraded" / "stock" (the _Hull chain end /
+    # root). It may also be an explicit hull NAME (e.g. "A_Hull") — used when
+    # the rendered GLB is a hull tier other than the gameplay-active one
+    # (mesh-swap variants render the stock hull, whose secondary / AA guns
+    # differ from the upgraded hull; see scaffold_ship `_detect_rendered_hull`).
+    # An unresolvable name falls back to the upgraded pick.
+    if not isinstance(hull_choice, str) or not hull_choice:
         raise ValueError(
-            f"hull_choice must be 'upgraded' or 'stock', got {hull_choice!r}"
+            f"hull_choice must be a non-empty str, got {hull_choice!r}"
         )
     sui = ship.get("ShipUpgradeInfo") or {}
     if not isinstance(sui, dict):
@@ -517,11 +523,30 @@ def resolve_components(
         if chain:
             chain_by_uctype[uc_type] = chain
 
+    # When ``hull_choice`` is an explicit hull name, find the matching _Hull
+    # module (its ``components.hull[0]`` equals the name). Only the
+    # _Hull-derived slots (atba / airDefense / directors / finders / radars /
+    # hull) follow the named hull; the standalone module ucTypes (_Artillery /
+    # _Torpedoes / _Engine / _Suo) keep their upgraded pick.
+    named_hull_module: str | None = None
+    if hull_choice not in ("upgraded", "stock"):
+        for module_id in chain_by_uctype.get("_Hull", []):
+            comps = sui.get(module_id, {}).get("components", {})
+            hull_list = comps.get("hull") if isinstance(comps, dict) else None
+            if (isinstance(hull_list, list) and hull_list
+                    and hull_list[0] == hull_choice):
+                named_hull_module = module_id
+                break
+
     def pick_chain(uc_type: str) -> str | None:
         chain = chain_by_uctype.get(uc_type) or []
         if not chain:
             return None
-        return chain[-1] if hull_choice == "upgraded" else chain[0]
+        if uc_type == "_Hull" and named_hull_module is not None:
+            return named_hull_module
+        # "stock" → chain root; "upgraded" and named-hull (non-_Hull slots)
+        # → chain end.
+        return chain[0] if hull_choice == "stock" else chain[-1]
 
     # Resolved upgraded-hull entry isn't read directly (we walk the merged
     # components below to pick the active hull component_id), but the
@@ -805,6 +830,46 @@ def autofill_for_hp(
     return {}
 
 
+def _dead_zones(v: Any) -> list[list[float]] | None:
+    """Coerce a GameParams ``deadZone`` / ``pitchDeadZones`` value to a list
+    of ``[start_deg, end_deg]`` float pairs.
+
+    These are the angular wedges where the mount can TRAVERSE but cannot
+    FIRE (it points at the ship's own superstructure) — the "can rotate but
+    can't shoot" split, distinct from the traverse limits in ``horizSector``
+    (``yaw_range_deg``). Same coordinate frame as ``horizSector`` (degrees
+    relative to the mount's forward).
+
+    WG ships this as a list of pairs (``[[-12.0, 0.0]]``); a bare ``[a, b]``
+    of two numbers is tolerated and wrapped. Returns ``None`` for empty or
+    malformed input (e.g. the ``[]`` carried by most main turrets).
+    """
+    def _num(x: Any) -> bool:
+        return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+    if not isinstance(v, list) or not v:
+        return None
+    if len(v) == 2 and all(_num(x) for x in v):  # bare [a, b] -> one wedge
+        return [[float(v[0]), float(v[1])]]
+    out: list[list[float]] = []
+    for pair in v:
+        if isinstance(pair, list) and len(pair) == 2 and all(_num(x) for x in pair):
+            out.append([float(pair[0]), float(pair[1])])
+    return out or None
+
+
+def _sector2(v: Any) -> list[float] | None:
+    """Coerce a 2-element degree sector (``shootSector`` /
+    ``additionalAimSector``) to ``[a, b]`` floats; ``None`` if not a
+    2-number list."""
+    def _num(x: Any) -> bool:
+        return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+    if isinstance(v, list) and len(v) == 2 and all(_num(x) for x in v):
+        return [float(v[0]), float(v[1])]
+    return None
+
+
 def _fill_gun_fields(
     mount: dict[str, Any],
     group: dict[str, Any],
@@ -826,6 +891,14 @@ def _fill_gun_fields(
     vert = mount.get("vertSector")
     if isinstance(vert, list) and len(vert) == 2:
         out["elev_range_deg"] = [float(vert[0]), float(vert[1])]
+    # Fire-arc dead zones — wedges inside the traverse range where the
+    # mount can rotate but won't fire (blocked by the ship's own structure).
+    dz = _dead_zones(mount.get("deadZone"))
+    if dz is not None:
+        out["yaw_dead_zones_deg"] = dz
+    pdz = _dead_zones(mount.get("pitchDeadZones"))
+    if pdz is not None:
+        out["pitch_dead_zones_deg"] = pdz
     rot = mount.get("rotationSpeed")
     if isinstance(rot, list) and len(rot) >= 1:
         out["traverse_rate"] = float(rot[0])
@@ -860,6 +933,9 @@ def _fill_aa_fields(mount: dict[str, Any], out: dict[str, Any]) -> None:
     vert = mount.get("vertSector")
     if isinstance(vert, list) and len(vert) == 2:
         out["elev_range_deg"] = [float(vert[0]), float(vert[1])]
+    dz = _dead_zones(mount.get("deadZone"))
+    if dz is not None:
+        out["yaw_dead_zones_deg"] = dz
     rot = mount.get("rotationSpeed")
     if isinstance(rot, list) and len(rot) >= 1:
         out["traverse_rate"] = float(rot[0])
@@ -886,9 +962,31 @@ def _fill_torpedo_fields(mount: dict[str, Any], out: dict[str, Any]) -> None:
     horiz = mount.get("horizSector")
     if isinstance(horiz, list) and len(horiz) == 2:
         out["yaw_range_deg"] = [float(horiz[0]), float(horiz[1])]
+    # Fire-arc dead zone — the launcher can swing here but won't fire
+    # (e.g. the forward wedge where it'd point across the ship's bow).
+    dz = _dead_zones(mount.get("deadZone"))
+    if dz is not None:
+        out["yaw_dead_zones_deg"] = dz
     rot = mount.get("rotationSpeed")
     if isinstance(rot, list) and len(rot) >= 1:
         out["traverse_rate"] = float(rot[0])
+    # Torpedo aiming extras: shootSector / additionalAimSector are usually
+    # [0, 0] (no extra arc) — emit only when authored. torpedoAngles is the
+    # narrow/wide spread the player can toggle.
+    shoot = _sector2(mount.get("shootSector"))
+    if shoot is not None and any(shoot):
+        out["shoot_sector_deg"] = shoot
+    addl = _sector2(mount.get("additionalAimSector"))
+    if addl is not None and any(addl):
+        out["additional_aim_sector_deg"] = addl
+    angles = mount.get("torpedoAngles")
+    if isinstance(angles, list) and angles:
+        coerced = [
+            float(x) for x in angles
+            if isinstance(x, (int, float)) and not isinstance(x, bool)
+        ]
+        if coerced:
+            out["torpedo_angles_deg"] = coerced
     ammo_list = mount.get("ammoList") or []
     if isinstance(ammo_list, list):
         types = _ammo_types_for(ammo_list)

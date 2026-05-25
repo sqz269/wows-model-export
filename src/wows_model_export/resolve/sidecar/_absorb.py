@@ -759,7 +759,9 @@ def _extract_hull_stats(ship_dict: dict[str, Any], hull_name: str) -> dict[str, 
     )
 
 
-def alias_active_hull_to_top_level(doc: dict[str, Any]) -> dict[str, Any]:
+def alias_active_hull_to_top_level(
+    doc: dict[str, Any], *, hull_name: str | None = None,
+) -> dict[str, Any]:
     """Ensure top-level placement arrays mirror the active hull's mount set.
 
     Behaviour by section:
@@ -778,17 +780,28 @@ def alias_active_hull_to_top_level(doc: dict[str, Any]) -> dict[str, Any]:
         so a mount that only exists on the *non*-active hull also gets
         treated as HP_-bound and dropped from top-level when not active).
 
-    No-op when no ``hulls`` block exists or no entry is ``is_active``.
+    ``hull_name`` overrides which hull is aliased — used when the rendered
+    GLB is a hull tier other than the gameplay-active one (mesh-swap
+    variants render the stock hull, so the top-level must mirror the
+    *rendered* hull to stay consistent with the meshes in the GLB). When
+    omitted, the ``is_active`` entry is used (the normal case).
+
+    No-op when no ``hulls`` block exists or the target hull isn't found.
     Returns a new doc; ``doc`` is not mutated.
     """
     hulls = doc.get("hulls")
     if not isinstance(hulls, dict):
         return doc
     active_entry = None
-    for entry in hulls.values():
-        if isinstance(entry, dict) and entry.get("is_active"):
-            active_entry = entry
-            break
+    if hull_name is not None:
+        cand = hulls.get(hull_name)
+        if isinstance(cand, dict):
+            active_entry = cand
+    else:
+        for entry in hulls.values():
+            if isinstance(entry, dict) and entry.get("is_active"):
+                active_entry = entry
+                break
     if active_entry is None:
         return doc
 

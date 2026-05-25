@@ -271,6 +271,11 @@ _PLACEMENT_ORDER: tuple[str, ...] = (
     "sigma",
     "yaw_range_deg",
     "elev_range_deg",
+    # Fire-arc dead zones — wedges inside the traverse range where the mount
+    # can rotate but won't fire (points at the ship's own structure). Lists
+    # of [start_deg, end_deg] pairs, same frame as yaw_range_deg.
+    "yaw_dead_zones_deg",
+    "pitch_dead_zones_deg",
     "traverse_rate",
     "elev_rate",
     "reload_s",
@@ -279,6 +284,9 @@ _PLACEMENT_ORDER: tuple[str, ...] = (
     "aa_dps",
     # Torpedo-specific.
     "tube_count",
+    "shoot_sector_deg",
+    "additional_aim_sector_deg",
+    "torpedo_angles_deg",
     # Hand-authored.
     "attach_to",
     "casts_shadow",

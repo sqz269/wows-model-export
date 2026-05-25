@@ -1038,6 +1038,58 @@ def _collect_per_hull_placements(gm3d_dir: Path) -> dict[str, Path]:
     return out
 
 
+def _detect_rendered_hull(doc: dict[str, Any], active_hull: str | None) -> str | None:
+    """Return the hull whose per-hull mount set best matches the rendered
+    top-level placements.
+
+    The toolkit's default ``export-ship`` (and mesh-swap variant routing)
+    can render a hull tier other than the gameplay-active one — typically
+    the *stock* hull, whose secondary / AA loadout differs from the upgraded
+    hull. Stamping upgraded-hull arcs onto a stock-rendered model leaves the
+    mismatched mounts wrong (empty, or aliased to a gun that isn't in the
+    GLB). Matching by ``(section, hp_name, asset_id)`` recovers the hull
+    actually in the GLB so gameplay + the top-level alias can follow it.
+
+    Returns ``active_hull`` (no override) when it already matches at least
+    as well as any other hull — the normal case, so non-variant ships and
+    ships rendered at their active hull are unaffected. Returns ``None``
+    when there's no ``hulls`` block to compare against.
+
+    Must be called BEFORE :func:`sidecar.alias_active_hull_to_top_level`,
+    while the top-level arrays still hold the toolkit's rendered placements.
+    """
+    hulls = doc.get("hulls")
+    if not isinstance(hulls, dict) or len(hulls) < 2:
+        return None
+
+    def keyset(container: dict[str, Any]) -> set[tuple[str, str, str]]:
+        out: set[tuple[str, str, str]] = set()
+        for sec in ("turrets", "secondaries", "antiair", "torpedoes"):
+            for e in container.get(sec) or []:
+                if not isinstance(e, dict):
+                    continue
+                hp, aid = e.get("hp_name"), e.get("asset_id")
+                if isinstance(hp, str) and isinstance(aid, str):
+                    out.add((sec, hp, aid))
+        return out
+
+    top = keyset(doc)
+    if not top:
+        return None
+    scores = {
+        name: len(top & keyset(he))
+        for name, he in hulls.items()
+        if isinstance(he, dict)
+    }
+    if not scores:
+        return None
+    best = max(scores, key=lambda k: scores[k])
+    active_score = scores.get(active_hull, -1) if active_hull else -1
+    if best != active_hull and scores[best] > active_score:
+        return best
+    return active_hull
+
+
 # ---------------------------------------------------------------------------
 # GameParams autofill passes (lifted)
 # ---------------------------------------------------------------------------
@@ -1105,7 +1157,32 @@ def _absorb_gameparams_passes(
             doc = sidecar.absorb_per_hull_placements(
                 doc, per_hull_files, ship_dict=ship_dict,
             )
-            doc = sidecar.alias_active_hull_to_top_level(doc)
+            # The toolkit may render a hull tier other than the gameplay-
+            # active one (mesh-swap variants render the stock hull, whose
+            # secondary / AA guns differ from the upgraded hull). Detect the
+            # hull actually in the GLB and resolve weapon arcs + alias the
+            # top-level from it, so per-mount fields and asset_ids match the
+            # rendered meshes instead of an unequipped hull tier.
+            rendered_hull = _detect_rendered_hull(doc, active_hull)
+            if rendered_hull and rendered_hull != active_hull:
+                stock_hull = (doc.get("variants") or {}).get("stock_hull")
+                hull_choice = (
+                    "stock" if rendered_hull == stock_hull else rendered_hull
+                )
+                components = _gp_autofill.resolve_components(
+                    ship_dict, hull_choice=hull_choice,
+                )
+                doc = sidecar.alias_active_hull_to_top_level(
+                    doc, hull_name=rendered_hull,
+                )
+                _warn(
+                    warnings,
+                    f"rendered hull {rendered_hull!r} != gameplay-active "
+                    f"{active_hull!r}; resolving weapon arcs + top-level mounts "
+                    f"from the rendered hull",
+                )
+            else:
+                doc = sidecar.alias_active_hull_to_top_level(doc)
     except Exception as e:
         _warn(warnings, f"per-hull mount index failed ({e})")
 
