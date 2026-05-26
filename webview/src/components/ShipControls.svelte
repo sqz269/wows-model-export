@@ -24,7 +24,7 @@
   import { SHIP_SECTIONS, SEAMS } from '$lib/types';
   import type { SeamKey, SeamState, ShipSectionKey } from '$lib/types';
   import type { ColorMode, LodPolicy, ShipViewer } from '$lib/ship';
-  import { DEFAULT_BLOOM_PARAMS } from '$lib/ship';
+  import { DEFAULT_BLOOM_PARAMS, ARMOR_THICKNESS_STOPS, hitboxStyleFor } from '$lib/ship';
   import type { CamoDiagnostics } from '$lib/ship/textures';
   import { loadState, patchState, patchNestedState, type PanelSection } from '$lib/store';
   import { rowCls, labelCls, inputBoxCls } from '$lib/ui/controls';
@@ -71,6 +71,15 @@
     accessories: true,
   });
   let groupVisible = $state<Record<string, boolean>>({});
+  // Armor + hitbox overlays. Per-ship inspection state (reset on swap, not
+  // persisted). `hideHull` is auto-managed on the none↔some-overlay edge but
+  // stays user-overridable via its checkbox.
+  let armorView = $state(false);
+  let hitboxView = $state(false);
+  let hideHull = $state(false);
+  let hasArmor = $state(false);
+  let hasHitbox = $state(false);
+  let hitboxCats = $state<Array<{ label: string; hex: string }>>([]);
   let seamStates = $state<Record<SeamKey, SeamState>>({
     'Bow-MidFront': 'Intact',
     'MidFront-MidBack': 'Intact',
@@ -198,6 +207,21 @@
       }
       groupVisible = next;
 
+      // Armor + hitbox overlays reset per ship. Read availability + build the
+      // hitbox legend (only categories actually present on this ship).
+      hasArmor = viewer.hasArmorData();
+      hasHitbox = viewer.hasHitboxData();
+      armorView = viewer.getArmorViewEnabled();
+      hitboxView = viewer.getHitboxViewEnabled();
+      hideHull = false;
+      const boxes = viewer.getSidecar()?.hitbox?.boxes ?? {};
+      const catMap = new Map<string, string>();
+      for (const b of Object.values(boxes)) {
+        const s = hitboxStyleFor(b);
+        catMap.set(s.label, s.hex);
+      }
+      hitboxCats = [...catMap].map(([label, hex]) => ({ label, hex }));
+
       // Honor the persisted Show-textures choice. Each ship's viewer
       // starts with textures off (TextureManager.clearShip()); kick off
       // the async decode here so the user's last toggle carries across
@@ -242,6 +266,35 @@
   function toggleGroup(name: string, v: boolean) {
     groupVisible[name] = v;
     viewer.setHullGroupVisible(name, v);
+  }
+  // Auto-hide the hull on the none→some-overlay edge and restore it when the
+  // last overlay turns off. Leaves a manual `hideHull` override untouched in
+  // between so the user can peek at hull + armor together.
+  function reconcileHull(wasAny: boolean) {
+    const isAny = armorView || hitboxView;
+    if (!wasAny && isAny) {
+      hideHull = true;
+      viewer.setHullGroupVisible('Hull', false);
+    } else if (wasAny && !isAny) {
+      hideHull = false;
+      viewer.setHullGroupVisible('Hull', true);
+    }
+  }
+  function toggleArmorView(v: boolean) {
+    const wasAny = armorView || hitboxView;
+    armorView = v;
+    viewer.setArmorView(v);
+    reconcileHull(wasAny);
+  }
+  function toggleHitboxView(v: boolean) {
+    const wasAny = armorView || hitboxView;
+    hitboxView = v;
+    viewer.setHitboxView(v);
+    reconcileHull(wasAny);
+  }
+  function toggleHideHull(v: boolean) {
+    hideHull = v;
+    viewer.setHullGroupVisible('Hull', !v);
   }
   function toggleDamageVariants(v: boolean) {
     damageVariants = v;
@@ -400,7 +453,9 @@
   const bodyCls = 'flex flex-col gap-2 px-3.5 pb-3 pt-1';
 </script>
 
-<section class="bg-card border-border flex w-[280px] flex-none flex-col gap-0 overflow-y-auto border-l">
+<section
+  class="bg-card border-border flex w-[280px] flex-none flex-col gap-0 overflow-y-auto border-l"
+>
   <details
     open={panelOpen.view}
     ontoggle={(e) => togglePanel('view', e.currentTarget.open)}
@@ -486,6 +541,71 @@
             {g}
           </label>
         {/each}
+      </div>
+    </details>
+  {/if}
+
+  {#if hasArmor || hasHitbox}
+    <details
+      open={panelOpen['armor-hitbox']}
+      ontoggle={(e) => togglePanel('armor-hitbox', e.currentTarget.open)}
+      class="group {detailsCls}"
+    >
+      <summary class={summaryCls}>Armor &amp; hitbox</summary>
+      <div class={bodyCls}>
+        {#if hasArmor}
+          <label class={rowCls}>
+            <input
+              type="checkbox"
+              checked={armorView}
+              onchange={(e) => toggleArmorView(e.currentTarget.checked)}
+            />
+            Armor (thickness)
+          </label>
+          {#if armorView}
+            <div class="flex flex-wrap gap-x-2 gap-y-0.5 pl-5">
+              {#each ARMOR_THICKNESS_STOPS as s (s.mm)}
+                <span class="text-muted-foreground flex items-center gap-1 text-[9px] tabular-nums">
+                  <span class="inline-block size-2.5 rounded-sm" style="background:{s.hex}"></span>
+                  {s.mm}
+                </span>
+              {/each}
+              <span class="text-muted-foreground/70 text-[9px]">mm</span>
+            </div>
+          {/if}
+        {/if}
+
+        {#if hasHitbox}
+          <label class={rowCls}>
+            <input
+              type="checkbox"
+              checked={hitboxView}
+              onchange={(e) => toggleHitboxView(e.currentTarget.checked)}
+            />
+            Hitboxes (damage modules)
+          </label>
+          {#if hitboxView && hitboxCats.length > 0}
+            <div class="flex flex-wrap gap-x-2.5 gap-y-0.5 pl-5">
+              {#each hitboxCats as c (c.label)}
+                <span class="flex items-center gap-1 text-[10px]">
+                  <span class="inline-block size-2.5 rounded-sm" style="background:{c.hex}"></span>
+                  {c.label}
+                </span>
+              {/each}
+            </div>
+          {/if}
+        {/if}
+
+        {#if armorView || hitboxView}
+          <label class={rowCls}>
+            <input
+              type="checkbox"
+              checked={hideHull}
+              onchange={(e) => toggleHideHull(e.currentTarget.checked)}
+            />
+            Hide hull
+          </label>
+        {/if}
       </div>
     </details>
   {/if}
@@ -592,10 +712,7 @@
               onchange={(e) => toggleAimArcs(e.currentTarget.checked)}
             />
             Show firing arcs
-            <span
-              class="inline-block size-2 rounded-sm"
-              style="background:#40e659"
-              title="can fire"
+            <span class="inline-block size-2 rounded-sm" style="background:#40e659" title="can fire"
             ></span>
             <span
               class="inline-block size-2 rounded-sm"
@@ -752,15 +869,22 @@
     <summary class={summaryCls}>Camo debug</summary>
     <div class={bodyCls}>
       {#if !camoDiag}
-        <span class="text-muted-foreground text-[11px]">No data — refresh once textures are on.</span>
+        <span class="text-muted-foreground text-[11px]"
+          >No data — refresh once textures are on.</span
+        >
         <Button variant="outline" size="xs" class="w-fit" onclick={refreshCamoDiag}>Refresh</Button>
       {:else}
         <div class="flex items-center justify-between">
           <span class="text-muted-foreground text-[10px] uppercase tracking-wide">Active skin</span>
-          <Button variant="outline" size="xs" class="h-5 px-2 text-[10px]" onclick={refreshCamoDiag}>Refresh</Button>
+          <Button variant="outline" size="xs" class="h-5 px-2 text-[10px]" onclick={refreshCamoDiag}
+            >Refresh</Button
+          >
         </div>
         <div class="font-mono text-[11px] leading-snug">
-          <div><span class="text-muted-foreground">id:</span> {camoDiag.activeSkinId ?? '(none)'}</div>
+          <div>
+            <span class="text-muted-foreground">id:</span>
+            {camoDiag.activeSkinId ?? '(none)'}
+          </div>
           <div><span class="text-muted-foreground">scheme:</span> {camoDiag.schemeKey}</div>
           <div class="flex items-center gap-1">
             <span class="text-muted-foreground">palette:</span>
@@ -769,8 +893,14 @@
                 {#each camoDiag.paletteColors as c, i (i)}
                   <span
                     class="border-border inline-block size-3 border"
-                    style:background-color={`rgba(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)},${c[3]})`}
-                    title={`#${[c[0],c[1],c[2]].map(v=>Math.round(v*255).toString(16).padStart(2,'0')).join('')} a=${c[3].toFixed(2)}`}
+                    style:background-color={`rgba(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)},${c[3]})`}
+                    title={`#${[c[0], c[1], c[2]]
+                      .map((v) =>
+                        Math.round(v * 255)
+                          .toString(16)
+                          .padStart(2, '0'),
+                      )
+                      .join('')} a=${c[3].toFixed(2)}`}
                   ></span>
                 {/each}
               </div>
@@ -781,21 +911,39 @@
         </div>
 
         <div class="border-border mt-1 border-t pt-1.5">
-          <div class="text-muted-foreground mb-0.5 text-[10px] uppercase tracking-wide">Entry stats</div>
+          <div class="text-muted-foreground mb-0.5 text-[10px] uppercase tracking-wide">
+            Entry stats
+          </div>
           <div class="font-mono text-[11px] leading-snug grid grid-cols-2 gap-x-2">
-            <span class="text-muted-foreground">total:</span><span>{fmtNum(camoDiag.entryStats.total)}</span>
-            <span class="text-muted-foreground">hull:</span><span>{fmtNum(camoDiag.entryStats.hullEntries)}</span>
-            <span class="text-muted-foreground">accessory:</span><span>{fmtNum(camoDiag.entryStats.accessoryEntries)}</span>
-            <span class="text-muted-foreground">camo on:</span><span>{fmtNum(camoDiag.entryStats.camoEnabled)}</span>
-            <span class="text-muted-foreground">mat_albedo on:</span><span>{fmtNum(camoDiag.entryStats.matAlbedoEnabled)}</span>
-            <span class="text-muted-foreground">unpainted:</span><span>{fmtNum(camoDiag.entryStats.bothDisabled)}</span>
-            <span class="text-muted-foreground">transparent:</span><span>{fmtNum(camoDiag.entryStats.noCamoEntries)}</span>
+            <span class="text-muted-foreground">total:</span><span
+              >{fmtNum(camoDiag.entryStats.total)}</span
+            >
+            <span class="text-muted-foreground">hull:</span><span
+              >{fmtNum(camoDiag.entryStats.hullEntries)}</span
+            >
+            <span class="text-muted-foreground">accessory:</span><span
+              >{fmtNum(camoDiag.entryStats.accessoryEntries)}</span
+            >
+            <span class="text-muted-foreground">camo on:</span><span
+              >{fmtNum(camoDiag.entryStats.camoEnabled)}</span
+            >
+            <span class="text-muted-foreground">mat_albedo on:</span><span
+              >{fmtNum(camoDiag.entryStats.matAlbedoEnabled)}</span
+            >
+            <span class="text-muted-foreground">unpainted:</span><span
+              >{fmtNum(camoDiag.entryStats.bothDisabled)}</span
+            >
+            <span class="text-muted-foreground">transparent:</span><span
+              >{fmtNum(camoDiag.entryStats.noCamoEntries)}</span
+            >
           </div>
         </div>
 
         {#if Object.keys(camoDiag.categories).length > 0}
           <div class="border-border mt-1 border-t pt-1.5">
-            <div class="text-muted-foreground mb-0.5 text-[10px] uppercase tracking-wide">Skin categories</div>
+            <div class="text-muted-foreground mb-0.5 text-[10px] uppercase tracking-wide">
+              Skin categories
+            </div>
             <table class="font-mono text-[10px] w-full">
               <thead>
                 <tr class="text-muted-foreground">
@@ -803,7 +951,10 @@
                   <th class="text-center font-normal" title="categories[cat].mask">msk</th>
                   <th class="text-center font-normal" title="categories[cat].mgn (Path B)">mgn</th>
                   <th class="text-center font-normal" title="mat_textures[cat].albedo">alb</th>
-                  <th class="text-right font-normal" title="entries with camoEnable=1 / total in this category">camo</th>
+                  <th
+                    class="text-right font-normal"
+                    title="entries with camoEnable=1 / total in this category">camo</th
+                  >
                 </tr>
               </thead>
               <tbody>
@@ -821,15 +972,21 @@
                 {/each}
               </tbody>
             </table>
-            <div class="text-muted-foreground mt-1 text-[9px]">Hull-side cats in amber. msk = Path A mask, mgn = Path B MGN, alb = mat_albedo atlas.</div>
+            <div class="text-muted-foreground mt-1 text-[9px]">
+              Hull-side cats in amber. msk = Path A mask, mgn = Path B MGN, alb = mat_albedo atlas.
+            </div>
           </div>
 
           {@const catSet = camoDiag.categories}
           {@const perCat = camoDiag.perCategory}
-          {@const unmatched = Object.keys(perCat).filter((k) => !(k in catSet)).sort()}
+          {@const unmatched = Object.keys(perCat)
+            .filter((k) => !(k in catSet))
+            .sort()}
           {#if unmatched.length > 0}
             <div class="border-border mt-1 border-t pt-1.5">
-              <div class="text-muted-foreground mb-0.5 text-[10px] uppercase tracking-wide">Entries unmatched</div>
+              <div class="text-muted-foreground mb-0.5 text-[10px] uppercase tracking-wide">
+                Entries unmatched
+              </div>
               <table class="font-mono text-[10px] w-full">
                 <thead>
                   <tr class="text-muted-foreground">
@@ -847,14 +1004,18 @@
                   {/each}
                 </tbody>
               </table>
-              <div class="text-muted-foreground mt-1 text-[9px]">Entry categories without a skin-category binding. Red = no paint applied.</div>
+              <div class="text-muted-foreground mt-1 text-[9px]">
+                Entry categories without a skin-category binding. Red = no paint applied.
+              </div>
             </div>
           {/if}
         {/if}
 
         {#if camoDiag.noCamoKeys.length > 0}
           <details class="border-border group/inner mt-1 border-t pt-1.5">
-            <summary class="text-muted-foreground hover:text-foreground mb-0.5 cursor-pointer select-none text-[10px] uppercase tracking-wide [&::-webkit-details-marker]:hidden before:content-[''] before:inline-block before:size-0 before:border-y-[3px] before:border-y-transparent before:border-l-[4px] before:border-l-current before:mr-1 before:transition-transform before:translate-y-[-1px] group-open/inner:before:rotate-90">
+            <summary
+              class="text-muted-foreground hover:text-foreground mb-0.5 cursor-pointer select-none text-[10px] uppercase tracking-wide [&::-webkit-details-marker]:hidden before:content-[''] before:inline-block before:size-0 before:border-y-[3px] before:border-y-transparent before:border-l-[4px] before:border-l-current before:mr-1 before:transition-transform before:translate-y-[-1px] group-open/inner:before:rotate-90"
+            >
               No-camo keys ({camoDiag.noCamoKeys.length})
             </summary>
             <div class="max-h-64 overflow-y-auto pt-0.5 font-mono text-[10px] leading-snug">
@@ -862,11 +1023,12 @@
                 <div class="truncate" title={key}>{key}</div>
               {/each}
             </div>
-            <div class="text-muted-foreground mt-1 text-[9px]">Materials with sidecar <code>shader_intent: "transparent"</code> — camo override skipped.</div>
+            <div class="text-muted-foreground mt-1 text-[9px]">
+              Materials with sidecar <code>shader_intent: "transparent"</code> — camo override skipped.
+            </div>
           </details>
         {/if}
       {/if}
     </div>
   </details>
-
 </section>

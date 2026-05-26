@@ -15,11 +15,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-import {
-  createSceneEnvironment,
-  type BloomParams,
-  type SceneEnvironment,
-} from '$lib/three/scene';
+import { createSceneEnvironment, type BloomParams, type SceneEnvironment } from '$lib/three/scene';
 import { observeResize } from '$lib/three/resize';
 import { startRenderLoop } from '$lib/three/render_loop';
 import { disposeTree } from '$lib/three/dispose';
@@ -63,6 +59,18 @@ import {
   TurretRigManager,
   type MountArcLimits,
 } from './turret_rig';
+import {
+  applyArmorView,
+  disposeArmorView,
+  prepareArmorMeshes,
+  type ArmorMeshEntry,
+} from './armor_view';
+import {
+  applyHitboxView,
+  disposeHitboxView,
+  prepareHitboxMeshes,
+  type HitboxMeshEntry,
+} from './hitbox_view';
 
 /**
  * Info resolved from `userData` on the clicked accessory instance. The
@@ -205,6 +213,14 @@ export class ShipViewer {
   // Color
   private colorMaterials: ColorMaterials;
   private colorMode: ColorMode = 'off';
+
+  // Armor + hitbox overlays. Lazy-prepared on first enable (reads the
+  // hull GLB's Armor/Hitboxes groups + sidecar tables), reset per ship.
+  private armorEntries: ArmorMeshEntry[] | null = null;
+  private armorMaterial: THREE.MeshStandardMaterial | null = null;
+  private armorViewEnabled = false;
+  private hitboxEntries: HitboxMeshEntry[] | null = null;
+  private hitboxViewEnabled = false;
 
   // Texture pipeline
   private textures: TextureManager;
@@ -640,6 +656,20 @@ export class ShipViewer {
       damageMeshes: [],
       meshesByLodLevel: new Map(),
     };
+    // Armor + hitbox overlays. The hull GLB owns the per-mesh geometry +
+    // original materials (released by disposeTree above); we only own the
+    // shared overlay materials. Edge LineSegments rode the hull tree too.
+    if (this.armorEntries && this.armorMaterial) {
+      disposeArmorView(this.armorEntries, this.armorMaterial);
+    }
+    this.armorEntries = null;
+    this.armorMaterial = null;
+    this.armorViewEnabled = false;
+    if (this.hitboxEntries) {
+      disposeHitboxView(this.hitboxEntries);
+    }
+    this.hitboxEntries = null;
+    this.hitboxViewEnabled = false;
     this.placementsByMesh.clear();
     this.placementColorEntries.length = 0;
     this.placementMeshesByLodLevel.clear();
@@ -664,6 +694,64 @@ export class ShipViewer {
   setHullGroupVisible(name: string, visible: boolean): void {
     const g = this.classified.groups.find((x) => x.name === name);
     if (g) g.node.visible = visible;
+  }
+
+  // ── Armor + hitbox overlays ───────────────────────────────────────────
+
+  /** True when the loaded ship has an `Armor` group + a sidecar thickness
+   *  table — i.e. the armor heat-map can be rendered. */
+  hasArmorData(): boolean {
+    return (
+      this.classified.groups.some((g) => g.name === 'Armor') &&
+      !!this.sidecar?.armor?.materials_table
+    );
+  }
+
+  /** True when the loaded ship has a `Hitboxes` group. Box tinting degrades
+   *  gracefully (flat "Other" colour) when the sidecar `hitbox` is absent. */
+  hasHitboxData(): boolean {
+    return this.classified.groups.some((g) => g.name === 'Hitboxes');
+  }
+
+  /** Toggle the per-vertex armor-thickness heat-map. Reveals the `Armor`
+   *  group and swaps its meshes onto a thickness-coloured material. */
+  setArmorView(on: boolean): void {
+    const group = this.classified.groups.find((g) => g.name === 'Armor');
+    if (!group) return;
+    if (on && !this.armorEntries) {
+      const table = this.sidecar?.armor?.materials_table ?? {};
+      const prep = prepareArmorMeshes(group.node, table);
+      this.armorEntries = prep.entries;
+      this.armorMaterial = prep.material;
+    }
+    this.armorViewEnabled = on;
+    if (this.armorEntries && this.armorMaterial) {
+      applyArmorView(this.armorEntries, this.armorMaterial, on);
+    }
+    group.node.visible = on;
+  }
+
+  /** Toggle the translucent hitbox / damage-module overlay. */
+  setHitboxView(on: boolean): void {
+    const group = this.classified.groups.find((g) => g.name === 'Hitboxes');
+    if (!group) return;
+    if (on && !this.hitboxEntries) {
+      const boxes = this.sidecar?.hitbox?.boxes ?? {};
+      this.hitboxEntries = prepareHitboxMeshes(group.node, boxes);
+    }
+    this.hitboxViewEnabled = on;
+    if (this.hitboxEntries) {
+      applyHitboxView(this.hitboxEntries, on);
+    }
+    group.node.visible = on;
+  }
+
+  getArmorViewEnabled(): boolean {
+    return this.armorViewEnabled;
+  }
+
+  getHitboxViewEnabled(): boolean {
+    return this.hitboxViewEnabled;
   }
 
   setLodPolicy(p: LodPolicy): void {

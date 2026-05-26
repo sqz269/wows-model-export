@@ -14,6 +14,8 @@ export {
   sectionOfHullMesh,
   shortMeshName,
 } from './visibility';
+export { ARMOR_THICKNESS_STOPS, thicknessToColorHex } from './armor_view';
+export { HITBOX_LEGEND, hitboxStyleFor } from './hitbox_view';
 export * as camo from './camo';
 export * as textures from './textures';
 export { TurretRigManager } from './turret_rig';
