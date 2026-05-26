@@ -58,11 +58,14 @@ import {
   extractTurretRig,
   TurretRigManager,
   type MountArcLimits,
+  type TurretRig,
 } from './turret_rig';
 import {
   applyArmorView,
+  buildArmorEntries,
+  createArmorXrayMaterial,
   disposeArmorView,
-  prepareArmorMeshes,
+  mountArmorThicknessOf,
   type ArmorMeshEntry,
 } from './armor_view';
 import {
@@ -175,6 +178,44 @@ export interface ShipLoadStats {
   skinCount: number;
 }
 
+/** Per-mount armor record — a turret/secondary's own armor meshes (from the
+ *  accessory GLB's `Armor` group), kept hidden until the armor view reveals
+ *  them. When the mount is rigged, the meshes are attached to the yaw bone so
+ *  they rotate with the turret; thickness comes from the ship's per-mount
+ *  `mount_armor[hp]`. */
+interface MountArmorRecord {
+  /** Owning hardpoint (e.g. `HP_AGM_1`) for the `mount_armor[hp]` lookup. */
+  hp: string | null;
+  /** The accessory's armor meshes (under its `Armor` group). */
+  meshes: THREE.Mesh[];
+  /** The mount's rig, when present — armor attaches to `rig.yaw`. */
+  rig: TurretRig | null;
+  /** Built lazily on first armor-view enable (per-instance coloured + cloned). */
+  entries: ArmorMeshEntry[];
+}
+
+/** Detach an accessory's `Armor` group from its parent so the normal
+ *  texture / color / LOD registration skips it. Returns the group + meshes;
+ *  the caller re-adds the group (hidden) after registration so the armor
+ *  rides the placement transform and can later attach to the yaw bone. */
+function detachAccessoryArmor(
+  inst: THREE.Object3D,
+): { parent: THREE.Object3D; group: THREE.Object3D; meshes: THREE.Mesh[] } | null {
+  const groups: THREE.Object3D[] = [];
+  inst.traverse((o) => {
+    if (o.name === 'Armor') groups.push(o);
+  });
+  const group = groups[0];
+  if (!group || !group.parent) return null;
+  const meshes: THREE.Mesh[] = [];
+  group.traverse((o) => {
+    if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh);
+  });
+  const parent = group.parent;
+  parent.remove(group);
+  return { parent, group, meshes };
+}
+
 export class ShipViewer {
   private env: SceneEnvironment;
   private stopLoop: () => void;
@@ -219,6 +260,12 @@ export class ShipViewer {
   private armorEntries: ArmorMeshEntry[] | null = null;
   private armorMaterial: THREE.MeshStandardMaterial | null = null;
   private armorViewEnabled = false;
+  /** Per-mount (turret/secondary) armor, collected at load, revealed in the
+   *  armor view. The X-ray material is shared with hull armor. */
+  private mountArmorRecords: MountArmorRecord[] = [];
+  /** instance_id → hardpoint name, from the sidecar mounts. Joins a placement
+   *  to its `mount_armor[hp]` thickness table. */
+  private hpByInstanceId = new Map<string, string>();
   private hitboxEntries: HitboxMeshEntry[] | null = null;
   private hitboxViewEnabled = false;
 
@@ -380,6 +427,7 @@ export class ShipViewer {
         if (!grp) continue;
         for (const m of grp) {
           if (!m.instance_id) continue;
+          if (m.hp_name) this.hpByInstanceId.set(m.instance_id, m.hp_name);
           if (m.misc_filter !== undefined) {
             miscFilterByInstanceId.set(m.instance_id, m.misc_filter);
           }
@@ -490,6 +538,10 @@ export class ShipViewer {
           // every turret's yaw to the same `Rotate_Y` instance.
           const inst = cloneAccessoryInstance(tpl);
           applyPlacementMatrix(inst, e.placement.transform.matrix);
+          // Pull the accessory's own armor (turret/secondary `Armor` group)
+          // out before registration so it isn't textured / colored / LOD-
+          // bucketed as normal turret geometry. Re-added hidden below.
+          const armorDetached = detachAccessoryArmor(inst);
           const { colorEntries, meshesByLodLevel } = tagAndIndexInstance(
             inst,
             {
@@ -531,6 +583,23 @@ export class ShipViewer {
             // meshes (no Rotate_Y bone), so draw their firing arc without
             // animating them.
             this.turretRigs.registerStaticArc(e.placement.instance_id, inst, arcLimits);
+          }
+          // Re-attach the detached armor (hidden) so it rides the placement
+          // transform, and record it for the armor view. Rigged mounts get
+          // their armor attached to the yaw bone on first reveal so it rotates
+          // with the turret.
+          if (armorDetached && armorDetached.meshes.length > 0) {
+            armorDetached.parent.add(armorDetached.group);
+            // Hide per-mesh (not the group): the armor view toggles mesh
+            // visibility, and rigged mounts move their meshes out of the group
+            // onto the yaw bone — so group-level visibility wouldn't gate them.
+            for (const m of armorDetached.meshes) m.visible = false;
+            this.mountArmorRecords.push({
+              hp: this.hpByInstanceId.get(e.placement.instance_id) ?? null,
+              meshes: armorDetached.meshes,
+              rig,
+              entries: [],
+            });
           }
           this.sectionGroups[e.section].add(inst);
           renderedPlacements++;
@@ -657,14 +726,17 @@ export class ShipViewer {
       meshesByLodLevel: new Map(),
     };
     // Armor + hitbox overlays. The hull GLB owns the per-mesh geometry +
-    // original materials (released by disposeTree above); we only own the
-    // shared overlay materials. Edge LineSegments rode the hull tree too.
-    if (this.armorEntries && this.armorMaterial) {
-      disposeArmorView(this.armorEntries, this.armorMaterial);
-    }
+    // original materials (released by disposeTree above); we own the shared
+    // X-ray material + any per-instance cloned mount-armor geometry. Edge
+    // LineSegments rode the hull tree too.
+    if (this.armorEntries) disposeArmorView(this.armorEntries, null);
+    for (const rec of this.mountArmorRecords) disposeArmorView(rec.entries, null);
+    this.armorMaterial?.dispose();
     this.armorEntries = null;
     this.armorMaterial = null;
     this.armorViewEnabled = false;
+    this.mountArmorRecords = [];
+    this.hpByInstanceId.clear();
     if (this.hitboxEntries) {
       disposeHitboxView(this.hitboxEntries);
     }
@@ -713,22 +785,70 @@ export class ShipViewer {
     return this.classified.groups.some((g) => g.name === 'Hitboxes');
   }
 
-  /** Toggle the per-vertex armor-thickness heat-map. Reveals the `Armor`
-   *  group and swaps its meshes onto a thickness-coloured material. */
+  /** Toggle the per-vertex armor-thickness heat-map across the hull `Armor`
+   *  group AND each turret/secondary mount's own armor. Mount armor is
+   *  thickness-coloured from the ship's `mount_armor[hp]` and, when the mount
+   *  is rigged, attached to its yaw bone so it rotates with the turret. The
+   *  X-ray material is shared by hull + mount armor. */
   setArmorView(on: boolean): void {
+    if (on) this.armorMaterial ??= createArmorXrayMaterial();
+    const materialsTable = this.sidecar?.armor?.materials_table ?? {};
+
+    // Hull armor.
     const group = this.classified.groups.find((g) => g.name === 'Armor');
-    if (!group) return;
-    if (on && !this.armorEntries) {
-      const table = this.sidecar?.armor?.materials_table ?? {};
-      const prep = prepareArmorMeshes(group.node, table);
-      this.armorEntries = prep.entries;
-      this.armorMaterial = prep.material;
+    if (group) {
+      if (on && !this.armorEntries) {
+        const meshes: THREE.Mesh[] = [];
+        group.node.traverse((o) => {
+          if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh);
+        });
+        // `mountArmorThicknessOf(undefined, table)` is just the materials_table
+        // lookup — hull armor has unique geometry, so no clone.
+        this.armorEntries = buildArmorEntries(
+          meshes,
+          mountArmorThicknessOf(undefined, materialsTable),
+        );
+      }
+      if (this.armorEntries && this.armorMaterial) {
+        applyArmorView(this.armorEntries, this.armorMaterial, on);
+      }
+      group.node.visible = on;
     }
+
+    // Per-mount (turret / secondary) armor. Lazy-prepare on first reveal:
+    // colour from mount_armor[hp], clone the shared template geometry, and
+    // attach rigged mounts' armor to the yaw bone so it rotates with the gun.
+    //
+    // `attach()` preserves world transform, so the rig must be at REST when we
+    // re-parent — otherwise armor authored at rest would bind relative to an
+    // already-aimed yaw and drift. Reset to rest around the one-time attach,
+    // then restore the user's aim (which now also drives the attached armor).
+    const needsPrep = on && this.mountArmorRecords.some((r) => r.entries.length === 0);
+    const savedAim = needsPrep ? this.turretRigs.getGlobalAim() : null;
+    if (needsPrep) {
+      this.turretRigs.reset();
+      this.shipRoot.updateMatrixWorld(true);
+    }
+    for (const rec of this.mountArmorRecords) {
+      if (on && rec.entries.length === 0) {
+        const thicknessOf = mountArmorThicknessOf(
+          this.sidecar?.armor?.mount_armor?.[rec.hp ?? ''],
+          materialsTable,
+        );
+        rec.entries = buildArmorEntries(rec.meshes, thicknessOf, { cloneGeometry: true });
+        const yaw = rec.rig?.yaw;
+        if (yaw) {
+          for (const m of rec.meshes) yaw.attach(m);
+        }
+      }
+      if (rec.entries.length > 0 && this.armorMaterial) {
+        applyArmorView(rec.entries, this.armorMaterial, on);
+      }
+      for (const m of rec.meshes) m.visible = on;
+    }
+    if (savedAim) this.turretRigs.setGlobalAim(savedAim.yaw, savedAim.pitch);
+
     this.armorViewEnabled = on;
-    if (this.armorEntries && this.armorMaterial) {
-      applyArmorView(this.armorEntries, this.armorMaterial, on);
-    }
-    group.node.visible = on;
   }
 
   /** Toggle the translucent hitbox / damage-module overlay. */
@@ -744,6 +864,26 @@ export class ShipViewer {
       applyHitboxView(this.hitboxEntries, on);
     }
     group.node.visible = on;
+  }
+
+  /**
+   * Hide the ship's *visual* meshes (hull group + every placed accessory mesh)
+   * so the armor / hitbox overlays read clearly. Hides the visual meshes, NOT
+   * the section groups — the per-mount armor now lives inside those groups
+   * (attached to the yaw bones), so hiding the group would hide the armor too.
+   * The hull `Armor` group + mount armor stay visible. Restoring re-runs the
+   * visibility cascade.
+   */
+  setArmorOnly(hide: boolean): void {
+    const hull = this.classified.groups.find((g) => g.name === 'Hull');
+    if (hull) hull.node.visible = !hide;
+    if (hide) {
+      for (const meshes of this.placementMeshesByLodLevel.values()) {
+        for (const m of meshes) m.visible = false;
+      }
+    } else {
+      this.applyAllStates();
+    }
   }
 
   getArmorViewEnabled(): boolean {

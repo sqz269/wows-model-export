@@ -133,7 +133,14 @@ export interface ArmorMeshEntry {
   savedColorAttr: THREE.BufferAttribute | THREE.InterleavedBufferAttribute | null;
   /** Computed per-vertex thickness colour buffer. */
   armorColorAttr: THREE.BufferAttribute;
+  /** Geometry this entry owns and must dispose (set when cloned per-instance
+   *  so shared turret-template geometry isn't mutated). Undefined for hull
+   *  armor (unique geometry, released by the hull's disposeTree). */
+  ownedGeometry?: THREE.BufferGeometry;
 }
+
+/** Resolves a per-vertex `_MATERIAL_ID` to an effective thickness (mm). */
+export type ArmorThicknessFn = (matId: number) => number;
 
 export interface ArmorPrep {
   entries: ArmorMeshEntry[];
@@ -149,53 +156,101 @@ function readMaterialIdAttr(
 }
 
 /**
- * Walk the `Armor` group, build a thickness-colour buffer per mesh, and
- * return the reversible swap entries + the shared material. Meshes without a
- * `_material_id` attribute fall back to a flat 0mm tint (rare; logged once).
+ * Build reversible thickness-colour swap entries for a set of armor meshes.
+ *
+ * `thicknessOf` maps each vertex's `_MATERIAL_ID` to an effective thickness;
+ * hull armor passes a `materials_table` lookup, per-mount turret armor passes
+ * a `mount_armor`-derived one (see `mountArmorThicknessOf`).
+ *
+ * `cloneGeometry`: clone each mesh's geometry before baking the colour buffer.
+ * Required for turret/mount armor — those meshes are clones that SHARE the
+ * library template's geometry, so mutating it in place would bleed the colour
+ * buffer (and thickness) across every mount of the same asset. Hull armor has
+ * unique geometry and skips the clone.
  */
-export function prepareArmorMeshes(
-  armorGroup: THREE.Object3D,
-  materialsTable: Record<string, SidecarArmorMaterial>,
-): ArmorPrep {
-  const material = createArmorXrayMaterial();
-
+export function buildArmorEntries(
+  meshes: Iterable<THREE.Mesh>,
+  thicknessOf: ArmorThicknessFn,
+  opts: { cloneGeometry?: boolean } = {},
+): ArmorMeshEntry[] {
   const entries: ArmorMeshEntry[] = [];
   const col = new THREE.Color();
   let warnedMissing = false;
 
-  armorGroup.traverse((obj) => {
-    const mesh = obj as THREE.Mesh;
-    if (!mesh.isMesh) return;
-    const geom = mesh.geometry as THREE.BufferGeometry;
+  for (const mesh of meshes) {
+    if (!mesh.isMesh) continue;
+    let geom = mesh.geometry as THREE.BufferGeometry;
     const count = geom.getAttribute('position')?.count ?? 0;
-    if (!count) return;
+    if (!count) continue;
 
     const matAttr = readMaterialIdAttr(geom);
-    const colors = new Float32Array(count * 3);
-    for (let i = 0; i < count; i++) {
-      const id = matAttr ? matAttr.getX(i) : 0;
-      const thickness = materialsTable[String(id)]?.thickness_mm ?? 0;
-      thicknessToColor(thickness, col);
-      colors[i * 3] = col.r;
-      colors[i * 3 + 1] = col.g;
-      colors[i * 3 + 2] = col.b;
-    }
     if (!matAttr && !warnedMissing) {
       console.warn('[armor] mesh has no _material_id attribute; coloring flat', mesh.name);
       warnedMissing = true;
     }
+    const colors = new Float32Array(count * 3);
+    for (let i = 0; i < count; i++) {
+      const id = matAttr ? matAttr.getX(i) : 0;
+      thicknessToColor(thicknessOf(id), col);
+      colors[i * 3] = col.r;
+      colors[i * 3 + 1] = col.g;
+      colors[i * 3 + 2] = col.b;
+    }
 
-    const armorColorAttr = new THREE.BufferAttribute(colors, 3);
+    let ownedGeometry: THREE.BufferGeometry | undefined;
+    if (opts.cloneGeometry) {
+      geom = geom.clone();
+      ownedGeometry = geom;
+      mesh.geometry = geom;
+    }
     const existing = geom.getAttribute('color') ?? null;
     entries.push({
       mesh,
       originalMaterial: mesh.material,
       savedColorAttr: existing as THREE.BufferAttribute | null,
-      armorColorAttr,
+      armorColorAttr: new THREE.BufferAttribute(colors, 3),
+      ownedGeometry,
     });
-  });
+  }
+  return entries;
+}
 
-  return { entries, material };
+/**
+ * Walk the hull `Armor` group and build swap entries + the shared X-ray
+ * material. Thickness from the sidecar `materials_table` (summed layers).
+ */
+export function prepareArmorMeshes(
+  armorGroup: THREE.Object3D,
+  materialsTable: Record<string, SidecarArmorMaterial>,
+): ArmorPrep {
+  const meshes: THREE.Mesh[] = [];
+  armorGroup.traverse((o) => {
+    if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh);
+  });
+  const thicknessOf: ArmorThicknessFn = (id) => materialsTable[String(id)]?.thickness_mm ?? 0;
+  return { entries: buildArmorEntries(meshes, thicknessOf), material: createArmorXrayMaterial() };
+}
+
+/**
+ * Build a thickness function for a turret/secondary mount from the sidecar's
+ * `mount_armor[hp]` map. Its keys are `(layer << 16) | material_id`; we mask
+ * to the material id and SUM the layers, matching how `materials_table`
+ * collapses multi-layer plates into one `thickness_mm`. Falls back to the
+ * hull `materials_table` when the mount carries no armor table.
+ */
+export function mountArmorThicknessOf(
+  mountArmor: Record<string, number> | undefined,
+  materialsTable: Record<string, SidecarArmorMaterial>,
+): ArmorThicknessFn {
+  if (mountArmor && Object.keys(mountArmor).length > 0) {
+    const byMat = new Map<number, number>();
+    for (const [k, mm] of Object.entries(mountArmor)) {
+      const mat = Number(k) & 0xffff;
+      byMat.set(mat, (byMat.get(mat) ?? 0) + mm);
+    }
+    return (id) => byMat.get(id) ?? 0;
+  }
+  return (id) => materialsTable[String(id)]?.thickness_mm ?? 0;
 }
 
 /** Swap armor meshes onto (on) / off (off) the thickness material. */
@@ -218,10 +273,12 @@ export function applyArmorView(
 }
 
 export function disposeArmorView(
-  _entries: ArmorMeshEntry[],
-  material: THREE.MeshStandardMaterial,
+  entries: ArmorMeshEntry[],
+  material: THREE.MeshStandardMaterial | null,
 ): void {
-  // Per-mesh geometry + originalMaterial belong to the hull GLB and are
-  // disposed by the hull's disposeTree; we only own the shared material.
-  material.dispose();
+  // Hull armor geometry + originalMaterial belong to the hull GLB (released by
+  // its disposeTree); we own only per-instance cloned geometry (mount armor)
+  // and the shared X-ray material.
+  for (const e of entries) e.ownedGeometry?.dispose();
+  material?.dispose();
 }

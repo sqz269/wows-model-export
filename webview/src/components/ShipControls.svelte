@@ -267,17 +267,18 @@
     groupVisible[name] = v;
     viewer.setHullGroupVisible(name, v);
   }
-  // Auto-hide the hull on the none→some-overlay edge and restore it when the
-  // last overlay turns off. Leaves a manual `hideHull` override untouched in
-  // between so the user can peek at hull + armor together.
+  // Auto-hide the ship's visual meshes (hull + turrets/accessories) on the
+  // none→some-overlay edge so the armor shells (hull + per-mount turret armor)
+  // read clearly, and restore them when the last overlay turns off. Leaves a
+  // manual `hideHull` override untouched in between.
   function reconcileHull(wasAny: boolean) {
     const isAny = armorView || hitboxView;
     if (!wasAny && isAny) {
       hideHull = true;
-      viewer.setHullGroupVisible('Hull', false);
+      viewer.setArmorOnly(true);
     } else if (wasAny && !isAny) {
       hideHull = false;
-      viewer.setHullGroupVisible('Hull', true);
+      viewer.setArmorOnly(false);
     }
   }
   function toggleArmorView(v: boolean) {
@@ -294,7 +295,7 @@
   }
   function toggleHideHull(v: boolean) {
     hideHull = v;
-    viewer.setHullGroupVisible('Hull', !v);
+    viewer.setArmorOnly(v);
   }
   function toggleDamageVariants(v: boolean) {
     damageVariants = v;
@@ -603,7 +604,7 @@
               checked={hideHull}
               onchange={(e) => toggleHideHull(e.currentTarget.checked)}
             />
-            Hide hull
+            Hide ship (armor only)
           </label>
         {/if}
       </div>
