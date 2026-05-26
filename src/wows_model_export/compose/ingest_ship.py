@@ -669,6 +669,13 @@ def ingest_ship(
             doc["provenance"] = {
                 "extract_args": {
                     "vehicle":       gameparams_ship_id or toolkit_name,
+                    # The resolved toolkit model directory name. `vehicle`
+                    # above is the GameParams top_key, which the toolkit's
+                    # find_ship REJECTS on replay; this is the identifier
+                    # compose.clean_and_reextract feeds back as
+                    # `toolkit_ship_override`. (Older sidecars omit it and
+                    # fall back to a snapshot join.)
+                    "model_dir":     toolkit_name,
                     "label":         label,
                     "permoflage":    variant_permoflage,
                     "build_library": bool(build_library),
