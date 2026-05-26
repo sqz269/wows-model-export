@@ -89,6 +89,18 @@ PARALLAX_KIND = {
     for name in cat
 }
 
+# Projector box depth in metres — the 5th arg to WG's
+# ``setTransform(pos, dir, tangent, size, depth)`` (Ghidra FUN_1401b1c40;
+# equals Unity ``DecalProjector.size.z``). Constant across all prototypes.
+PROJECTION_DEPTH = 0.7
+
+# HDR multiplier applied to the sRGB-decoded ``_e`` channel in the forward-lit
+# decal pixel shader (DXBC ``decal.win.dx11`` chunk001/009: ``mad r, e_sample,
+# l(104.0,104.0,104.0,0), r``). Emitted so consumers source it instead of
+# hardcoding; treat as WG's pre-tonemap HDR scale and re-tune visually under
+# the consumer's tonemapper rather than copying the literal.
+EMISSIVE_HDR_SCALE = 104.0
+
 # Default WG install path (matches the I:-side convention). Overridable
 # via the ``source_dir`` parameter on the public entry.
 _DEFAULT_DYNDECALS_DIR = Path(
@@ -154,6 +166,8 @@ def build_manifest(decals: dict[str, dict], patch_id: str) -> dict:
     out: dict = {
         "patch_id": patch_id,
         "u_flip": True,
+        "projection_depth": PROJECTION_DEPTH,
+        "emissive_hdr_scale": EMISSIVE_HDR_SCALE,
         "decals": {},
         "prototype_lists": PROTOTYPE_LISTS,
         "techniques": TECHNIQUES,
