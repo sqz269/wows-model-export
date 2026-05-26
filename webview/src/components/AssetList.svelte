@@ -11,7 +11,6 @@
     LibraryAsset,
     LibraryFilter,
     LibraryIndex,
-    WindingAuditEntry,
   } from '$lib/types';
 
   export type SortKey = 'id-asc' | 'id-desc' | 'built-desc' | 'built-asc';
@@ -28,18 +27,6 @@
     filter: LibraryFilter;
     sort: SortKey;
     activeId: string | null;
-    /** Audit verdicts keyed by GLB-relative path. Empty when the audit
-     *  JSON is missing — rows just don't render verdict badges. */
-    windingAudit?: Map<string, WindingAuditEntry>;
-    /** Unresolved FLIP-verdict count. Drives the bulk-flip button —
-     *  hidden when 0 so the filter row stays tidy. */
-    flipCandidateCount?: number;
-    /** True while a bulk auto-flip is in flight. Disables the button
-     *  and the per-row F shortcut (via parent gating). */
-    autoFlipPending?: boolean;
-    /** Inline status line under the filter row. `null` = hidden. */
-    auditMsg?: { cls: 'ok' | 'fail' | 'working'; text: string } | null;
-    onAutoFlip?: () => void;
     onFilterChange: (next: LibraryFilter) => void;
     onSortChange: (next: SortKey) => void;
     onSelect: (id: string) => void;
@@ -50,11 +37,6 @@
     filter,
     sort,
     activeId,
-    windingAudit,
-    flipCandidateCount = 0,
-    autoFlipPending = false,
-    auditMsg = null,
-    onAutoFlip,
     onFilterChange,
     onSortChange,
     onSelect,
@@ -229,28 +211,6 @@
         {/each}
       </select>
     </label>
-
-    {#if flipCandidateCount > 0}
-      <button
-        type="button"
-        title="Run the audit + flip every asset whose joint A+B correctness < 0.4. Updates flip_overrides.json with source=auto. Reversible per-asset via F-key."
-        disabled={autoFlipPending}
-        onclick={() => onAutoFlip?.()}
-        class="rounded border border-amber-700/60 bg-amber-900/30 px-2 py-1 text-xs text-amber-200 hover:bg-amber-900/50 disabled:opacity-60"
-      >
-        {autoFlipPending ? 'Auto-flipping…' : `Apply auto-flips (${flipCandidateCount})`}
-      </button>
-    {/if}
-    {#if auditMsg}
-      <div
-        class="text-[11px] leading-tight"
-        class:text-emerald-400={auditMsg.cls === 'ok'}
-        class:text-destructive={auditMsg.cls === 'fail'}
-        class:text-muted-foreground={auditMsg.cls === 'working'}
-      >
-        {auditMsg.text}
-      </div>
-    {/if}
   </div>
 
   <ul class="m-0 flex-1 list-none overflow-y-auto p-0">
@@ -286,42 +246,6 @@
               <span class="bg-secondary text-muted-foreground rounded px-1.5 py-[1px] text-[10px]">
                 {a.subcategory}
               </span>
-            {/if}
-            {#if windingAudit}
-              {@const w = windingAudit.get(a.glb)}
-              {#if w && w.verdict === 'flip' && !w.in_overrides}
-                <span
-                  class="rounded px-1.5 py-[1px] text-[10px]"
-                  style="background: #3e2127; color: #ffb3b3"
-                  title="Auto-detect: winding looks inverted (correctness {w.correctness.toFixed(2)}). Press F to flip, or click Apply auto-flips."
-                >
-                  FLIP
-                </span>
-              {:else if w && w.verdict === 'flip' && w.in_overrides}
-                <span
-                  class="rounded px-1.5 py-[1px] text-[10px]"
-                  style="background: #3e2127; color: #ffb3b3"
-                  title="DISPUTE: asset is in flip_overrides.json but the audit still scores it as inverted (correctness {w.correctness.toFixed(2)}). Inspect."
-                >
-                  DISPUTE
-                </span>
-              {:else if w && w.verdict === 'ambiguous'}
-                <span
-                  class="rounded px-1.5 py-[1px] text-[10px]"
-                  style="background: #3a2d0f; color: #facc15"
-                  title="Auto-detect: ambiguous (correctness {w.correctness.toFixed(2)}). Inspect orientation manually."
-                >
-                  AMBIG
-                </span>
-              {:else if w && w.in_overrides && w.verdict === 'keep'}
-                <span
-                  class="rounded px-1.5 py-[1px] text-[10px]"
-                  style="background: #1f3a25; color: #8be09a"
-                  title="In flip_overrides.json — post-flip state scores correctness {w.correctness.toFixed(2)}, audit confirms your flip."
-                >
-                  MANUAL
-                </span>
-              {/if}
             {/if}
           </div>
           <div class="text-muted-foreground mt-0.5 text-[11px]">

@@ -195,7 +195,6 @@ class AccessoryLibraryResult:
     library_root:        Path
     assets_built:        int
     assets_audited:      int
-    auto_flipped:        tuple[str, ...] = ()
     warnings:            tuple[str, ...] = ()
     attachment_stats:    dict[str, AttachmentResolveStats] = field(default_factory=dict)
     step_timings_ms:     dict[str, float] = field(default_factory=dict)

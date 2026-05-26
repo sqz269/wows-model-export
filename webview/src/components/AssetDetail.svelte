@@ -11,24 +11,17 @@
   import AccessoryViewerCmp from './AccessoryViewer.svelte';
   import DetailBottomPanel from './DetailBottomPanel.svelte';
   import type { AccessoryViewer, LoadResult, MeshInfo, SideMode } from '$lib/accessory';
-  import type { LibraryAsset, RigPivots, WindingAuditEntry } from '$lib/types';
-  import { fetchRigPivots, postFlipWinding, repoUrl } from '$lib/api';
-  import { onMount } from 'svelte';
+  import type { LibraryAsset, RigPivots } from '$lib/types';
+  import { fetchRigPivots, repoUrl } from '$lib/api';
   import { rowCls, labelCls, inputBoxCls } from '$lib/ui/controls';
 
   interface Props {
     /** Asset_id (key in LibraryIndex.assets). */
     id: string;
     asset: LibraryAsset;
-    /** Audit verdict for this asset's GLB. `null` when the audit JSON
-     *  is missing or this asset isn't in the audit (e.g. unscored). */
-    windingAudit?: WindingAuditEntry | null;
-    /** Notify the parent to refetch the audit after a successful flip
-     *  so list-level badges + counts stay in sync without a reload. */
-    onWindingAuditChange?: () => void;
   }
 
-  const { id, asset, windingAudit = null, onWindingAuditChange }: Props = $props();
+  const { id, asset }: Props = $props();
 
   let viewer: AccessoryViewer | null = $state(null);
   let result: LoadResult | null = $state(null);
@@ -49,13 +42,6 @@
   let pivots = $state<RigPivots | null>(null);
   let showRigPivots = $state(false);
   let rigFlip180 = $state(false);
-
-  // Per-asset winding flip state. The "Flip winding" button rewrites
-  // the GLB on disk (via /api/flip-winding) and toggles the asset's
-  // entry in flip_overrides.json. Trivially reversible — click again
-  // to undo. Distinct from the rigFlip180 viewer-only A/B toggle.
-  let flipPending = $state(false);
-  let flipMsg = $state<{ cls: 'ok' | 'fail' | 'working'; text: string } | null>(null);
 
   // Rig editor open/closed. When open, the AccessoryViewer is loaded
   // with the asset's `.rig.debug.glb` instead of the regular GLB, and
@@ -83,7 +69,7 @@
   //   - geometry-shaped state (result, meshVisibility, loadError)
   //   - per-asset toggles (dead variant)
   //   - per-asset sidecar data (rig pivots — refetched in onLoaded)
-  //   - in-flight UI feedback (flipMsg, rigEditorOpen, cacheBust)
+  //   - in-flight UI feedback (rigEditorOpen)
   //
   // lodFilter is clamped separately once the new asset's result lands
   // — see the next $effect — so a "LOD 2 only" filter on an asset
@@ -96,8 +82,6 @@
     result = null;
     pivots = null;
     rigEditorOpen = false;
-    flipMsg = null;
-    cacheBust = 0;
   });
 
   // Clamp the sticky LOD filter once the new asset's meshes have
@@ -134,11 +118,7 @@
 
   const url = $derived.by(() => {
     const rel = showingDead && asset.glb_dead ? asset.glb_dead : asset.glb;
-    const base = repoUrl(`libraries/accessories/${rel}`);
-    // Append the cache-buster on every persist-flip so the viewer
-    // re-fetches the rewritten GLB. Default 0 leaves the URL clean
-    // for the initial load.
-    return cacheBust ? `${base}?t=${cacheBust}` : base;
+    return repoUrl(`libraries/accessories/${rel}`);
   });
 
   // LOD bucketing for the LOD-filter buttons + info section.
@@ -226,67 +206,6 @@
     return result?.meshes ?? [];
   }
 
-  async function flipWinding() {
-    if (flipPending || rigEditorOpen) return;
-    const rel = showingDead && asset.glb_dead ? asset.glb_dead : asset.glb;
-    flipPending = true;
-    flipMsg = { cls: 'working', text: 'Flipping…' };
-    try {
-      const res = await postFlipWinding(rel);
-      if (!res.ok) {
-        flipMsg = {
-          cls: 'fail',
-          text: `Flip failed: ${res.error || res.stderr || 'unknown'}`,
-        };
-        return;
-      }
-      // GLB on disk has been rewritten. Reload it with a cache-bust
-      // so the browser fetches the new bytes. The viewer's onLoaded
-      // re-fetches pivots, so everything stays in sync.
-      const flipped = res.override?.flipped ?? true;
-      flipMsg = {
-        cls: 'ok',
-        text: flipped ? 'Flipped (persisted). Click again to undo.' : 'Un-flipped (persisted).',
-      };
-      // Bump the audit so the badge updates without a page reload.
-      onWindingAuditChange?.();
-      // Force-reload the viewer by re-triggering the load effect with a
-      // cache-buster. `url` is derived from `asset` + `showingDead` —
-      // we can't mutate `asset.glb` so we use a separate cache-bust
-      // counter (added below).
-      cacheBust = Date.now();
-    } catch (err) {
-      flipMsg = { cls: 'fail', text: `Flip failed: ${err}` };
-    } finally {
-      flipPending = false;
-    }
-  }
-
-  // Per-asset cache-buster bumped on every persist-flip so the viewer
-  // re-fetches the rewritten GLB.
-  let cacheBust = $state(0);
-
-  // F-key shortcut for "flip winding". No-op while typing in an input
-  // / textarea / contenteditable, while any modifier is held (keeps
-  // Ctrl+F → browser find free), or while a persist is in flight.
-  onMount(() => {
-    function onKey(ev: KeyboardEvent) {
-      if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
-      const t = ev.target as HTMLElement | null;
-      if (t) {
-        const tag = t.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-        if (t.isContentEditable) return;
-      }
-      if (ev.key.toLowerCase() !== 'f') return;
-      if (flipPending || rigEditorOpen) return;
-      ev.preventDefault();
-      void flipWinding();
-    }
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  });
-
   /** Verdict chip metadata for the rig-pivots panel. Buckets the four
    *  geometric_check states + the `auto_flipped_180_around_yaw` flag
    *  into colour-coded chips with explanatory tooltips. */
@@ -344,39 +263,6 @@
     });
   });
 
-  /** Pill metadata for the header's winding-status indicator. Mirrors
-   *  the AssetList row badge colour scheme so the at-a-glance state
-   *  reads the same across pages. `null` when no audit is available. */
-  const windingPill = $derived.by(() => {
-    if (!windingAudit) return null;
-    const w = windingAudit;
-    const label =
-      w.in_overrides && w.verdict === 'keep'
-        ? 'MANUAL'
-        : w.in_overrides && w.verdict === 'flip'
-          ? 'DISPUTE'
-          : w.verdict === 'flip'
-            ? 'FLIP'
-            : w.verdict === 'ambiguous'
-              ? 'AMBIG'
-              : w.verdict === 'keep'
-                ? 'KEEP'
-                : w.verdict.toUpperCase();
-    let cls = 'bg-muted text-muted-foreground';
-    if (label === 'FLIP' || label === 'DISPUTE') cls = 'bg-rose-950/60 text-rose-300';
-    else if (label === 'AMBIG') cls = 'bg-amber-950/60 text-amber-300';
-    else if (label === 'MANUAL' || label === 'KEEP') cls = 'bg-emerald-950/60 text-emerald-300';
-    return {
-      label,
-      score: w.correctness,
-      cls,
-      title:
-        `Joint A+B winding heuristic — correctness ${w.correctness.toFixed(3)} ` +
-        `(B=${w.signal_b.toFixed(3)} geom·outward, A=${w.signal_a.toFixed(3)} geom·stored). ` +
-        `>0.5 = correct, <0.5 = inverted.`,
-    };
-  });
-
   function onRigEditorClose() {
     rigEditorOpen = false;
   }
@@ -391,8 +277,8 @@
   <!--
     Header bar: three regions, left-to-right.
     Left  — asset id + breadcrumb + used-by line.
-    Center— load summary + at-a-glance status pills (winding + rig).
-    Right — action cluster (Flip winding, Edit rig, variant, Frame).
+    Center— load summary + at-a-glance status pills (rig).
+    Right — action cluster (Edit rig, variant, Frame).
   -->
   <header class="bg-card border-border flex flex-none items-center gap-4 border-b px-5 py-2.5">
     <div class="flex min-w-0 flex-1 flex-col">
@@ -423,15 +309,6 @@
         {/if}
       </div>
       <div class="flex items-center gap-1.5">
-        {#if windingPill}
-          <span
-            class="rounded px-1.5 py-[1px] text-[10px] font-semibold tabular-nums {windingPill.cls}"
-            title={windingPill.title}
-          >
-            {windingPill.label}
-            <span class="font-normal opacity-80">{windingPill.score.toFixed(2)}</span>
-          </span>
-        {/if}
         {#if verdictChip}
           <span
             class="rounded px-1.5 py-[1px] text-[10px] {verdictChip.cls}"
@@ -444,15 +321,6 @@
     </div>
 
     <div class="flex flex-none items-center gap-1.5">
-      <button
-        type="button"
-        disabled={flipPending || rigEditorOpen}
-        onclick={flipWinding}
-        title="Reverse triangle winding and rewrite the GLB on disk. Click again to undo. Shortcut: F"
-        class="rounded border border-border bg-popover px-2 py-1 text-xs hover:bg-accent disabled:opacity-60"
-      >
-        Flip winding <span class="text-muted-foreground ml-0.5">F</span>
-      </button>
       <button
         type="button"
         onclick={() => (rigEditorOpen = !rigEditorOpen)}
@@ -502,17 +370,6 @@
     </div>
   </header>
 
-  {#if flipMsg}
-    <div
-      class="bg-card border-border flex-none border-b px-5 py-1 text-[11px] leading-tight"
-      class:text-emerald-400={flipMsg.cls === 'ok'}
-      class:text-destructive={flipMsg.cls === 'fail'}
-      class:text-muted-foreground={flipMsg.cls === 'working'}
-    >
-      {flipMsg.text}
-    </div>
-  {/if}
-
   <div class="flex flex-1 min-h-0 overflow-hidden">
     <AccessoryViewerCmp
       {url}
@@ -526,8 +383,8 @@
 
     <!--
       Side panel: pure view-state controls. Authoring/destructive actions
-      (Flip winding, Edit rig) live in the header; verdict info + audit
-      numbers live in the bottom inspector.
+      (Edit rig) live in the header; verdict info lives in the bottom
+      inspector.
     -->
     <aside
       class="bg-card border-border flex w-[240px] flex-none flex-col gap-3 overflow-y-auto border-l p-3"
@@ -676,7 +533,6 @@
 
   <DetailBottomPanel
     {asset}
-    {windingAudit}
     {pivots}
     {verdictChip}
     {distRows}

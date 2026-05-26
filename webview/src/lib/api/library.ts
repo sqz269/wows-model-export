@@ -1,5 +1,5 @@
-// `/api/library` + related client: accessory library index, winding
-// audit, flip toggles, rig overrides + rebuild.
+// `/api/library` + related client: accessory library index, rig
+// overrides + rebuild.
 //
 // `fetchLibrary` dedupes parallel callers via a module-level promise
 // cache. With the router keeping every route mounted at once
@@ -7,16 +7,14 @@
 // simultaneously; without the cache the dev backend would build the
 // same index twice on first load.
 //
-// The audit + flip + rig endpoints have no caching — each call mutates
-// disk state and the callers want fresh reads.
+// The rig endpoints have no caching — each call mutates disk state and
+// the callers want fresh reads.
 
 import { fetchJson } from './client';
 import type {
   LibraryIndex,
   RigOverridesDoc,
   RigPivots,
-  WindingAuditDoc,
-  WindingAuditEntry,
 } from '$lib/types';
 
 let cached: Promise<LibraryIndex> | null = null;
@@ -36,64 +34,6 @@ export function fetchLibrary(): Promise<LibraryIndex> {
 /** Reset the cache. Useful for a "rebuild library" hook later. */
 export function invalidateLibrary(): void {
   cached = null;
-}
-
-// ── Winding audit + flip ────────────────────────────────────────────────
-
-/** Fetch the audit JSON and key it by GLB-relative path so callers can
- *  cheaply join verdicts onto `LibraryAsset.glb`. Missing audit JSON
- *  resolves to an empty map — UI degrades gracefully. */
-export async function fetchWindingAudit(): Promise<Map<string, WindingAuditEntry>> {
-  try {
-    const resp = await fetch('/api/winding-audit');
-    if (!resp.ok) return new Map();
-    const doc = (await resp.json()) as WindingAuditDoc;
-    if (!doc?.assets) return new Map();
-    const m = new Map<string, WindingAuditEntry>();
-    for (const e of doc.assets) m.set(e.path, e);
-    return m;
-  } catch {
-    return new Map();
-  }
-}
-
-export interface AutoFlipResult {
-  ok: boolean;
-  stdout?: string;
-  stderr?: string;
-  error?: string;
-}
-
-/** Trigger the bulk auto-flip CLI. Returns the captured stdout/stderr
- *  so the caller can surface progress. The endpoint waits for the CLI
- *  to finish — typical run is ~3 s for a ~1k-asset library. */
-export async function postAutoFlipWinding(): Promise<AutoFlipResult> {
-  const resp = await fetch('/api/auto-flip-winding', { method: 'POST' });
-  return (await resp.json()) as AutoFlipResult;
-}
-
-export interface FlipWindingResult {
-  ok: boolean;
-  relPath?: string;
-  override?: { flipped: boolean; flip_normals: boolean };
-  report?: unknown;
-  error?: string;
-  stderr?: string;
-}
-
-/** Persistent per-asset flip. Rewrites the GLB on disk and toggles its
- *  entry in `flip_overrides.json`. Trivially reversible — click again
- *  to undo (winding-reversal is involutive). */
-export async function postFlipWinding(
-  relPath: string,
-  flipNormals = false,
-): Promise<FlipWindingResult> {
-  const resp = await fetch('/api/flip-winding', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ relPath, flipNormals }),
-  });
-  return (await resp.json()) as FlipWindingResult;
 }
 
 // ── Rig pivots (from /repo/) ────────────────────────────────────────────

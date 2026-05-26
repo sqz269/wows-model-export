@@ -4,7 +4,6 @@
   // Tabs:
   //   - Files       : GLB / dead GLB / textures_dds paths
   //   - LODs        : LOD breakdown table
-  //   - Winding     : audit numbers + heuristic tooltip
   //   - Rig         : pivots verdict chip + per-barrel distances + warnings
   //   - Rig editor  : hosts <RigEditorPanel> when the parent's editor toggle is on
   //
@@ -19,13 +18,12 @@
   import DdsTexturePreview from './DdsTexturePreview.svelte';
   import BoneInspector from './BoneInspector.svelte';
   import type { AccessoryViewer } from '$lib/accessory';
-  import type { LibraryAsset, RigPivots, WindingAuditEntry } from '$lib/types';
+  import type { LibraryAsset, RigPivots } from '$lib/types';
 
   export type BottomTab =
     | 'files'
     | 'lods'
     | 'textures'
-    | 'winding'
     | 'rig'
     | 'bones'
     | 'rig-editor';
@@ -72,8 +70,6 @@
 
   interface Props {
     asset: LibraryAsset;
-    /** Audit verdict for the GLB at `asset.glb`. `null` when missing. */
-    windingAudit: WindingAuditEntry | null;
     /** Rig pivot sidecar data. `null` when the JSON isn't on disk. */
     pivots: RigPivots | null;
     /** Derived in parent — verdict chip metadata for the Rig tab. */
@@ -100,7 +96,6 @@
 
   const {
     asset,
-    windingAudit,
     pivots,
     verdictChip,
     distRows,
@@ -139,7 +134,6 @@
         t === 'files' ||
         t === 'lods' ||
         t === 'textures' ||
-        t === 'winding' ||
         t === 'rig' ||
         t === 'bones'
       ) {
@@ -170,7 +164,6 @@
           t === 'files' ||
           t === 'lods' ||
           t === 'textures' ||
-          t === 'winding' ||
           t === 'rig' ||
           t === 'bones'
             ? t
@@ -304,7 +297,6 @@
     { id: 'files', label: 'Files' },
     { id: 'lods', label: 'LODs' },
     { id: 'textures', label: 'Textures', hide: !hasTextures },
-    { id: 'winding', label: 'Winding' },
     { id: 'rig', label: 'Rig' },
     { id: 'bones', label: 'Bones' },
     { id: 'rig-editor', label: 'Rig editor', hide: !rigEditorOpen },
@@ -448,54 +440,6 @@
                 </div>
               </div>
             {/each}
-          </div>
-        {/if}
-      {:else if activeTab === 'winding'}
-        {#if windingAudit}
-          {@const w = windingAudit}
-          {@const label =
-            w.in_overrides && w.verdict === 'keep'
-              ? 'manual'
-              : w.in_overrides && w.verdict === 'flip'
-                ? 'dispute'
-                : w.verdict}
-          <div class="flex flex-col gap-1.5">
-            <div class="flex items-baseline gap-3">
-              <span class="text-muted-foreground text-[10px] uppercase tracking-wider">verdict</span
-              >
-              <strong
-                class:text-rose-400={label === 'flip' || label === 'dispute'}
-                class:text-amber-400={label === 'ambiguous'}
-                class:text-emerald-400={label === 'manual' || label === 'keep'}>{label}</strong
-              >
-              <span
-                class="text-muted-foreground cursor-help text-[11px]"
-                title={'Joint A+B winding heuristic.\n' +
-                  'Signal B = geom · outward (geometry vs. surface-outward direction).\n' +
-                  'Signal A = geom · stored (geometry vs. stored normals).\n' +
-                  'Correctness = combined score, range 0..1.\n' +
-                  '> 0.5 → winding is correct.\n' +
-                  '< 0.5 → winding is inverted; press F to flip.'}>what does this mean?</span
-              >
-            </div>
-            <dl
-              class="m-0 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-xs [&_dt]:text-muted-foreground [&_dd]:m-0 [&_dd]:tabular-nums"
-            >
-              <dt>correctness</dt>
-              <dd>{w.correctness.toFixed(3)}</dd>
-              <dt>signal_b (geom · outward)</dt>
-              <dd>{w.signal_b.toFixed(3)}</dd>
-              <dt>signal_a (geom · stored)</dt>
-              <dd>{w.signal_a.toFixed(3)}</dd>
-              <dt>n_prim</dt>
-              <dd>{w.n_prim}</dd>
-              <dt>in_overrides</dt>
-              <dd>{w.in_overrides ? 'yes' : 'no'}</dd>
-            </dl>
-          </div>
-        {:else}
-          <div class="text-muted-foreground">
-            no <code class="font-mono text-[11px]">winding_audit.json</code> entry for this asset
           </div>
         {/if}
       {:else if activeTab === 'rig'}

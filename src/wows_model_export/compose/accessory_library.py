@@ -21,8 +21,7 @@ The composer emits the following canonical :class:`StepEvent` names so
 consumers can branch reliably (see ``migration/PIPELINE_API.md``):
 
     "discover_assets"   "plan_batch"   "batch_export"
-    "swizzle_textures"  "winding_audit" "winding_flip"
-    "build_rigs"        "resolve_attachments"
+    "swizzle_textures"  "build_rigs"   "resolve_attachments"
     "dead_variant_audit" "write_index"
 
 Each step emits ``started`` / ``completed`` (or ``skipped`` /
@@ -47,7 +46,6 @@ from ..errors import StepError, ToolkitError
 from ..read import sidecar as read_sidecar
 from ..resolve import sidecar as resolve_sidecar
 from ..resolve import synth_emission
-from ..resolve import winding as resolve_winding
 from ..types import (
     AccessoryLibraryResult,
     AttachmentResolveStats,
@@ -61,9 +59,6 @@ PLACEMENT_SECTIONS = ("turrets", "secondaries", "antiair", "torpedoes", "accesso
 # Placement attachments file suffix (mirrors the resolver's constant
 # without an import-time dependency on it).
 ATTACHMENTS_SUFFIX = ".attached_accessories.json"
-
-FLIP_OVERRIDES_FILENAME = "flip_overrides.json"
-WINDING_AUDIT_FILENAME = "winding_audit.json"
 
 # VFS manifest path resolution lives in :mod:`wows_model_export.toolkit.vfs`
 # (``default_manifest_path`` / ``ensure_manifest``). Helpers below accept
@@ -665,257 +660,6 @@ def _build_assets_batch(
     return (built, skipped, failed, failure_strings, newly_built_glbs)
 
 
-# ---------------------------------------------------------------------------
-# Flip overrides
-# ---------------------------------------------------------------------------
-
-
-def _load_flip_overrides(library_root: Path) -> dict[str, dict]:
-    """Return ``{rel_path: override_entry}`` for assets the user has flipped."""
-    path = library_root / FLIP_OVERRIDES_FILENAME
-    if not path.is_file():
-        return {}
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    out: dict[str, dict] = {}
-    for entry in doc.get("flipped", []) or []:
-        p = entry.get("path")
-        if isinstance(p, str):
-            out[p.replace("\\", "/")] = entry
-    return out
-
-
-def _reapply_flip_overrides(
-    newly_built_glbs: list[Path],
-    library_root: Path,
-    *,
-    warnings: list[str],
-) -> int:
-    """Re-apply persisted flips to every freshly-exported GLB."""
-    overrides = _load_flip_overrides(library_root)
-    if not overrides:
-        return 0
-    count = 0
-    for glb_path in newly_built_glbs:
-        try:
-            rel = str(glb_path.relative_to(library_root)).replace("\\", "/")
-        except ValueError:
-            continue
-        entry = overrides.get(rel)
-        if entry is None:
-            continue
-        try:
-            data = glb_path.read_bytes()
-            gltf, bin_data = _glb.parse_glb(data)
-            new_bin, wrep = _glb.flip_winding(gltf, bin_data)
-            if entry.get("flip_normals"):
-                new_bin, _ = resolve_winding.flip_normals(gltf, new_bin)
-            if wrep["buffer_views_flipped"] == 0 and not entry.get("flip_normals"):
-                continue
-            _glb.write_glb(gltf, new_bin, glb_path)
-            count += 1
-        except Exception as e:
-            warnings.append(f"flip re-apply failed for {rel}: {e}")
-    return count
-
-
-def _save_flip_overrides(library_root: Path, entries: list[dict]) -> None:
-    """Write ``flip_overrides.json`` from a list of entry dicts."""
-    entries = sorted(entries, key=lambda e: e["path"])
-    doc = {
-        "version": 1,
-        "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "flipped": entries,
-    }
-    out = library_root / FLIP_OVERRIDES_FILENAME
-    tmp = out.with_suffix(out.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(tmp, out)
-
-
-# ---------------------------------------------------------------------------
-# Winding audit
-# ---------------------------------------------------------------------------
-
-
-def _audit_winding(
-    library_root: Path,
-    *,
-    apply: bool,
-    margin: float = 0.10,
-    warnings: list[str],
-    rebuild: bool = False,
-) -> tuple[list[str], int]:
-    """Score every GLB in the library, write ``winding_audit.json``, and
-    optionally auto-flip the high-confidence inversions.
-
-    Returns ``(auto_flipped_paths, applied_count)``.
-
-    With ``rebuild=False`` (default), reuses prior per-GLB entries from
-    ``winding_audit.json`` when each GLB's mtime is unchanged since the
-    score was taken (``scored_mtime`` field in the entry). Pass
-    ``rebuild=True`` to force a fresh score for every GLB.
-    """
-    overrides = _load_flip_overrides(library_root)
-    overrides_paths: set[str] = set(overrides.keys())
-
-    # Prior-pass reuse map: rel_path -> entry. Empty when ``rebuild`` or
-    # the audit file is missing / unparseable.
-    prior_entries: dict[str, dict] = {}
-    audit_path = library_root / WINDING_AUDIT_FILENAME
-    if not rebuild and audit_path.is_file():
-        try:
-            prior_doc = json.loads(audit_path.read_text(encoding="utf-8"))
-            for e in prior_doc.get("assets") or []:
-                p = e.get("path")
-                if isinstance(p, str):
-                    prior_entries[p] = e
-        except (OSError, ValueError, json.JSONDecodeError):
-            prior_entries = {}
-
-    flip_recs: list[dict] = []
-    ambiguous_recs: list[dict] = []
-    manual_recs: list[dict] = []
-    keep_count = 0
-    skipped_unscored = 0
-    audit_entries: list[dict] = []
-
-    def _bucket(rec: dict) -> None:
-        nonlocal keep_count
-        if rec.get("in_overrides"):
-            manual_recs.append(rec)
-            return
-        v = rec.get("verdict")
-        if v == resolve_winding.VERDICT_FLIP:
-            flip_recs.append(rec)
-        elif v == resolve_winding.VERDICT_AMBIGUOUS:
-            ambiguous_recs.append(rec)
-        else:
-            keep_count += 1
-
-    for glb_path in sorted(library_root.rglob("*.glb")):
-        rel = str(glb_path.relative_to(library_root)).replace("\\", "/")
-        if glb_path.parent.name != glb_path.stem:
-            continue
-        glb_mtime = glb_path.stat().st_mtime
-        prior = prior_entries.get(rel)
-        if (prior is not None
-                and isinstance(prior.get("scored_mtime"), (int, float))
-                and prior["scored_mtime"] >= glb_mtime):
-            # Reuse the prior score verbatim, but refresh ``in_overrides``
-            # since flip_overrides.json can change between runs without
-            # touching the GLB itself (recategorises into manual_recs).
-            rec = dict(prior)
-            rec["in_overrides"] = rel in overrides_paths
-            audit_entries.append(rec)
-            _bucket(rec)
-            continue
-        try:
-            data = glb_path.read_bytes()
-            gltf, bin_data = _glb.parse_glb(data)
-            score = resolve_winding.score_winding(gltf, bin_data)
-        except Exception as e:
-            warnings.append(f"audit_winding parse failed for {rel}: {e}")
-            skipped_unscored += 1
-            continue
-        if score["n_prim"] == 0:
-            skipped_unscored += 1
-            continue
-
-        verdict = resolve_winding.detect_winding_verdict(score, margin=margin)
-        a = score["signal_a"]
-        b = score["signal_b"]
-        c = resolve_winding.winding_correctness(score)
-        in_overrides = rel in overrides_paths
-
-        if (verdict == resolve_winding.VERDICT_UNSCORED
-                or c != c
-                or a != a or b != b):
-            skipped_unscored += 1
-            continue
-
-        rec = {
-            "path":         rel,
-            "verdict":      verdict,
-            "correctness":  round(c, 4),
-            "signal_b":     round(b, 4),
-            "signal_a":     round(a, 4),
-            "n_prim":       score["n_prim"],
-            "in_overrides": in_overrides,
-            "scored_mtime": glb_mtime,
-        }
-        audit_entries.append(rec)
-        _bucket(rec)
-
-    applied = 0
-    auto_flipped: list[str] = []
-    if apply and flip_recs:
-        entries = list(overrides.values())
-        for r in flip_recs:
-            rel = r["path"]
-            glb_path = library_root / rel
-            try:
-                data = glb_path.read_bytes()
-                gltf, bin_data = _glb.parse_glb(data)
-                new_bin, wrep = _glb.flip_winding(gltf, bin_data)
-                if wrep["buffer_views_flipped"] == 0:
-                    continue
-                _glb.write_glb(gltf, new_bin, glb_path)
-                entries.append({
-                    "path":         rel,
-                    "flip_normals": False,
-                    "source":       "auto",
-                    "correctness":  r["correctness"],
-                    "signal_b":     r["signal_b"],
-                    "signal_a":     r["signal_a"],
-                })
-                applied += 1
-                auto_flipped.append(rel)
-                r["in_overrides"] = True
-                r["verdict"] = "manual"
-                r["correctness"] = round(1.0 - r["correctness"], 4)
-                r["signal_b"] = round(1.0 - r["signal_b"], 4)
-                r["signal_a"] = round(1.0 - r["signal_a"], 4)
-                # Bump ``scored_mtime`` past the post-flip write so the
-                # next run reuses this entry instead of re-scoring the
-                # now-correctly-oriented GLB. The override locks the
-                # verdict at "manual" regardless, so re-scoring would be
-                # wasted work.
-                r["scored_mtime"] = glb_path.stat().st_mtime
-            except Exception as e:
-                warnings.append(f"failed to flip {rel}: {e}")
-        if applied:
-            _save_flip_overrides(library_root, entries)
-
-    audit_doc = {
-        "schema":       "wows_winding_audit/v1",
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "asset_count":  len(audit_entries),
-        "summary":      {
-            "flip":      len(flip_recs) - applied,
-            "applied":   applied,
-            "ambiguous": len(ambiguous_recs),
-            "manual":    len(manual_recs) + applied,
-            "keep":      keep_count,
-            "unscored":  skipped_unscored,
-        },
-        "assets":       sorted(audit_entries, key=lambda r: r["path"]),
-    }
-    audit_path = library_root / WINDING_AUDIT_FILENAME
-    tmp = audit_path.with_suffix(audit_path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(audit_doc, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(tmp, audit_path)
-
-    return auto_flipped, applied
-
 
 # ---------------------------------------------------------------------------
 # Index writer
@@ -1021,8 +765,6 @@ def build_accessory_library(
     library_root: Path | None = None,
     only_ships: tuple[str, ...] | None = None,
     rebuild: bool = False,
-    audit_winding: bool = False,
-    auto_flip_winding: bool = False,
     on_event: OnEvent | None = None,
     cancel: threading.Event | None = None,
 ) -> AccessoryLibraryResult:
@@ -1047,12 +789,6 @@ def build_accessory_library(
         rebuild              When True, re-export every asset's GLB
                               even if it already exists. Default skips
                               already-built assets.
-        audit_winding        Run the joint A+B winding heuristic
-                              report-only. The ``winding_audit.json``
-                              sidecar is always written.
-        auto_flip_winding    Apply the winding flips per the heuristic
-                              and persist them to ``flip_overrides.json``
-                              with ``source: "auto"``.
         on_event             Optional progress callback receiving
                               :class:`StepEvent` notifications. See the
                               "Canonical step names" docstring.
@@ -1085,7 +821,6 @@ def build_accessory_library(
     runner = StepRunner(on_event, cancel=cancel)
     warnings: list[str] = []
     attachment_stats: dict[str, AttachmentResolveStats] = {}
-    auto_flipped: tuple[str, ...] = ()
 
     # ── Step: discover_assets ─────────────────────────────────────────
     try:
@@ -1130,7 +865,6 @@ def build_accessory_library(
             library_root=lib_root,
             assets_built=0,
             assets_audited=0,
-            auto_flipped=auto_flipped,
             warnings=tuple(warnings),
             attachment_stats=attachment_stats,
             step_timings_ms=dict(runner.step_timings_ms),
@@ -1243,21 +977,6 @@ def build_accessory_library(
                     detail="no newly-built GLBs")
         runner.step_timings_ms["swizzle_textures"] = 0.0
 
-    # ── Reapply manual flip overrides ─────────────────────────────────
-    # Not its own canonical step — it's the persistence half of the
-    # winding pipeline, runs unconditionally on newly-built GLBs.
-    if newly_built_glbs:
-        try:
-            reflipped = _reapply_flip_overrides(
-                newly_built_glbs, lib_root, warnings=warnings,
-            )
-            if reflipped:
-                warnings.append(
-                    f"re-applied flip overrides to {reflipped} GLB(s)"
-                )
-        except Exception as e:
-            warnings.append(f"flip override re-apply failed: {e}")
-
     # ── First-pass index write (dead_variant_audit reads from it) ─────
     try:
         with runner.step("write_index", "first pass") as st:
@@ -1367,44 +1086,6 @@ def build_accessory_library(
     except Exception as e:
         raise StepError(step="write_index", underlying=e, detail=str(e)) from e
 
-    # ── Step: winding_audit (always runs; writes JSON sidecar) ────────
-    audit_should_apply = auto_flip_winding
-    # The audit step itself runs whenever we want a report OR an apply
-    # pass. We always emit the JSON sidecar (consumers like the webview
-    # render verdict badges from it).
-    try:
-        with runner.step("winding_audit") as st:
-            flipped_paths, applied_count = _audit_winding(
-                lib_root, apply=audit_should_apply,
-                warnings=warnings,
-                rebuild=rebuild,
-            )
-            st.annotate(
-                f"applied={applied_count}",
-                data={"applied": applied_count, "report": audit_winding},
-            )
-            if audit_should_apply:
-                auto_flipped = tuple(flipped_paths)
-    except StepError:
-        raise
-    except Exception as e:
-        warnings.append(f"winding_audit failed: {e}")
-
-    if audit_should_apply:
-        # Emit a separate winding_flip event so consumers can branch on
-        # "an apply pass actually ran" vs "report-only".
-        runner.emit(
-            "winding_flip", "completed",
-            detail=f"auto-flipped {len(auto_flipped)} GLB(s)",
-            step_ms=runner.step_timings_ms.get("winding_audit"),
-            data={"applied": len(auto_flipped), "paths": list(auto_flipped)},
-        )
-    else:
-        runner.emit(
-            "winding_flip", "skipped",
-            detail="auto_flip_winding=False",
-        )
-
     # ── Step: build_rigs ──────────────────────────────────────────────
     # Iterate every ``category=="gun"`` asset and invoke the lifted
     # per-asset rig builder. Each call writes ``<asset_id>.rig_pivots.json``
@@ -1459,7 +1140,6 @@ def build_accessory_library(
         library_root=lib_root,
         assets_built=assets_built,
         assets_audited=len(records),
-        auto_flipped=auto_flipped,
         warnings=tuple(warnings),
         attachment_stats=attachment_stats,
         step_timings_ms=dict(runner.step_timings_ms),
