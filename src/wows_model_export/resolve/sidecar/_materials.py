@@ -933,8 +933,9 @@ def _apply_material_mappings_json(
                     diffuse_keys = (key,) if diffuse_keys is None else diffuse_keys
                 break  # stop at first matching key (raw vs. year-stripped)
 
-        # Synthesised emissive: `tools/shared/synth_emission.py` writes
-        # `<diffuse_stem>_emissive.{dd0,dds}` for any stem with a sibling
+        # Synthesised emissive: `tools/shared/synth_emission.py` writes a
+        # `<diffuse_stem>_emissive.{dd0,dd1,dd2,dds}` pyramid for any
+        # stem with a sibling
         # `*_emissive.mfm` in the VFS (ARP / Azur Lane / Sabaton crossover
         # skins). The classifier indexes those under the diffuse stem
         # keyed `emissive`. For mesh-swap variants the diffuse stem is

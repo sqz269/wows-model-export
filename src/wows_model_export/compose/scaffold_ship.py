@@ -48,7 +48,7 @@ Emissive-DDS synthesis (ARP / Azur Lane / Sabaton crossover skins)
 routes through :mod:`wows_model_export.resolve.synth_emission` — called
 inside the ``export_hull`` step on a best-effort basis. Failures
 degrade to warnings; the sidecar's stem classifier picks up any
-``*_emissive.dd0`` files that landed.
+``*_emissive.dd?`` / ``*_emissive.dds`` files that landed.
 """
 from __future__ import annotations
 
