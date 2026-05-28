@@ -76,6 +76,7 @@ export interface SidecarMountDispersion {
   taperDist?: number;
   normalDistribution?: boolean;
   idealRadius?: number;
+  idealDistance?: number;
   minRadius?: number;
   delim?: number;
   radiusOnZero?: number;

@@ -948,6 +948,7 @@ def _dispersion_fields(group: dict[str, Any], mount: dict[str, Any]) -> dict[str
 
     for key in (
         "idealRadius",
+        "idealDistance",
         "minRadius",
         "delim",
         "radiusOnZero",
