@@ -570,8 +570,8 @@ def _longest_parent_hp_match(
 #     and the full GameParams entity ID
 #   * :func:`absorb_gameparams_variants` — top-level ``variants`` block
 #   * :func:`absorb_gameparams_mounts`   — placement gameplay fields
-#     (caliber_mm / barrel_count / yaw / elev / reload / sigma / ammo_types
-#     / aa_range_km / aa_dps / tube_count / display_name)
+#     (caliber_mm / barrel_count / yaw / elev / reload / dispersion
+#     / ammo_types / aa_range_km / aa_dps / tube_count / display_name)
 #   * :func:`absorb_gameparams_armor`    — per-mount armor + barbettes
 #   * :func:`absorb_gameparams_hitbox`   — per-cube classification
 #     (``boxes`` + ``hit_locations``)

@@ -268,7 +268,7 @@ _PLACEMENT_ORDER: tuple[str, ...] = (
     # for non-firing mounts (directors, finders, radars, decoratives).
     "ammo_ids",
     "ammo_types",
-    "sigma",
+    "dispersion",
     "yaw_range_deg",
     "elev_range_deg",
     # Fire-arc dead zones — wedges inside the traverse range where the mount

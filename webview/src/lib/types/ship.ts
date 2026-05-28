@@ -33,6 +33,32 @@ export interface ShipSummary {
 }
 
 /**
+ * Raw GameParams dispersion scalars surfaced for downstream combat consumers.
+ * Field names intentionally mirror GameParams until gameplay code normalizes
+ * the exact radius / ellipse model.
+ */
+export interface PlacementDispersion {
+  maxDist?: number;
+  sigmaCount?: number;
+  taperDist?: number;
+  normalDistribution?: boolean;
+  idealRadius?: number;
+  minRadius?: number;
+  delim?: number;
+  radiusOnZero?: number;
+  radiusOnDelim?: number;
+  radiusOnMax?: number;
+  ellipseRangeMin?: number;
+  ellipseRangeMax?: number;
+  minEllipseRanging?: number;
+  medEllipseRanging?: number;
+  maxEllipseRanging?: number;
+  aiMGminEllipseRanging?: number;
+  aiMGmedEllipseRanging?: number;
+  aiMGmaxEllipseRanging?: number;
+}
+
+/**
  * Per-placement entry in `<Ship>_accessories.json`. Same common shape
  * across every typed section (turrets/secondaries/antiair/torpedoes/
  * accessories); the typed sections may carry extra category-specific
@@ -73,6 +99,7 @@ export interface ShipPlacement {
    * or absent on AA, torpedo, and accessory placements.
    */
   ammo_ids?: string[];
+  dispersion?: PlacementDispersion;
   /**
    * Per-HP miscFilter — a WHITELIST of `MP_<…>` placement_ids the WG
    * runtime renders for this asset's bundled attached accessories.

@@ -66,6 +66,32 @@ export interface SidecarMaterial {
 }
 
 /**
+ * Raw GameParams dispersion scalars surfaced for downstream combat consumers.
+ * Field names intentionally mirror GameParams until gameplay code normalizes
+ * the exact radius / ellipse model.
+ */
+export interface SidecarMountDispersion {
+  maxDist?: number;
+  sigmaCount?: number;
+  taperDist?: number;
+  normalDistribution?: boolean;
+  idealRadius?: number;
+  minRadius?: number;
+  delim?: number;
+  radiusOnZero?: number;
+  radiusOnDelim?: number;
+  radiusOnMax?: number;
+  ellipseRangeMin?: number;
+  ellipseRangeMax?: number;
+  minEllipseRanging?: number;
+  medEllipseRanging?: number;
+  maxEllipseRanging?: number;
+  aiMGminEllipseRanging?: number;
+  aiMGmedEllipseRanging?: number;
+  aiMGmaxEllipseRanging?: number;
+}
+
+/**
  * Per-mount subset. The real sidecar carries more (display_name,
  * attach_to, transform, parent_section, …) — we only need what joins
  * to `ballistics.shells` and what the attached-accessories composer
@@ -82,6 +108,7 @@ export interface SidecarMount {
   hp_name?: string;
   asset_id?: string;
   ammo_ids?: string[];
+  dispersion?: SidecarMountDispersion;
   misc_filter?: string[];
   /**
    * Yaw traverse limits `[min, max]` in degrees, in the mount's rest-relative

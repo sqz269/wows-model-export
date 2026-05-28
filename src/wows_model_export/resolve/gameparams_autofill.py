@@ -877,7 +877,8 @@ def _fill_gun_fields(
 ) -> None:
     """Main / secondary battery fields. ``group`` carries shared dispersion
     + range data (``sigmaCount``, ``maxDist``); ``mount`` carries per-mount
-    kinematics (yaw/elev arcs, traverse rate, reload)."""
+    kinematics (yaw/elev arcs, traverse rate, reload) and radius/ellipse
+    dispersion scalars."""
     barrel_d = _safe_float(mount.get("barrelDiameter"))
     if barrel_d is not None and barrel_d > 0:
         # GameParams stores barrel diameter in metres (0.406 = 406 mm).
@@ -920,14 +921,51 @@ def _fill_gun_fields(
     reload = _safe_float(mount.get("shotDelay"))
     if reload is not None and reload > 0:
         out["reload_s"] = reload
-    sigma = _safe_float(group.get("sigmaCount"))
-    if sigma is not None:
-        out["sigma"] = sigma
+    dispersion = _dispersion_fields(group, mount)
+    if dispersion:
+        out["dispersion"] = dispersion
     ammo_list = mount.get("ammoList") or []
     if isinstance(ammo_list, list):
         types = _ammo_types_for(ammo_list)
         if types:
             out["ammo_types"] = types
+
+
+def _dispersion_fields(group: dict[str, Any], mount: dict[str, Any]) -> dict[str, Any]:
+    """Collect raw GameParams dispersion scalars for downstream consumers.
+
+    Keep the field names aligned with GameParams for this data-only handoff;
+    gameplay can layer normalized names/units on top once the model is wired.
+    """
+    out: dict[str, Any] = {}
+    for key in ("maxDist", "sigmaCount", "taperDist"):
+        v = _safe_float(group.get(key))
+        if v is not None:
+            out[key] = v
+    normal_distribution = group.get("normalDistribution")
+    if isinstance(normal_distribution, bool):
+        out["normalDistribution"] = normal_distribution
+
+    for key in (
+        "idealRadius",
+        "minRadius",
+        "delim",
+        "radiusOnZero",
+        "radiusOnDelim",
+        "radiusOnMax",
+        "ellipseRangeMin",
+        "ellipseRangeMax",
+        "minEllipseRanging",
+        "medEllipseRanging",
+        "maxEllipseRanging",
+        "aiMGminEllipseRanging",
+        "aiMGmedEllipseRanging",
+        "aiMGmaxEllipseRanging",
+    ):
+        v = _safe_float(mount.get(key))
+        if v is not None:
+            out[key] = v
+    return out
 
 
 def _fill_aa_fields(mount: dict[str, Any], out: dict[str, Any]) -> None:
