@@ -246,6 +246,156 @@ def resolve_ship_identity(
 
 
 # ---------------------------------------------------------------------------
+# Reusable sidecar refresh + deferred library build (shared with the queue)
+# ---------------------------------------------------------------------------
+
+
+def refresh_ship_sidecar(
+    label: str,
+    *,
+    workspace: Path,
+    config: PipelineConfig,
+    toolkit_ship: str | None = None,
+    gameparams_ship_id: str | None = None,
+    variant_permoflage: str | None = "auto",
+    class_override: str | None = None,
+    ship_key_suffix: str | None = None,
+    on_event: OnEvent | None = None,
+    cancel: threading.Event | None = None,
+) -> "_scaffold_ship_mod.ScaffoldResult":
+    """Re-fold a ship's sidecar with every heavy step skipped.
+
+    Runs :func:`scaffold_ship` with ``skip_export / skip_armor / skip_ammo
+    / skip_gameparams_autofill / skip_materials_skins / skip_geometry_hitbox``
+    all set — so it only re-derives the placement/decorative/variant folds
+    against whatever is already on disk. Used (a) after a decoratives
+    merge, and (b) after the accessory-library build (the mesh-swap
+    variant Ry(180°) bone correction needs the variant accessory GLBs to
+    exist, which only happens post-library). A no-op for ships without
+    variant swaps, but always cheap (no toolkit subprocess, no GameParams
+    autofill).
+    """
+    return _scaffold_ship_mod.scaffold_ship(
+        label,
+        workspace=workspace,
+        config=config,
+        class_override=class_override,
+        ship_key_suffix=ship_key_suffix,
+        toolkit_ship=toolkit_ship,
+        gameparams_ship_id=gameparams_ship_id,
+        skip_export=True,
+        skip_armor=True,
+        skip_ammo=True,
+        skip_gameparams_autofill=True,
+        skip_materials_skins=True,
+        skip_geometry_hitbox=True,
+        variant_permoflage=variant_permoflage,
+        on_event=on_event,
+        cancel=cancel,
+    )
+
+
+def build_library_and_refresh(
+    *,
+    workspace: Path,
+    config: PipelineConfig | None = None,
+    refresh_specs: list[dict] | None = None,
+    rebuild_library: bool = False,
+    on_event: OnEvent | None = None,
+    cancel: threading.Event | None = None,
+) -> IngestResult:
+    """Build the fleet-wide accessory library ONCE, then post-library
+    refresh each given ship's sidecar.
+
+    This is the queue-drain counterpart to the per-ingest
+    ``build_library`` step: instead of re-scanning the whole library
+    (re-reading ~1k GLBs + an all-tree rglob, ~30 s) once *per* queued
+    ship, the queue defers it to a single pass after the queue drains.
+    The final library state + sidecars are identical to the per-item path
+    (the library build is additive; the union is the same either way).
+
+    ``refresh_specs`` is a list of ``{label, toolkit_ship,
+    gameparams_ship_id, permoflage}`` dicts — one per ship ingested since
+    the last build. Ships whose ``<label>_skel_ext.json`` candidates file
+    is absent are skipped (the post-library refresh is a no-op for them).
+    Per-ship refresh failures are collected as warnings rather than
+    aborting the whole drain (matching ``ingest_ship``'s post-library
+    soft-fail).
+    """
+    cfg = config or PipelineConfig.load()
+    workspace = Path(workspace).resolve()
+    timer = StepRunner(on_event, cancel=cancel)
+    warnings: list[str] = []
+
+    timer.start("build_library", detail=("rebuild" if rebuild_library else "additive"))
+    try:
+        _accessory_library_mod.build_accessory_library(
+            workspace=workspace,
+            config=cfg,
+            rebuild=rebuild_library,
+            on_event=on_event,
+            cancel=cancel,
+        )
+        timer.complete()
+    except StepError as e:
+        timer.fail("build_library", detail=f"step={e.step!r}")
+        raise
+    except Exception as e:
+        timer.fail("build_library", detail=f"{type(e).__name__}: {e}")
+        raise StepError(
+            step="build_library", underlying=e,
+            detail="build_accessory_library failed",
+        ) from e
+
+    for spec in (refresh_specs or []):
+        label = str(spec.get("label") or "")
+        if not label:
+            continue
+        candidates = (
+            workspace / "ships" / label / _sidecar.MODELS_SUBDIR
+            / f"{label}_skel_ext.json"
+        )
+        if not candidates.is_file():
+            continue
+        toolkit_ship = spec.get("toolkit_ship") or None
+        if toolkit_ship == label:
+            toolkit_ship = None
+        try:
+            refresh_ship_sidecar(
+                label,
+                workspace=workspace,
+                config=cfg,
+                toolkit_ship=toolkit_ship,
+                gameparams_ship_id=spec.get("gameparams_ship_id") or None,
+                variant_permoflage=spec.get("permoflage") or "auto",
+                on_event=on_event,
+                cancel=cancel,
+            )
+        except StepError as e:
+            warnings.append(
+                f"post-library refresh failed for {label!r} at "
+                f"step {e.step!r}: {e.detail or e}"
+            )
+        except Exception as e:
+            warnings.append(
+                f"post-library refresh failed for {label!r}: "
+                f"{type(e).__name__}: {e}"
+            )
+
+    return IngestResult(
+        ship_id="",
+        label="__library_drain__",
+        workspace_dir=workspace,
+        scaffold=None,
+        accessories_json_path=None,
+        library_refreshed=True,
+        published_to=None,
+        warnings=tuple(warnings),
+        step_timings_ms=dict(timer.step_timings_ms),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public composer entry
 # ---------------------------------------------------------------------------
 
@@ -267,6 +417,7 @@ def ingest_ship(
     variant_permoflage: str | None = "auto",
     toolkit_ship_override: str | None = None,
     gameparams_ship_id: str | None = None,
+    provenance_build_library: bool | None = None,
     on_event: OnEvent | None = None,
     cancel: threading.Event | None = None,
 ) -> IngestResult:
@@ -506,7 +657,7 @@ def ingest_ship(
 
     def _refresh_sidecar() -> "_scaffold_ship_mod.ScaffoldResult":
         """Re-run scaffold_ship with all heavy steps skipped (sidecar fold only)."""
-        return _scaffold_ship_mod.scaffold_ship(
+        return refresh_ship_sidecar(
             label,
             workspace=workspace,
             config=cfg,
@@ -514,12 +665,6 @@ def ingest_ship(
             ship_key_suffix=ship_key_suffix,
             toolkit_ship=toolkit_name if toolkit_name != label else None,
             gameparams_ship_id=gameparams_ship_id,
-            skip_export=True,
-            skip_armor=True,
-            skip_ammo=True,
-            skip_gameparams_autofill=True,
-            skip_materials_skins=True,
-            skip_geometry_hitbox=True,
             variant_permoflage=variant_permoflage,
             on_event=on_event,
             cancel=cancel,
@@ -669,9 +814,26 @@ def ingest_ship(
             doc["provenance"] = {
                 "extract_args": {
                     "vehicle":       gameparams_ship_id or toolkit_name,
+                    # The resolved toolkit model directory name. `vehicle`
+                    # above is the GameParams top_key, which the toolkit's
+                    # find_ship REJECTS on replay; this is the identifier
+                    # compose.clean_and_reextract feeds back as
+                    # `toolkit_ship_override`. (Older sidecars omit it and
+                    # fall back to a snapshot join.)
+                    "model_dir":     toolkit_name,
                     "label":         label,
                     "permoflage":    variant_permoflage,
-                    "build_library": bool(build_library),
+                    # Record the library-build INTENT for replay, which can
+                    # differ from the value this call ran with: the queue
+                    # forces build_library=False per item (the library is
+                    # built once at queue drain) but a clean-and-reextract
+                    # replay should still rebuild the library, so the queue
+                    # passes provenance_build_library=<the user's intent>.
+                    "build_library": bool(
+                        provenance_build_library
+                        if provenance_build_library is not None
+                        else build_library
+                    ),
                 },
                 "extracted_at": datetime.now(UTC).strftime(
                     "%Y-%m-%dT%H:%M:%SZ"
@@ -746,4 +908,6 @@ def ingest_ship(
 __all__ = [
     "ingest_ship",
     "resolve_ship_identity",
+    "refresh_ship_sidecar",
+    "build_library_and_refresh",
 ]

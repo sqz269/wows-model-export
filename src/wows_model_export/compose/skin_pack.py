@@ -732,7 +732,7 @@ def _load_vfs_variant(
     # `<stem>_emissive.mfm` siblings in the VFS that flag certain stems
     # as emissive — the .mfm's emissivePower scales `diffuse * mg.B`
     # into a glow texture. Run before the classifier walks the dir so
-    # synthesized `<stem>_emissive.dd0/.dds` files land in the plan via
+    # synthesized `<stem>_emissive.dd?/.dds` files land in the plan via
     # the regular CHANNEL_SLOTS path.
     try:
         synth_paths = synth_emission.synthesize_emissive_textures(

@@ -37,6 +37,8 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from ._atomic import atomic_write_text as _atomic_write_text
+
 # ---------------------------------------------------------------------------
 # GLB parsing — minimal JSON-chunk read; same approach as turret_autorig.
 # ---------------------------------------------------------------------------
@@ -449,10 +451,10 @@ def audit_library(
         "asset_count": len(results),
         "assets": [asdict(r) for r in results],
     }
-    out.write_text(
-        json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    # Atomic + unique-temp write: a sibling composer (accessory_library's
+    # _load_dead_orientation_map) reads this back during a concurrent
+    # build; a bare write_text could hand it a torn file.
+    _atomic_write_text(out, json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
     return results, out
 
 

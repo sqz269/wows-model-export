@@ -57,8 +57,14 @@ from .clean_workspace import (
     scan_extracted_ships,
 )
 from .decal_library import build_decal_library
+from .dedup_textures import dedup_textures
 from .find_ship_variants import find_ship_variants
-from .ingest_ship import ingest_ship, resolve_ship_identity
+from .ingest_ship import (
+    build_library_and_refresh,
+    ingest_ship,
+    refresh_ship_sidecar,
+    resolve_ship_identity,
+)
 from .projectile_library import build_projectile_library
 from .publish import publish
 from .scaffold_ship import scaffold_ship
@@ -75,6 +81,8 @@ __all__ = [
     "sidecar",
     # Per-ship composer functions (shadow same-named submodules)
     "ingest_ship",
+    "build_library_and_refresh",
+    "refresh_ship_sidecar",
     "scaffold_ship",
     "build_accessory_library",
     "ingest_skin_pack",
@@ -94,6 +102,7 @@ __all__ = [
     "build_projectile_library",
     "build_decal_library",
     "build_ammo_profiles",
+    "dedup_textures",
     # Cross-cutting
     "publish",
     "snapshot",

@@ -25,6 +25,7 @@ export type PanelSection =
   | 'view'
   | 'sections'
   | 'hull-groups'
+  | 'armor-hitbox'
   | 'damage'
   | 'aim'
   | 'textures'
@@ -103,6 +104,7 @@ export function defaultState(): PersistedState {
       view: true,
       sections: true,
       'hull-groups': false,
+      'armor-hitbox': false,
       damage: false,
       aim: false,
       textures: false,
@@ -150,9 +152,10 @@ export function patchState(patch: Partial<PersistedState>): PersistedState {
 
 /** Update a single nested record (sectionVisible, seamStates, panelOpen)
  * without clobbering sibling keys. */
-export function patchNestedState<
-  K extends 'sectionVisible' | 'seamStates' | 'panelOpen',
->(key: K, patch: Partial<PersistedState[K]>): PersistedState {
+export function patchNestedState<K extends 'sectionVisible' | 'seamStates' | 'panelOpen'>(
+  key: K,
+  patch: Partial<PersistedState[K]>,
+): PersistedState {
   const current = loadState();
   const next: PersistedState = {
     ...current,

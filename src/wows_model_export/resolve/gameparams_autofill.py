@@ -53,7 +53,6 @@ from ..read.gameparams import (
     get_projectile,
     get_ship,
     load_full,
-    resolve_ship_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -877,7 +876,8 @@ def _fill_gun_fields(
 ) -> None:
     """Main / secondary battery fields. ``group`` carries shared dispersion
     + range data (``sigmaCount``, ``maxDist``); ``mount`` carries per-mount
-    kinematics (yaw/elev arcs, traverse rate, reload)."""
+    kinematics (yaw/elev arcs, traverse rate, reload) and radius/ellipse
+    dispersion scalars."""
     barrel_d = _safe_float(mount.get("barrelDiameter"))
     if barrel_d is not None and barrel_d > 0:
         # GameParams stores barrel diameter in metres (0.406 = 406 mm).
@@ -920,14 +920,52 @@ def _fill_gun_fields(
     reload = _safe_float(mount.get("shotDelay"))
     if reload is not None and reload > 0:
         out["reload_s"] = reload
-    sigma = _safe_float(group.get("sigmaCount"))
-    if sigma is not None:
-        out["sigma"] = sigma
+    dispersion = _dispersion_fields(group, mount)
+    if dispersion:
+        out["dispersion"] = dispersion
     ammo_list = mount.get("ammoList") or []
     if isinstance(ammo_list, list):
         types = _ammo_types_for(ammo_list)
         if types:
             out["ammo_types"] = types
+
+
+def _dispersion_fields(group: dict[str, Any], mount: dict[str, Any]) -> dict[str, Any]:
+    """Collect raw GameParams dispersion scalars for downstream consumers.
+
+    Keep the field names aligned with GameParams for this data-only handoff;
+    gameplay can layer normalized names/units on top once the model is wired.
+    """
+    out: dict[str, Any] = {}
+    for key in ("maxDist", "sigmaCount", "taperDist"):
+        v = _safe_float(group.get(key))
+        if v is not None:
+            out[key] = v
+    normal_distribution = group.get("normalDistribution")
+    if isinstance(normal_distribution, bool):
+        out["normalDistribution"] = normal_distribution
+
+    for key in (
+        "idealRadius",
+        "idealDistance",
+        "minRadius",
+        "delim",
+        "radiusOnZero",
+        "radiusOnDelim",
+        "radiusOnMax",
+        "ellipseRangeMin",
+        "ellipseRangeMax",
+        "minEllipseRanging",
+        "medEllipseRanging",
+        "maxEllipseRanging",
+        "aiMGminEllipseRanging",
+        "aiMGmedEllipseRanging",
+        "aiMGmaxEllipseRanging",
+    ):
+        v = _safe_float(mount.get(key))
+        if v is not None:
+            out[key] = v
+    return out
 
 
 def _fill_aa_fields(mount: dict[str, Any], out: dict[str, Any]) -> None:
@@ -1143,6 +1181,15 @@ def shell_visual_extras(ammo_id: str, *, refresh: bool = False) -> dict[str, Any
     proj = get_projectile(ammo_id, refresh=refresh)
     if proj is None:
         return {}
+    return _shell_visual_extras_from_proj(proj)
+
+
+def _shell_visual_extras_from_proj(proj: dict[str, Any]) -> dict[str, Any]:
+    """Body of :func:`shell_visual_extras` over an already-resolved
+    Projectile entity dict. Lets callers that already hold the dict (e.g.
+    a corpus walk over ``load_full()``) skip the ``get_projectile``
+    round-trip. Identical output to ``shell_visual_extras(ammo_id)`` when
+    ``proj`` is that ammo's entity."""
     # Skip torpedo-style entities (Torpedo / DepthCharge / Laser / Wave /
     # PlaneTracer) — they don't carry shell mesh sizing, and falling
     # through would otherwise duplicate the torpedo helper's tracer XML
@@ -1265,6 +1312,12 @@ def shell_effects_extras(ammo_id: str, *, refresh: bool = False) -> dict[str, An
     proj = get_projectile(ammo_id, refresh=refresh)
     if proj is None:
         return {}
+    return _shell_effects_extras_from_proj(proj)
+
+
+def _shell_effects_extras_from_proj(proj: dict[str, Any]) -> dict[str, Any]:
+    """Body of :func:`shell_effects_extras` over an already-resolved
+    Projectile entity dict (see :func:`_shell_visual_extras_from_proj`)."""
     # Same shell-render guard as :func:`shell_visual_extras`. Without it
     # the helper would extract ``blowUpEffect`` / ``shipDestroyEffect``
     # from torpedo / depth charge entries (which carry those flat fields
@@ -1340,6 +1393,12 @@ def torpedo_visual_extras(ammo_id: str, *, refresh: bool = False) -> dict[str, A
     proj = get_projectile(ammo_id, refresh=refresh)
     if proj is None:
         return {}
+    return _torpedo_visual_extras_from_proj(proj)
+
+
+def _torpedo_visual_extras_from_proj(proj: dict[str, Any]) -> dict[str, Any]:
+    """Body of :func:`torpedo_visual_extras` over an already-resolved
+    Projectile entity dict (see :func:`_shell_visual_extras_from_proj`)."""
     out: dict[str, Any] = {}
 
     for src, dst in (
@@ -1382,6 +1441,12 @@ def torpedo_effects_extras(ammo_id: str, *, refresh: bool = False) -> dict[str, 
     proj = get_projectile(ammo_id, refresh=refresh)
     if proj is None:
         return {}
+    return _torpedo_effects_extras_from_proj(proj)
+
+
+def _torpedo_effects_extras_from_proj(proj: dict[str, Any]) -> dict[str, Any]:
+    """Body of :func:`torpedo_effects_extras` over an already-resolved
+    Projectile entity dict (see :func:`_shell_visual_extras_from_proj`)."""
     # Skip shell-style entities — their impact effects are already emitted
     # by :func:`shell_effects_extras` in the authoritative H/V-split form.
     # WG ships duplicate flat ``projDestroyedEffect`` alongside the split
@@ -1835,10 +1900,10 @@ def derive_class_from_placements(
         return None
     if not param_index:
         return class_from_caliber(species, None)
-    full_id = resolve_ship_id(param_index)
-    if not full_id:
-        return class_from_caliber(species, None)
-    ship = get_ship(full_id, refresh=refresh)
+    # get_ship -> get_entity already handles prefix-form lookup
+    # (gameparams.py), so pass param_index straight through rather than
+    # pre-resolving it to a full id first. Same result; one fewer scan.
+    ship = get_ship(param_index, refresh=refresh)
     if ship is None:
         return class_from_caliber(species, None)
     components = resolve_components(ship)

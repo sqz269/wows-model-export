@@ -6,7 +6,6 @@ Drives the fleet-wide accessory-library builder. Argv shape::
         [--library-root P]
         [--only A,B,C]
         [--rebuild]
-        [--audit-winding] [--auto-flip-winding]
         [common flags ...]
 """
 
@@ -54,17 +53,6 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Regenerate every asset GLB + DDS from scratch.",
     )
-    ap.add_argument(
-        "--audit-winding",
-        action="store_true",
-        help="Run the joint A+B winding heuristic and print results.",
-    )
-    ap.add_argument(
-        "--auto-flip-winding",
-        action="store_true",
-        help="Flip GLBs that score a high-confidence FLIP verdict and "
-             "persist them to flip_overrides.json (source: 'auto').",
-    )
     add_common_args(ap)
     return ap
 
@@ -75,8 +63,6 @@ def _summarize(result: AccessoryLibraryResult) -> str:
         f"built={result.assets_built}",
         f"audited={result.assets_audited}",
     ]
-    if result.auto_flipped:
-        bits.append(f"auto_flipped={len(result.auto_flipped)}")
     if result.warnings:
         bits.append(f"warnings={len(result.warnings)}")
     total = result.step_timings_ms.get("total")
@@ -106,8 +92,6 @@ def main(argv: list[str] | None = None) -> int:
             library_root=args.library_root,
             only_ships=only_ships,
             rebuild=args.rebuild,
-            audit_winding=args.audit_winding,
-            auto_flip_winding=args.auto_flip_winding,
             on_event=printer,
         )
     except StepError as e:

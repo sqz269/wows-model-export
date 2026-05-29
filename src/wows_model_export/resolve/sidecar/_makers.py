@@ -9,7 +9,7 @@ which captures wall-clock time + user/host into the ``pipeline`` block.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from ._constants import VALID_SHIP_CLASSES
@@ -349,7 +349,7 @@ def _add_gameplay_fields(
     caliber_mm: int | None,
     barrel_count: int | None,
     ammo_types: Iterable[str] | None,
-    sigma: float | None,
+    dispersion: Mapping[str, Any] | None,
     yaw_range_deg: Iterable[float] | None,
     elev_range_deg: Iterable[float] | None,
     yaw_dead_zones_deg: Iterable[Iterable[float]] | None = None,
@@ -366,8 +366,8 @@ def _add_gameplay_fields(
         out["barrel_count"] = int(barrel_count)
     if ammo_types is not None:
         out["ammo_types"] = list(ammo_types)
-    if sigma is not None:
-        out["sigma"] = float(sigma)
+    if dispersion:
+        out["dispersion"] = dict(dispersion)
     if yaw_range_deg is not None:
         out["yaw_range_deg"] = [float(v) for v in yaw_range_deg]
     if elev_range_deg is not None:
@@ -397,7 +397,7 @@ def make_turret(
     caliber_mm: int | None = None,
     barrel_count: int | None = None,
     ammo_types: Iterable[str] | None = None,
-    sigma: float | None = None,
+    dispersion: Mapping[str, Any] | None = None,
     yaw_range_deg: Iterable[float] | None = None,
     elev_range_deg: Iterable[float] | None = None,
     yaw_dead_zones_deg: Iterable[Iterable[float]] | None = None,
@@ -417,7 +417,8 @@ def make_turret(
     _add_gameplay_fields(
         out,
         display_name=display_name, caliber_mm=caliber_mm,
-        barrel_count=barrel_count, ammo_types=ammo_types, sigma=sigma,
+        barrel_count=barrel_count, ammo_types=ammo_types,
+        dispersion=dispersion,
         yaw_range_deg=yaw_range_deg, elev_range_deg=elev_range_deg,
         yaw_dead_zones_deg=yaw_dead_zones_deg, pitch_dead_zones_deg=pitch_dead_zones_deg,
         traverse_rate=traverse_rate, elev_rate=elev_rate, reload_s=reload_s,
@@ -438,7 +439,7 @@ def make_secondary(
     caliber_mm: int | None = None,
     barrel_count: int | None = None,
     ammo_types: Iterable[str] | None = None,
-    sigma: float | None = None,
+    dispersion: Mapping[str, Any] | None = None,
     yaw_range_deg: Iterable[float] | None = None,
     elev_range_deg: Iterable[float] | None = None,
     yaw_dead_zones_deg: Iterable[Iterable[float]] | None = None,
@@ -458,7 +459,8 @@ def make_secondary(
     _add_gameplay_fields(
         out,
         display_name=display_name, caliber_mm=caliber_mm,
-        barrel_count=barrel_count, ammo_types=ammo_types, sigma=sigma,
+        barrel_count=barrel_count, ammo_types=ammo_types,
+        dispersion=dispersion,
         yaw_range_deg=yaw_range_deg, elev_range_deg=elev_range_deg,
         yaw_dead_zones_deg=yaw_dead_zones_deg, pitch_dead_zones_deg=pitch_dead_zones_deg,
         traverse_rate=traverse_rate, elev_rate=elev_rate, reload_s=reload_s,
@@ -492,7 +494,7 @@ def make_antiair(
     """Build an entry for ``antiair[]`` (AA mount).
 
     AA mounts add ``aa_range_km`` + ``aa_dps`` for aura math. Standard
-    gun-gameplay fields (``ammo_types``, ``reload_s``, ``sigma``) are
+    gun-gameplay fields (``ammo_types``, ``reload_s``, ``dispersion``) are
     omitted by convention — auto-AA doesn't expose them to players.
     """
     out = _make_placement_common(
@@ -504,7 +506,7 @@ def make_antiair(
         out,
         display_name=display_name, caliber_mm=caliber_mm,
         barrel_count=barrel_count,
-        ammo_types=None, sigma=None,
+        ammo_types=None, dispersion=None,
         yaw_range_deg=yaw_range_deg, elev_range_deg=elev_range_deg,
         yaw_dead_zones_deg=yaw_dead_zones_deg, pitch_dead_zones_deg=pitch_dead_zones_deg,
         traverse_rate=traverse_rate, elev_rate=elev_rate, reload_s=None,

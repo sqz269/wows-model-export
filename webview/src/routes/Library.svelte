@@ -10,8 +10,6 @@
   import {
     fetchLibrary,
     invalidateLibrary,
-    fetchWindingAudit,
-    postAutoFlipWinding,
   } from '$lib/api';
   import { extractEvents } from '$lib/extract_events.svelte';
   import { settingsHref } from '$lib/nav_state.svelte';
@@ -20,7 +18,6 @@
     LibraryAsset,
     LibraryFilter,
     LibraryIndex,
-    WindingAuditEntry,
   } from '$lib/types';
   import AssetList from '$components/AssetList.svelte';
   import AssetDetail from '$components/AssetDetail.svelte';
@@ -39,70 +36,6 @@
 
   let index = $state<LibraryIndex | null>(null);
   let loadError = $state<string | null>(null);
-
-  // Winding-audit verdicts keyed by GLB-relative path. Best-effort —
-  // missing audit JSON resolves to an empty map and the row badges
-  // just don't render. Refresh after a bulk auto-flip so the badges
-  // reflect the new on-disk state without a page reload.
-  let windingAudit = $state<Map<string, WindingAuditEntry>>(new Map());
-  let auditMsg = $state<{ cls: 'ok' | 'fail' | 'working'; text: string } | null>(null);
-  let autoFlipPending = $state(false);
-
-  async function refreshWindingAudit(): Promise<void> {
-    windingAudit = await fetchWindingAudit();
-  }
-
-  /** Count of assets the audit recommends flipping that the user
-   *  hasn't already manually decided on. Drives the bulk button label. */
-  const flipCandidateCount = $derived.by(() => {
-    let n = 0;
-    for (const w of windingAudit.values()) {
-      if (w.verdict === 'flip' && !w.in_overrides) n += 1;
-    }
-    return n;
-  });
-
-  async function runAutoFlip() {
-    const n = flipCandidateCount;
-    if (n === 0 || autoFlipPending) return;
-    if (
-      !confirm(
-        `Apply ${n} auto-flip recommendation(s)?\n\n` +
-          `Each rewrites the GLB on disk and adds a "source: auto" entry to ` +
-          `flip_overrides.json. Reversible per-asset via the F-key.`,
-      )
-    )
-      return;
-    autoFlipPending = true;
-    auditMsg = { cls: 'working', text: `Auto-flipping ${n}…` };
-    try {
-      const res = await postAutoFlipWinding();
-      if (!res.ok) {
-        auditMsg = {
-          cls: 'fail',
-          text: `Auto-flip failed: ${res.error || res.stderr || 'unknown'}`,
-        };
-        return;
-      }
-      await refreshWindingAudit();
-      const still = flipCandidateCount;
-      const applied = n - still;
-      auditMsg = {
-        cls: 'ok',
-        text:
-          still === 0
-            ? `Auto-flipped ${applied} asset(s). All FLIP verdicts cleared.`
-            : `Auto-flipped ${applied} asset(s); ${still} still flagged.`,
-      };
-      // GLBs were rewritten — invalidate any cached library handle so
-      // the next page-load re-fetches.
-      invalidateLibrary();
-    } catch (err) {
-      auditMsg = { cls: 'fail', text: `Auto-flip failed: ${err}` };
-    } finally {
-      autoFlipPending = false;
-    }
-  }
 
   let filter = $state<LibraryFilter>({
     scope: null,
@@ -181,9 +114,6 @@
     } catch (err) {
       loadError = err instanceof Error ? err.message : String(err);
     }
-    // Best-effort, don't block the page on a missing audit file —
-    // the sidebar renders without badges in that case.
-    void refreshWindingAudit();
   });
 
   function selectAsset(id: string) {
@@ -221,11 +151,6 @@
       {filter}
       {sort}
       {activeId}
-      {windingAudit}
-      {flipCandidateCount}
-      {autoFlipPending}
-      {auditMsg}
-      onAutoFlip={runAutoFlip}
       onFilterChange={(next) => (filter = next)}
       onSortChange={(next) => (sort = next)}
       onSelect={selectAsset}
@@ -243,8 +168,6 @@
       <AssetDetail
         id={activeId}
         asset={activeAsset}
-        windingAudit={windingAudit.get(activeAsset.glb) ?? null}
-        onWindingAuditChange={refreshWindingAudit}
       />
     {:else}
       <div class="text-muted-foreground flex flex-1 items-center justify-center p-6 text-center">

@@ -36,7 +36,6 @@ from .routes import (
     rig,
     settings,
     ships,
-    winding,
 )
 from .static import mount_webview
 
@@ -88,7 +87,6 @@ def create_app(config: PipelineConfig) -> FastAPI:
     app.include_router(cleanup.make_router(config), prefix="/api")
     app.include_router(queue.make_router(config), prefix="/api")
     app.include_router(jobs.make_router(), prefix="/api")
-    app.include_router(winding.make_router(config), prefix="/api")
     app.include_router(rig.make_router(config), prefix="/api")
     app.include_router(consumers.make_router(config), prefix="/api")
 

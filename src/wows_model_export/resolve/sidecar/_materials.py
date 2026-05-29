@@ -17,19 +17,18 @@ from __future__ import annotations
 
 import json
 import re
-import struct
-import sys
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from ._constants import (
-    DDS_MIP_SUFFIXES,
     _CHANNEL_SUFFIX_MAP,
     _MFM_STRIP_SUFFIXES,
+    DDS_MIP_SUFFIXES,
 )
 from ._dds_channels import CHANNEL_SLOTS, LEGACY_RAW_SUFFIXES
 from ._makers import make_default_skin, make_skin
+
 
 def _glb_json_chunk(glb_path: str | Path) -> dict[str, Any]:
     """Extract and parse the JSON chunk from a GLB file.
@@ -511,20 +510,32 @@ _LIBRARY_MATERIAL_STEMS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("shipglass_",  ("glass",),        "transparent"),  # glass: alpha-blended
 )
 
-# Shared-library token list used by base-stem ranking + permoflage
-# fallback resolver to skip stems that aren't ship-owned (damage
-# interior, glass, nets, defaults, transparent surfaces). Mirror of
-# `_HINT_ALIASES` keys + `_LIBRARY_MATERIAL_STEMS` tokens.
-_SHARED_LIBRARY_TOKENS: tuple[str, ...] = (
-    "razlom", "glass", "grid", "net", "default", "transparent",
-)
+_STEM_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 def _is_library_stem(stem: str) -> bool:
-    """True if ``stem`` matches a known shared-library token (damage
-    interior / glass / nets / defaults). Used to keep permoflage
-    fallback search from latching onto cross-ship texture sources."""
-    return any(t in stem for t in _SHARED_LIBRARY_TOKENS)
+    """True if ``stem`` is one of WG's shared/common texture stems.
+
+    This intentionally does not do broad substring checks. Real accessory
+    stems such as ``AM073_Floater_Net_Basket`` and
+    ``FM604_Magnetic_Compass`` contain ``net`` as ordinary text; treating
+    those as library stems makes the deterministic material-mappings pass
+    drop every texture for those assets.
+    """
+    low = (stem or "").lower()
+    if not low:
+        return False
+    tokens = set(_STEM_TOKEN_RE.findall(low))
+    if "default" in tokens or "razlom" in tokens:
+        return True
+    if "transparent" in tokens or "glass" in tokens:
+        return True
+    # Shared net/grid alpha materials are authored as C###_*_alpha or
+    # *_grid_alpha / *_net_alpha. Ordinary accessory stems can contain
+    # Net/Grid without being library materials.
+    if "alpha" in tokens and (("grid" in tokens) or ("net" in tokens)):
+        return True
+    return False
 
 # Channel suffix → glTF slot name. The canonical table lives in
 # ``_dds_channels.CHANNEL_SLOTS`` and is shared with the skin-pack
@@ -933,8 +944,9 @@ def _apply_material_mappings_json(
                     diffuse_keys = (key,) if diffuse_keys is None else diffuse_keys
                 break  # stop at first matching key (raw vs. year-stripped)
 
-        # Synthesised emissive: `tools/shared/synth_emission.py` writes
-        # `<diffuse_stem>_emissive.{dd0,dds}` for any stem with a sibling
+        # Synthesised emissive: `tools/shared/synth_emission.py` writes a
+        # `<diffuse_stem>_emissive.{dd0,dd1,dd2,dds}` pyramid for any
+        # stem with a sibling
         # `*_emissive.mfm` in the VFS (ARP / Azur Lane / Sabaton crossover
         # skins). The classifier indexes those under the diffuse stem
         # keyed `emissive`. For mesh-swap variants the diffuse stem is

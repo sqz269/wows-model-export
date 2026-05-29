@@ -10,14 +10,13 @@ Public surface — two access patterns:
 
        from wows_model_export.resolve import (
            bone_orientation, skel_ext_hashes, gameparams_autofill,
-           camo, sidecar, winding, synth_emission,
+           camo, sidecar, synth_emission,
        )
        sign = bone_orientation.glb_forward_z_sign(glb_path)
        res  = skel_ext_hashes.resolve_candidates(candidates, table=tbl)
        swap = gameparams_autofill.resolve_variant_accessory_swaps(ship, exterior)
        cats = camo.categories_for_entry(entry, ...)
        doc  = sidecar.read(path)
-       verd = winding.detect_winding_verdict(glb_path)
        emi  = synth_emission.synth_emissive_dds(diffuse_dds, mg_dds, ...)
 
 2. **Specific symbols** flattened — for distinctive names. See
@@ -37,8 +36,6 @@ Lifted modules so far:
                            constructor, absorb_* pass, mutating
                            transform, and the GLB walkers
                            (from tools/ship/sidecar.py).
-    winding              — auto-detect heuristic for triangle winding
-                           orientation (from glb_flip_winding.py).
     synth_emission       — diffuse * mg.B emissive synthesis for
                            ARP / Azur Lane / Sabaton crossover skins
                            (from synth_emission.py).
@@ -66,7 +63,6 @@ from . import (
     sidecar,
     skel_ext_hashes,
     synth_emission,
-    winding,
 )
 
 # bone_orientation — pure math + GLB header read
@@ -195,14 +191,6 @@ from .synth_emission import (
 from .rig_normalize_bones import normalize as normalize_rig
 from .rig_normalize_bones import normalize_file as normalize_rig_file
 
-# winding — auto-detect heuristic for triangle winding orientation
-from .winding import (
-    detect_winding_verdict,
-    flip_normals,
-    score_winding,
-    winding_correctness,
-)
-
 __all__ = [
     # Submodules
     "bone_orientation",
@@ -214,7 +202,6 @@ __all__ = [
     "sidecar",
     "skel_ext_hashes",
     "synth_emission",
-    "winding",
     # bone_orientation
     "glb_forward_z_sign",
     "post_multiply_ry180",
@@ -321,9 +308,4 @@ __all__ = [
     # rig_normalize_bones (renamed to avoid clashing with generic ``normalize``)
     "normalize_rig",
     "normalize_rig_file",
-    # winding
-    "detect_winding_verdict",
-    "flip_normals",
-    "score_winding",
-    "winding_correctness",
 ]

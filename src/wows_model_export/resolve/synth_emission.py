@@ -45,10 +45,11 @@ from PIL import Image
 
 from ..config import PipelineConfig
 
-
 #: Default ``emissivePower`` when an ``*_emissive.mfm`` doesn't carry one.
 #: Empirically 1.8 across every tested ARP / AL / Sabaton ship.
 DEFAULT_EMISSIVE_POWER: float = 1.8
+
+_WG_DDS_MIP_SUFFIXES: tuple[str, ...] = (".dd0", ".dd1", ".dd2", ".dds")
 
 #: Shader-ID family prefix for ``ship_emissive_material.fx`` variants
 #: (the engine's emissive PBS shader). Toolkit writes ``shader_id`` as
@@ -181,6 +182,26 @@ def synth_emissive_dds(
     return out_path
 
 
+def _paired_emissive_mip_inputs(
+    textures_dds_dir: Path,
+    diffuse_stem: str,
+    mg_stem: str,
+) -> tuple[list[Path], list[Path], tuple[str, ...]]:
+    diffuse_paths: list[Path] = []
+    mg_paths: list[Path] = []
+    suffixes: list[str] = []
+
+    for suffix in _WG_DDS_MIP_SUFFIXES:
+        diffuse_path = textures_dds_dir / f"{diffuse_stem}_a{suffix}"
+        mg_path = textures_dds_dir / f"{mg_stem}_mg{suffix}"
+        if diffuse_path.is_file() and mg_path.is_file():
+            diffuse_paths.append(diffuse_path)
+            mg_paths.append(mg_path)
+            suffixes.append(suffix)
+
+    return diffuse_paths, mg_paths, tuple(suffixes)
+
+
 def _load_material_mappings(
     material_mappings_json: str | Path | None,
 ) -> list[dict] | None:
@@ -306,10 +327,13 @@ def synthesize_emissive_textures(
     Detection is definitive (not heuristic): a stem owns an emissive
     material iff a sibling ``<stem>_emissive.mfm`` exists in the VFS.
 
-    For each emissive stem found, this writes:
+    For each emissive stem found, this writes the suffix-aligned WG mip
+    pyramid that exists on both the diffuse and ``_mg`` inputs:
 
-      - ``<stem>_emissive.dd0``  (top mip — synthesized from ``_a.dd0`` + ``_mg.dd0``)
-      - ``<stem>_emissive.dds``  (low mip — synthesized from ``_a.dds`` + ``_mg.dds``)
+      - ``<stem>_emissive.dd0``
+      - ``<stem>_emissive.dd1``
+      - ``<stem>_emissive.dd2``
+      - ``<stem>_emissive.dds``
 
     Sidecar's ``CHANNEL_SLOTS`` table (in
     :mod:`wows_model_export.resolve.sidecar._dds_channels`) then routes
@@ -432,12 +456,12 @@ def synthesize_emissive_textures(
     def _synth_one(stem: str, mg_stem: str, mfm_for_power: Path) -> None:
         if stem in synthesized:
             return
-        diff_dd0 = textures_dds_dir / f"{stem}_a.dd0"
-        diff_low = textures_dds_dir / f"{stem}_a.dds"
-        mg_dd0 = textures_dds_dir / f"{mg_stem}_mg.dd0"
-        mg_low = textures_dds_dir / f"{mg_stem}_mg.dds"
-        if not ((diff_dd0.is_file() or diff_low.is_file())
-                and (mg_dd0.is_file() or mg_low.is_file())):
+        diffuse_paths, mg_paths, mip_suffixes = _paired_emissive_mip_inputs(
+            textures_dds_dir,
+            stem,
+            mg_stem,
+        )
+        if not diffuse_paths:
             print(
                 f"  skip emissive synth for {stem}: missing _a.* "
                 f"or {mg_stem}_mg.* (VFS pull-in didn't surface them)",
@@ -450,24 +474,22 @@ def synthesize_emissive_textures(
             if mfm_for_power.is_file() else DEFAULT_EMISSIVE_POWER
         )
 
-        mip_count = 0
-        if diff_dd0.is_file() and mg_dd0.is_file():
-            out_dd0 = textures_dds_dir / f"{stem}_emissive.dd0"
-            synth_emissive_dds(diff_dd0, mg_dd0, out_dd0, emissive_power=power)
-            written.append(out_dd0)
-            mip_count += 1
-
-        if diff_low.is_file() and mg_low.is_file():
-            out_low = textures_dds_dir / f"{stem}_emissive.dds"
-            synth_emissive_dds(diff_low, mg_low, out_low, emissive_power=power)
-            written.append(out_low)
-            mip_count += 1
+        synth_paths = synth_emissive_dds_pyramid(
+            diffuse_paths,
+            mg_paths,
+            textures_dds_dir,
+            stem,
+            emissive_power=power,
+            mip_suffixes=mip_suffixes,
+        )
+        written.extend(synth_paths)
 
         synthesized.add(stem)
         mg_note = f" (mg from {mg_stem})" if mg_stem != stem else ""
+        suffix_note = ",".join(p.suffix.lstrip(".") for p in synth_paths)
         print(
-            f"  emissive synth: {stem}_emissive.{{dd0,dds}}  "
-            f"(power={power:.2f}, {mip_count} mip(s)){mg_note}"
+            f"  emissive synth: {stem}_emissive.{{{suffix_note}}}  "
+            f"(power={power:.2f}, {len(synth_paths)} mip(s)){mg_note}"
         )
 
     for mfm in sorted(textures_dds_dir.glob("*_emissive.mfm")):
@@ -687,7 +709,7 @@ def synthesize_emissive_textures_batch(
     # single-dir helper without its extract pass — distribution above
     # already pulled in everything from the VFS. Each owner dir has its
     # own dedup set so Path A and Path B can both write to the same
-    # canonical `<diffuse_stem>_emissive.{dd0,dds}` output without one
+    # canonical `<diffuse_stem>_emissive.{dd0,dd1,dd2,dds}` output without one
     # clobbering the other.
     synthesized_by_dir: dict[Path, set[str]] = {}
 
@@ -697,12 +719,12 @@ def synthesize_emissive_textures_batch(
         already = synthesized_by_dir.setdefault(owner, set())
         if stem in already:
             return
-        diff_dd0 = owner / f"{stem}_a.dd0"
-        diff_low = owner / f"{stem}_a.dds"
-        mg_dd0 = owner / f"{mg_stem}_mg.dd0"
-        mg_low = owner / f"{mg_stem}_mg.dds"
-        if not ((diff_dd0.is_file() or diff_low.is_file())
-                and (mg_dd0.is_file() or mg_low.is_file())):
+        diffuse_paths, mg_paths, mip_suffixes = _paired_emissive_mip_inputs(
+            owner,
+            stem,
+            mg_stem,
+        )
+        if not diffuse_paths:
             print(
                 f"  skip emissive synth for {stem}: missing _a.* or "
                 f"{mg_stem}_mg.* (not in VFS for this stem)",
@@ -715,21 +737,20 @@ def synthesize_emissive_textures_batch(
             if mfm_for_power.is_file() else DEFAULT_EMISSIVE_POWER
         )
 
-        written: list[Path] = []
-        if diff_dd0.is_file() and mg_dd0.is_file():
-            out_dd0 = owner / f"{stem}_emissive.dd0"
-            synth_emissive_dds(diff_dd0, mg_dd0, out_dd0, emissive_power=power)
-            written.append(out_dd0)
-
-        if diff_low.is_file() and mg_low.is_file():
-            out_low = owner / f"{stem}_emissive.dds"
-            synth_emissive_dds(diff_low, mg_low, out_low, emissive_power=power)
-            written.append(out_low)
+        written = synth_emissive_dds_pyramid(
+            diffuse_paths,
+            mg_paths,
+            owner,
+            stem,
+            emissive_power=power,
+            mip_suffixes=mip_suffixes,
+        )
 
         already.add(stem)
         mg_note = f" (mg from {mg_stem})" if mg_stem != stem else ""
+        suffix_note = ",".join(p.suffix.lstrip(".") for p in written)
         print(
-            f"  emissive synth: {stem}_emissive.{{dd0,dds}}  "
+            f"  emissive synth: {stem}_emissive.{{{suffix_note}}}  "
             f"(power={power:.2f}, {len(written)} mip(s)){mg_note}"
         )
         if written:
@@ -760,7 +781,7 @@ def synth_emissive_dds_pyramid(
     *,
     emissive_power: float = DEFAULT_EMISSIVE_POWER,
     pixel_format: str = "DXT1",
-    mip_suffixes: tuple[str, ...] = (".dd0", ".dd1", ".dd2", ".dds"),
+    mip_suffixes: tuple[str, ...] = _WG_DDS_MIP_SUFFIXES,
 ) -> list[Path]:
     """Synthesize a multi-mip emissive set, mirroring WG's ``.dd0`` /
     ``.dd1`` / ``.dd2`` / ``.dds`` mip pyramid convention.

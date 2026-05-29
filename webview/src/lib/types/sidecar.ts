@@ -66,6 +66,33 @@ export interface SidecarMaterial {
 }
 
 /**
+ * Raw GameParams dispersion scalars surfaced for downstream combat consumers.
+ * Field names intentionally mirror GameParams until gameplay code normalizes
+ * the exact radius / ellipse model.
+ */
+export interface SidecarMountDispersion {
+  maxDist?: number;
+  sigmaCount?: number;
+  taperDist?: number;
+  normalDistribution?: boolean;
+  idealRadius?: number;
+  idealDistance?: number;
+  minRadius?: number;
+  delim?: number;
+  radiusOnZero?: number;
+  radiusOnDelim?: number;
+  radiusOnMax?: number;
+  ellipseRangeMin?: number;
+  ellipseRangeMax?: number;
+  minEllipseRanging?: number;
+  medEllipseRanging?: number;
+  maxEllipseRanging?: number;
+  aiMGminEllipseRanging?: number;
+  aiMGmedEllipseRanging?: number;
+  aiMGmaxEllipseRanging?: number;
+}
+
+/**
  * Per-mount subset. The real sidecar carries more (display_name,
  * attach_to, transform, parent_section, …) — we only need what joins
  * to `ballistics.shells` and what the attached-accessories composer
@@ -82,6 +109,7 @@ export interface SidecarMount {
   hp_name?: string;
   asset_id?: string;
   ammo_ids?: string[];
+  dispersion?: SidecarMountDispersion;
   misc_filter?: string[];
   /**
    * Yaw traverse limits `[min, max]` in degrees, in the mount's rest-relative
@@ -109,6 +137,85 @@ export interface SidecarMount {
    * bakes the convention-B basis conjugation into the child matrices.
    */
   attached_y_flip?: boolean;
+}
+
+// ─── Armor (§6) ──────────────────────────────────────────────────────────
+// Per-vertex `_MATERIAL_ID` on the hull GLB's `Armor` group joins to
+// `materials_table[id]` for thickness. `zones` is the human-readable
+// per-zone summary. See reference/schemas/METADATA_SPEC.md §6.
+
+export interface SidecarArmorZone {
+  default_thickness_mm: number;
+  max_thickness_mm: number;
+  plate_count: number;
+}
+
+export interface SidecarArmorMaterial {
+  /** Effective total thickness (sum of `layers`). */
+  thickness_mm: number;
+  /** Ordered outer→inner layer thicknesses, e.g. [19, 19] = 2×19mm spaced. */
+  layers: number[];
+  /** Armor zones that use this material (a material may span several). */
+  zones: string[];
+  /** Toolkit `zone_hidden` flag — internal decks / bulkheads. */
+  hidden?: boolean;
+}
+
+export interface SidecarArmor {
+  source_glb?: string;
+  class_canonical?: boolean;
+  plate_count?: number;
+  triangles?: number;
+  zones?: Record<string, SidecarArmorZone>;
+  /** Keyed by integer-as-string `material_id` (matches GLB `_MATERIAL_ID`). */
+  materials_table?: Record<string, SidecarArmorMaterial>;
+  /** Per-mount armor `{HP_AGM_1: {material_id_str: thickness_mm}}` (v3+). */
+  mount_armor?: Record<string, Record<string, number>>;
+  /** Per-turret barbette material-id lists (v3+). */
+  barbettes?: Record<string, string[]>;
+  hidden_zones?: string[];
+}
+
+// ─── Hitbox (§7) ─────────────────────────────────────────────────────────
+// `Hitboxes` group on the hull GLB carries `CM_SB_*` cube meshes; each box
+// name keys into `boxes`. `hit_locations` carries the per-section damage
+// pool + regen numbers. See METADATA_SPEC.md §7.
+
+export interface SidecarHitboxRegion {
+  box_count: number;
+  /** Present when the on-disk token differed from the canonical zone. */
+  raw_name?: string;
+  raw_names?: string[];
+}
+
+export interface SidecarHitboxBox {
+  /** Damage section the cube belongs to (e.g. "Cit", "engine", "artillery"). */
+  section: string;
+  /** Verbatim GameParams hlType (e.g. "citadel_hitlocation"). */
+  hl_type: string;
+  /** Damage-cascade target (e.g. "Hull"). */
+  parent_hl?: string;
+  /** Owning hardpoint for turret-barbette boxes (`CM_SB_gk_*`). */
+  owner_hp?: string;
+}
+
+export interface SidecarHitLocation {
+  hl_type: string;
+  parent_hl?: string;
+  max_hp?: number;
+  regen_part?: number;
+  enhanced_regen_part?: number;
+  auto_repair_s?: number;
+  broken_repair_s?: number;
+}
+
+export interface SidecarHitbox {
+  source_glb?: string;
+  region_count?: number;
+  regions?: Record<string, SidecarHitboxRegion>;
+  /** Keyed by raw `CM_SB_*` name (matches the GLB node names). */
+  boxes?: Record<string, SidecarHitboxBox>;
+  hit_locations?: Record<string, SidecarHitLocation>;
 }
 
 export interface SidecarShip {
@@ -349,13 +456,7 @@ export interface ParticleRecord {
  * Older sidecars (pre-source taxonomy) omit `source`; the consumer
  * defaults to `hull` for back-compat.
  */
-export type ParticleSource =
-  | 'hull'
-  | 'artillery'
-  | 'atba'
-  | 'airDefense'
-  | 'aa_aura'
-  | 'munition';
+export type ParticleSource = 'hull' | 'artillery' | 'atba' | 'airDefense' | 'aa_aura' | 'munition';
 
 export interface ParticleAttachment {
   /**
@@ -405,6 +506,8 @@ export interface SidecarDoc {
   antiair?: SidecarMount[];
   torpedoes?: SidecarMount[];
   accessories?: SidecarMount[];
+  armor?: SidecarArmor;
+  hitbox?: SidecarHitbox;
   ballistics?: BallisticsSection;
   skins?: Skin[];
   effects?: SidecarEffects;

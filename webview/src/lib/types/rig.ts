@@ -1,33 +1,6 @@
 // Turret-rig types. Mirrors the JSON shapes the pipeline produces:
 //   <asset>.rig_pivots.json    — emitted by `wows-turret-autorig`
 //   <asset>.rig_overrides.json — read/written by the rig editor
-//   winding_audit.json         — emitted by `wows-build-accessory-library --audit-winding`
-//   flip_overrides.json        — read/written by per-asset flip toggle
-
-/** Per-asset auto-detect winding verdict.
- *  Mirrors the schema produced by
- *  `compose.accessory_library._audit_winding`.
- *  Keyed by GLB-relative path (matches `LibraryAsset.glb`). */
-export interface WindingAuditEntry {
-  path: string;
-  /** `unscored` for pathological geometry where Signal A+B failed. */
-  verdict: 'flip' | 'keep' | 'ambiguous' | 'manual' | 'unscored';
-  /** 0..1, joint A+B score (>0.5 = correct, <0.5 = inverted). */
-  correctness: number;
-  signal_b: number;
-  signal_a: number;
-  n_prim: number;
-  /** True iff asset has a row in `flip_overrides.json`. */
-  in_overrides: boolean;
-}
-
-export interface WindingAuditDoc {
-  schema: string;
-  generated_at: string;
-  asset_count: number;
-  summary: Record<string, number>;
-  assets: WindingAuditEntry[];
-}
 
 // ── Rig pivots (turret_autorig output) ──────────────────────────────────
 

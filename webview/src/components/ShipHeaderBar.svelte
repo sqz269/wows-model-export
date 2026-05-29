@@ -11,7 +11,7 @@
   // shortcuts. Clicking the "N unresolved" pill jumps the bottom panel
   // to the Unresolved tab (via `onShowUnresolved`).
   //
-  // Status pills colour scheme mirrors AssetDetail's winding pill:
+  // Status pills colour scheme:
   //   green = healthy (textures on, no unresolved)
   //   amber = needs attention (unresolved assets, miscFilter drops)
   //   muted = neutral info (textures off, skin name)

@@ -64,6 +64,7 @@ emit their own sub-step events through the parent's ``on_event``):
 """
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import threading
@@ -128,6 +129,14 @@ class ShipReplayPlan:
     skins:              tuple[SkinReplayPlan, ...]
     sidecar_path:       Path
     provenance_source:  Literal["stamped", "fallback"]
+    # Toolkit model directory name (e.g. ``ASB017_Montana_1945``) — the
+    # only identifier the toolkit's ``find_ship`` accepts. ``vehicle``
+    # holds the GameParams top_key / param_index, which the toolkit
+    # REJECTS, so the re-extract path must thread this through as
+    # ``toolkit_ship_override``. ``None`` when neither the sidecar stamp
+    # nor the snapshot lookup could supply it; the replay then falls back
+    # to ``resolve_ship_identity(vehicle)`` (which fails for a top_key).
+    model_dir:          str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +227,13 @@ def _plan_from_sidecar(sidecar_path: Path) -> ShipReplayPlan | None:
             skins=_skin_plans_from_sidecar(doc),
             sidecar_path=sidecar_path,
             provenance_source="stamped",
+            # Forward-stamped by ingest_ship since the model_dir fix;
+            # older sidecars lack it and rely on the snapshot lookup.
+            model_dir=(
+                str(prov["model_dir"])
+                if isinstance(prov.get("model_dir"), str) and prov["model_dir"]
+                else None
+            ),
         )
         return plan
 
@@ -260,6 +276,54 @@ def scan_extracted_ships(workspace: Path) -> list[ShipReplayPlan]:
         if plan is not None:
             plans.append(plan)
     return plans
+
+
+# Extract-snapshot cache filename (matches compose.snapshot's writer and
+# the webview's `<workspace>/.cache/snapshot.json` convention).
+_SNAPSHOT_FILENAME = "snapshot.json"
+
+
+def _load_model_dir_index(
+    workspace: Path,
+    config: PipelineConfig,
+) -> dict[str, str]:
+    """Map GameParams ``top_key`` AND ``param_index`` -> toolkit ``model_dir``.
+
+    The re-extract replay only has each ship's GameParams id (the stamped
+    ``vehicle``), but the toolkit's ``find_ship`` needs the model
+    directory name. The Extract snapshot already carries that join, so we
+    read it (building the cache when absent) and flatten it into a lookup
+    keyed by both the top_key and the param_index — the stamped value can
+    be either form.
+
+    Soft-fail: any error (missing GameParams cache, parse failure) returns
+    an empty dict. The caller then falls back to the per-sidecar stamped
+    ``model_dir`` (present on newer sidecars) or, failing that, to
+    ``resolve_ship_identity(vehicle)``.
+    """
+    try:
+        cache_dir = config.cache_dir or (workspace / ".cache")
+        snap_path = cache_dir / _SNAPSHOT_FILENAME
+        if not snap_path.is_file():
+            # Cold cache — build it. Read-only w.r.t. ships; ~30 s on a
+            # cold GameParams dump, negligible against a full re-extract.
+            from .snapshot import snapshot as _snapshot
+            _snapshot(output_path=snap_path, config=config)
+        doc = json.loads(snap_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+    index: dict[str, str] = {}
+    for v in doc.get("vehicles") or ():
+        if not isinstance(v, dict):
+            continue
+        model_dir = v.get("model_dir")
+        if not isinstance(model_dir, str) or not model_dir:
+            continue
+        for key in (v.get("top_key"), v.get("param_index")):
+            if isinstance(key, str) and key:
+                index.setdefault(key, model_dir)
+    return index
 
 
 # ---------------------------------------------------------------------------
@@ -484,11 +548,12 @@ def clean_and_reextract(
         "ships_unrecoverable":  [],
         "library_existed":      False,
         "library_wiped":        False,
-        "plans":                [],
-        "ships_reextracted":    [],
-        "skins_replayed":       [],
-        "errors":               [],
-        "step_timings_ms":      {},
+        "plans":                    [],
+        "ships_reextracted":        [],
+        "ships_unresolved_model_dir": [],
+        "skins_replayed":           [],
+        "errors":                   [],
+        "step_timings_ms":          {},
     }
 
     # ── Phase 1: scan ─────────────────────────────────────────────────
@@ -604,17 +669,35 @@ def clean_and_reextract(
             detail="no replay plans recovered",
         )
     else:
+        # Map each plan's GameParams id -> toolkit model_dir. The toolkit
+        # rejects the stamped top_key (e.g. "PASB820_BA_Montana"); it only
+        # accepts the model directory name ("ASB017_Montana_1945"). Newer
+        # sidecars carry it directly (plan.model_dir); older ones need the
+        # snapshot join. Built once here (empty dict on failure).
+        model_dir_index = _load_model_dir_index(workspace, cfg)
         with runner.step(
             "reextract_ships", detail=f"{len(plans)} ship(s)",
         ) as ctx:
             reextracted: list[str] = []
+            unresolved: list[str] = []
             for plan in plans:
+                model_dir = plan.model_dir or model_dir_index.get(plan.vehicle)
+                if model_dir is None:
+                    unresolved.append(plan.label)
                 try:
                     _ingest_ship_mod.ingest_ship(
-                        ship_input=plan.vehicle,
+                        # Pass the model_dir as both the positional input
+                        # and the toolkit override (mirrors the working
+                        # /api/extract/run path); gameparams_ship_id keeps
+                        # the GameParams top_key for the GP-side lookup.
+                        # model_dir=None falls back to resolve_identity on
+                        # the GameParams id (which fails for a top_key, but
+                        # we've surfaced it via `unresolved`).
+                        ship_input=model_dir or plan.vehicle,
                         workspace=workspace,
                         config=cfg,
                         forced_label=plan.label,
+                        toolkit_ship_override=model_dir,
                         gameparams_ship_id=plan.vehicle,
                         variant_permoflage=plan.permoflage or "auto",
                         build_library=plan.build_library,
@@ -632,11 +715,17 @@ def clean_and_reextract(
                         "message": f"{type(e).__name__}: {e}",
                     })
             report["ships_reextracted"] = reextracted
+            report["ships_unresolved_model_dir"] = unresolved
             ctx.annotate(
-                f"{len(reextracted)}/{len(plans)} re-extracted",
+                f"{len(reextracted)}/{len(plans)} re-extracted"
+                + (
+                    f"; {len(unresolved)} had no model_dir"
+                    if unresolved else ""
+                ),
                 data={
-                    "succeeded": len(reextracted),
-                    "failed":    len(plans) - len(reextracted),
+                    "succeeded":   len(reextracted),
+                    "failed":      len(plans) - len(reextracted),
+                    "unresolved":  len(unresolved),
                 },
             )
 

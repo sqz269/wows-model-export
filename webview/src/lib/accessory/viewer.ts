@@ -27,7 +27,6 @@ import type {
 
 import { DebugSceneController, type DebugSceneLoadResult } from './debug_scene';
 import { RigPivotOverlay } from './rig_pivots';
-import { flipWindingIndex, resetWindingIndex } from './winding';
 
 export type SideMode = 'front' | 'back' | 'double';
 
@@ -111,7 +110,6 @@ export class AccessoryViewer {
     side: 'double' as SideMode,
     wireframe: false,
     lodFilter: null as number | null,
-    flipWinding: false,
   };
 
   private texturesOn = true;
@@ -129,8 +127,7 @@ export class AccessoryViewer {
   private debugScene: DebugSceneController | null = null;
 
   /** True while a `<asset>.rig.debug.glb` is loaded (vs a regular GLB).
-   *  Used so `setFlipWinding` etc. don't fight the picker's material
-   *  state. */
+   *  Used so material state doesn't fight the picker's material state. */
   private debugSceneActive = false;
 
   // ── Bone inspector state ──────────────────────────────────────────────
@@ -253,13 +250,6 @@ export class AccessoryViewer {
     // the GLB's source material from being mutated.
     this.applyMaterialState();
     this.applyLodFilter();
-    // Re-apply the persistent flip-winding toggle to freshly-loaded
-    // meshes. The setting outlives individual loads, so a user who
-    // flipped winding on asset A and clicks asset B expects B to come
-    // up already flipped.
-    if (this.state.flipWinding) {
-      for (const t of this.tracked) flipWindingIndex(t.mesh);
-    }
     this.bounds = new THREE.Box3().setFromObject(r);
     this.frame();
 
@@ -328,21 +318,6 @@ export class AccessoryViewer {
     if (!t) return;
     t.info.visible = visible;
     t.mesh.visible = visible && this.passesLod(t.info.lod);
-  }
-
-  /** Reverse triangle winding live — preview the persisted-flip effect
-   *  without touching the GLB on disk. Toggle off restores the original
-   *  index buffer. Persisting is a separate API call. */
-  setFlipWinding(on: boolean): void {
-    this.state.flipWinding = on;
-    for (const t of this.tracked) {
-      if (on) flipWindingIndex(t.mesh);
-      else resetWindingIndex(t.mesh);
-    }
-  }
-
-  getFlipWinding(): boolean {
-    return this.state.flipWinding;
   }
 
   // ── Rig pivots overlay ───────────────────────────────────────────────

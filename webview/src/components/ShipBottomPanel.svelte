@@ -36,6 +36,7 @@
     Skin,
   } from '$lib/types';
   import type { PickResult, ShipLoadStats, ShipViewer } from '$lib/ship';
+  import { thicknessToColorHex, hitboxStyleFor } from '$lib/ship';
   import DdsTexturePreview from './DdsTexturePreview.svelte';
 
   export type ShipBottomTab =
@@ -43,6 +44,7 @@
     | 'placements'
     | 'unresolved'
     | 'hull'
+    | 'armor'
     | 'skins'
     | 'damage'
     | 'textures'
@@ -135,6 +137,7 @@
     'placements',
     'unresolved',
     'hull',
+    'armor',
     'skins',
     'damage',
     'textures',
@@ -350,6 +353,46 @@
 
   const hasHullTextures = $derived(materialTextures.length > 0);
 
+  // ── Armor + hitbox tab data ──────────────────────────────────────────
+  // Read straight off the sidecar (`armor` / `hitbox` sections). Bumped by
+  // `revision` so a ship swap re-reads. See METADATA_SPEC §6 / §7.
+  const armorSection = $derived.by(() => {
+    void revision;
+    return viewer?.getSidecar()?.armor ?? null;
+  });
+  const hitboxSection = $derived.by(() => {
+    void revision;
+    return viewer?.getSidecar()?.hitbox ?? null;
+  });
+  // Zones sorted thickest-first so the citadel / belt lead.
+  const armorZoneRows = $derived.by(() =>
+    Object.entries(armorSection?.zones ?? {})
+      .map(([zone, z]) => ({ zone, ...z }))
+      .sort((a, b) => b.max_thickness_mm - a.max_thickness_mm),
+  );
+  // Materials sorted by thickness desc; 0mm (no-armor) sentinels trail.
+  const armorMaterialRows = $derived.by(() =>
+    Object.entries(armorSection?.materials_table ?? {})
+      .map(([id, m]) => ({ id, ...m }))
+      .sort((a, b) => b.thickness_mm - a.thickness_mm || Number(a.id) - Number(b.id)),
+  );
+  const hitLocationRows = $derived.by(() =>
+    Object.entries(hitboxSection?.hit_locations ?? {})
+      .map(([section, h]) => ({ section, ...h }))
+      .sort((a, b) => (b.max_hp ?? 0) - (a.max_hp ?? 0)),
+  );
+  const hitboxRegionRows = $derived.by(() =>
+    Object.entries(hitboxSection?.regions ?? {})
+      .map(([zone, r]) => ({ zone, ...r, style: hitboxStyleFor({ section: zone, hl_type: zone }) }))
+      .sort((a, b) => b.box_count - a.box_count),
+  );
+  const hasArmorTab = $derived(
+    armorZoneRows.length > 0 ||
+      armorMaterialRows.length > 0 ||
+      hitLocationRows.length > 0 ||
+      hitboxRegionRows.length > 0,
+  );
+
   const tabs: Array<{ id: ShipBottomTab; label: string; hide?: boolean; badge?: number }> =
     $derived([
       { id: 'overview', label: 'Overview' },
@@ -361,6 +404,7 @@
         badge: unresolvedCount,
       },
       { id: 'hull', label: 'Hull' },
+      { id: 'armor', label: 'Armor', hide: !hasArmorTab },
       { id: 'skins', label: 'Skins', hide: skins.length <= 1 },
       { id: 'damage', label: 'Damage' },
       { id: 'textures', label: 'Textures', hide: !hasHullTextures },
@@ -378,7 +422,7 @@
 
   const pickInfo = $derived(selectedPick?.info ?? null);
   const pickLibEntry = $derived(
-    pickInfo && library ? library.assets[pickInfo.asset_id] ?? null : null,
+    pickInfo && library ? (library.assets[pickInfo.asset_id] ?? null) : null,
   );
 
   function openPickInLibrary() {
@@ -528,8 +572,8 @@
         {:else}
           <div class="flex flex-col gap-2">
             <div class="text-muted-foreground text-[11px]">
-              {unresolvedEntries.length} asset_id(s) referenced by this ship had no matching entry
-              in the accessory library. Most often this means the asset wasn't extracted yet — re-run
+              {unresolvedEntries.length} asset_id(s) referenced by this ship had no matching entry in
+              the accessory library. Most often this means the asset wasn't extracted yet — re-run
               <code class="font-mono text-[11px]">wows-build-accessory-library</code> after extracting
               the missing source.
             </div>
@@ -598,6 +642,149 @@
             </tfoot>
           </table>
         {/if}
+      {:else if activeTab === 'armor'}
+        {@const tableCls =
+          'w-fit text-[11px] tabular-nums [&_th]:text-muted-foreground [&_th]:font-normal [&_th]:uppercase [&_th]:tracking-wider [&_th]:text-[10px] [&_th]:pr-5 [&_td]:pr-5 [&_th]:py-0.5 [&_td]:py-0.5'}
+        {@const hdrCls = 'text-muted-foreground mb-1 text-[10px] uppercase tracking-wider'}
+        <div class="flex flex-wrap gap-x-10 gap-y-4">
+          {#if armorZoneRows.length > 0}
+            <div>
+              <div class={hdrCls}>Armor zones</div>
+              <table class={tableCls}>
+                <thead>
+                  <tr>
+                    <th class="text-left">zone</th>
+                    <th class="text-right">default</th>
+                    <th class="text-right">max</th>
+                    <th class="text-right">plates</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each armorZoneRows as z (z.zone)}
+                    <tr>
+                      <td class="text-foreground">{z.zone}</td>
+                      <td class="text-right">
+                        <span
+                          class="mr-1 inline-block size-2 rounded-[2px] align-middle"
+                          style="background:{thicknessToColorHex(z.default_thickness_mm)}"
+                        ></span>{z.default_thickness_mm}
+                      </td>
+                      <td class="text-right">{z.max_thickness_mm}</td>
+                      <td class="text-muted-foreground text-right">{z.plate_count}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+              <div class="text-muted-foreground/70 mt-1 text-[9px]">thickness in mm</div>
+            </div>
+          {/if}
+
+          {#if hitLocationRows.length > 0}
+            <div>
+              <div class={hdrCls}>Module HP</div>
+              <table class={tableCls}>
+                <thead>
+                  <tr>
+                    <th class="text-left">section</th>
+                    <th class="text-left">type</th>
+                    <th class="text-right">max HP</th>
+                    <th class="text-right">regen</th>
+                    <th class="text-right">repair</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each hitLocationRows as h (h.section)}
+                    {@const style = hitboxStyleFor({ section: h.section, hl_type: h.hl_type })}
+                    <tr>
+                      <td class="text-foreground">
+                        <span
+                          class="mr-1 inline-block size-2 rounded-[2px] align-middle"
+                          style="background:{style.hex}"
+                        ></span>{h.section}
+                      </td>
+                      <td class="text-muted-foreground">{h.hl_type.replace('_hitlocation', '')}</td>
+                      <td class="text-right"
+                        >{h.max_hp != null ? h.max_hp.toLocaleString() : '—'}</td
+                      >
+                      <td class="text-muted-foreground text-right">
+                        {h.regen_part != null ? `${Math.round(h.regen_part * 100)}%` : '—'}
+                      </td>
+                      <td class="text-muted-foreground text-right">
+                        {h.broken_repair_s != null ? `${h.broken_repair_s}s` : '—'}
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+              <div class="text-muted-foreground/70 mt-1 text-[9px]">
+                regen = HP restored per repair tick · repair = full-section restore time
+              </div>
+            </div>
+          {/if}
+
+          {#if hitboxRegionRows.length > 0}
+            <div>
+              <div class={hdrCls}>Hitbox regions</div>
+              <table class={tableCls}>
+                <thead>
+                  <tr>
+                    <th class="text-left">zone</th>
+                    <th class="text-right">boxes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each hitboxRegionRows as r (r.zone)}
+                    <tr>
+                      <td class="text-foreground">
+                        <span
+                          class="mr-1 inline-block size-2 rounded-[2px] align-middle"
+                          style="background:{r.style.hex}"
+                        ></span>{r.zone}
+                      </td>
+                      <td class="text-muted-foreground text-right">{r.box_count}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+
+          {#if armorMaterialRows.length > 0}
+            <div class="min-w-0">
+              <div class={hdrCls}>Armor materials ({armorMaterialRows.length})</div>
+              <div class="max-h-44 overflow-y-auto pr-1">
+                <table class={tableCls}>
+                  <thead>
+                    <tr>
+                      <th class="text-left">id</th>
+                      <th class="text-right">mm</th>
+                      <th class="text-left">layers</th>
+                      <th class="text-left">zones</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each armorMaterialRows as m (m.id)}
+                      <tr class={m.hidden ? 'text-muted-foreground/60' : ''}>
+                        <td class="font-mono">{m.id}</td>
+                        <td class="text-right">
+                          <span
+                            class="mr-1 inline-block size-2 rounded-[2px] align-middle"
+                            style="background:{thicknessToColorHex(m.thickness_mm)}"
+                          ></span>{m.thickness_mm}
+                        </td>
+                        <td class="text-muted-foreground">{m.layers.join(' + ') || '—'}</td>
+                        <td class="text-muted-foreground">{m.zones.join(', ') || '—'}</td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+              <div class="text-muted-foreground/70 mt-1 text-[9px]">
+                dimmed rows = hidden (internal decks / bulkheads); layers = outer→inner mm
+              </div>
+            </div>
+          {/if}
+        </div>
       {:else if activeTab === 'skins'}
         {#if skins.length === 0}
           <div class="text-muted-foreground">No skins available.</div>
@@ -637,9 +824,9 @@
       {:else if activeTab === 'damage'}
         <div class="flex flex-col gap-2">
           <div class="text-muted-foreground text-[11px] max-w-[60ch]">
-            Per-seam damage state. Toggling a seam in the side panel cascades hull patches +
-            cracks via <code class="font-mono text-[11px]">damage_cascade</code>; this tab
-            shows the current snapshot.
+            Per-seam damage state. Toggling a seam in the side panel cascades hull patches + cracks
+            via <code class="font-mono text-[11px]">damage_cascade</code>; this tab shows the
+            current snapshot.
           </div>
           <table
             class="w-fit text-[11px] [&_th]:text-muted-foreground [&_th]:font-normal [&_th]:uppercase [&_th]:tracking-wider [&_th]:text-[10px] [&_th]:pr-6 [&_td]:pr-6 [&_th]:py-0.5 [&_td]:py-0.5"
@@ -697,9 +884,7 @@
                 </div>
                 {#each mat.schemes as scheme (scheme.scheme)}
                   <div class="flex flex-col gap-1">
-                    <div
-                      class="text-muted-foreground text-[10px] uppercase tracking-wider"
-                    >
+                    <div class="text-muted-foreground text-[10px] uppercase tracking-wider">
                       {scheme.scheme}
                       <span class="text-muted-foreground/70 ml-1 normal-case">
                         · {scheme.slots.length} slot{scheme.slots.length === 1 ? '' : 's'}

@@ -79,6 +79,14 @@ _LABEL_BUSY_BACKOFF_S = 2.0
 # without holding the queue lock so routes stay responsive.
 _JOB_POLL_INTERVAL_S = 0.5
 
+# Synthetic job label for the once-per-drain accessory-library build.
+_LIBRARY_JOB_LABEL = "__library_drain__"
+
+# After a FAILED drain library build, wait this long before retrying so a
+# persistently-failing build can't hot-loop the idle worker (owed items
+# stay un-built and would otherwise be re-detected on every wake).
+_LIBRARY_RETRY_COOLDOWN_S = 60.0
+
 # Soft cap on completed-item history kept in the persistence file. Past
 # this we drop the oldest completed entries so the file doesn't grow
 # without bound over a long-running workspace.
@@ -121,6 +129,12 @@ class QueueItem:
     started_at:      int | None = None
     finished_at:     int | None = None
     error:           str | None = None
+    # True once the post-drain accessory-library build has covered this
+    # item. Items are ingested with build_library forced OFF; the library
+    # is built ONCE when the queue drains (see _worker_loop). This flag is
+    # what tells the drain pass which completed items still owe a build —
+    # and survives a restart so a crash mid-drain still gets a build.
+    library_built:   bool = False
 
 
 def _item_to_dict(item: QueueItem) -> dict[str, Any]:
@@ -151,6 +165,13 @@ def _item_from_dict(d: dict[str, Any]) -> QueueItem | None:
             started_at=        d.get("started_at"),
             finished_at=       d.get("finished_at"),
             error=             d.get("error"),
+            # Back-compat: a pre-existing `done` item from before this
+            # field existed was built per-item by the old flow, so treat
+            # it as already library-built (don't trigger a spurious drain
+            # build on first load after upgrade).
+            library_built=     bool(
+                d.get("library_built", d.get("status") == "done")
+            ),
         )
     except (KeyError, ValueError, TypeError):
         return None
@@ -186,6 +207,10 @@ _config: PipelineConfig | None = None
 
 # Persistence path. Set at configure() time so tests can hand a tmp dir.
 _persistence_path: Path | None = None
+
+# perf_counter timestamp of the last drain-library-build ATTEMPT; gates
+# the post-failure retry cooldown so a failing build doesn't hot-loop.
+_last_library_attempt: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +364,14 @@ def _spawn_for_item(item: QueueItem) -> tuple[str, list[str]] | None:
         "toolkit_ship_override": item.toolkit_ship,
         "gameparams_ship_id":    item.gameparams_ship_id,
         "interactive":           False,
-        "build_library":         item.build_library,
+        # build_library is deferred to a single queue-drain pass (see
+        # _worker_loop / _spawn_library_drain). Each per-item ingest skips
+        # the ~30s full-fleet library re-scan; item.build_library is the
+        # "this ship wants to be in the library" intent the drain pass
+        # consumes — and is recorded in provenance so a later
+        # clean-and-reextract replay still rebuilds the library.
+        "build_library":             False,
+        "provenance_build_library":  item.build_library,
     }
     if item.permoflage is not None:
         kwargs["variant_permoflage"] = item.permoflage
@@ -368,37 +400,113 @@ def _spawn_for_item(item: QueueItem) -> tuple[str, list[str]] | None:
     return job.id, list(job.cmd)
 
 
+def _owed_library_items() -> list[QueueItem]:
+    """Done items that wanted a library build but haven't been covered by
+    a drain build yet. Caller holds the lock."""
+    return [
+        it for it in _items
+        if it.status == "done" and it.build_library and not it.library_built
+    ]
+
+
+def _spawn_library_drain(owed: list[QueueItem]) -> str | None:
+    """Spawn the once-per-drain accessory-library build + post-library
+    sidecar refresh covering the ``owed`` items. Returns the job id, or
+    ``None`` when ``_config`` is unset or the synthetic label is locked.
+    Caller holds the lock."""
+    if _config is None:
+        return None
+    refresh_specs = [
+        {
+            "label":              it.label,
+            "toolkit_ship":       it.toolkit_ship,
+            "gameparams_ship_id": it.gameparams_ship_id,
+            "permoflage":         it.permoflage or "auto",
+        }
+        for it in owed
+    ]
+    try:
+        job = spawn_job(
+            kind="extract",
+            label=_LIBRARY_JOB_LABEL,
+            target=compose.build_library_and_refresh,
+            kwargs={
+                "workspace":     _config.workspace,
+                "config":        _config,
+                "refresh_specs": refresh_specs,
+            },
+            cmd_display=[
+                "compose.build_library_and_refresh",
+                f"{len(owed)} ship(s)",
+            ],
+        )
+    except JobLockedError:
+        return None
+    return job.id
+
+
 def _worker_loop() -> None:
-    """Main worker loop. Daemon thread; ends only on process exit."""
+    """Main worker loop. Daemon thread; ends only on process exit.
+
+    Two kinds of work, both run through the same spawn/poll/finalize
+    machinery: per-ship ``ingest`` (the head of the pending list) and,
+    once the queue has drained, a single ``library`` build covering every
+    completed item that wanted one. Deferring the library build to the
+    drain avoids re-scanning the whole fleet library once per item.
+    """
+    global _last_library_attempt
     while not _worker_stop.is_set():
-        # ── Phase 1: wait until there's something to do ──
+        # ── Phase 1: decide the next action under the lock ──
+        action: tuple[str, Any] | None = None
         with _cond:
             while not _worker_stop.is_set():
                 if not _paused:
                     item = _next_pending()
                     if item is not None:
+                        action = ("ingest", item)
                         break
+                    owed = _owed_library_items()
+                    if owed:
+                        since = time.perf_counter() - _last_library_attempt
+                        if since >= _LIBRARY_RETRY_COOLDOWN_S:
+                            action = ("library", owed)
+                            break
+                        # In the post-failure cooldown — idle until it
+                        # elapses (or an enqueue/resume wakes us early).
+                        _cond.wait(
+                            timeout=min(10.0, _LIBRARY_RETRY_COOLDOWN_S - since)
+                        )
+                        continue
                 # Idle: sleep until enqueue / resume / cancel wakes us.
                 _cond.wait(timeout=10.0)
             if _worker_stop.is_set():
                 return
-            # Try to spawn under the lock — spawn_job is fast (~µs) and
-            # holding the lock keeps "I'm about to start this" atomic
-            # against a concurrent remove/cancel.
-            spawn = _spawn_for_item(item)
-            if spawn is None:
-                # Label busy — leave the item pending and back off so
-                # we don't hot-spin. The cond wait wakes early on
-                # state changes (cancel of the direct job, etc.).
-                _cond.wait(timeout=_LABEL_BUSY_BACKOFF_S)
-                continue
-            job_id, _cmd = spawn
-            item.status = "running"
-            item.job_id = job_id
-            item.started_at = _now_ms()
-            _persist()
-            # Wake watchers so the UI sees the transition immediately.
-            _cond.notify_all()
+            assert action is not None
+
+            if action[0] == "ingest":
+                item = action[1]
+                # Try to spawn under the lock — spawn_job is fast (~µs) and
+                # holding the lock keeps "I'm about to start this" atomic
+                # against a concurrent remove/cancel.
+                spawn = _spawn_for_item(item)
+                if spawn is None:
+                    # Label busy — leave the item pending and back off.
+                    _cond.wait(timeout=_LABEL_BUSY_BACKOFF_S)
+                    continue
+                job_id, _cmd = spawn
+                item.status = "running"
+                item.job_id = job_id
+                item.started_at = _now_ms()
+                _persist()
+                _cond.notify_all()
+            else:  # "library"
+                owed = action[1]
+                _last_library_attempt = time.perf_counter()
+                job_id = _spawn_library_drain(owed)
+                if job_id is None:
+                    _cond.wait(timeout=_LABEL_BUSY_BACKOFF_S)
+                    continue
+                _cond.notify_all()
 
         # ── Phase 2: wait for the underlying job to terminate ──
         # Released the lock so /api/queue/* routes stay responsive.
@@ -411,26 +519,40 @@ def _worker_loop() -> None:
         # ── Phase 3: record terminal state ──
         with _cond:
             j = get_job(job_id)
-            if j is None:
-                # Should be rare — gc_jobs only drops completed jobs
-                # past JOB_RETENTION_MS, and we just polled it as
-                # running. Treat as failed.
-                item.status = "failed"
-                item.error = "underlying job vanished from runner"
-            elif j.state == "done":
-                item.status = "done"
-            elif j.state == "cancelled":
-                item.status = "cancelled"
-                item.error = "cancelled"
-            else:
-                item.status = "failed"
-                if isinstance(j.error, dict):
-                    item.error = str(j.error.get("message") or "unknown")
+            if action[0] == "ingest":
+                item = action[1]
+                if j is None:
+                    # Should be rare — gc_jobs only drops completed jobs
+                    # past JOB_RETENTION_MS, and we just polled it as
+                    # running. Treat as failed.
+                    item.status = "failed"
+                    item.error = "underlying job vanished from runner"
+                elif j.state == "done":
+                    item.status = "done"
+                elif j.state == "cancelled":
+                    item.status = "cancelled"
+                    item.error = "cancelled"
                 else:
-                    item.error = "unknown"
-            item.finished_at = _now_ms()
-            _persist()
-            _cond.notify_all()
+                    item.status = "failed"
+                    if isinstance(j.error, dict):
+                        item.error = str(j.error.get("message") or "unknown")
+                    else:
+                        item.error = "unknown"
+                item.finished_at = _now_ms()
+                _persist()
+                _cond.notify_all()
+            else:  # "library"
+                owed = action[1]
+                if j is not None and j.state == "done":
+                    # The drain build (and per-ship post-library refresh)
+                    # succeeded — these items are now in the library.
+                    for it in owed:
+                        it.library_built = True
+                    _persist()
+                # On failure/cancel: leave library_built False. The
+                # _last_library_attempt cooldown stops a hot retry loop;
+                # a later enqueue (or cooldown expiry) re-attempts.
+                _cond.notify_all()
 
 
 # ---------------------------------------------------------------------------
