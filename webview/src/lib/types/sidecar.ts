@@ -241,6 +241,21 @@ export interface SidecarShip {
 }
 
 // ─── Particle effects ──────────────────────────────────────────────────────
+
+/**
+ * One entry from the ``particles/textures/particles.atlas`` manifest.
+ * Resolves an authoring-side ``.tga`` filename (the basename of
+ * ``textureName0/1`` / ``motionVectorsTexture``) to a named region
+ * inside one of the 6 shipped atlas DDS pages.
+ *
+ * `page` is a workspace-relative URL the webview hands to ``repoUrl()``;
+ * `rect` is a normalised UV rect ``[u0, v0, u1, v1]`` within the page.
+ */
+export interface ParticleAtlasRect {
+  page: string;
+  rect: [number, number, number, number];
+}
+
 // Surface a subset of the parsed Effect record. Full schema lives in
 // `reference/topics/particle/particle_format_spec.md`.
 //
@@ -391,35 +406,94 @@ export interface ParticleGeneralSection {
 }
 
 /**
- * Renderer block surfaced from the Effect blob. Only the byte-mapped
- * trio is populated today: `textureName0` / `textureName1` (VFS paths,
- * pool-form ResourceRefs) and `yawRateRamp`. Tail fields (`blendType`,
- * `tilingU`/`V`, `billboard`, lighting params) live at unmapped offsets
- * and aren't surfaced yet — see particle_render_roadmap P3.
+ * Renderer block surfaced from the Effect blob. Field offsets confirmed
+ * against the WoWS binary (build 12267945, FUN_1406f2150), superseding
+ * the 2026-05-23 statistical probe: texture refs
+ * (`textureName0`/`textureName1`) + `yawRateRamp` at +0x00/+0x10/+0x20,
+ * and the tail enums/floats (`rotationCenter`/`lightingType`/`blendType`/
+ * `sortType`/`tilingU`/`tilingV`) at +0x80..+0x94 within the 0xa0-byte
+ * struct.
  *
- * `textureUrl0` / `textureUrl1` are stamped by the pipeline-side
- * texture-extract pass (`compose/effects_textures.py`) and carry a
- * workspace-relative path that the webview hands to `repoUrl()` to load
- * the DDS via the standard texture machinery.
+ * The +0x30..+0x7f float cluster and the +0x98/+0x9c bool quartets are
+ * byte-mapped in the binary but not surfaced here.
+ *
+ * `textureUrl0` / `textureUrl1` are stamped by the library builder
+ * (`compose/library_particles.py`) and carry a workspace-relative
+ * path that the webview hands to `repoUrl()` to load the DDS via the
+ * standard texture machinery.
  */
 export interface ParticleRenderer {
   textureName0?: string;
   textureName1?: string;
   textureUrl0?: string;
   textureUrl1?: string;
+  /** Atlas-mapped fallback for textureName0 when it's a ``.tga`` ref
+   *  whose name appears in the atlas manifest. Mutually exclusive with
+   *  ``textureUrl0`` — direct extract takes precedence. */
+  textureAtlas0?: ParticleAtlasRect;
+  textureAtlas1?: ParticleAtlasRect;
   yawRateRamp?: ParticleRamp;
+  /** PS_RRC label (4 values: bottom / corner / center / custom).
+   *  Recovered from the binary enum table @ 0x1420bf0d0. */
+  rotationCenter?: string;
+  /** PS_RLT label (3 values: lambert / lightmapping4Way / lightmappingHL2),
+   *  Renderer +0x84. Recovered from the binary enum table @ 0x1420bf490.
+   *  This is the slot the old probe mislabeled as "blendFlag84". */
+  lightingType?: string;
+  /** PS_RBT label (10 values) — drives the per-system blending mode.
+   *  Maps to THREE.* blending: ADDITIVE -> AdditiveBlending, BLENDED ->
+   *  NormalBlending, others need custom shader paths (see particle
+   *  render roadmap). */
+  blendType?: string;
+  /** Raw i32 sort-type (enum fx::RendererSortType; labels not yet
+   *  recovered). */
+  sortType?: number;
+  /** Per-system UV tiling factors; default 1.0/1.0. */
+  tilingU?: number;
+  tilingV?: number;
 }
 
 /**
- * Animation block. Only `frameRateRamp` and `motionVectorsTexture` are
- * byte-mapped today; the sprite-atlas grid (`framesPerX`/`framesPerY`,
- * `framesRangeBegin`/`framesRangeEnd`, `animationPeriod`) sits in the
- * tail at unmapped offsets — see particle_render_roadmap P2.
+ * Animation block — sprite-atlas grid + motion vectors. Field offsets
+ * confirmed against the WoWS binary (build 12267945, FUN_1406f37a0),
+ * superseding the 2026-05-23 probe (which had the +0x3c/+0x3d bools
+ * swapped).
+ *
+ * For systems with `framesPerX > 1 || framesPerY > 1`, the renderer
+ * samples the texture at cell `(currentFrame % framesPerX, currentFrame
+ * / framesPerX)` where `currentFrame` is driven by the particle age +
+ * `animationPeriod` + `framesRangeBegin/End`. `animationType` (PS_PAT)
+ * selects the animation mode (noAnimation / framesPlayback /
+ * motionVectors) — NOT a loop/once/pingPong wrap mode (that is the
+ * separate ramp-sampling enum).
  */
 export interface ParticleAnimation {
   frameRateRamp?: ParticleRamp;
   motionVectorsTexture?: string;
   motionVectorsTextureUrl?: string;
+  /** Atlas-mapped fallback for motionVectorsTexture when it's a ``.tga``
+   *  ref whose name appears in the atlas manifest. Mutually exclusive
+   *  with ``motionVectorsTextureUrl``. */
+  motionVectorsTextureAtlas?: ParticleAtlasRect;
+  /** Sprite-sheet column count. 1 means "no atlas". */
+  framesPerX?: number;
+  /** Sprite-sheet row count. 1 means "no atlas". */
+  framesPerY?: number;
+  /** First active frame index; usually 0. */
+  framesRangeBegin?: number;
+  /** Last active frame index (exclusive); usually == framesPerX*framesPerY. */
+  framesRangeEnd?: number;
+  /** Total animation cycle length in seconds. */
+  animationPeriod?: number;
+  /** MV distortion factor (small, typically 0..0.017). */
+  motionVectorsDistortion?: number;
+  /** PS_PAT label (3 values: noAnimation / framesPlayback / motionVectors).
+   *  Recovered from the binary enum table @ 0x1420bf430. */
+  animationType?: string;
+  /** Read emission alpha from the motion-vector texture's alpha. */
+  useEmissionAlphaFromMV?: boolean;
+  /** Pick one random frame per particle instead of animating. */
+  randomFrameOnly?: boolean;
 }
 
 export interface ParticleSystem {
@@ -495,7 +569,9 @@ export interface ParticleAttachment {
 export interface SidecarEffects {
   source?: { generated_at?: string };
   attachments: ParticleAttachment[];
-  particles: Record<string, ParticleRecord>;
+  // particles field removed in schema v4 — Effect records now live in
+  // the shared `library/particles/records.json` artefact. Consumers
+  // join by `attachment.particle_path`.
 }
 
 export interface SidecarDoc {

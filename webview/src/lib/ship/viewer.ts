@@ -326,6 +326,11 @@ export class ShipViewer {
       this.env.controls.update();
       this.env.render();
     });
+
+    // Expose for in-browser debugging.
+    if (typeof window !== 'undefined') {
+      (window as unknown as { __wowsShipViewer__?: unknown }).__wowsShipViewer__ = this;
+    }
   }
 
   // ── Public API ────────────────────────────────────────────────────────

@@ -150,7 +150,13 @@
         const n = Number(stored);
         if (Number.isFinite(n) && n >= COLLAPSED_HEIGHT) height = n;
       }
-      const t = localStorage.getItem(TAB_KEY) as ShipBottomTab | null;
+      const stored_t = localStorage.getItem(TAB_KEY);
+      // Pre-2026-05-16 sidecars stored `effects` here; later renamed to
+      // `particles`. As of the Particles-page split (2026-05-16 evening)
+      // particles live on their own top-level tab and the in-ship row
+      // is gone — quietly redirect both legacy keys to `overview`.
+      let t = stored_t as ShipBottomTab | null;
+      if (stored_t === 'effects' || stored_t === 'particles') t = 'overview';
       if (t && PERSISTABLE.includes(t)) activeTab = t;
     } catch {
       /* localStorage may be unavailable */

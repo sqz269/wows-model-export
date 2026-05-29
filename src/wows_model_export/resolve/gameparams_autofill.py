@@ -1538,6 +1538,394 @@ _HP_HITLOC_KEYS: tuple[str, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Particle effects extras — extract the per-ship hullParams.effects table
+# ---------------------------------------------------------------------------
+
+# Effect group keys the autofill is willing to surface. These mirror
+# ``EffectsGroupName`` (22 documented slots), expanded with the fire1..4 /
+# fireResistance / fixDeluge / fixLight / flood / floodLight / repairLight
+# subdivisions that show up empirically in the corpus. Anything outside
+# this whitelist is dropped (avoids inheriting placeholder / dev fields).
+_KNOWN_EFFECT_GROUPS: frozenset[str] = frozenset({
+    "death",
+    "fire1", "fire2", "fire3", "fire4",
+    "fireResistance",
+    "fixDeluge", "fixLight",
+    "flood", "floodLight",
+    "horn",
+    "idle", "idlePort",
+    "repairLight",
+    "smoke",
+    "waketraceback", "waketracefront",
+    "acid", "antiPing",
+    "oil", "oilBubble",
+    "preparationAlertLight",
+    "propellerEffect", "propellerEffectReversed",
+    "rageMode", "rageModeFullScreen",
+})
+
+
+def collect_effect_attachments(
+    ship: dict[str, Any],
+    components: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return the flat ``[{group, node, particle_path}, ...]`` attachment
+    list for the active hull's ``effects`` table.
+
+    Each entry in ``ship[active_hull]['effects'][<group>]`` is a 2-tuple
+    ``[node_name, particle_xml_path]``. The schema doc previously listed
+    ``effectGroupsDict`` as a sibling table; on the live corpus that
+    field is empty / absent — all particle attachments are under the
+    flat ``effects`` table.
+
+    Returns ``[]`` if the active hull or its effects table is missing.
+    Group order is preserved (sorted alphabetically); within a group,
+    entry order is preserved verbatim from GameParams.
+    """
+    if components is None:
+        components = resolve_components(ship, hull_choice="upgraded")
+    hull = components.get("hull") or {}
+    if not isinstance(hull, dict):
+        return []
+    effects = hull.get("effects")
+    if not isinstance(effects, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for group in sorted(effects.keys()):
+        if group not in _KNOWN_EFFECT_GROUPS:
+            continue
+        entries = effects.get(group)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            # WG stores each as a 2-tuple [node, particle_path]. Some
+            # rare cases ship a single string (no node binding) — we
+            # skip those for the attachment table (no bone to mount to).
+            if not isinstance(entry, list) or len(entry) < 2:
+                continue
+            node, particle = entry[0], entry[1]
+            if not isinstance(node, str) or not isinstance(particle, str):
+                continue
+            node = node.strip()
+            particle = particle.strip()
+            if not node or not particle:
+                continue
+            out.append({
+                "group": group,
+                "node": node,
+                "particle_path": particle,
+            })
+    return out
+
+
+def collect_unique_particle_paths(
+    attachments: list[dict[str, Any]],
+) -> list[str]:
+    """Return the deduplicated, sorted list of particle paths referenced
+    by ``attachments``. Used to drive the per-ship particle-data dump.
+    """
+    seen: set[str] = set()
+    for a in attachments:
+        p = a.get("particle_path")
+        if isinstance(p, str) and p:
+            seen.add(p)
+    return sorted(seen)
+
+
+# ---------------------------------------------------------------------------
+# Particle effects — gameplay scope (guns / AA auras / projectiles)
+# ---------------------------------------------------------------------------
+#
+# Beyond the hull-anchored EP_* effects in ``hull['effects']`` (fire / flood /
+# death / smoke / wake), every gun mount, AA aura, and Munition prototype
+# carries its own particle XML references. Those drive the gameplay-event
+# VFX: muzzle blasts, gun-damaged smoke, flak bursts, shell-impact splashes,
+# projectile-destroyed pops, etc. The collectors below pull each scope into
+# the same flat ``{source, source_id, group, node, particle_path}`` shape so
+# absorb can merge them into one ``effects.attachments`` list.
+
+# Per-gun-mount slots (artillery / atba / airDefense). Empty-string values
+# are treated as "not bound" and dropped (WG uses ``""`` to suppress a slot
+# that the parent gun would otherwise inherit).
+_GUN_EFFECT_SLOTS: tuple[str, ...] = (
+    "shotEffect",
+    "purgingEffect",
+    "reloadBoostEffect",
+    "brokenEffect",
+    "damagedEffect",
+    "lensEffect",
+)
+
+# Per-aura slots inside ``hull.<X>_AirDefense.<Aura...>``. Both single-string
+# fields and list-valued fields appear — we normalise to one row per path.
+_AA_AURA_SCALAR_SLOTS: tuple[str, ...] = ("missDetonationEffect",)
+_AA_AURA_LIST_SLOTS: tuple[str, ...] = ("barrageEffect", "detonationEffect")
+
+# Per-Munition slots. Each shell type lives in its own Projectile entity
+# referenced from each gun mount's ``ammoList``. The ``proj*`` family pairs
+# horizontal/vertical strikes; we surface both axes (the consumer doesn't
+# care about strike angle in preview mode). Single-particle fields and list
+# fields are both present; the absorb dedupes by path downstream.
+_MUNITION_SCALAR_SLOTS: tuple[str, ...] = (
+    "shipDestroyEffect",
+    "tracerEffect",
+    "ownTracerEffect",
+    "fallingTracerEffect",
+    "underwaterTracerEffect",
+    "tracerAirEffect",
+    "enemyHitSurfaceEffect",
+    "enemyHitUnderwaterEffect",
+    "waterHitEffect",
+    "dropToTheGroundEffect",
+    "skipEffect",
+    "firstSkipEffect",
+    "flightEffect",
+    "damagedFlightEffect",
+    "groundHitEffect",
+    "hitEffect",
+)
+_MUNITION_LIST_SLOTS: tuple[str, ...] = (
+    "blowUpEffect",
+    "water",
+    "ground",
+    "groundHorizontal",
+    "groundVertical",
+    "projDestroyedEffect",
+    "projDestroyedEffectHorizontal",
+    "projDestroyedEffectVertical",
+    "projHitCitadelEffectHorizontal",
+    "projHitCitadelEffectVertical",
+    "projHitNoPenetrationEffectHorizontal",
+    "projHitNoPenetrationEffectVertical",
+    "projOverPenetrationEffectHorizontal",
+    "projOverPenetrationEffectVertical",
+    "projOverPenetrationExitEffectHorizontal",
+    "projOverPenetrationExitEffectVertical",
+    "projRicochetEffectHorizontal",
+    "projRicochetEffectVertical",
+    "torpedoProjDestroyedEffect",
+    "underwaterDeathEffects",
+    "deathUnderWaterBubblesEffects",
+)
+
+
+def _emit_particle(
+    out: list[dict[str, Any]],
+    *,
+    source: str,
+    source_id: str,
+    group: str,
+    node: str,
+    particle: Any,
+) -> None:
+    """Append a normalised attachment row to ``out`` if ``particle`` is a
+    non-empty, non-placeholder XML path. ``Empty_FX.xml`` is silently
+    dropped — WG uses it to suppress a slot the consumer doesn't actually
+    render. Both single strings and list values are accepted; lists emit
+    one row per entry (de-duplication is downstream's job).
+    """
+    if isinstance(particle, list):
+        for item in particle:
+            _emit_particle(
+                out,
+                source=source, source_id=source_id,
+                group=group, node=node, particle=item,
+            )
+        return
+    if not isinstance(particle, str):
+        return
+    p = particle.strip()
+    if not p:
+        return
+    # Suppress WG-side "no-op" placeholder. Keeping these in the attachments
+    # list inflates the inspector with empty entries that never render.
+    if p == "particles/Empty_FX.xml":
+        return
+    out.append({
+        "source": source,
+        "source_id": source_id,
+        "group": group,
+        "node": node,
+        "particle_path": p,
+    })
+
+
+def collect_gun_effects(
+    ship: dict[str, Any],
+    components: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Per-gun particle attachments (muzzle blast + gun-damage / purge /
+    reload / lens).
+
+    Walks ``artillery`` / ``atba`` / ``airDefense`` HP_* mounts. The
+    ``node`` is the gun's hardpoint (``HP_AGM_1`` etc.) so the consumer
+    can resolve the world position via the existing placement table. WG
+    fires the muzzle blast at each barrel's ``HP_gunFire<N>`` inside the
+    gun's bone tree — preview mode mounts at the hull-side anchor only.
+    """
+    if components is None:
+        components = resolve_components(ship, hull_choice="upgraded")
+    out: list[dict[str, Any]] = []
+    for grp_key in ("artillery", "atba", "airDefense"):
+        group = components.get(grp_key)
+        if not isinstance(group, dict):
+            continue
+        # Use the lowercase group key as the source category — the
+        # consumer pivots on (source, group) to bucket rows.
+        source = grp_key
+        for hp_name in sorted(group.keys()):
+            if not isinstance(hp_name, str) or not hp_name.startswith("HP_"):
+                continue
+            mount = group[hp_name]
+            if not isinstance(mount, dict):
+                continue
+            for slot in _GUN_EFFECT_SLOTS:
+                _emit_particle(
+                    out,
+                    source=source, source_id=hp_name,
+                    group=slot, node=hp_name,
+                    particle=mount.get(slot),
+                )
+    return out
+
+
+def collect_aa_aura_effects(
+    ship: dict[str, Any],
+    components: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Per-AA-aura particle attachments (flak barrage burst + sustained
+    DPS detonation + miss puff).
+
+    AA aura definitions are ship-scope: ``<X>_AirDefense.<Aura*>``
+    siblings of the HP_AGA_* mounts (e.g. ``A_AirDefense.AuraMedium``).
+    One aura covers a band (Near / Medium / Far / Long) shared by every
+    eligible AA mount in that range, not a per-gun emitter. The bursts
+    spawn at altitude above the ship, not on a hull bone, so ``node`` is
+    left empty — the consumer stages them on the unresolved-effects
+    grid.
+    """
+    out: list[dict[str, Any]] = []
+    # Walk every ``<X>_AirDefense`` top-level dict on the Vehicle (not
+    # the hull). HP_* siblings are AA gun mounts — they're caught by
+    # collect_gun_effects. Aura* siblings (AuraNear / AuraMedium / …) are
+    # what we want here.
+    for top_key in sorted(ship.keys()):
+        if "AirDefense" not in top_key:
+            continue
+        section = ship.get(top_key)
+        if not isinstance(section, dict):
+            continue
+        for aura_name in sorted(section.keys()):
+            if not aura_name.startswith("Aura"):
+                continue
+            aura = section.get(aura_name)
+            if not isinstance(aura, dict):
+                continue
+            source_id = f"{top_key}.{aura_name}"
+            for slot in _AA_AURA_SCALAR_SLOTS + _AA_AURA_LIST_SLOTS:
+                _emit_particle(
+                    out,
+                    source="aa_aura", source_id=source_id,
+                    group=slot, node="",
+                    particle=aura.get(slot),
+                )
+    return out
+
+
+def collect_munition_effects(
+    ship: dict[str, Any],
+    components: dict[str, Any] | None = None,
+    *,
+    ammo_ids: Iterable[str] | None = None,
+    refresh: bool = False,
+) -> list[dict[str, Any]]:
+    """Per-Munition particle attachments (shell impact + projectile-destroyed
+    + tracer XML refs).
+
+    Iterates every ammo ID carried by the active hull's gun mounts (or
+    ``ammo_ids`` directly when caller pre-resolved them), loads each
+    Projectile entity via GameParams, and emits one row per non-empty
+    effect slot. Impact effects spawn at hit location (no anchor on the
+    ship); ``node`` is left empty so the consumer stages them.
+
+    ``tracerTexture`` / ``ownTracerTexture`` / ``hatTracerTexture`` etc.
+    are intentionally NOT surfaced here — they're shader textures on a
+    stretched-quad trail, not Effect-blob particle systems. The current
+    ParticleScene renders Effect-blob particles only.
+    """
+    if ammo_ids is None:
+        if components is None:
+            components = resolve_components(ship, hull_choice="upgraded")
+        # Collect ammo IDs from every gun mount across artillery / atba /
+        # airDefense. AA mounts technically don't carry ammoList (they
+        # damage by aura), but check anyway in case a future schema does.
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for grp_key in ("artillery", "atba", "airDefense"):
+            group = components.get(grp_key)
+            if not isinstance(group, dict):
+                continue
+            for hp_name in sorted(group.keys()):
+                mount = group[hp_name]
+                if not isinstance(mount, dict):
+                    continue
+                for aid in mount.get("ammoList") or []:
+                    s = str(aid)
+                    if s and s not in seen:
+                        seen.add(s)
+                        ordered.append(s)
+        ammo_ids = ordered
+
+    out: list[dict[str, Any]] = []
+    for ammo_id in ammo_ids:
+        if not isinstance(ammo_id, str) or not ammo_id:
+            continue
+        proj = get_projectile(ammo_id, refresh=refresh)
+        if proj is None:
+            continue
+        for slot in _MUNITION_SCALAR_SLOTS + _MUNITION_LIST_SLOTS:
+            _emit_particle(
+                out,
+                source="munition", source_id=ammo_id,
+                group=slot, node="",
+                particle=proj.get(slot),
+            )
+    return out
+
+
+def collect_all_particle_attachments(
+    ship: dict[str, Any],
+    components: dict[str, Any] | None = None,
+    *,
+    refresh: bool = False,
+) -> list[dict[str, Any]]:
+    """Run every particle-effect collector and concatenate.
+
+    Order: hull effects first (back-compat with the earlier single-scope
+    behaviour), then gun, AA aura, munition. Each row carries a
+    ``source`` field the consumer pivots on for bucketing. ``source`` is
+    ``"hull"`` for the hull-scope effects to match the new convention.
+    """
+    if components is None:
+        components = resolve_components(ship, hull_choice="upgraded")
+    out: list[dict[str, Any]] = []
+    # Hull effects use the legacy collector; stamp source="hull" on each
+    # row so the consumer can group consistently.
+    for entry in collect_effect_attachments(ship, components):
+        e = dict(entry)
+        e.setdefault("source", "hull")
+        # Preserve the existing key shape — no source_id for hull effects
+        # (the group IS the identifier: fire1, flood, death, …).
+        out.append(e)
+    out.extend(collect_gun_effects(ship, components))
+    out.extend(collect_aa_aura_effects(ship, components))
+    out.extend(collect_munition_effects(
+        ship, components, refresh=refresh,
+    ))
+    return out
+
+
 def classify_splash_boxes(
     ship: dict[str, Any],
     components: dict[str, Any] | None = None,

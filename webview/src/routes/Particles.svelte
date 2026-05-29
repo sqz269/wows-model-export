@@ -1,0 +1,755 @@
+<script lang="ts">
+  // Particles route — single-particle inspector.
+  //
+  // Renders ONE Effect record from `assets.bin` in isolation: no ship,
+  // no neighbour emitters, no scene context. The goal is render-fidelity
+  // diagnostics — does our CPU emitter actually behave the way the
+  // parsed authoring data says it should?
+  //
+  // Layout (3 columns):
+  //   left   — particle picker (list of every path in assets.bin)
+  //   centre — isolated Three.js scene + transport controls
+  //   right  — parsed JSON + decoded-vs-rendered checklist
+  //
+  // URL: `#/particles` (bare) or `#/particles/<vfs-path>`, e.g.
+  // `#/particles/particles/vehicles/Fire_big_2.xml`. The router splits
+  // on the first slash only, so embedded `/`s in the path pass through
+  // without URL-encoding.
+
+  import { onMount } from 'svelte';
+  import * as THREE from 'three';
+  import Search from '@lucide/svelte/icons/search';
+  import Play from '@lucide/svelte/icons/play';
+  import Pause from '@lucide/svelte/icons/pause';
+  import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
+  import XIcon from '@lucide/svelte/icons/x';
+  import { Button } from '$lib/components/ui/button';
+  import { ApiError, fetchJson } from '$lib/api';
+  import { navigate } from '$lib/router';
+  import { navState } from '$lib/nav_state.svelte';
+  import { hasModifier, isTypingContext } from '$lib/shortcuts';
+  import { ParticleScene, type ParticleAttachmentHandle } from '$lib/three/particles';
+  import { createSceneEnvironment, type SceneEnvironment } from '$lib/three/scene';
+  import { observeResize } from '$lib/three/resize';
+  import { startRenderLoop } from '$lib/three/render_loop';
+  import type {
+    ParticleAttachment,
+    ParticleRecord,
+    ParticleSystem,
+  } from '$lib/types/sidecar';
+  import DdsTexturePreview from '$components/DdsTexturePreview.svelte';
+
+  interface Props {
+    /** Particle XML path from the URL (`#/particles/<path>`), or null
+     *  when the user is on a different page / hasn't selected one yet. */
+    particlePath: string | null;
+    /** True iff this is the active route. Page-local keydown handlers
+     *  short-circuit when false. */
+    active: boolean;
+  }
+  const { particlePath, active }: Props = $props();
+
+  // ── Listing state ───────────────────────────────────────────────────
+
+  let particleList = $state<string[]>([]);
+  let listError = $state<string | null>(null);
+  let listLoading = $state(true);
+  let filter = $state('');
+  let searchEl: HTMLInputElement | null = $state(null);
+
+  // ── Current selection ───────────────────────────────────────────────
+
+  /** Sticky — adopts `particlePath` when non-null; persists across tab
+   *  switches via `navState.lastParticlePath`. */
+  let selectedPath = $state<string | null>(null);
+  $effect(() => {
+    if (particlePath) {
+      selectedPath = particlePath;
+      navState.lastParticlePath = particlePath;
+    }
+  });
+
+  let activeRecord = $state<ParticleRecord | null>(null);
+  let availableQualities = $state<string[]>([]);
+  /** The quality the backend actually served — may differ from
+   *  `qualityChoice` when the requested variant doesn't exist for this
+   *  particle (e.g. user clicks `high` but only `low` is available). */
+  let qualityUsed = $state<string | null>(null);
+  let textureCount = $state<{ stamped: number; missing: number }>({ stamped: 0, missing: 0 });
+  let recordError = $state<string | null>(null);
+  let recordLoading = $state(false);
+  let qualityChoice = $state<'high' | 'low' | 'shared'>('high');
+
+  // ── Three.js scene ──────────────────────────────────────────────────
+
+  let canvasContainer: HTMLElement | null = $state(null);
+  let env: SceneEnvironment | null = null;
+  let scene: ParticleScene | null = null;
+  let stopResize: (() => void) | null = null;
+  let stopLoop: (() => void) | null = null;
+
+  /** Per-handle stats updated on the render loop. Drives the readouts
+   *  in the centre overlay (alive count + elapsed time). */
+  let aliveCount = $state(0);
+  let elapsedS = $state(0);
+  let playing = $state(true);
+
+  // ── List fetch ──────────────────────────────────────────────────────
+
+  type ListResponse = {
+    ok: boolean;
+    particles?: string[];
+    count?: number;
+    record_count?: number;
+    error?: string;
+  };
+
+  /** Extract the inner `error` string from an ApiError body, falling
+   *  back to the generic message. The backend returns
+   *  `{ok:false, error:"..."}` on 4xx/5xx; the bare `err.message` is
+   *  just `HTTP 503`. */
+  function describeError(err: unknown): string {
+    if (err instanceof ApiError) {
+      const body = err.body as { error?: string } | null;
+      if (body && typeof body.error === 'string' && body.error) return body.error;
+      return `${err.message}`;
+    }
+    if (err instanceof Error) return err.message;
+    return String(err);
+  }
+
+  async function loadList(): Promise<void> {
+    listLoading = true;
+    listError = null;
+    try {
+      const res = await fetchJson<ListResponse>('/api/particles');
+      if (!res.ok) {
+        listError = res.error ?? 'unknown error';
+        particleList = [];
+        return;
+      }
+      particleList = res.particles ?? [];
+    } catch (err) {
+      listError = describeError(err);
+      particleList = [];
+    } finally {
+      listLoading = false;
+    }
+  }
+
+  // ── Record fetch ────────────────────────────────────────────────────
+
+  type RecordResponse = {
+    ok: boolean;
+    path?: string;
+    qualities?: string[];
+    quality_used?: string | null;
+    record?: ParticleRecord;
+    textures_stamped?: number;
+    textures_missing?: string[];
+    error?: string;
+  };
+
+  async function loadRecord(path: string, quality: string): Promise<void> {
+    recordLoading = true;
+    recordError = null;
+    try {
+      const qs = new URLSearchParams({ path, quality });
+      const res = await fetchJson<RecordResponse>(`/api/particles/record?${qs}`);
+      if (!res.ok) {
+        recordError = res.error ?? 'unknown error';
+        activeRecord = null;
+        return;
+      }
+      activeRecord = res.record ?? null;
+      availableQualities = res.qualities ?? [];
+      qualityUsed = res.quality_used ?? null;
+      textureCount = {
+        stamped: res.textures_stamped ?? 0,
+        missing: (res.textures_missing ?? []).length,
+      };
+    } catch (err) {
+      recordError = describeError(err);
+      activeRecord = null;
+    } finally {
+      recordLoading = false;
+    }
+  }
+
+  // Auto-refetch whenever the path or quality changes.
+  $effect(() => {
+    const p = selectedPath;
+    const q = qualityChoice;
+    if (!p) {
+      activeRecord = null;
+      recordError = null;
+      return;
+    }
+    void loadRecord(p, q);
+  });
+
+  // ── Three.js lifecycle ──────────────────────────────────────────────
+
+  function mountViewer(container: HTMLElement) {
+    // Compact-ish scene: camera close to the origin, smaller grid, no
+    // axes hint (the inspector doesn't care about world axes — the
+    // emitter is at (0,0,0) by construction).
+    env = createSceneEnvironment(container, {
+      background: 0x0a0c11,
+      cameraPosition: [12, 8, 12],
+      gridSize: 40,
+      gridDivisions: 20,
+      axesSize: 1.5,
+      far: 1000,
+    });
+    env.setBloomEnabled(true);
+    env.setBloomParams({ strength: 0.7, radius: 0.4, threshold: 0.6 });
+
+    scene = new ParticleScene(env.renderer);
+    env.scene.add(scene.root);
+
+    stopResize = observeResize({
+      container,
+      renderer: env.renderer,
+      camera: env.camera,
+      onResize: (w, h) => env?.setSize(w, h),
+    });
+
+    stopLoop = startRenderLoop(() => {
+      env!.controls.update();
+      scene!.tick();
+      env!.render();
+      // Mirror the simulator's alive count + elapsed time into reactive
+      // state so the overlay readouts update without a manual ping.
+      if (currentHandle) {
+        let total = 0;
+        let maxElapsed = 0;
+        for (const s of currentHandle.systems) {
+          total += s.aliveCount;
+          if (s.elapsedSeconds > maxElapsed) maxElapsed = s.elapsedSeconds;
+        }
+        aliveCount = total;
+        elapsedS = maxElapsed;
+      } else {
+        aliveCount = 0;
+        elapsedS = 0;
+      }
+    });
+  }
+
+  function disposeViewer() {
+    stopLoop?.();
+    stopResize?.();
+    scene?.dispose();
+    env?.dispose();
+    stopLoop = null;
+    stopResize = null;
+    scene = null;
+    env = null;
+    currentHandle = null;
+  }
+
+  // ── Per-record viewer state ─────────────────────────────────────────
+
+  /** The single fake attachment we render. Path becomes the key into
+   *  the synthetic `particles` map fed to ParticleScene.build. */
+  let currentHandle: ParticleAttachmentHandle | null = null;
+
+  function rebuildSceneFromRecord(rec: ParticleRecord | null) {
+    if (!scene) return;
+    scene.clear();
+    currentHandle = null;
+    if (!rec || !selectedPath) return;
+    const synthetic: ParticleAttachment = {
+      group: 'inspector',
+      node: 'origin',
+      particle_path: selectedPath,
+      source: 'hull',
+    };
+    const handles = scene.build(
+      [synthetic],
+      { [selectedPath]: rec },
+      () => new THREE.Vector3(0, 0, 0),
+    );
+    if (handles.length === 0) return;
+    const h = handles[0];
+    scene.setAttachmentActive(h, playing);
+    currentHandle = h;
+  }
+
+  // Rebuild whenever the active record changes.
+  $effect(() => {
+    rebuildSceneFromRecord(activeRecord);
+  });
+
+  // Toggle live activity when `playing` changes (without rebuilding the
+  // simulator — preserves the ring buffer state).
+  $effect(() => {
+    if (currentHandle && scene) {
+      scene.setAttachmentActive(currentHandle, playing);
+    }
+  });
+
+  // ── Lifecycle wiring ────────────────────────────────────────────────
+
+  onMount(() => {
+    void loadList();
+    if (canvasContainer) mountViewer(canvasContainer);
+
+    const onKey = (e: KeyboardEvent) => {
+      if (!active) return;
+      if (hasModifier(e)) return;
+      if (isTypingContext(e)) return;
+      switch (e.key) {
+        case '/':
+          searchEl?.focus();
+          e.preventDefault();
+          return;
+        case ' ':
+        case 'k':
+        case 'K':
+          playing = !playing;
+          e.preventDefault();
+          return;
+        case 'r':
+        case 'R':
+          restart();
+          e.preventDefault();
+          return;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      disposeViewer();
+    };
+  });
+
+  // ── Picker actions ──────────────────────────────────────────────────
+
+  function selectPath(path: string) {
+    navigate(`#/particles/${path}`);
+  }
+
+  function restart() {
+    rebuildSceneFromRecord(activeRecord);
+    playing = true;
+  }
+
+  function clearFilter() {
+    filter = '';
+    searchEl?.focus();
+  }
+
+  // ── Derived ─────────────────────────────────────────────────────────
+
+  const filteredList = $derived.by(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return particleList;
+    return particleList.filter((p) => p.toLowerCase().includes(q));
+  });
+
+  /** Short, human-friendly form of a particle path. Strips the leading
+   *  `particles/` and trailing `.xml`. */
+  function shortName(path: string): string {
+    return path.replace(/^particles\//, '').replace(/\.xml$/, '');
+  }
+
+  /** Set of action names the WEBVIEW emitter (`particles.ts`) actually
+   *  consumes today. Anything else in a record is silently ignored —
+   *  the inspector flags these so the user knows render fidelity is
+   *  limited there.
+   *
+   *  Source: `webview/src/lib/three/particles.ts:262-290` — the
+   *  `SystemRenderer` constructor's switch on `c.action`.
+   */
+  const RENDERED_ACTIONS = new Set([
+    'creator', 'tint', 'alphaSetter', 'scaler', 'resizer', 'force',
+  ]);
+
+  /** Parser-side fields known to NOT be surfaced yet — these are
+   *  blockers for bit-exact rendering, called out per record so the
+   *  user can correlate "this fire looks wrong" with which open RE
+   *  task it depends on. Source: `particle_render_roadmap.md` P2/P3
+   *  and the comments in `read/particles.py` _decode_renderer /
+   *  _decode_animation. */
+  function parserGapsForRecord(rec: ParticleRecord | null): string[] {
+    if (!rec) return [];
+    const gaps: string[] = [];
+    let anySystemHasAtlas = false;
+    let anySystemHasTexture = false;
+    let anyTextureStamped = false;
+    for (const s of rec.systems ?? []) {
+      if (s.renderer?.textureName0) {
+        anySystemHasTexture = true;
+        // Texture name with 8x8 / 6x6 / 4x4 in the filename is almost
+        // certainly a sprite-sheet flipbook (e.g. Sparkles_8x8.dds).
+        if (/\d+x\d+/i.test(s.renderer.textureName0)) anySystemHasAtlas = true;
+      }
+      if (s.renderer?.textureUrl0) anyTextureStamped = true;
+    }
+    if (anySystemHasAtlas) {
+      gaps.push(
+        'sprite atlas grid (framesPerX/Y) not decoded — flipbook ' +
+        'frames collapse into the full atlas image',
+      );
+    }
+    if (anySystemHasTexture) {
+      gaps.push(
+        'Renderer.blendType not decoded — every system renders ' +
+        'additive (PS_RBT_ADDITIVE) regardless of authored mode',
+      );
+    }
+    if (anySystemHasTexture && !anyTextureStamped) {
+      gaps.push(
+        'texture(s) referenced but not extracted to ' +
+        'content/effects_textures/ — render falls back to procedural disc',
+      );
+    }
+    return gaps;
+  }
+
+  /** Per-system action checklist. Tags each action `rendered` / `ignored`
+   *  so the user can see at a glance which authoring fields the live
+   *  emitter is actually consuming. */
+  function actionChecklist(
+    system: ParticleSystem,
+  ): Array<{ kind: string; action: string; rendered: boolean }> {
+    const out: Array<{ kind: string; action: string; rendered: boolean }> = [];
+    for (const c of system.components ?? []) {
+      const action = c.action ?? c.kind ?? '?';
+      out.push({
+        kind: c.kind ?? '?',
+        action,
+        rendered: RENDERED_ACTIONS.has(action),
+      });
+    }
+    return out;
+  }
+
+  const repoBase = $derived(
+    typeof window !== 'undefined' ? `${window.location.origin}/repo/` : '/repo/',
+  );
+
+  /** First textureUrl0 in any system, used for the side-panel preview. */
+  const firstTexture = $derived.by(() => {
+    for (const s of activeRecord?.systems ?? []) {
+      const url = s.renderer?.textureUrl0;
+      const name = s.renderer?.textureName0;
+      if (url) return { url, name };
+    }
+    return null;
+  });
+</script>
+
+<div class="flex flex-1 min-w-0 h-full">
+  <!-- ── Left: picker ─────────────────────────────────────────────── -->
+  <aside class="bg-card border-border flex w-72 flex-none flex-col border-r">
+    <div class="flex-none border-b border-border px-3 py-2">
+      <div class="flex items-center justify-between">
+        <span class="text-foreground text-xs font-semibold tracking-wider uppercase">
+          particles
+        </span>
+        <span class="text-muted-foreground text-[10px] tabular-nums">
+          {filteredList.length}/{particleList.length}
+        </span>
+      </div>
+      <div class="relative mt-1.5">
+        <Search class="text-muted-foreground pointer-events-none absolute left-2 top-1.5 size-3" />
+        <input
+          bind:this={searchEl}
+          type="search"
+          value={filter}
+          oninput={(e) => (filter = e.currentTarget.value)}
+          placeholder="Filter (e.g. Fire_big)…"
+          aria-label="Filter particle list"
+          class="bg-popover text-foreground border-border placeholder:text-muted-foreground focus:ring-ring/30 h-7 w-full rounded border pl-7 pr-6 text-xs outline-none focus:border-ring focus:ring-2 [&::-webkit-search-cancel-button]:hidden"
+        />
+        {#if filter}
+          <button
+            type="button"
+            class="text-muted-foreground hover:bg-popover hover:text-foreground absolute right-1 top-1 flex size-[18px] items-center justify-center rounded"
+            onclick={clearFilter}
+            aria-label="Clear filter"
+          >
+            <XIcon class="size-3" />
+          </button>
+        {/if}
+      </div>
+    </div>
+    <div class="flex-1 min-h-0 overflow-y-auto">
+      {#if listLoading}
+        <div class="text-muted-foreground px-3 py-3 text-[11px]">loading…</div>
+      {:else if listError}
+        <div class="text-destructive px-3 py-3 text-[11px]">
+          {listError}
+        </div>
+      {:else if filteredList.length === 0}
+        <div class="text-muted-foreground px-3 py-3 text-[11px]">
+          no matches
+        </div>
+      {:else}
+        <ul class="flex flex-col">
+          {#each filteredList as p (p)}
+            <li>
+              <button
+                type="button"
+                onclick={() => selectPath(p)}
+                title={p}
+                class="block w-full truncate px-3 py-1 text-left font-mono text-[11px] hover:bg-muted/30 {selectedPath ===
+                p
+                  ? 'bg-primary/15 border-l-2 border-l-primary text-foreground'
+                  : 'text-muted-foreground border-l-2 border-l-transparent'}"
+              >
+                {shortName(p)}
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+  </aside>
+
+  <!-- ── Centre: scene + controls ─────────────────────────────────── -->
+  <section class="relative flex flex-1 min-w-0 flex-col">
+    <!-- Toolbar -->
+    <div
+      class="bg-card border-border flex flex-none items-center gap-2 border-b px-4 py-2 text-xs"
+    >
+      {#if selectedPath}
+        <code class="text-foreground font-mono">{shortName(selectedPath)}</code>
+        <span class="text-muted-foreground/60">·</span>
+        <code class="text-muted-foreground font-mono text-[10px]">{selectedPath}</code>
+      {:else}
+        <span class="text-muted-foreground">no particle selected</span>
+      {/if}
+
+      <div class="ml-auto flex items-center gap-2">
+        {#if availableQualities.length > 1}
+          <div class="flex rounded border border-border overflow-hidden">
+            {#each availableQualities as q (q)}
+              <button
+                type="button"
+                onclick={() => (qualityChoice = q as 'high' | 'low' | 'shared')}
+                title="{q === qualityChoice && q !== qualityUsed
+                  ? `you picked ${q}, this particle has no ${q} variant — showing ${qualityUsed}`
+                  : `quality variant: ${q}`}"
+                class="px-2 py-0.5 text-[10px] font-medium tracking-wider uppercase {qualityUsed ===
+                q
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-popover text-muted-foreground hover:text-foreground'}"
+              >
+                {q}
+              </button>
+            {/each}
+          </div>
+        {/if}
+        <Button
+          variant="outline"
+          size="sm"
+          onclick={() => (playing = !playing)}
+          title={playing ? 'Pause (space)' : 'Play (space)'}
+        >
+          {#if playing}
+            <Pause class="size-3" />
+          {:else}
+            <Play class="size-3" />
+          {/if}
+        </Button>
+        <Button variant="outline" size="sm" onclick={restart} title="Restart simulation (R)">
+          <RotateCcw class="size-3" />
+        </Button>
+      </div>
+    </div>
+
+    <!-- Canvas -->
+    <div class="relative flex-1 min-h-0">
+      <div
+        bind:this={canvasContainer}
+        class="absolute inset-0"
+      ></div>
+
+      {#if !selectedPath}
+        <div
+          class="text-muted-foreground pointer-events-none absolute inset-0 flex items-center justify-center text-center text-sm"
+        >
+          Pick a particle from the left to inspect it.
+        </div>
+      {:else if recordLoading}
+        <div
+          class="text-muted-foreground pointer-events-none absolute inset-0 flex items-center justify-center text-center text-sm"
+        >
+          parsing record…
+        </div>
+      {:else if recordError}
+        <div
+          class="text-destructive pointer-events-none absolute inset-0 flex items-center justify-center p-6 text-center text-sm"
+        >
+          {recordError}
+        </div>
+      {/if}
+
+      <!-- Live overlay: alive count + elapsed -->
+      {#if selectedPath && activeRecord && !recordError}
+        <div
+          class="bg-popover/85 border-border absolute left-3 top-3 rounded border px-2 py-1 font-mono text-[10px] backdrop-blur"
+        >
+          <div class="text-muted-foreground">
+            alive <span class="text-foreground tabular-nums">{aliveCount}</span>
+          </div>
+          <div class="text-muted-foreground">
+            t <span class="text-foreground tabular-nums">{elapsedS.toFixed(2)}s</span>
+          </div>
+          <div class="text-muted-foreground">
+            systems <span class="text-foreground tabular-nums">{activeRecord.systems?.length ?? 0}</span>
+          </div>
+        </div>
+      {/if}
+    </div>
+  </section>
+
+  <!-- ── Right: parameter inspector ───────────────────────────────── -->
+  <aside class="bg-card border-border flex w-[420px] flex-none flex-col border-l">
+    <div
+      class="flex-none border-b border-border px-3 py-2 text-xs font-semibold tracking-wider uppercase text-foreground"
+    >
+      inspector
+    </div>
+    <div class="flex-1 min-h-0 overflow-y-auto p-3 text-[11px]">
+      {#if !activeRecord}
+        <div class="text-muted-foreground">no record loaded</div>
+      {:else}
+        {@const gaps = parserGapsForRecord(activeRecord)}
+
+        <!-- Render-fidelity caveats -->
+        {#if gaps.length > 0}
+          <section class="mb-3 rounded border border-amber-900/50 bg-amber-950/30 p-2">
+            <div
+              class="text-amber-300 mb-1 text-[10px] uppercase tracking-wider font-semibold"
+            >
+              parser gaps
+            </div>
+            <ul class="text-amber-200/90 text-[10px] flex flex-col gap-0.5">
+              {#each gaps as g (g)}
+                <li>· {g}</li>
+              {/each}
+            </ul>
+          </section>
+        {/if}
+
+        <!-- Texture preview -->
+        {#if firstTexture?.url}
+          <section class="mb-3 flex items-start gap-3">
+            <DdsTexturePreview
+              paths={[firstTexture.url]}
+              baseUrl={repoBase}
+              slot="baseColor"
+              size={96}
+            />
+            <div class="flex min-w-0 flex-1 flex-col gap-0.5">
+              <div class="text-muted-foreground text-[9px] uppercase tracking-wider">
+                sprite map
+              </div>
+              <code class="text-foreground font-mono text-[10px] break-all">
+                {firstTexture.name}
+              </code>
+              <div class="text-muted-foreground text-[9px]">
+                {textureCount.stamped} stamped · {textureCount.missing} missing
+              </div>
+            </div>
+          </section>
+        {:else if textureCount.missing > 0}
+          <section class="mb-3 rounded border border-border bg-muted/20 p-2">
+            <div class="text-muted-foreground text-[10px]">
+              textures referenced but not extracted yet — render falls back to
+              procedural disc. Scaffold a ship that uses this particle to
+              populate the cache.
+            </div>
+          </section>
+        {/if}
+
+        <!-- Per-system breakdown -->
+        <section class="mb-3 flex flex-col gap-2">
+          <div class="text-muted-foreground text-[9px] uppercase tracking-wider">
+            systems
+          </div>
+          {#each activeRecord.systems ?? [] as s, si (si)}
+            {@const checklist = actionChecklist(s)}
+            <details
+              class="border-border bg-popover/40 rounded border px-2 py-1.5 [&[open]]:bg-popover/70"
+              open={si === 0}
+            >
+              <summary
+                class="text-foreground cursor-pointer text-[11px] font-mono hover:text-primary"
+              >
+                #{si} · cap {s.general?.capacity ?? '—'} · maxAge {(s.general?.maxParticleAge ?? 0).toFixed(2)}s
+                · {checklist.length} comps
+              </summary>
+              <div class="mt-2 flex flex-col gap-2">
+                <!-- Emitter sub-fields -->
+                <div>
+                  <div class="text-muted-foreground text-[9px] uppercase tracking-wider">
+                    emitter
+                  </div>
+                  <pre
+                    class="text-foreground bg-background/40 mt-1 max-h-32 overflow-auto rounded border border-border/60 p-1 font-mono text-[10px]">{JSON.stringify(s.emitter ?? {}, null, 2)}</pre>
+                </div>
+                <!-- Renderer + animation -->
+                <div>
+                  <div class="text-muted-foreground text-[9px] uppercase tracking-wider">
+                    renderer + animation
+                  </div>
+                  <pre
+                    class="text-foreground bg-background/40 mt-1 max-h-32 overflow-auto rounded border border-border/60 p-1 font-mono text-[10px]">{JSON.stringify(
+                      { renderer: s.renderer, animation: s.animation },
+                      null,
+                      2,
+                    )}</pre>
+                </div>
+                <!-- Component action checklist -->
+                <div>
+                  <div class="text-muted-foreground text-[9px] uppercase tracking-wider">
+                    components · {checklist.filter((x) => x.rendered).length}/{checklist.length} rendered
+                  </div>
+                  <ul class="mt-1 flex flex-col gap-0.5">
+                    {#each checklist as item, ci (ci)}
+                      <li class="flex items-center gap-2 font-mono text-[10px]">
+                        <span
+                          class="inline-flex size-2 flex-none rounded-full {item.rendered
+                            ? 'bg-emerald-500'
+                            : 'bg-amber-500/60'}"
+                          title={item.rendered ? 'rendered' : 'ignored by current renderer'}
+                        ></span>
+                        <span class="text-foreground">{item.action}</span>
+                        <span class="text-muted-foreground text-[9px]">({item.kind})</span>
+                      </li>
+                    {/each}
+                  </ul>
+                </div>
+                <!-- Raw component bodies -->
+                <details class="text-[10px]">
+                  <summary
+                    class="text-muted-foreground cursor-pointer hover:text-foreground"
+                  >
+                    raw component bodies
+                  </summary>
+                  <pre
+                    class="text-foreground bg-background/40 mt-1 max-h-64 overflow-auto rounded border border-border/60 p-1 font-mono text-[10px]">{JSON.stringify(s.components ?? [], null, 2)}</pre>
+                </details>
+              </div>
+            </details>
+          {/each}
+        </section>
+
+        <!-- Full raw JSON for power users -->
+        <details class="text-[10px]">
+          <summary class="text-muted-foreground cursor-pointer hover:text-foreground">
+            full parsed record (JSON)
+          </summary>
+          <pre
+            class="text-foreground bg-background/40 mt-1 max-h-96 overflow-auto rounded border border-border/60 p-1 font-mono text-[10px]">{JSON.stringify(activeRecord, null, 2)}</pre>
+        </details>
+      {/if}
+    </div>
+  </aside>
+</div>

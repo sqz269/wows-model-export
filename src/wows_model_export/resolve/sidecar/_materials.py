@@ -29,6 +29,14 @@ from ._constants import (
 from ._dds_channels import CHANNEL_SLOTS, LEGACY_RAW_SUFFIXES
 from ._makers import make_default_skin, make_skin
 
+# Default `factors.emissive_strength` for any material that ships an
+# emissive slot. The synthesised `_emissive.dd?` is sRGB-LDR (DXT1) —
+# `synth_emission.py` re-encodes through `linear_to_sRGB` after the
+# `emissivePower` boost, which clips any pixel brighter than linear 1.0
+# back down to 1.0 in the stored texel. Consumers therefore need a
+# post-sample multiplier to push emission above their bloom threshold
+# (Unity URP default = 1.0). Mirrors `projectile_library.DEFAULT_EMISSION_INTENSITY`.
+DEFAULT_EMISSION_INTENSITY: float = 2.5
 
 def _glb_json_chunk(glb_path: str | Path) -> dict[str, Any]:
     """Extract and parse the JSON chunk from a GLB file.
@@ -425,6 +433,22 @@ def materials_from_glb(
                 f"no matching DDS stem. These will render untextured downstream: "
                 f"{', '.join(uniq)}",
                 file=sys.stderr,
+            )
+
+    # Stamp `factors.emissive_strength` on every material whose final
+    # texture_sets (main OR any camo variant) carries an emissive slot.
+    # See module-level DEFAULT_EMISSION_INTENSITY for why this is needed —
+    # the synthesised emissive DDS is sRGB-LDR and clips at linear 1.0,
+    # so consumers need a post-sample multiplier to drive bloom. Runs
+    # after the DDS-only resolver so it catches materials where the
+    # emissive slot was discovered from disk rather than the glTF.
+    # `setdefault` so an explicit override (e.g. projectile_library
+    # writing its own value) wins.
+    for entry in out:
+        sets = entry.get("texture_sets") or {}
+        if any(isinstance(s, dict) and "emissive" in s for s in sets.values()):
+            entry.setdefault("factors", {}).setdefault(
+                "emissive_strength", float(DEFAULT_EMISSION_INTENSITY)
             )
 
     return out

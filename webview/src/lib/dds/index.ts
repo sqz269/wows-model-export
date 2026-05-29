@@ -151,6 +151,34 @@ function makeRgtcDataTexture(
 }
 
 /**
+ * Wrap an uncompressed RGBA8 DDS mip (worker-decoded byte array, already
+ * R/G/B/A-ordered with alpha forced to 255 where the source had no
+ * alpha channel) into a Three.js ``DataTexture``. Used for
+ * GRADIENT_MAP color ramps and any other non-BC particle texture.
+ */
+function makeRgba8DataTexture(
+  mip: { data: Uint8Array; width: number; height: number },
+  renderer: THREE.WebGLRenderer,
+): THREE.DataTexture {
+  const tex = new THREE.DataTexture(
+    mip.data as unknown as Uint8Array<ArrayBuffer>,
+    mip.width,
+    mip.height,
+    THREE.RGBAFormat,
+    THREE.UnsignedByteType,
+  );
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  tex.flipY = false;
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/**
  * Fetch + parse multiple DDS files (one per mip level) and assemble them
  * into a single `CompressedTexture` with a full mip chain.
  *
@@ -193,6 +221,14 @@ export async function loadDdsMipChain(
   if (firstRgtc) {
     if (!ensureRgtcSupport(renderer)) return null;
     return makeRgtcDataTexture(firstRgtc.mipmaps[0], renderer);
+  }
+
+  // Uncompressed RGBA8 fast-path. WG ships color ramps (fire / smoke /
+  // gradient LUTs) as small uncompressed DDS. No GL extension needed —
+  // pump straight into a DataTexture.
+  const firstRgba8 = parses.find((p): p is ParseSuccess => !!p && p.kind === 'rgba8');
+  if (firstRgba8) {
+    return makeRgba8DataTexture(firstRgba8.mipmaps[0], renderer);
   }
 
   type Mip = ParseSuccess['mipmaps'][number];

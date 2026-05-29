@@ -1271,76 +1271,38 @@ def _absorb_gameparams_passes(
     except Exception as e:
         _warn(warnings, f"gameparams camera failed ({e})")
 
-    # Pass 7: particle effect attachments + resolved Effect blob data
-    # (schema v3.x). Drives the webview's particle renderer and the
-    # Unity-side ParticleSystem authoring. Best-effort: a missing
-    # assets.bin / unresolved entry degrades to a warning, never blocks
-    # the rest of the sidecar build.
+    # Pass 7: particle effect attachments (schema v4 — record decode +
+    # texture extraction moved to the shared library/particles artefact).
+    # Per-ship sidecar carries only ``effects.attachments``; the matching
+    # Effect records live in ``library/particles/records.json`` keyed by
+    # ``particle_path``. First scaffold on a fresh workspace builds the
+    # library (one decode pass over assets.bin + one texture extract);
+    # subsequent scaffolds reuse the cached artefact via mtime check.
+    # Best-effort: a missing assets.bin degrades to a warning, never
+    # blocks the rest of the sidecar build.
     try:
-        # Collect every particle scope the consumer can preview: hull
-        # anchored EP_* effects (fire / flood / death / smoke / wake),
-        # per-gun muzzle + damage + purge + reload + lens, per-AA-aura
-        # flak burst + detonation + miss puff, and per-Munition impact
-        # / projectile-destroyed / tracer XML refs. Each row carries a
-        # ``source`` field the webview pivots on for tab bucketing.
         attachments = _gp_autofill.collect_all_particle_attachments(
             ship_dict, components,
         )
         if attachments:
-            from ..read import particles as _particles
-            from ..toolkit import assets_bin as _assets_bin
             try:
-                assets_bin_path = _assets_bin.ensure_dump(config=config)
-            except Exception as e:
-                _warn(warnings, f"gameparams effects: assets.bin unavailable ({e})")
-                assets_bin_path = None
-            if assets_bin_path is not None:
-                with _particles.ParticleStore.open(assets_bin_path) as store:
-                    paths = _gp_autofill.collect_unique_particle_paths(attachments)
-                    resolved: dict[str, dict] = {}
-                    unresolved: list[str] = []
-                    for p in paths:
-                        eff = store.get(p)
-                        if eff is None:
-                            unresolved.append(p)
-                        else:
-                            resolved[p] = eff
-                    if unresolved:
+                from . import library_particles as _lib_particles
+                lib_status = _lib_particles.ensure_built(config=config)
+                if lib_status["status"] == "built":
+                    print(
+                        f"  effects: library built — "
+                        f"{lib_status['paths_decoded']} records, "
+                        f"{lib_status['textures_extracted']} textures",
+                    )
+                    if lib_status.get("textures_missing"):
                         _warn(
                             warnings,
-                            f"gameparams effects: {len(unresolved)} of "
-                            f"{len(paths)} particle paths unresolved "
-                            f"(e.g. {unresolved[0]!r})",
+                            f"effects textures: "
+                            f"{lib_status['textures_missing']} unresolvable",
                         )
-                    # Extract every DDS referenced by Renderer.textureName*
-                    # / Animation.motionVectorsTexture into the workspace
-                    # cache so the webview can fetch them. Stamps each
-                    # renderer block with a ``texture_url_*`` field used
-                    # by the JS-side ParticleScene.
-                    try:
-                        from . import effects_textures as _eff_tex
-                        tex_paths = _eff_tex.collect_texture_paths(resolved)
-                        if tex_paths:
-                            resolved_urls, missing_tex = _eff_tex.ensure_textures_on_disk(
-                                tex_paths, config=config,
-                            )
-                            stamped = _eff_tex.stamp_texture_urls(resolved, resolved_urls)
-                            if missing_tex:
-                                _warn(
-                                    warnings,
-                                    f"effects textures: {len(missing_tex)} of "
-                                    f"{len(tex_paths)} referenced textures not "
-                                    f"extractable (e.g. {sorted(missing_tex)[0]!r})",
-                                )
-                            print(
-                                f"  effects: extracted {len(resolved_urls)} "
-                                f"texture(s) ({stamped} field(s) stamped)",
-                            )
-                    except Exception as e:
-                        _warn(warnings, f"effects textures failed ({e})")
-                    doc = sidecar.absorb_gameparams_effects(
-                        doc, attachments=attachments, particles=resolved,
-                    )
+            except Exception as e:
+                _warn(warnings, f"gameparams effects: library build failed ({e})")
+            doc = sidecar.absorb_gameparams_effects(doc, attachments=attachments)
     except Exception as e:
         _warn(warnings, f"gameparams effects failed ({e})")
 

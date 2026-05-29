@@ -32,6 +32,7 @@ Public surface — one function per `wowsunpack` subcommand we care about:
 
 from __future__ import annotations
 
+from . import assets_bin
 from .ammo import ammo_json
 from .armor import armor_json
 from .bones import dump_bones, fetch_bones
@@ -66,4 +67,6 @@ __all__ = [
     # Cache helpers
     "default_manifest_path",
     "ensure_manifest",
+    # Submodules
+    "assets_bin",
 ]

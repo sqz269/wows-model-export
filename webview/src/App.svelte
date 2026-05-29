@@ -10,12 +10,14 @@
     gameParamsHref,
     libraryHref,
     projectilesHref,
+    particlesHref,
     settingsHref,
     shipsHref,
   } from '$lib/nav_state.svelte';
   import { hasModifier, isTypingContext } from '$lib/shortcuts';
   import Library from '$routes/Library.svelte';
   import Ships from '$routes/Ships.svelte';
+  import Particles from '$routes/Particles.svelte';
   import Extract from '$routes/Extract.svelte';
   import Settings from '$routes/Settings.svelte';
   import GameParams from '$routes/GameParams.svelte';
@@ -68,14 +70,18 @@
           e.preventDefault();
           return;
         case '5':
-          navigate(gameParamsHref());
+          navigate(particlesHref());
           e.preventDefault();
           return;
         case '6':
-          navigate(consumersHref());
+          navigate(gameParamsHref());
           e.preventDefault();
           return;
         case '7':
+          navigate(consumersHref());
+          e.preventDefault();
+          return;
+        case '8':
           navigate(settingsHref());
           e.preventDefault();
           return;
@@ -99,9 +105,10 @@
     { page: 'ships', href: shipsHref(), label: 'Ships', keyHint: '2' },
     { page: 'library', href: libraryHref(), label: 'Library', keyHint: '3' },
     { page: 'projectiles', href: projectilesHref(), label: 'Projectiles', keyHint: '4' },
-    { page: 'gameparams', href: gameParamsHref(), label: 'GameParams', keyHint: '5' },
-    { page: 'consumers', href: consumersHref(), label: 'Consumers', keyHint: '6' },
-    { page: 'settings', href: settingsHref(), label: 'Settings', keyHint: '7' },
+    { page: 'particles', href: particlesHref(), label: 'Particles', keyHint: '5' },
+    { page: 'gameparams', href: gameParamsHref(), label: 'GameParams', keyHint: '6' },
+    { page: 'consumers', href: consumersHref(), label: 'Consumers', keyHint: '7' },
+    { page: 'settings', href: settingsHref(), label: 'Settings', keyHint: '8' },
   ]);
 
   function go(e: MouseEvent, href: string) {
@@ -176,6 +183,12 @@
     <Ships
       shipName={route.page === 'ships' ? route.shipName : null}
       active={route.page === 'ships'}
+    />
+  </div>
+  <div class={route.page === 'particles' ? 'flex flex-1 min-w-0' : 'hidden'}>
+    <Particles
+      particlePath={route.page === 'particles' ? route.particlePath : null}
+      active={route.page === 'particles'}
     />
   </div>
   <div class={route.page === 'extract' ? 'flex flex-1 min-w-0' : 'hidden'}>

@@ -16,6 +16,8 @@ const FOURCC_DXT3 = 0x33545844;
 const FOURCC_DXT5 = 0x35545844;
 
 const DDPF_ALPHAPIXELS = 0x1;
+const DDPF_FOURCC = 0x4;
+const DDPF_RGB = 0x40;
 
 // THREE format constants (mirrored as numerics so the worker doesn't
 // pull three.js into the bundle).
@@ -56,7 +58,7 @@ interface Mip {
 }
 
 export interface ParseSuccess {
-  kind: 'bptc' | 'rgtc' | 'classic';
+  kind: 'bptc' | 'rgtc' | 'classic' | 'rgba8';
   format: number;
   mipmaps: Mip[];
   width: number;
@@ -309,6 +311,89 @@ function parseDx10Classic(buf: ArrayBuffer, dxgi: number): ParseSuccess | null {
   };
 }
 
+// Uncompressed RGBA/BGRA 8-bit per channel. WG ships particle color
+// ramps (e.g. ``particles/ramps/fire_yellow_2.dds``) as small
+// 256x1..256x8 uncompressed textures — the GRADIENT_MAP particle blend
+// path keys these as 1D LUTs via the fragment shader. Pixel-format
+// signature: DDPF_RGB | DDPF_ALPHAPIXELS, 32 bpp, channel masks for
+// either RGBA or BGRA byte order.
+function parseUncompressedRgba8(buf: ArrayBuffer): ParseSuccess | null {
+  const view = new DataView(buf);
+  if (buf.byteLength < 128) return null;
+  const pfFlags = view.getUint32(80, true);
+  if ((pfFlags & DDPF_RGB) === 0) return null;
+  // Non-DXT non-DX10: fourCC must be 0 (no compression).
+  const fourCC = view.getUint32(84, true);
+  if (fourCC !== 0 && (pfFlags & DDPF_FOURCC) !== 0) return null;
+  const rgbBits = view.getUint32(88, true);
+  if (rgbBits !== 32) return null; // 24bpp + 16bpp paths not needed yet.
+
+  const maskR = view.getUint32(92, true);
+  const maskG = view.getUint32(96, true);
+  const maskB = view.getUint32(100, true);
+  const maskA = view.getUint32(104, true);
+
+  // Detect channel order from the masks. R=0xff means R is the low
+  // byte (RGBA layout); R=0xff0000 means R is the high byte (BGRA).
+  let swizzle: 'rgba' | 'bgra';
+  if (maskR === 0x000000ff && maskG === 0x0000ff00 && maskB === 0x00ff0000) {
+    swizzle = 'rgba';
+  } else if (maskR === 0x00ff0000 && maskG === 0x0000ff00 && maskB === 0x000000ff) {
+    swizzle = 'bgra';
+  } else {
+    return null; // unsupported mask layout
+  }
+  const hasAlpha = (pfFlags & DDPF_ALPHAPIXELS) !== 0 && maskA !== 0;
+
+  let height = view.getUint32(12, true);
+  let width = view.getUint32(16, true);
+  const topW = width;
+  const topH = height;
+  const mipCount = Math.max(1, view.getUint32(28, true));
+
+  let offset = 128;
+  const mipmaps: Mip[] = [];
+  const src = new Uint8Array(buf);
+  for (let i = 0; i < mipCount; i++) {
+    const pixelCount = width * height;
+    const byteSize = pixelCount * 4;
+    if (offset + byteSize > buf.byteLength) break;
+    const out = new Uint8Array(byteSize);
+    if (swizzle === 'rgba') {
+      out.set(src.subarray(offset, offset + byteSize));
+      if (!hasAlpha) {
+        // Force alpha=255 when the file doesn't carry an alpha channel.
+        for (let p = 3; p < byteSize; p += 4) out[p] = 0xff;
+      }
+    } else {
+      // BGRA on disk -> swap R/B into RGBA output.
+      for (let p = 0; p < byteSize; p += 4) {
+        out[p] = src[offset + p + 2];
+        out[p + 1] = src[offset + p + 1];
+        out[p + 2] = src[offset + p];
+        out[p + 3] = hasAlpha ? src[offset + p + 3] : 0xff;
+      }
+    }
+    mipmaps.push({ data: out, width, height });
+    offset += byteSize;
+    if (width === 1 && height === 1) break;
+    width = Math.max(1, width >> 1);
+    height = Math.max(1, height >> 1);
+  }
+  if (mipmaps.length === 0) return null;
+  return { kind: 'rgba8', format: RGBAFormat, mipmaps, width: topW, height: topH };
+}
+
+// DXGI formats the worker recognises but can't decode in software yet.
+// Reported back as a distinct ``ParseSuccess.kind = 'unsupported'`` so
+// callers can downgrade their console message from "malformed" to
+// "format X not implemented" (BC6H HDR particle ramps are the live case
+// — fire_yellow_*_HDR.dds is DXGI 95).
+const UNSUPPORTED_DXGI: Record<number, string> = {
+  95: 'BC6H_UF16',
+  96: 'BC6H_SF16',
+};
+
 function parse(buf: ArrayBuffer): ParseSuccess | null {
   const view = new DataView(buf);
   if (view.byteLength < 128 || view.getUint32(0, true) !== DDS_MAGIC) return null;
@@ -321,7 +406,26 @@ function parse(buf: ArrayBuffer): ParseSuccess | null {
     if (CLASSIC_DXGI[dxgi]) return parseDx10Classic(buf, dxgi);
     return null;
   }
-  return parseClassic(buf);
+  // Try the BC1/3/5 classic-fourCC path first; fall through to the
+  // uncompressed RGBA8 reader for files like fire_yellow_*.dds.
+  const classic = parseClassic(buf);
+  if (classic) return classic;
+  return parseUncompressedRgba8(buf);
+}
+
+function describeFailure(buf: ArrayBuffer): string {
+  const view = new DataView(buf);
+  if (view.byteLength < 128 || view.getUint32(0, true) !== DDS_MAGIC) {
+    return 'not a DDS file';
+  }
+  const fourCC = view.getUint32(84, true);
+  if (fourCC === DDS_DX10_FOURCC && buf.byteLength >= 148) {
+    const dxgi = view.getUint32(128, true);
+    const name = UNSUPPORTED_DXGI[dxgi];
+    if (name) return `DXGI ${dxgi} (${name}) not implemented by worker`;
+    return `unsupported DXGI format ${dxgi}`;
+  }
+  return 'unsupported or malformed DDS';
 }
 
 const ctx = self as unknown as Worker;
@@ -331,7 +435,9 @@ ctx.onmessage = (e: MessageEvent<DecodeRequest>) => {
   try {
     const result = parse(buffer);
     if (!result) {
-      const resp: DecodeResponse = { id, ok: false, error: 'unsupported or malformed DDS' };
+      const resp: DecodeResponse = {
+        id, ok: false, error: describeFailure(buffer),
+      };
       ctx.postMessage(resp);
       return;
     }
