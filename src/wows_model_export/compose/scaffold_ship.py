@@ -1810,6 +1810,13 @@ def scaffold_ship(
     )
 
     armor_data: dict[str, Any] | None = None
+    # NOTE: this read is load-bearing even on a _refresh_sidecar pass
+    # (skip_armor=True). new_document_from_placements stubs an EMPTY armor
+    # block (source_glb=None, hidden_zones=[]) which then wins in the
+    # final merge; re-reading armor.json here is what repopulates the real
+    # source_glb + hidden_zones. (Empirically verified 2026-05-29: gating
+    # this on `not skip_armor` dropped armor.hidden_zones + source_glb from
+    # the refreshed sidecar.) Do NOT gate it on skip_armor.
     if armor_json_path.is_file():
         armor_data = json.loads(armor_json_path.read_text(encoding="utf-8"))
         doc = sidecar.merge_preserving(doc, {

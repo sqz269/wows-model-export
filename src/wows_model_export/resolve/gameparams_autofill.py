@@ -53,7 +53,6 @@ from ..read.gameparams import (
     get_projectile,
     get_ship,
     load_full,
-    resolve_ship_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -1182,6 +1181,15 @@ def shell_visual_extras(ammo_id: str, *, refresh: bool = False) -> dict[str, Any
     proj = get_projectile(ammo_id, refresh=refresh)
     if proj is None:
         return {}
+    return _shell_visual_extras_from_proj(proj)
+
+
+def _shell_visual_extras_from_proj(proj: dict[str, Any]) -> dict[str, Any]:
+    """Body of :func:`shell_visual_extras` over an already-resolved
+    Projectile entity dict. Lets callers that already hold the dict (e.g.
+    a corpus walk over ``load_full()``) skip the ``get_projectile``
+    round-trip. Identical output to ``shell_visual_extras(ammo_id)`` when
+    ``proj`` is that ammo's entity."""
     # Skip torpedo-style entities (Torpedo / DepthCharge / Laser / Wave /
     # PlaneTracer) — they don't carry shell mesh sizing, and falling
     # through would otherwise duplicate the torpedo helper's tracer XML
@@ -1304,6 +1312,12 @@ def shell_effects_extras(ammo_id: str, *, refresh: bool = False) -> dict[str, An
     proj = get_projectile(ammo_id, refresh=refresh)
     if proj is None:
         return {}
+    return _shell_effects_extras_from_proj(proj)
+
+
+def _shell_effects_extras_from_proj(proj: dict[str, Any]) -> dict[str, Any]:
+    """Body of :func:`shell_effects_extras` over an already-resolved
+    Projectile entity dict (see :func:`_shell_visual_extras_from_proj`)."""
     # Same shell-render guard as :func:`shell_visual_extras`. Without it
     # the helper would extract ``blowUpEffect`` / ``shipDestroyEffect``
     # from torpedo / depth charge entries (which carry those flat fields
@@ -1379,6 +1393,12 @@ def torpedo_visual_extras(ammo_id: str, *, refresh: bool = False) -> dict[str, A
     proj = get_projectile(ammo_id, refresh=refresh)
     if proj is None:
         return {}
+    return _torpedo_visual_extras_from_proj(proj)
+
+
+def _torpedo_visual_extras_from_proj(proj: dict[str, Any]) -> dict[str, Any]:
+    """Body of :func:`torpedo_visual_extras` over an already-resolved
+    Projectile entity dict (see :func:`_shell_visual_extras_from_proj`)."""
     out: dict[str, Any] = {}
 
     for src, dst in (
@@ -1421,6 +1441,12 @@ def torpedo_effects_extras(ammo_id: str, *, refresh: bool = False) -> dict[str, 
     proj = get_projectile(ammo_id, refresh=refresh)
     if proj is None:
         return {}
+    return _torpedo_effects_extras_from_proj(proj)
+
+
+def _torpedo_effects_extras_from_proj(proj: dict[str, Any]) -> dict[str, Any]:
+    """Body of :func:`torpedo_effects_extras` over an already-resolved
+    Projectile entity dict (see :func:`_shell_visual_extras_from_proj`)."""
     # Skip shell-style entities — their impact effects are already emitted
     # by :func:`shell_effects_extras` in the authoritative H/V-split form.
     # WG ships duplicate flat ``projDestroyedEffect`` alongside the split
@@ -1874,10 +1900,10 @@ def derive_class_from_placements(
         return None
     if not param_index:
         return class_from_caliber(species, None)
-    full_id = resolve_ship_id(param_index)
-    if not full_id:
-        return class_from_caliber(species, None)
-    ship = get_ship(full_id, refresh=refresh)
+    # get_ship -> get_entity already handles prefix-form lookup
+    # (gameparams.py), so pass param_index straight through rather than
+    # pre-resolving it to a full id first. Same result; one fewer scan.
+    ship = get_ship(param_index, refresh=refresh)
     if ship is None:
         return class_from_caliber(species, None)
     components = resolve_components(ship)

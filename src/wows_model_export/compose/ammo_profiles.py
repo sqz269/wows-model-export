@@ -125,8 +125,9 @@ def build_profiles(
     if refresh:
         _ensure_gameparams_dump(refresh=True, config=config)
     # ``load_full`` already unwraps the outer realm key — iterate
-    # directly.
-    main = _gp_read.load_full()
+    # directly. Thread ``config`` so the warm-cache hit skips a
+    # PipelineConfig.load() (user-settings read) per call.
+    main = _gp_read.load_full(config=config)
 
     profiles: dict[str, dict] = {}
     species_counts: dict[str, int] = {}
@@ -149,13 +150,18 @@ def build_profiles(
         # Both family helpers run; their key sets are disjoint by
         # design (shell-style emits {model_scale, tint, glow, tracer,
         # smoke, ...}; torpedo-style emits {tracer_effect,
-        # parachute_*, ...}).
+        # parachute_*, ...}). We already hold the resolved Projectile
+        # entity (`entity` IS get_projectile(ammo_id) here — we filtered
+        # typeinfo.type == "Projectile" above), so call the *_from_proj
+        # cores directly and skip four get_projectile round-trips per
+        # projectile (each a get_entity -> load_full -> ensure_dump ->
+        # PipelineConfig.load).
         visual: dict = {}
-        visual.update(_gp_autofill.shell_visual_extras(ammo_id))
-        visual.update(_gp_autofill.torpedo_visual_extras(ammo_id))
+        visual.update(_gp_autofill._shell_visual_extras_from_proj(entity))
+        visual.update(_gp_autofill._torpedo_visual_extras_from_proj(entity))
         effects: dict = {}
-        effects.update(_gp_autofill.shell_effects_extras(ammo_id))
-        effects.update(_gp_autofill.torpedo_effects_extras(ammo_id))
+        effects.update(_gp_autofill._shell_effects_extras_from_proj(entity))
+        effects.update(_gp_autofill._torpedo_effects_extras_from_proj(entity))
 
         entry: dict = {
             "ammo_type": str(ammo_type) if isinstance(ammo_type, str) else None,
@@ -264,7 +270,7 @@ def build_ammo_profiles(
         with runner.step("load_gameparams") as st:
             if refresh_gameparams:
                 _ensure_gameparams_dump(refresh=True, config=cfg)
-            main = _gp_read.load_full()
+            main = _gp_read.load_full(config=cfg)
             # Count Projectile entities up front so the step's data
             # payload carries something useful.
             projectile_count = sum(

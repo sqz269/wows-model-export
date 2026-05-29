@@ -35,11 +35,15 @@ needs in order to bootstrap on a fresh install.
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..toolkit.gameparams import ensure_dump
+
+if TYPE_CHECKING:
+    from ..config import PipelineConfig
 
 # In-process flat-load cache. Keyed by the cache file's (mtime, size) so
 # a refresh (which rewrites the file) invalidates automatically without
@@ -57,6 +61,15 @@ from ..toolkit.gameparams import ensure_dump
 _CACHE_KEY_T = tuple[float, int]
 _FULL_DATA: tuple[_CACHE_KEY_T, dict[str, Any]] | None = None
 
+# Serializes the cold 2.8 GB ``json.load`` so two concurrent first-loads
+# (the jobs ThreadPoolExecutor is max_workers=4, and FastAPI
+# ``/api/gameparams/*`` handlers call ``load_full`` on the anyio thread
+# pool) can't each build a ~12 GB resident set in parallel (OOM on
+# low-RAM boxes) or silently overwrite ``_FULL_DATA`` mid-parse. The warm
+# fast-path stays lock-free via a snapshot read; only the cold parse and
+# ``unload_full`` take the lock.
+_load_lock = threading.Lock()
+
 
 def _cache_key(p: Path) -> _CACHE_KEY_T:
     st = p.stat()
@@ -67,6 +80,7 @@ def load_full(
     *,
     refresh: bool = False,
     path: Path | None = None,
+    config: "PipelineConfig | None" = None,
 ) -> dict[str, Any]:
     """Return the unwrapped GameParams dict, caching the parse per-process.
 
@@ -75,26 +89,39 @@ def load_full(
     in the same process reuse the parsed dict unless ``refresh=True``.
 
     When ``path`` is ``None`` and the default cache file is missing,
-    :func:`ensure_dump` is invoked to build it before reading.
+    :func:`ensure_dump` is invoked to build it before reading. Passing
+    ``config`` threads a pre-resolved :class:`PipelineConfig` into
+    ``ensure_dump`` so the warm-cache hit path doesn't re-run
+    ``PipelineConfig.load()`` (a user-settings file read) on every call —
+    matters for hot loops that touch many entities.
     """
     global _FULL_DATA
     if path is None:
-        cache_path = ensure_dump(refresh=refresh)
+        cache_path = ensure_dump(refresh=refresh, config=config)
     else:
         cache_path = Path(path)
         if not cache_path.is_file():
             raise FileNotFoundError(f"gameparams: {cache_path} not found")
     key = _cache_key(cache_path)
-    if not refresh and _FULL_DATA is not None and _FULL_DATA[0] == key:
-        return _FULL_DATA[1]
-    with open(cache_path, encoding="utf-8") as f:
-        wrapped = json.load(f)
-    if isinstance(wrapped, dict) and "" in wrapped:
-        flat = wrapped[""] or {}
-    else:
-        flat = wrapped or {}
-    _FULL_DATA = (key, flat)
-    return flat
+    # Warm fast-path: snapshot the global into a local first so a
+    # concurrent ``unload_full`` (which sets ``_FULL_DATA = None``) can't
+    # turn the check-then-index into a torn read.
+    snap = _FULL_DATA
+    if not refresh and snap is not None and snap[0] == key:
+        return snap[1]
+    # Cold path: serialize the parse (double-checked locking).
+    with _load_lock:
+        snap = _FULL_DATA
+        if not refresh and snap is not None and snap[0] == key:
+            return snap[1]
+        with open(cache_path, encoding="utf-8") as f:
+            wrapped = json.load(f)
+        if isinstance(wrapped, dict) and "" in wrapped:
+            flat = wrapped[""] or {}
+        else:
+            flat = wrapped or {}
+        _FULL_DATA = (key, flat)
+        return flat
 
 
 def unload_full() -> None:
@@ -106,7 +133,44 @@ def unload_full() -> None:
     is complete to free memory before downstream steps.
     """
     global _FULL_DATA
-    _FULL_DATA = None
+    with _load_lock:
+        _FULL_DATA = None
+
+
+def _resolve_from_loaded(prefix: str) -> str | None:
+    """Resolve a param_index ``prefix`` against the warm in-process dict.
+
+    Returns the first TOP-LEVEL entity key matching ``prefix`` (the same
+    predicate :func:`iter_top_level_keys` uses), or ``None`` when the
+    flat dict isn't resident / doesn't match the default cache file's
+    ``(mtime, size)`` key — in which case the caller falls back to the
+    ``ijson`` stream.
+
+    This is both ~4 orders of magnitude faster than re-streaming the
+    2.8 GB file (~0.2 ms vs ~5-9 s) AND more correct for prefix-collision
+    families: :func:`iter_top_level_keys` yields ``map_key`` events at
+    *every* nesting depth, so the streaming path can return a nested
+    sub-key (e.g. ``PRSC990_RC``) that happens to appear first in the
+    byte stream, whereas this top-level scan returns the real entity
+    (``PRSC990_Petrozavodsk``).
+    """
+    snap = _FULL_DATA
+    if snap is None:
+        return None
+    # Validate the resident dict is the current default cache. ensure_dump
+    # is a cheap is_file() check here (the file must exist — _FULL_DATA was
+    # populated from it) and never triggers a dump on a warm cache.
+    try:
+        cache_path = ensure_dump()
+    except Exception:
+        return None
+    if not cache_path.is_file() or snap[0] != _cache_key(cache_path):
+        return None
+    needle = prefix + "_"
+    for key in snap[1]:
+        if key == prefix or key.startswith(needle):
+            return key
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +231,16 @@ def resolve_ship_id(prefix_or_full: str, *, path: Path | None = None) -> str | N
         return None
     if "_" in prefix_or_full:
         return prefix_or_full
+    # Warm fast-path (default cache only): resolve against the resident
+    # parsed dict instead of re-streaming the 2.8 GB file via ijson.
+    # Orders of magnitude faster on a warm cache, and more correct for
+    # prefix-collision families (see ``_resolve_from_loaded``). A match
+    # wins; a miss falls through to the ijson stream so behaviour is
+    # unchanged when the dict isn't resident or has no top-level match.
+    if path is None:
+        hit = _resolve_from_loaded(prefix_or_full)
+        if hit is not None:
+            return hit
     needle = prefix_or_full + "_"
     for key in iter_top_level_keys(
         lambda k: k == prefix_or_full or k.startswith(needle),

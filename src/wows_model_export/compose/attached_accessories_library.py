@@ -45,6 +45,7 @@ from pathlib import Path
 from ..config import PipelineConfig
 from ..resolve import skel_ext_hashes
 from ..types import AttachmentResolveStats
+from ._atomic import atomic_write_text as _atomic_write_text
 
 SCHEMA_VERSION = "6"
 # Matrices are bone-rest-composed with Ry(180°) baked in and translations
@@ -608,10 +609,9 @@ def resolve_for_asset_dir(
             except OSError:
                 pass
         return None
-    out_path.write_text(
-        json.dumps(doc, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    # Atomic + unique-temp write: accessory_library reads these per-asset
+    # manifests back during the same (possibly concurrent) build.
+    _atomic_write_text(out_path, json.dumps(doc, indent=2, ensure_ascii=False))
     return (out_path, stats)
 
 

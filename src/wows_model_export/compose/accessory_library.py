@@ -52,6 +52,7 @@ from ..types import (
     OnEvent,
 )
 from . import attached_accessories_library, dead_variant_audit
+from ._atomic import atomic_write_text as _atomic_write_text
 from ._step_runner import StepRunner
 
 PLACEMENT_SECTIONS = ("turrets", "secondaries", "antiair", "torpedoes", "accessories")
@@ -744,12 +745,10 @@ def _write_index(
         "asset_count": len(assets),
         "assets": assets,
     }
-    tmp = out.with_suffix(out.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(tmp, out)
+    # Process-unique temp (not a shared "<name>.tmp") so two concurrent
+    # library builds writing the same index don't collide on the temp
+    # path (Windows raises PermissionError on a cross-writer clash).
+    _atomic_write_text(out, json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
     return out
 
 

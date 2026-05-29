@@ -170,10 +170,16 @@ def read_vehicle_permoflages(
 
     full_id = ship_id
     if "_" not in ship_id:
-        resolved = _gp.resolve_ship_id(ship_id, path=gameparams_path)
-        if resolved is None:
+        # We already hold the parsed dict — resolve the prefix against its
+        # top-level keys directly instead of round-tripping through
+        # resolve_ship_id (which would re-open the cache / re-stream the
+        # file). Same first-top-level-match predicate.
+        needle = ship_id + "_"
+        full_id = next(
+            (k for k in flat if k == ship_id or k.startswith(needle)), None
+        )
+        if full_id is None:
             return []
-        full_id = resolved
 
     vehicle = flat.get(full_id)
     if not isinstance(vehicle, dict):
