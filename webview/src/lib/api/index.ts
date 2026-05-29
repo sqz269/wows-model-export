@@ -10,3 +10,4 @@ export * from './gameparams';
 export * from './consumers';
 export * from './queue';
 export * from './projectiles';
+export * from './maps';

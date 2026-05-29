@@ -17,6 +17,17 @@ export function disposeTree(tree: THREE.Object3D): void {
     const m = obj as THREE.Mesh;
     if (!m.isMesh) return;
 
+    // InstancedMesh owns an instanceMatrix (and optional instanceColor)
+    // BufferAttribute that isn't released by geometry.dispose() — its
+    // own `.dispose()` dispatches the event the WebGL renderer listens
+    // for. The shared geometry/material are then handled by the normal
+    // path below (via the WeakSet dedup, in case the same geometry is
+    // also used as a non-instanced mesh elsewhere).
+    const im = m as THREE.InstancedMesh;
+    if (im.isInstancedMesh) {
+      im.dispose();
+    }
+
     const g = m.geometry;
     if (g && !seenGeom.has(g)) {
       g.dispose();

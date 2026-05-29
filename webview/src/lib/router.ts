@@ -74,6 +74,13 @@ export type ParticlesRoute = {
   particlePath: string | null;
 };
 
+export type MapsRoute = {
+  page: 'maps';
+  path: string;
+  /** Selected space name from `#/maps/<name>`. Null on bare `#/maps`. */
+  spaceName: string | null;
+};
+
 export type RouteState =
   | LibraryRoute
   | ShipsRoute
@@ -82,7 +89,8 @@ export type RouteState =
   | GameParamsRoute
   | ConsumersRoute
   | ProjectilesRoute
-  | ParticlesRoute;
+  | ParticlesRoute
+  | MapsRoute;
 
 function parseHash(hash: string): RouteState {
   const path = hash.replace(/^#\/?/, '');
@@ -108,6 +116,9 @@ function parseHash(hash: string): RouteState {
   }
   if (head === 'projectiles' || head === 'projectile') {
     return { page: 'projectiles', path, projectileId: rest ?? null };
+  }
+  if (head === 'maps' || head === 'map') {
+    return { page: 'maps', path, spaceName: rest ?? null };
   }
   // Default + `library` + `asset/...` all route to the library page.
   return { page: 'library', path, assetId: rest ?? null };
