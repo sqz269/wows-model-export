@@ -36,13 +36,19 @@ from .ammo import ammo_json
 from .armor import armor_json
 from .bones import dump_bones, fetch_bones
 from .gameparams import dump_gameparams
-from .ship import batch_export_model, export_model, export_ship
+from .ship import (
+    batch_export_model,
+    export_model,
+    export_ship,
+    ingest_ship_bundle,
+)
 from .swizzle import swizzle_dir
 from .vfs import default_manifest_path, ensure_manifest, extract, metadata_json
 
 __all__ = [
     # Ship / asset export
     "export_ship",
+    "ingest_ship_bundle",
     "export_model",
     "batch_export_model",
     # Data dumps

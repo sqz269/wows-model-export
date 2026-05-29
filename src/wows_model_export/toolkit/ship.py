@@ -154,6 +154,126 @@ def export_ship(
     )
 
 
+def ingest_ship_bundle(
+    ship: str,
+    out_path: Path | str | os.PathLike,
+    *,
+    config: PipelineConfig | None = None,
+    hull: str | None = None,
+    lod: int = 0,
+    no_textures: bool = True,
+    all_render_sets: bool = False,
+    accessories: Literal["embed", "main-only", "exclude"] = "embed",
+    placements_json: Path | str | os.PathLike | None = None,
+    skel_ext_candidates_json: Path | str | os.PathLike | None = None,
+    textures_dir: Path | str | os.PathLike | None = None,
+    textures_uri_prefix: str | None = None,
+    raw_dds_dir: Path | str | os.PathLike | None = None,
+    material_mappings_json: Path | str | os.PathLike | None = None,
+    armor_json: Path | str | os.PathLike | None = None,
+    ammo_json: Path | str | os.PathLike | None = None,
+    ammo_hull: str | None = None,
+) -> ToolkitResult:
+    """One-shot per-ship ingest: GLB + placements + skel_ext + material
+    mappings + armor JSON + ammo JSON from a SINGLE ``wowsunpack`` process
+    (one VFS + GameParams parse).
+
+    Collapses what used to be three separate invocations (``export-ship``
+    + ``armor`` + ``ammo``), each of which independently re-parsed the
+    173 MB assets.bin + GameParams.data (~12 s apiece). The armor + ammo
+    JSON are byte-identical to the standalone subcommands (verified); the
+    GLB / placements / skel_ext / material-mappings come from the exact
+    same ``export-ship`` code path.
+
+    ``armor_json`` / ``ammo_json`` are optional — omit one to skip that
+    output. ``ammo_hull`` selects the hull for the ammo ``ranges`` section
+    only; it is decoupled from ``hull`` (which drives the GLB + armor).
+
+    Applies the same ``Armor_*`` / ``CM_SB_*`` winding flip as
+    :func:`export_ship` after a successful export (the GLB is produced by
+    the same toolkit code, so it carries the same inverted-winding armor
+    + hitbox meshes downstream raycasters need flipped).
+    """
+    if accessories not in ("embed", "main-only", "exclude"):
+        raise ValueError(
+            f"accessories={accessories!r}; expected one of "
+            f"'embed', 'main-only', 'exclude'"
+        )
+    cfg = config or PipelineConfig.load()
+
+    out = Path(out_path).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    argv = [
+        "--game-dir", str(cfg.require_game_dir()),
+        "ingest-ship", ship,
+        "--output", str(out),
+        "--lod", str(lod),
+        "--accessories", accessories,
+    ]
+    if hull is not None:
+        argv += ["--hull", hull]
+    if no_textures:
+        argv.append("--no-textures")
+    if all_render_sets:
+        argv.append("--all-render-sets")
+
+    expected: list[Path] = [out]
+
+    if placements_json is not None:
+        placements_out = Path(placements_json).resolve()
+        placements_out.parent.mkdir(parents=True, exist_ok=True)
+        argv += ["--placements-json", str(placements_out)]
+        expected.append(placements_out)
+    if skel_ext_candidates_json is not None:
+        skel_ext_out = Path(skel_ext_candidates_json).resolve()
+        skel_ext_out.parent.mkdir(parents=True, exist_ok=True)
+        argv += ["--skel-ext-candidates-json", str(skel_ext_out)]
+        expected.append(skel_ext_out)
+    if textures_dir is not None:
+        tex_dir = Path(textures_dir).resolve()
+        tex_dir.mkdir(parents=True, exist_ok=True)
+        argv += ["--textures-dir", str(tex_dir)]
+        if textures_uri_prefix is not None:
+            argv += ["--textures-uri-prefix", textures_uri_prefix]
+    if raw_dds_dir is not None:
+        dds_dir = Path(raw_dds_dir).resolve()
+        dds_dir.mkdir(parents=True, exist_ok=True)
+        argv += ["--raw-dds-dir", str(dds_dir)]
+    if material_mappings_json is not None:
+        mat_map_out = Path(material_mappings_json).resolve()
+        mat_map_out.parent.mkdir(parents=True, exist_ok=True)
+        argv += ["--material-mappings-json", str(mat_map_out)]
+        expected.append(mat_map_out)
+    if armor_json is not None:
+        armor_out = Path(armor_json).resolve()
+        armor_out.parent.mkdir(parents=True, exist_ok=True)
+        argv += ["--armor-json", str(armor_out)]
+        expected.append(armor_out)
+    if ammo_json is not None:
+        ammo_out = Path(ammo_json).resolve()
+        ammo_out.parent.mkdir(parents=True, exist_ok=True)
+        argv += ["--ammo-json", str(ammo_out)]
+        expected.append(ammo_out)
+    if ammo_hull is not None:
+        argv += ["--ammo-hull", ammo_hull]
+
+    result = run_toolkit(argv, config=cfg, expect_outputs=tuple(expected))
+
+    # Same post-export armor/hitbox winding flip export_ship applies — the
+    # combined GLB is produced by the identical toolkit code path.
+    import time as _t
+    t0 = _t.perf_counter()
+    _flip_armor_hitbox_winding(out)
+    flip_ms = (_t.perf_counter() - t0) * 1000.0
+
+    return ToolkitResult(
+        output_paths=result.output_paths,
+        stderr=result.stderr,
+        elapsed_ms=result.elapsed_ms + flip_ms,
+        stdout=result.stdout,
+    )
+
+
 def export_model(
     geometry_vfs_path: str,
     out_path: Path | str | os.PathLike,
@@ -362,7 +482,7 @@ def _missing(path: Path | None) -> bool:
 
 
 # Re-exported for symmetry with the I:-side import surface.
-__all__ = ["export_ship", "export_model", "batch_export_model"]
+__all__ = ["export_ship", "ingest_ship_bundle", "export_model", "batch_export_model"]
 
 # Defensive: surface ToolkitError for `import *` consumers that catch it.
 _ = ToolkitError

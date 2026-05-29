@@ -73,6 +73,7 @@ from ..resolve import synth_emission as _synth_emission
 from ..toolkit import ammo_json as _toolkit_ammo_json
 from ..toolkit import armor_json as _toolkit_armor_json
 from ..toolkit import export_ship as _toolkit_export_ship
+from ..toolkit import ingest_ship_bundle as _toolkit_ingest_ship_bundle
 from ..toolkit.gameparams import ensure_dump as _ensure_gameparams_dump
 from ..types import OnEvent, ScaffoldResult
 from ._step_runner import StepRunner
@@ -1460,6 +1461,88 @@ def scaffold_ship(
         with _emit_lock:
             timer.step_timings_ms[step] = ms
 
+    def _variant_and_emissive(out: dict[str, Any]) -> None:
+        """Post base-export work shared by the hull + bundle tasks.
+
+        (1) Mesh-swap permoflage routing — a 2nd GLB-only ``export-ship``
+        for the resolved variant model_dir, re-stamping the placements
+        JSON. (2) Emissive DDS synthesis. Both read the placements JSON +
+        raw-DDS dir the base export produced, so they run AFTER it (in the
+        same worker), never overlapping armor/ammo.
+        """
+        # Mesh-swap permoflage routing.
+        if variant_permoflage is not None:
+            try:
+                with open(placements_json, "rb") as f:
+                    _pl_doc = json.loads(f.read().decode("utf-8"))
+                param_index = ((_pl_doc.get("ship") or {}).get("param_index"))
+            except Exception:
+                param_index = None
+
+            base_vehicle_id = gameparams_ship_id or param_index
+            variant_dir, exterior_id = (None, None)
+            if base_vehicle_id:
+                variant_dir, exterior_id = (
+                    _gp_autofill.resolve_variant_model_dir(
+                        base_vehicle_id,
+                        permoflage_id=(
+                            variant_permoflage
+                            if variant_permoflage != "auto" else None
+                        ),
+                    )
+                )
+            elif variant_permoflage is not None and variant_permoflage != "auto":
+                out["task_warnings"].append(
+                    f"--variant-permoflage={variant_permoflage!r} requested "
+                    f"but no GameParams Vehicle ID resolvable; base ship used"
+                )
+
+            if variant_dir:
+                _toolkit_export_ship(
+                    variant_dir, hull_glb,
+                    accessories="exclude",
+                    all_render_sets=True,
+                    placements_json=None,
+                    skel_ext_candidates_json=skel_ext_candidates_json,
+                    material_mappings_json=material_mappings_json,
+                    no_textures=True,
+                    raw_dds_dir=textures_dds_dir,
+                    config=cfg,
+                )
+                _pl_doc.setdefault("ship", {})["model_dir"] = variant_dir
+                _pl_doc["ship"]["variant_permoflage"] = exterior_id
+                with open(placements_json, "wb") as f:
+                    f.write(
+                        json.dumps(_pl_doc, indent=2, ensure_ascii=False)
+                        .encode("utf-8")
+                    )
+                out["variant_routed"] = True
+                out["variant_exterior_id"] = exterior_id
+
+        # Emissive synthesis — discovers ``*_emissive.mfm`` files in the
+        # VFS, then synthesizes per-stem emissive DDS files next to the
+        # diffuse so the sidecar's stem classifier can route them into
+        # ``texture_sets[<scheme>]["emissive"]``. Best-effort: synth
+        # failures don't abort the scaffold, just surface as warnings.
+        # No-op for non-emissive ships (no ``*_emissive.mfm`` matches).
+        try:
+            synth_paths = _synth_emission.synthesize_emissive_textures(
+                textures_dds_dir,
+                config=cfg,
+                label=ship,
+                material_mappings_json=material_mappings_json,
+            )
+            if synth_paths:
+                _emit_locked(
+                    "export_hull", "progress",
+                    detail=f"synthesised {len(synth_paths)} emissive DDS file(s)",
+                    data={"emissive_files": [str(p) for p in synth_paths]},
+                )
+        except Exception as e:
+            out["task_warnings"].append(
+                f"emissive synthesis skipped ({type(e).__name__}: {e})"
+            )
+
     def _hull_task() -> dict[str, Any]:
         out: dict[str, Any] = {
             "variant_routed":       False,
@@ -1481,80 +1564,7 @@ def scaffold_ship(
                 raw_dds_dir=textures_dds_dir,
                 config=cfg,
             )
-
-            # Mesh-swap permoflage routing.
-            if variant_permoflage is not None:
-                try:
-                    with open(placements_json, "rb") as f:
-                        _pl_doc = json.loads(f.read().decode("utf-8"))
-                    param_index = ((_pl_doc.get("ship") or {}).get("param_index"))
-                except Exception:
-                    param_index = None
-
-                base_vehicle_id = gameparams_ship_id or param_index
-                variant_dir, exterior_id = (None, None)
-                if base_vehicle_id:
-                    variant_dir, exterior_id = (
-                        _gp_autofill.resolve_variant_model_dir(
-                            base_vehicle_id,
-                            permoflage_id=(
-                                variant_permoflage
-                                if variant_permoflage != "auto" else None
-                            ),
-                        )
-                    )
-                elif variant_permoflage is not None and variant_permoflage != "auto":
-                    out["task_warnings"].append(
-                        f"--variant-permoflage={variant_permoflage!r} requested "
-                        f"but no GameParams Vehicle ID resolvable; base ship used"
-                    )
-
-                if variant_dir:
-                    _toolkit_export_ship(
-                        variant_dir, hull_glb,
-                        accessories="exclude",
-                        all_render_sets=True,
-                        placements_json=None,
-                        skel_ext_candidates_json=skel_ext_candidates_json,
-                        material_mappings_json=material_mappings_json,
-                        no_textures=True,
-                        raw_dds_dir=textures_dds_dir,
-                        config=cfg,
-                    )
-                    _pl_doc.setdefault("ship", {})["model_dir"] = variant_dir
-                    _pl_doc["ship"]["variant_permoflage"] = exterior_id
-                    with open(placements_json, "wb") as f:
-                        f.write(
-                            json.dumps(_pl_doc, indent=2, ensure_ascii=False)
-                            .encode("utf-8")
-                        )
-                    out["variant_routed"] = True
-                    out["variant_exterior_id"] = exterior_id
-
-            # Emissive synthesis — discovers ``*_emissive.mfm`` files in
-            # the VFS, then synthesizes per-stem emissive DDS files next
-            # to the diffuse so the sidecar's stem classifier can route
-            # them into ``texture_sets[<scheme>]["emissive"]``. Best-
-            # effort: synth failures don't abort the scaffold, just
-            # surface as warnings. No-op for non-emissive ships (no
-            # ``*_emissive.mfm`` matches).
-            try:
-                synth_paths = _synth_emission.synthesize_emissive_textures(
-                    textures_dds_dir,
-                    config=cfg,
-                    label=ship,
-                    material_mappings_json=material_mappings_json,
-                )
-                if synth_paths:
-                    _emit_locked(
-                        "export_hull", "progress",
-                        detail=f"synthesised {len(synth_paths)} emissive DDS file(s)",
-                        data={"emissive_files": [str(p) for p in synth_paths]},
-                    )
-            except Exception as e:
-                out["task_warnings"].append(
-                    f"emissive synthesis skipped ({type(e).__name__}: {e})"
-                )
+            _variant_and_emissive(out)
         except StepError:
             step_ms = (time.perf_counter() - t0) * 1000.0
             _record_timing("export_hull", step_ms)
@@ -1649,16 +1659,88 @@ def scaffold_ship(
         if not skip_ammo:
             _ammo_task()
 
+    def _bundle_task() -> dict[str, Any]:
+        """Full-pass fast path: ONE ``ingest-ship`` process emits the GLB +
+        placements + skel_ext + material-mappings + raw DDS + armor JSON +
+        ammo JSON from a single VFS + GameParams parse, replacing the
+        hull‖(armor+ammo) trio (each of which re-parsed assets.bin +
+        GameParams.data independently). armor/ammo JSON are byte-identical
+        to the standalone subcommands; the GLB comes from the identical
+        export-ship code path. Variant routing + emissive synth run after,
+        exactly as in _hull_task.
+        """
+        out: dict[str, Any] = {
+            "variant_routed":       False,
+            "variant_exterior_id":  None,
+            "task_warnings":        [],
+        }
+        detail = f"{toolkit_name} -> {hull_glb.name} (+armor+ammo, one parse)"
+        _emit_locked("export_hull", "started", detail=detail)
+        _emit_locked("export_armor", "started", detail=str(armor_json_path.name))
+        _emit_locked("export_ammo", "started", detail=str(ballistics_json.name))
+        t0 = time.perf_counter()
+        try:
+            _toolkit_ingest_ship_bundle(
+                toolkit_name, hull_glb,
+                accessories="exclude",
+                all_render_sets=True,
+                placements_json=placements_json,
+                skel_ext_candidates_json=skel_ext_candidates_json,
+                material_mappings_json=material_mappings_json,
+                no_textures=True,
+                raw_dds_dir=textures_dds_dir,
+                armor_json=armor_json_path,
+                ammo_json=ballistics_json,
+                config=cfg,
+            )
+            _variant_and_emissive(out)
+        except Exception as e:
+            step_ms = (time.perf_counter() - t0) * 1000.0
+            _record_timing("export_hull", step_ms)
+            _emit_locked("export_hull", "failed", step_ms=step_ms)
+            _emit_locked("export_armor", "failed")
+            _emit_locked("export_ammo", "failed")
+            if isinstance(e, StepError):
+                raise
+            raise StepError(
+                step="export_hull",
+                underlying=e,
+                detail=f"ingest-ship {toolkit_name!r} failed",
+            ) from e
+        step_ms = (time.perf_counter() - t0) * 1000.0
+        _record_timing("export_hull", step_ms)
+        _emit_locked("export_hull", "completed", detail=detail, step_ms=step_ms)
+        # armor + ammo were produced inside the same process; surface them
+        # as completed (timing folded into export_hull) so the step set is
+        # unchanged for progress consumers that track all three.
+        _record_timing("export_armor", 0.0)
+        _record_timing("export_ammo", 0.0)
+        _emit_locked("export_armor", "completed",
+                     detail="(folded into ingest-ship)", step_ms=0.0)
+        _emit_locked("export_ammo", "completed",
+                     detail="(folded into ingest-ship)", step_ms=0.0)
+        return out
+
     # Gather + run live tasks. Priority list determines which error
     # surfaces first when both tasks fail in the same parallel batch
     # (hull > aux, matching the original sequential order). The aux
     # task already carries the right inner step name (export_armor or
     # export_ammo) on its raised StepError.
+    #
+    # Fast path: when the full trio is wanted (the common initial ingest
+    # pass), fuse export+armor+ammo into ONE ingest-ship process. Any
+    # skip combination (e.g. the skip-everything _refresh_sidecar pass, or
+    # a CLI --skip-ammo) falls back to the separate hull‖aux path, which
+    # ingest-ship can't express (it always re-exports the GLB).
+    use_bundle = (not skip_export) and (not skip_armor) and (not skip_ammo)
     tasks: list[tuple[str, Callable[[], Any]]] = []
-    if not skip_export:
-        tasks.append(("export_hull", _hull_task))
-    if not skip_armor or not skip_ammo:
-        tasks.append(("export_aux", _aux_task))
+    if use_bundle:
+        tasks.append(("export_hull", _bundle_task))
+    else:
+        if not skip_export:
+            tasks.append(("export_hull", _hull_task))
+        if not skip_armor or not skip_ammo:
+            tasks.append(("export_aux", _aux_task))
 
     hull_result: dict[str, Any] | None = None
     if tasks:
