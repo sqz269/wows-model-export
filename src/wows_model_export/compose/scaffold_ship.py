@@ -74,6 +74,7 @@ from ..toolkit import ammo_json as _toolkit_ammo_json
 from ..toolkit import armor_json as _toolkit_armor_json
 from ..toolkit import export_ship as _toolkit_export_ship
 from ..toolkit import ingest_ship_bundle as _toolkit_ingest_ship_bundle
+from ..toolkit import ingest_ship_supported as _toolkit_ingest_ship_supported
 from ..toolkit.gameparams import ensure_dump as _ensure_gameparams_dump
 from ..types import OnEvent, ScaffoldResult
 from ._step_runner import StepRunner
@@ -1728,11 +1729,16 @@ def scaffold_ship(
     # export_ammo) on its raised StepError.
     #
     # Fast path: when the full trio is wanted (the common initial ingest
-    # pass), fuse export+armor+ammo into ONE ingest-ship process. Any
-    # skip combination (e.g. the skip-everything _refresh_sidecar pass, or
-    # a CLI --skip-ammo) falls back to the separate hull‖aux path, which
-    # ingest-ship can't express (it always re-exports the GLB).
-    use_bundle = (not skip_export) and (not skip_armor) and (not skip_ammo)
+    # pass) AND the toolkit binary has the `ingest-ship` subcommand, fuse
+    # export+armor+ammo into ONE process. Any skip combination (e.g. the
+    # skip-everything _refresh_sidecar pass, or a CLI --skip-ammo), or an
+    # older wowsunpack without the subcommand, falls back to the separate
+    # hull‖aux path (ingest-ship can't express a skip — it always
+    # re-exports the GLB — and an old binary has no ingest-ship at all).
+    use_bundle = (
+        (not skip_export) and (not skip_armor) and (not skip_ammo)
+        and _toolkit_ingest_ship_supported(cfg)
+    )
     tasks: list[tuple[str, Callable[[], Any]]] = []
     if use_bundle:
         tasks.append(("export_hull", _bundle_task))

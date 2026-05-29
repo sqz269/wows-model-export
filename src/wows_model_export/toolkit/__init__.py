@@ -41,6 +41,7 @@ from .ship import (
     export_model,
     export_ship,
     ingest_ship_bundle,
+    ingest_ship_supported,
 )
 from .swizzle import swizzle_dir
 from .vfs import default_manifest_path, ensure_manifest, extract, metadata_json
@@ -49,6 +50,7 @@ __all__ = [
     # Ship / asset export
     "export_ship",
     "ingest_ship_bundle",
+    "ingest_ship_supported",
     "export_model",
     "batch_export_model",
     # Data dumps

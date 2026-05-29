@@ -274,6 +274,31 @@ def ingest_ship_bundle(
     )
 
 
+# Per-process cache for the `ingest-ship` capability probe. None = not yet
+# probed. Set once by `ingest_ship_supported`.
+_INGEST_SHIP_SUPPORTED: bool | None = None
+
+
+def ingest_ship_supported(config: PipelineConfig | None = None) -> bool:
+    """Whether the resolved `wowsunpack` binary has the `ingest-ship`
+    subcommand (added for the combined per-ship ingest fast path).
+
+    Probed once per process via `ingest-ship --help` (exit 0 = present;
+    a clap "unknown subcommand" error = absent) and cached. Lets callers
+    gracefully fall back to the separate `export-ship` + `armor` + `ammo`
+    path when a user is running an older toolkit binary (the webview
+    bundles the pipeline but users supply their own wowsunpack.exe).
+    """
+    global _INGEST_SHIP_SUPPORTED
+    if _INGEST_SHIP_SUPPORTED is None:
+        try:
+            run_toolkit(["ingest-ship", "--help"], config=config, timeout=30)
+            _INGEST_SHIP_SUPPORTED = True
+        except Exception:
+            _INGEST_SHIP_SUPPORTED = False
+    return _INGEST_SHIP_SUPPORTED
+
+
 def export_model(
     geometry_vfs_path: str,
     out_path: Path | str | os.PathLike,
@@ -482,7 +507,13 @@ def _missing(path: Path | None) -> bool:
 
 
 # Re-exported for symmetry with the I:-side import surface.
-__all__ = ["export_ship", "ingest_ship_bundle", "export_model", "batch_export_model"]
+__all__ = [
+    "export_ship",
+    "ingest_ship_bundle",
+    "ingest_ship_supported",
+    "export_model",
+    "batch_export_model",
+]
 
 # Defensive: surface ToolkitError for `import *` consumers that catch it.
 _ = ToolkitError
