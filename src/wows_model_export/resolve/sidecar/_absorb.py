@@ -984,6 +984,75 @@ def absorb_gameparams_hitbox(
     return out
 
 
+def absorb_gameparams_camera(
+    doc: dict[str, Any],
+    cameras: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Fold the GameParams ``Cameras`` component into ``doc["camera"]``
+    (schema ``wg_cameras_v1``).
+
+    Pure pass-through of the per-mode ``EllipticTrajectory`` records: each
+    camera mode (Artillery / Observe / Spectator / Death / Guns* / …) carries
+    a mandatory ``InnerTrajectory`` and an optional ``OuterTrajectory``
+    (presence == double ellipse). Every numeric field is kept as its verbatim
+    ``(min, max)`` FOV-slider keyframe pair (``posCenter`` a pair of vec3s);
+    no geometry math here — the consumer (Unity ShipCamera) honours the WG
+    ``EllipticTrajectory.getPosDir`` projection. See
+    ``reference/engine/wg_battle_camera.md`` + the per-ship findings.
+
+    ``cameras`` is the gameparams ship entity's ``Cameras`` dict. Pass ``None``
+    to skip. Replacement semantics (stale modes drop on re-run). Returns a new doc.
+    """
+    if not isinstance(cameras, dict):
+        return doc
+
+    def _traj(t: Any) -> dict[str, Any] | None:
+        if not isinstance(t, dict):
+            return None
+        # Keep the raw EllipticTrajectory fields verbatim (semiAxisH/V, posCenter,
+        # pitchInfluenceOnHeight, minPosY, min/maxPitch, min/maxYaw, incline*,
+        # default*, lockOnDefault*, ignore*, bevel*, zoomControllerCoef, resistances).
+        return {
+            k: v
+            for k, v in t.items()
+            if not k.startswith("_")
+            and k not in ("InnerTrajectory", "OuterTrajectory", "components")
+        }
+
+    trajectories: list[dict[str, Any]] = []
+    for name, comp in cameras.items():
+        if not isinstance(comp, dict):
+            continue
+        nested = comp.get("components")
+        nested = nested if isinstance(nested, dict) else comp
+        inner = comp.get("InnerTrajectory") or nested.get("InnerTrajectory")
+        if not isinstance(inner, dict):
+            continue
+        outer = comp.get("OuterTrajectory") or nested.get("OuterTrajectory")
+        entry: dict[str, Any] = {
+            "name": name,
+            "tags": comp.get("tags", ""),
+            "weapons": comp.get("weapons", []),
+            "hulls": comp.get("hulls", []),
+            "double": isinstance(outer, dict),
+            "inner": _traj(inner),
+        }
+        if isinstance(outer, dict):
+            entry["outer"] = _traj(outer)
+        trajectories.append(entry)
+
+    if not trajectories:
+        return doc
+
+    out = _deepcopy_jsonish(doc)
+    cam: dict[str, Any] = {"schema": "wg_cameras_v1", "trajectories": trajectories}
+    for k in ("inertialRollCoef", "rockingCompensationCoef", "smartZoomAngleCoef"):
+        if k in cameras:
+            cam[k] = cameras[k]
+    out["camera"] = cam
+    return out
+
+
 def absorb_gameparams_torpedoes(
     doc: dict[str, Any],
     torpedo_profiles: dict[str, dict[str, Any]],

@@ -82,6 +82,7 @@ from ._absorb import (
     absorb_gameparams_mounts,
     absorb_gameparams_armor,
     absorb_gameparams_hitbox,
+    absorb_gameparams_camera,
     absorb_gameparams_torpedoes,
     absorb_ballistics_json,
 )
@@ -148,6 +149,7 @@ __all__ = [
     'absorb_gameparams_mounts',
     'absorb_gameparams_armor',
     'absorb_gameparams_hitbox',
+    'absorb_gameparams_camera',
     'absorb_gameparams_torpedoes',
     'absorb_ballistics_json',
     'new_document',

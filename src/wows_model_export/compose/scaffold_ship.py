@@ -1260,6 +1260,17 @@ def _absorb_gameparams_passes(
     except Exception as e:
         _warn(warnings, f"gameparams torpedo profiles failed ({e})")
 
+    # Pass 6b: per-ship camera trajectory ellipses (the GameParams ``Cameras``
+    # component → ``doc.camera``, schema wg_cameras_v1). Drives the consumer's
+    # WG-faithful 3rd-person / observe / binocular orbit
+    # (reference/engine/wg_battle_camera.md). Pure pass-through; best-effort.
+    try:
+        cameras = ship_dict.get("Cameras") if isinstance(ship_dict, dict) else None
+        if isinstance(cameras, dict):
+            doc = sidecar.absorb_gameparams_camera(doc, cameras)
+    except Exception as e:
+        _warn(warnings, f"gameparams camera failed ({e})")
+
     # Pass 7: particle effect attachments + resolved Effect blob data
     # (schema v3.x). Drives the webview's particle renderer and the
     # Unity-side ParticleSystem authoring. Best-effort: a missing

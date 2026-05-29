@@ -24,6 +24,7 @@ from __future__ import annotations
 from ..resolve.sidecar import (
     absorb_ballistics_json,
     absorb_gameparams_armor,
+    absorb_gameparams_camera,
     absorb_gameparams_hitbox,
     absorb_gameparams_mounts,
     absorb_gameparams_ship,
@@ -57,6 +58,7 @@ __all__ = [
     "absorb_gameparams_mounts",
     "absorb_gameparams_armor",
     "absorb_gameparams_hitbox",
+    "absorb_gameparams_camera",
     "absorb_gameparams_torpedoes",
     "absorb_gameparams_variants",
     "absorb_ballistics_json",
