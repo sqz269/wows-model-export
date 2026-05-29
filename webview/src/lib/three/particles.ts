@@ -579,6 +579,23 @@ interface ParticleMaterialOptions {
    *  UNDERWATER_GRADIENT_MAP). The fragment shader switches to
    *  ``texture2D(lut, vec2(base.r, 0.5)).rgb`` when ``useLut=1``. */
   useLut?: boolean;
+  /** PS_RLT lighting mode (renderer.lightingType). For the lightmapping
+   *  modes (``lightmapping4Way`` / ``lightmappingHL2``) the bound texture
+   *  is a DIRECTIONAL LIGHTMAP, not albedo: its RGB are 3 grayscale
+   *  renders of the same sprite baked-lit from 3 fixed HL2-basis
+   *  directions, and A is the opacity mask (RE-verified 2026-05-29 — see
+   *  memory `project-particle-lm-lightmap`). The fragment shader then
+   *  reconstructs one lit luminance from a sun direction instead of
+   *  showing the RGB directly (which reads as a wrong rainbow). */
+  lightingType?: string;
+  /** Motion-vector flipbook blending (animation.motionVectorsDistortion).
+   *  The per-pixel optical-flow warp magnitude; scales the UV displacement
+   *  decoded from the `_MVEA` texture's (G,B) channels. 0 → pure cross-fade
+   *  (no spatial warp), still smoother than a hard frame step. */
+  motionVectorsDistortion?: number;
+  /** animation.useEmissionAlphaFromMV — when set, the `_MVEA` texture's R
+   *  channel drives emission and its A channel drives opacity. */
+  useEmissionAlphaFromMV?: boolean;
 }
 
 /**
@@ -637,6 +654,16 @@ const PS_RBT_LUT_MODES = new Set([
   'UNDERWATER_GRADIENT_MAP',
 ]);
 
+/** PS_RLT labels whose textureName0 is a directional lightmap (RGB = 3
+ *  baked light-direction renders, A = opacity), NOT albedo. The fragment
+ *  shader reconstructs a single lit luminance against the sun direction
+ *  instead of sampling RGB as colour. See memory
+ *  `project-particle-lm-lightmap`. */
+const PS_RLT_LIGHTMAP_MODES = new Set([
+  'lightmapping4Way',
+  'lightmappingHL2',
+]);
+
 /**
  * Build a per-system point-sprite material. Each SystemRenderer owns
  * its own copy so per-system uniforms (atlas rect, frame grid, texture
@@ -686,6 +713,25 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         ),
       },
       animationPeriod: { value: opts.animationPeriod ?? 0 },
+      // Directional-lightmap (PS_RLT) reconstruction. uLightingMode=1 when
+      // the texture is an `_LM` lightmap (lightmapping4Way/HL2); the
+      // fragment shader then treats `map` RGB as a 3-direction HL2-basis
+      // lightmap reconstructed against uSunDirWorld, not albedo. The sun
+      // dir defaults to the scene's key DirectionalLight (scene.ts:121-122,
+      // positioned at (50,80,50)) so particle lighting matches the hull.
+      uLightingMode: {
+        value: PS_RLT_LIGHTMAP_MODES.has(opts.lightingType ?? '') ? 1 : 0,
+      },
+      uSunDirWorld: { value: new THREE.Vector3(50, 80, 50).normalize() },
+      // Motion-vector flipbook blending (`_MVEA`). useMv is flipped to 1 by
+      // bindMvTexture once the MV DDS loads; the shader then samples two
+      // adjacent frames, warps each along the MV (G,B) optical-flow field,
+      // and cross-fades them — replacing the hard age-driven frame step.
+      // Math RE'd instruction-for-instruction from particles.win.dx11.fxo.
+      mvMap: { value: null as THREE.Texture | null },
+      useMv: { value: 0 },
+      mvDistortion: { value: opts.motionVectorsDistortion ?? 0 },
+      useEmissionAlphaFromMV: { value: opts.useEmissionAlphaFromMV ? 1 : 0 },
     },
     vertexShader: /* glsl */ `
       attribute vec4 color;
@@ -713,42 +759,117 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform vec2 framesPerXY;
       uniform vec2 frameRange;
       uniform float animationPeriod;
+      uniform float uLightingMode;
+      uniform vec3 uSunDirWorld;
+      uniform sampler2D mvMap;
+      uniform float useMv;
+      uniform float mvDistortion;
+      uniform float useEmissionAlphaFromMV;
       varying vec4 vColor;
       varying float vAge;
 
       void main() {
         vec4 base;
         if (useMap > 0.5) {
-          // Compose UV transforms in order: grid -> atlas rect.
-          // gl_PointCoord starts as the sprite-local UV; the grid math
-          // (if active) maps it to the current frame's cell within the
-          // texture's own framesPerX x framesPerY layout; the atlas
-          // rect (if active) then maps that cell-local UV into the
-          // parent atlas page's [u0,v0,u1,v1] sub-region.
-          vec2 puv = gl_PointCoord;
+          vec2 local = gl_PointCoord;
           float fx = framesPerXY.x;
           float fy = framesPerXY.y;
           float total = frameRange.y - frameRange.x;
-          if (fx * fy > 1.0 && total > 0.0 && animationPeriod > 0.0) {
-            // Driven by particle age. fps = totalFrames / period;
-            // current frame loops within [begin, end).
+          bool animated = (fx * fy > 1.0 && total > 0.0 && animationPeriod > 0.0);
+          float mvEmissive = 0.0;   // additive emission from _MVEA.R (if on)
+
+          if (animated && useMv > 0.5) {
+            // Motion-vector flipbook blend (WG _MVEA): sample the two
+            // adjacent frames, warp each along the per-pixel optical-flow
+            // field stored in the MV texture's (G,B) channels, and cross-
+            // fade by the inter-frame fraction. Decode is (G,B)*2-1;
+            // mvDistortion scales the warp. RE'd instruction-for-instruction
+            // from particles.win.dx11.fxo (20 motion-vector PS permutations,
+            // identical math). Replaces the hard age-driven frame step.
             float fps = total / animationPeriod;
-            float idx = mod(floor(vAge * fps), total) + frameRange.x;
-            float col = mod(idx, fx);
-            float row = floor(idx / fx);
-            puv = (vec2(col, row) + puv) / vec2(fx, fy);
+            float idxF = mod(vAge * fps, total);
+            float f = fract(idxF);
+            float n0 = floor(idxF) + frameRange.x;
+            float n1 = mod(floor(idxF) + 1.0, total) + frameRange.x;
+            vec2 grid = vec2(fx, fy);
+            vec2 cell0 = (vec2(mod(n0, fx), floor(n0 / fx)) + local) / grid;
+            vec2 cell1 = (vec2(mod(n1, fx), floor(n1 / fx)) + local) / grid;
+            vec2 mv0 = texture2D(mvMap, cell0).gb * 2.0 - 1.0;
+            vec2 mv1 = texture2D(mvMap, cell1).gb * 2.0 - 1.0;
+            vec2 uv0 = cell0 - mv0 * f * mvDistortion;
+            vec2 uv1 = cell1 + mv1 * (1.0 - f) * mvDistortion;
+            base = mix(texture2D(map, uv0), texture2D(map, uv1), f);
+            if (useEmissionAlphaFromMV > 0.5) {
+              // _MVEA.R = emission, .A = opacity — sampled at the warped
+              // UVs, lerped by f. Opacity overrides the base alpha; emission
+              // is ADDED to the final colour below (the engine replaces in
+              // its non-lit permutation; adding lets it compose with the
+              // lightmap relight without erasing it).
+              vec4 e0 = texture2D(mvMap, uv0);
+              vec4 e1 = texture2D(mvMap, uv1);
+              base.a = mix(e0.a, e1.a, f);
+              mvEmissive = mix(e0.r, e1.r, f);
+            }
+          } else {
+            // Hard age-driven frame step (framesPlayback / no MV texture),
+            // composed with the manifest atlas-rect mapping when present.
+            vec2 puv = local;
+            if (animated) {
+              float fps = total / animationPeriod;
+              float idx = mod(floor(vAge * fps), total) + frameRange.x;
+              puv = (vec2(mod(idx, fx), floor(idx / fx)) + puv) / vec2(fx, fy);
+            }
+            if (useAtlasRect > 0.5) {
+              puv = mix(atlasRect.xy, atlasRect.zw, puv);
+            }
+            base = texture2D(map, puv);
           }
-          if (useAtlasRect > 0.5) {
-            puv = mix(atlasRect.xy, atlasRect.zw, puv);
+          if (uLightingMode > 0.5) {
+            // _LM directional lightmap (PS_RLT lightmapping4Way/HL2):
+            // base.rgb are 3 grayscale renders of the same sprite baked-lit
+            // from 3 fixed HL2-basis directions; base.a is the opacity mask.
+            // Showing rgb directly reads as a wrong rainbow — instead blend
+            // the 3 directional renders by how strongly each basis direction
+            // faces the sun, recovering "the sprite lit from the sun".
+            //
+            // Point sprites are screen-aligned, so the sprite tangent frame
+            // is the view-space axes (tangent +X, bitangent +Y, normal +Z
+            // toward camera). viewMatrix is auto-injected by three.js and
+            // updates every frame, so transforming the world sun dir into
+            // view space gives a live relight with no per-frame uniform
+            // plumbing.
+            vec3 sunV = normalize((viewMatrix * vec4(uSunDirWorld, 0.0)).xyz);
+            // Half-Life-2 radiosity-normal-map basis (tangent space).
+            const vec3 B0 = vec3(-0.40824829, -0.70710678, 0.57735027);
+            const vec3 B1 = vec3(-0.40824829,  0.70710678, 0.57735027);
+            const vec3 B2 = vec3( 0.81649658,  0.0,        0.57735027);
+            vec3 w = vec3(max(0.0, dot(B0, sunV)),
+                          max(0.0, dot(B1, sunV)),
+                          max(0.0, dot(B2, sunV)));
+            w *= w;                       // HL2 weighting is dot^2
+            float wsum = w.x + w.y + w.z;
+            float flatLum = (base.r + base.g + base.b) / 3.0;
+            // Energy-normalised directional blend; fall back to the flat
+            // average when the sun is edge-on/behind (wsum~0) so smoke never
+            // goes fully black.
+            float lit = wsum > 1e-4 ? dot(w, base.rgb) / wsum : flatLum;
+            // Ambient floor (engine carries a lightingAmbient term) — keeps
+            // back-lit sprites visible rather than crushing them to zero.
+            lit = mix(lit, flatLum, 0.30);
+            base = vec4(vec3(lit), base.a);
           }
-          base = texture2D(map, puv);
           if (useLut > 0.5) {
             // Remap luminance via the color LUT (textureName1).
-            // WG's GRADIENT_MAP shader keys the LUT by texture red;
-            // alpha stays from the base (the "shape" channel).
+            // WG's GRADIENT_MAP shader keys the LUT by texture red; for a
+            // lightmapped sprite base.r is now the reconstructed lit
+            // luminance (above), so the ramp keys off lit density.
+            // Alpha stays from the base (the "shape"/opacity channel).
             vec3 remapped = texture2D(lut, vec2(base.r, 0.5)).rgb;
             base = vec4(remapped, base.a);
           }
+          // _MVEA emission (when useEmissionAlphaFromMV): additive glow on
+          // top of the lit/remapped colour. Zero when not enabled.
+          base.rgb += vec3(mvEmissive);
         } else {
           vec2 c = gl_PointCoord - vec2(0.5);
           float r = length(c) * 2.0;
@@ -872,8 +993,13 @@ export class ParticleScene {
         const useAtlas = !r?.textureUrl0 && !!r?.textureAtlas0;
         const useLut = !!r?.blendType && PS_RBT_LUT_MODES.has(r.blendType)
           && !!r?.textureUrl1;
+        // Motion-vector flipbook blend only when the engine authored it
+        // (animationType === 'motionVectors') AND the `_MVEA` DDS resolved.
+        const useMv = anim?.animationType === 'motionVectors'
+          && !!anim?.motionVectorsTextureUrl;
         const mat = buildParticleMaterial({
           blendType: r?.blendType,
+          lightingType: r?.lightingType,
           framesPerX: anim?.framesPerX,
           framesPerY: anim?.framesPerY,
           framesRangeBegin: anim?.framesRangeBegin,
@@ -881,6 +1007,8 @@ export class ParticleScene {
           animationPeriod: anim?.animationPeriod,
           atlasRect: useAtlas ? r!.textureAtlas0!.rect : undefined,
           useLut,
+          motionVectorsDistortion: useMv ? anim?.motionVectorsDistortion : undefined,
+          useEmissionAlphaFromMV: useMv ? anim?.useEmissionAlphaFromMV : undefined,
         });
         const renderer = new SystemRenderer(sys, mat);
         renderer.setActive(false);   // start inactive — UI toggles on
@@ -895,6 +1023,9 @@ export class ParticleScene {
         }
         if (useLut && r?.textureUrl1) {
           void this.bindLutTexture(mat, r.textureUrl1);
+        }
+        if (useMv && anim?.motionVectorsTextureUrl) {
+          void this.bindMvTexture(mat, anim.motionVectorsTextureUrl);
         }
       }
       const handle: ParticleAttachmentHandle = {
@@ -955,6 +1086,31 @@ export class ParticleScene {
     if (!tex) return;
     material.uniforms.lut.value = tex;
     material.uniforms.useLut.value = 1;
+    material.needsUpdate = true;
+  }
+
+  /** Bind ``workspaceRelPath`` as the motion-vector sampler (`_MVEA`) for
+   *  the motionVectors animation path. Loaded LINEAR (sRGB=false) — its
+   *  (G,B) channels are signed optical-flow data, not colour, so an sRGB
+   *  curve would corrupt the (G,B)*2-1 decode. Same cache as bindTexture. */
+  private async bindMvTexture(
+    material: THREE.ShaderMaterial, workspaceRelPath: string,
+  ): Promise<void> {
+    const r = this.renderer;
+    if (!r) return;
+    const url = repoUrl(workspaceRelPath);
+    let pending = this.textureCache.get(url);
+    if (!pending) {
+      pending = loadDdsMipChain([url], false, r).catch((err) => {
+        console.warn('[particles] MV DDS load failed', workspaceRelPath, err);
+        return null;
+      });
+      this.textureCache.set(url, pending);
+    }
+    const tex = await pending;
+    if (!tex) return;
+    material.uniforms.mvMap.value = tex;
+    material.uniforms.useMv.value = 1;
     material.needsUpdate = true;
   }
 

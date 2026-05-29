@@ -367,43 +367,74 @@
     'creator', 'tint', 'alphaSetter', 'scaler', 'resizer', 'force',
   ]);
 
-  /** Parser-side fields known to NOT be surfaced yet — these are
-   *  blockers for bit-exact rendering, called out per record so the
-   *  user can correlate "this fire looks wrong" with which open RE
-   *  task it depends on. Source: `particle_render_roadmap.md` P2/P3
-   *  and the comments in `read/particles.py` _decode_renderer /
-   *  _decode_animation. */
-  function parserGapsForRecord(rec: ParticleRecord | null): string[] {
+  /** PS_RBT blend modes the renderer can only approximate with an additive
+   *  placeholder — no bespoke water-deform / refraction shader yet. Mirror
+   *  of the placeholder branch in `three/particles.ts` `blendConfigForPsRbt`. */
+  const PLACEHOLDER_BLEND_MODES = new Set(['SHIMMER', 'DEFORM_WATER_SURFACE']);
+
+  /** Render-fidelity caveats that actually apply to THIS record, keyed off
+   *  the decoded data rather than guessed from filenames.
+   *
+   *  Note: `framesPerX/Y` (animation grid) and `blendType` (PS_RBT, 10
+   *  values) ARE decoded by the parser (`read/particles.py`
+   *  _decode_animation / _decode_renderer) and consumed by the renderer
+   *  (`three/particles.ts` `blendConfigForPsRbt` + the flipbook-UV shader
+   *  math) since the 2026-05-23 gap-closing pass — they are no longer gaps.
+   *  What remains:
+   *    - a few PS_RBT modes (SHIMMER / DEFORM_WATER_SURFACE) fall back to an
+   *      additive placeholder pending a bespoke shader;
+   *    - a texture ref that resolved to neither a direct extract
+   *      (`textureUrl0`) nor an atlas region (`textureAtlas0`) renders as a
+   *      procedural soft disc. */
+  function renderCaveatsForRecord(rec: ParticleRecord | null): string[] {
     if (!rec) return [];
     const gaps: string[] = [];
-    let anySystemHasAtlas = false;
-    let anySystemHasTexture = false;
-    let anyTextureStamped = false;
+    const placeholderBlends = new Set<string>();
+    let anyUnresolvedTexture = false;
+    let anyLightmap = false;
+    let anyMvEmission = false;
     for (const s of rec.systems ?? []) {
-      if (s.renderer?.textureName0) {
-        anySystemHasTexture = true;
-        // Texture name with 8x8 / 6x6 / 4x4 in the filename is almost
-        // certainly a sprite-sheet flipbook (e.g. Sparkles_8x8.dds).
-        if (/\d+x\d+/i.test(s.renderer.textureName0)) anySystemHasAtlas = true;
+      const r = s.renderer;
+      if (!r) continue;
+      if (r.blendType && PLACEHOLDER_BLEND_MODES.has(r.blendType)) {
+        placeholderBlends.add(r.blendType);
       }
-      if (s.renderer?.textureUrl0) anyTextureStamped = true;
+      // textureName0 referenced, but it resolved to neither a direct DDS
+      // extract nor an atlas region -> the renderer draws a procedural disc.
+      if (r.textureName0 && !r.textureUrl0 && !r.textureAtlas0) {
+        anyUnresolvedTexture = true;
+      }
+      // Directional lightmap (`_LM`): relit approximately (see below).
+      if (r.lightingType === 'lightmapping4Way'
+        || r.lightingType === 'lightmappingHL2') {
+        anyLightmap = true;
+      }
+      // `_MVEA` motion-vector blend IS now applied; the one residual is the
+      // emission-from-MV path (engine replaces colour, we add — see below).
+      if (s.animation?.useEmissionAlphaFromMV) anyMvEmission = true;
     }
-    if (anySystemHasAtlas) {
+    if (placeholderBlends.size > 0) {
       gaps.push(
-        'sprite atlas grid (framesPerX/Y) not decoded — flipbook ' +
-        'frames collapse into the full atlas image',
+        `blend mode ${[...placeholderBlends].join(' / ')} approximated with ` +
+        'an additive placeholder — no bespoke water-deform/refraction shader yet',
       );
     }
-    if (anySystemHasTexture) {
+    if (anyUnresolvedTexture) {
       gaps.push(
-        'Renderer.blendType not decoded — every system renders ' +
-        'additive (PS_RBT_ADDITIVE) regardless of authored mode',
+        'texture(s) referenced but resolved to neither a direct extract nor ' +
+        'an atlas region — render falls back to a procedural disc',
       );
     }
-    if (anySystemHasTexture && !anyTextureStamped) {
+    if (anyLightmap) {
       gaps.push(
-        'texture(s) referenced but not extracted to ' +
-        'content/effects_textures/ — render falls back to procedural disc',
+        'directional lightmap (lightingType=lightmapping*) relit approximately ' +
+        'from a fixed sun direction (HL2 basis) — not the engine-exact 4-way decode',
+      );
+    }
+    if (anyMvEmission) {
+      gaps.push(
+        '_MVEA emission (useEmissionAlphaFromMV) added on top of the lit ' +
+        'colour rather than replacing it — keeps the lightmap, not bit-exact',
       );
     }
     return gaps;
@@ -619,7 +650,7 @@
       {#if !activeRecord}
         <div class="text-muted-foreground">no record loaded</div>
       {:else}
-        {@const gaps = parserGapsForRecord(activeRecord)}
+        {@const gaps = renderCaveatsForRecord(activeRecord)}
 
         <!-- Render-fidelity caveats -->
         {#if gaps.length > 0}
@@ -627,7 +658,7 @@
             <div
               class="text-amber-300 mb-1 text-[10px] uppercase tracking-wider font-semibold"
             >
-              parser gaps
+              render caveats
             </div>
             <ul class="text-amber-200/90 text-[10px] flex flex-col gap-0.5">
               {#each gaps as g (g)}
