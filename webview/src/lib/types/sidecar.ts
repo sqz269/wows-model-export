@@ -280,15 +280,16 @@ export interface ParticleGeneralSection {
 }
 
 /**
- * Renderer block surfaced from the Effect blob. Texture refs
- * (`textureName0`/`textureName1`) and `yawRateRamp` are byte-mapped
- * at +0x00/+0x10/+0x20 within the 0xa0-byte struct. The tail offsets
- * (`rotationCenter`/`blendType`/`sortType`/`tilingU`/`tilingV`) at
- * +0x80..+0x94 landed 2026-05-23 via corpus-wide statistical probe.
+ * Renderer block surfaced from the Effect blob. Field offsets confirmed
+ * against the WoWS binary (build 12267945, FUN_1406f2150), superseding
+ * the 2026-05-23 statistical probe: texture refs
+ * (`textureName0`/`textureName1`) + `yawRateRamp` at +0x00/+0x10/+0x20,
+ * and the tail enums/floats (`rotationCenter`/`lightingType`/`blendType`/
+ * `sortType`/`tilingU`/`tilingV`) at +0x80..+0x94 within the 0xa0-byte
+ * struct.
  *
- * The 16-float lighting cluster at +0x30..+0x7f and trailing bool
- * quartets at +0x98/+0x9c are documented in particle_format_spec.md
- * but per-field byte offsets aren't RE'd yet — needs Ghidra.
+ * The +0x30..+0x7f float cluster and the +0x98/+0x9c bool quartets are
+ * byte-mapped in the binary but not surfaced here.
  *
  * `textureUrl0` / `textureUrl1` are stamped by the library builder
  * (`compose/library_particles.py`) and carry a workspace-relative
@@ -306,16 +307,20 @@ export interface ParticleRenderer {
   textureAtlas0?: ParticleAtlasRect;
   textureAtlas1?: ParticleAtlasRect;
   yawRateRamp?: ParticleRamp;
-  /** PS_RRC label (4 values: center / topLeft / topRight / bottomLeft).
-   *  Labels are tentative — names need Ghidra to confirm. */
+  /** PS_RRC label (4 values: bottom / corner / center / custom).
+   *  Recovered from the binary enum table @ 0x1420bf0d0. */
   rotationCenter?: string;
+  /** PS_RLT label (3 values: lambert / lightmapping4Way / lightmappingHL2),
+   *  Renderer +0x84. Recovered from the binary enum table @ 0x1420bf490.
+   *  This is the slot the old probe mislabeled as "blendFlag84". */
+  lightingType?: string;
   /** PS_RBT label (10 values) — drives the per-system blending mode.
    *  Maps to THREE.* blending: ADDITIVE -> AdditiveBlending, BLENDED ->
    *  NormalBlending, others need custom shader paths (see particle
    *  render roadmap). */
   blendType?: string;
-  /** Raw i32 sort-type — enum labels TBD (3 values; likely
-   *  AGE / DISTANCE / NONE per BigWorld convention). */
+  /** Raw i32 sort-type (enum fx::RendererSortType; labels not yet
+   *  recovered). */
   sortType?: number;
   /** Per-system UV tiling factors; default 1.0/1.0. */
   tilingU?: number;
@@ -323,16 +328,18 @@ export interface ParticleRenderer {
 }
 
 /**
- * Animation block — sprite-atlas grid + motion vectors. All fields
- * byte-mapped 2026-05-23 (empirical, 91.3% cross-validation that
- * framesPerX * framesPerY == framesRangeEnd).
+ * Animation block — sprite-atlas grid + motion vectors. Field offsets
+ * confirmed against the WoWS binary (build 12267945, FUN_1406f37a0),
+ * superseding the 2026-05-23 probe (which had the +0x3c/+0x3d bools
+ * swapped).
  *
  * For systems with `framesPerX > 1 || framesPerY > 1`, the renderer
  * samples the texture at cell `(currentFrame % framesPerX, currentFrame
  * / framesPerX)` where `currentFrame` is driven by the particle age +
- * `animationPeriod` + `framesRangeBegin/End`. `animationType` (PS_PAT
- * label) chooses between the 3 wrap modes (loop / once / pingPong —
- * labels tentative until Ghidra).
+ * `animationPeriod` + `framesRangeBegin/End`. `animationType` (PS_PAT)
+ * selects the animation mode (noAnimation / framesPlayback /
+ * motionVectors) — NOT a loop/once/pingPong wrap mode (that is the
+ * separate ramp-sampling enum).
  */
 export interface ParticleAnimation {
   frameRateRamp?: ParticleRamp;
@@ -354,7 +361,8 @@ export interface ParticleAnimation {
   animationPeriod?: number;
   /** MV distortion factor (small, typically 0..0.017). */
   motionVectorsDistortion?: number;
-  /** PS_PAT label (3 values; labels tentative). */
+  /** PS_PAT label (3 values: noAnimation / framesPlayback / motionVectors).
+   *  Recovered from the binary enum table @ 0x1420bf430. */
   animationType?: string;
   /** Read emission alpha from the motion-vector texture's alpha. */
   useEmissionAlphaFromMV?: boolean;

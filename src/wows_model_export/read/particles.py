@@ -92,9 +92,9 @@ PS_VALG_RAMP_PARAMETER = {
 }
 PS_VALG_RAMP_SAMPLING = {0: "loop", 1: "once", 2: "pingPong"}
 
-# PS_RBT — Render Blend Type. Stored at Renderer +0x88 (i32). Offsets
-# empirically determined 2026-05-22 via corpus-wide statistical probe
-# (10/10 values present, semantic correlation with effect names).
+# PS_RBT — Render Blend Type. Renderer +0x88 (i32, 10 values). Value
+# order confirmed against the binary enum table @ 0x1420befc0 (WoWS
+# build 12267945) — the 2026-05-22 statistical probe had it right.
 PS_RBT = {
     0: "BLENDED_WATER_SURFACE",
     1: "DEFORM_WATER_SURFACE",
@@ -108,14 +108,22 @@ PS_RBT = {
     9: "BLENDED",
 }
 
+# PS_RLT — Renderer Lighting Type. Renderer +0x84 (i32, 3 values).
+# Labels recovered from the binary enum table @ 0x1420bf490 (WoWS build
+# 12267945, value-ordered). This is the +0x84 slot the 2026-05-22 probe
+# mislabeled as a "blendFlag84" gradient sub-mode flag.
+PS_RLT = {0: "lambert", 1: "lightmapping4Way", 2: "lightmappingHL2"}
+
 # PS_RRC — Rotation Center reference. Renderer +0x80 (i32, 4 values).
-# Name set is tentative — needs Ghidra to confirm the labels (the slot
-# count matches the spec doc's 4-value PS_RRC enum).
-PS_RRC = {0: "center", 1: "topLeft", 2: "topRight", 3: "bottomLeft"}
+# Labels recovered from the binary enum table @ 0x1420bf0d0 (WoWS build
+# 12267945, value-ordered); supersedes the earlier tentative guess
+# {center/topLeft/topRight/bottomLeft}, which was wrong.
+PS_RRC = {0: "bottom", 1: "corner", 2: "center", 3: "custom"}
 
 # PS_PAT — Particle Animation Type. Animation +0x38 (u32, 3 values).
-# Enum labels unverified — corpus only shows distribution 0/1/2.
-PS_PAT = {0: "type_0", 1: "type_1", 2: "type_2"}
+# Labels recovered from the binary enum table @ 0x1420bf430 (WoWS build
+# 12267945, value-ordered).
+PS_PAT = {0: "noAnimation", 1: "framesPlayback", 2: "motionVectors"}
 
 
 # ---------------------------------------------------------------------------
@@ -387,8 +395,8 @@ def _decode_vgt_body(
         if body_addr + 12 > file_end:
             return {"_err": "point_oob"}
         return {"position": list(struct.unpack_from("<3f", buf, body_addr))}
-    if vgt_type == 2:  # cylinder (~0x44B)
-        if body_addr + 0x44 > file_end:
+    if vgt_type == 2:  # cylinder (0x40B; confirmed via FUN_1407149d0)
+        if body_addr + 0x40 > file_end:
             return {"_err": "cyl_oob"}
         origin = struct.unpack_from("<3f", buf, body_addr)
         max_r = struct.unpack_from("<f", buf, body_addr + 0x0c)[0]
@@ -396,7 +404,7 @@ def _decode_vgt_body(
         min_r = struct.unpack_from("<f", buf, body_addr + 0x1c)[0]
         basis_v = struct.unpack_from("<3f", buf, body_addr + 0x20)
         diff = struct.unpack_from("<3f", buf, body_addr + 0x2c)
-        scale = struct.unpack_from("<2f", buf, body_addr + 0x38)  # vec3 in source but third comp is noise
+        scale = struct.unpack_from("<2f", buf, body_addr + 0x38)  # Vector2 @+0x38 (confirmed fx::Vector2; body ends at 0x40)
         return {
             "origin": list(origin), "maxRadius": max_r,
             "basisU": list(basis_u), "minRadius": min_r,
@@ -686,20 +694,23 @@ def _decode_renderer(
 ) -> dict:
     """Decode the Renderer block at System +0x000 (0xa0 bytes).
 
+    Field offsets confirmed against the WoWS binary (build 12267945,
+    FUN_1406f2150) — supersedes the 2026-05-22 statistical probe.
+
     Surfaced fields:
       +0x00 ``textureName0`` (16 B ResourceRef)
       +0x10 ``textureName1`` (16 B ResourceRef)
       +0x20 ``yawRateRamp``  (16 B Ramp)
       +0x80 ``rotationCenter`` i32 -> PS_RRC label
-      +0x88 ``blendType`` i32 -> PS_RBT label
-      +0x8c ``sortType`` i32 (raw — enum labels TBD)
+      +0x84 ``lightingType``  i32 -> PS_RLT label
+      +0x88 ``blendType``     i32 -> PS_RBT label
+      +0x8c ``sortType``      i32 (raw; enum fx::RendererSortType, labels TBD)
       +0x90 ``tilingU`` f32, +0x94 ``tilingV`` f32
 
-    The 16-float cluster at +0x30..+0x7f (lighting/billboard/orient
-    floats) and the two trailing bool quartets at +0x98 / +0x9c are
-    documented in particle_format_spec.md but their per-field
-    boundaries aren't byte-mapped yet (low-confidence empirical layer
-    in the 2026-05-22 probe; needs Ghidra to confirm).
+    The +0x30..+0x7f float cluster (explicitOrientation/customCenterOffset
+    + 13 lighting/spin/scale floats) and the +0x98/+0x9c bool quartets
+    (billboard/velocityOriented/flipTexcoordU-V …) are byte-mapped in the
+    binary but not surfaced here.
     """
     base = sys_off  # Renderer is the first sub-struct
     out: dict[str, Any] = {}
@@ -710,16 +721,15 @@ def _decode_renderer(
     if t1:
         out["textureName1"] = t1
     out["yawRateRamp"] = _decode_ramp(buf, base + 0x20, file_end)
-    rotation_center, blend_flag_84, blend_type, sort_type = struct.unpack_from(
+    rotation_center, lighting_type, blend_type, sort_type = struct.unpack_from(
         "<4i", buf, base + 0x80,
     )
     tiling_u, tiling_v = struct.unpack_from("<2f", buf, base + 0x90)
     out["rotationCenter"] = PS_RRC.get(int(rotation_center), str(rotation_center))
-    # +0x84 carries 2 distinct values per corpus probe; perfectly
-    # co-varies with GRADIENT_MAP blends — likely a sub-mode flag
-    # ("uses gradient LUT") set at bake time. Kept raw so a future
-    # Ghidra pass can name it; consumers ignore for now.
-    out["blendFlag84"] = int(blend_flag_84)
+    # +0x84 is fx::RendererLightingType (PS_RLT), NOT a blend sub-mode flag.
+    # Confirmed via Ghidra (FUN_1406f2150, type_info 0x142a81bb8); the earlier
+    # "blendFlag84 co-varies with GRADIENT_MAP" reading was coincidental.
+    out["lightingType"] = PS_RLT.get(int(lighting_type), str(lighting_type))
     out["blendType"] = PS_RBT.get(int(blend_type), str(blend_type))
     out["sortType"] = int(sort_type)
     out["tilingU"] = float(tiling_u)
@@ -732,10 +742,9 @@ def _decode_animation(
 ) -> dict:
     """Decode the Animation block at System +0x130 (0x40 bytes).
 
-    Surfaced fields (all empirically validated 2026-05-22 across
-    20,030 animation blocks; framesPerX * framesPerY == framesRangeEnd
-    held 91.3% of the time, and animationType at +0x38 has exactly the
-    three distinct values {0,1,2} matching the PS_PAT enum):
+    Field offsets confirmed against the WoWS binary (build 12267945,
+    FUN_1406f37a0) — supersedes the 2026-05-22 statistical probe, which
+    had the two trailing bools (+0x3c / +0x3d) swapped.
 
       +0x00 ``frameRateRamp``           (16 B Ramp)
       +0x10 ``motionVectorsTexture``    (16 B ResourceRef)
@@ -746,8 +755,8 @@ def _decode_animation(
       +0x30 ``animationPeriod`` f32
       +0x34 ``motionVectorsDistortion`` f32
       +0x38 ``animationType`` u32 -> PS_PAT label
-      +0x3c ``useEmissionAlphaFromMV`` u8 bool
-      +0x3d ``randomFrameOnly`` u8 bool
+      +0x3c ``randomFrameOnly`` u8 bool
+      +0x3d ``useEmissionAlphaFromMV`` u8 bool
     """
     base = sys_off + 0x130
     out: dict[str, Any] = {}
@@ -767,8 +776,8 @@ def _decode_animation(
     out["animationPeriod"] = float(anim_period)
     out["motionVectorsDistortion"] = float(mv_distortion)
     out["animationType"] = PS_PAT.get(int(anim_type), str(anim_type))
-    out["useEmissionAlphaFromMV"] = bool(buf[base + 0x3c])
-    out["randomFrameOnly"] = bool(buf[base + 0x3d])
+    out["randomFrameOnly"] = bool(buf[base + 0x3c])
+    out["useEmissionAlphaFromMV"] = bool(buf[base + 0x3d])
     return out
 
 
