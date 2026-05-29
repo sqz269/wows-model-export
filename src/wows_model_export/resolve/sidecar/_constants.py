@@ -156,6 +156,15 @@ _TOP_LEVEL_ORDER: tuple[str, ...] = (
     "ballistics",
     "materials",
     "skins",
+    # v3 (additive, 2026-05-29): indexable Exterior overlays on the canonical
+    # base ship — each entry is one WG Exterior (permoflage) carrying a resolved
+    # per-mount mesh-swap delta + a cross-link into skins[] for its paint scheme.
+    # Mirrors WG's ``Vehicle -> permoflages[] of Exteriors``. Sibling to skins[];
+    # DISTINCT from ``variants`` (hull/module/research). Emitting this collapses
+    # the legacy ``<Base>__<Variant>`` separate-ship folders into one ship.
+    # Schema stays 3 — the key is purely additive (strict consumers ignore it).
+    # See docs/SHIP_EXTERIOR_UNIFICATION_HANDOFF.md + resolve/exterior_unify.py.
+    "exteriors",
 )
 
 _PIPELINE_ORDER: tuple[str, ...] = (
@@ -352,6 +361,41 @@ _ASSET_OVERRIDE_ORDER: tuple[str, ...] = (
 )
 
 _TRANSFORM_ORDER: tuple[str, ...] = ("matrix", "position")
+
+#: Per-exterior entry key order (additive, 2026-05-29). One entry per WG
+#: Exterior (permoflage) in ``exteriors[]``. ``exterior_id`` is the index key
+#: (the WG Exterior param-name); ``camo_scheme_key`` cross-links into this
+#: ship's ``skins[].scheme_key`` so the same selector flips geometry + paint;
+#: ``hull`` is null when the hull mesh is shared (a HullDelta only when a
+#: genuine ``/ship/`` swap exists). See resolve/exterior_unify.py.
+_EXTERIOR_ORDER: tuple[str, ...] = (
+    "exterior_id",
+    "display_name",
+    "wg_asset_id",
+    "species",
+    "peculiarity",
+    "is_native",
+    "camo_scheme_key",
+    "hull",
+    "swap_table",
+    "mounts",
+    "variant_swapped_asset_ids",
+)
+
+#: Per-mount swap key order (entries of ``exteriors[].mounts[]``).
+#: ``transform`` and ``misc_filter`` are stored VERBATIM (the schema_v6
+#: Ry180-baked matrix + the nodesConfig miscFilter override) — neither is
+#: reconstructable from the base mount. ``attached_y_flip`` is diagnostic only;
+#: consumers do NOT re-apply Ry180.
+_MOUNT_SWAP_ORDER: tuple[str, ...] = (
+    "hp_name",
+    "base_asset_id",
+    "asset_id",
+    "dead_asset_id",
+    "transform",
+    "misc_filter",
+    "attached_y_flip",
+)
 
 #: Top-level ``variants`` section keys (schema v3.1).
 _VARIANTS_ORDER: tuple[str, ...] = (
