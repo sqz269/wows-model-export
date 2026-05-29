@@ -57,6 +57,7 @@ from .clean_workspace import (
     scan_extracted_ships,
 )
 from .decal_library import build_decal_library
+from .dedup_textures import dedup_textures
 from .find_ship_variants import find_ship_variants
 from .ingest_ship import (
     build_library_and_refresh,
@@ -101,6 +102,7 @@ __all__ = [
     "build_projectile_library",
     "build_decal_library",
     "build_ammo_profiles",
+    "dedup_textures",
     # Cross-cutting
     "publish",
     "snapshot",
