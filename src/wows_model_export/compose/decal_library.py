@@ -60,22 +60,32 @@ from ._step_runner import StepRunner
 # All prototypes set DECAL_FLIP.U (U-axis flip applied to texture
 # sampling).
 
+# The first four lists (shot/ground/fire/heat) are lifted verbatim from
+# ClientDecals/DecalProperties.py. The last two (he/scuff) are NOT WG-native
+# prototype lists — they are curated routing groups so a consumer can pick a
+# look by hit kind: ``he`` = wide soot/scorch/smoke for HE detonations,
+# ``scuff`` = light hole-less patches for ricochets/shatters. They reuse the
+# same damage_dec_* assets, sub-selected from the WG damage set.
 PROTOTYPE_LISTS = {
     "shot":   ["damage_dec_2", "damage_dec_3", "damage_dec_4",
                "damage_dec_5", "damage_dec_6"],
     "ground": ["damage_dec_1", "damage_dec_7"],
     "fire":   ["damage_dec_2"],
     "heat":   ["heat_dec_0"],
+    "he":     ["damage_dec_1", "damage_dec_5", "damage_dec_6"],
+    "scuff":  ["damage_dec_3", "damage_dec_5"],
 }
 
 TECHNIQUES = {
     "shot": "DAMAGE", "ground": "DAMAGE",
     "fire": "DAMAGE", "heat": "EMISSIVE",
+    "he": "DAMAGE", "scuff": "DAMAGE",
 }
 
 INFLUENCE = {
     "shot": "APPLY_TO_STATIC", "ground": "APPLY_TO_TERRAIN",
     "fire": "APPLY_TO_STATIC", "heat": "APPLY_TO_STATIC",
+    "he": "APPLY_TO_STATIC", "scuff": "APPLY_TO_STATIC",
 }
 
 # Per-decal-name parallax channel encoding. Empirically determined by
