@@ -614,6 +614,75 @@ def resolve_components(
     return out
 
 
+# Knots → metres/second (1 nautical mile = 1.852 km). Matches the engine's
+# own KNOTS_TO_MPS (1.852 / 3.6); GameParams stores hull maxSpeed in knots.
+_KNOTS_TO_MPS = 1.852 / 3.6
+
+
+def ship_movement_extras(components: dict[str, Any]) -> dict[str, Any]:
+    """Extract the ship-level movement (maneuverability) block from the active
+    Hull + Engine components.
+
+    Mirrors the per-mount gun autofill (:func:`autofill_for_hp`): reads the
+    resolved GameParams component dicts (see :func:`resolve_components`) and
+    returns a flat, consumer-agnostic ``movement`` block ready to merge into
+    ``sidecar.ship`` (see ``absorb_gameparams_ship``).
+
+    WoWS ship movement is a native hydrodynamic maneuvering model (thrust vs.
+    drift-dependent drag with yaw damping); these fields are its per-ship
+    tuning. ``turningRadius`` / drift are *emergent outputs* of that model, but
+    WG also stores ``turningRadius`` as the steady-state turn circle, so it is
+    exported as a calibration target. Consumers integrate in real metres /
+    seconds — the engine's internal BigWorld scale + ``SHIP_TIME_SCALE`` are
+    not exported (they are presentation-space artifacts; see
+    ``reference/engine/wows_ship_movement.md``).
+
+    Units: ``maxSpeed`` is stored in knots; it is converted to m/s
+    (``max_speed_mps``) to match the sidecar speed convention (``speed_mps`` /
+    ``muzzle_velocity_mps``), with the raw knots kept as ``max_speed_kn`` for
+    traceability. Other fields are emitted verbatim in their GameParams units
+    (metres / seconds / degrees / kg / shp / engine-native drag coefficients).
+    """
+    hull = components.get("hull")
+    engine = components.get("engine")
+    if not isinstance(hull, dict):
+        hull = {}
+    if not isinstance(engine, dict):
+        engine = {}
+    out: dict[str, Any] = {}
+
+    # Hull: top speed (knots → m/s), inertia, maneuver + drag tuning.
+    max_speed_kn = _safe_float(hull.get("maxSpeed"))
+    if max_speed_kn is not None:
+        out["max_speed_kn"] = round(max_speed_kn, 4)
+        out["max_speed_mps"] = round(max_speed_kn * _KNOTS_TO_MPS, 4)
+    for src, dst in (
+        ("mass", "mass_kg"),
+        ("turningRadius", "turning_radius_m"),
+        ("rudderTime", "rudder_time_s"),
+        ("maxRudderAngle", "max_rudder_angle_deg"),
+        ("enginePower", "engine_power_hp"),
+        ("sideDragCoef", "side_drag_coef"),
+        ("rudderPower", "rudder_power"),
+        ("friction", "friction"),
+    ):
+        v = _safe_float(hull.get(src))
+        if v is not None:
+            out[dst] = v
+
+    # Engine: power spool-up time constants (the accel/decel ramp; there is no
+    # *EngineDownTime field — slowdown is pure drag).
+    for src, dst in (
+        ("forwardEngineUpTime", "forward_engine_up_time_s"),
+        ("backwardEngineUpTime", "backward_engine_up_time_s"),
+    ):
+        v = _safe_float(engine.get(src))
+        if v is not None:
+            out[dst] = v
+
+    return out
+
+
 def variants_summary(ship: dict[str, Any]) -> dict[str, Any]:
     """Return a JSON-friendly summary of the ship's upgrade tree.
 

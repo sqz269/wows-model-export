@@ -585,6 +585,7 @@ def absorb_gameparams_ship(
     ship_dict: dict[str, Any],
     *,
     full_ship_id: str | None = None,
+    movement: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Merge ship-level metadata extras (archetype, peculiarity, paper_ship)
     into ``doc.ship``. Returns a new doc; ``doc`` is not mutated.
@@ -592,6 +593,11 @@ def absorb_gameparams_ship(
     ``full_ship_id`` is the GameParams full entity key (``PASB018_Iowa_1944``).
     Passing it stamps ``ship.wg_ship_full_id`` so downstream consumers can
     index the dump without re-resolving.
+
+    ``movement`` is the gameplay-active hull/engine maneuverability block from
+    :func:`...gameparams_autofill.ship_movement_extras` (max speed, turning
+    radius, rudder time, engine spool times, drag coefs). When non-empty it is
+    stamped at ``ship.movement`` (schema v3.x, additive).
     """
     if not isinstance(ship_dict, dict):
         return doc
@@ -609,6 +615,8 @@ def absorb_gameparams_ship(
         update_ship["paper_ship"] = True
     if isinstance(full_ship_id, str) and full_ship_id:
         update_ship["wg_ship_full_id"] = full_ship_id
+    if isinstance(movement, dict) and movement:
+        update_ship["movement"] = movement
     if not update_ship:
         return doc
     return merge_preserving(doc, {"ship": update_ship})

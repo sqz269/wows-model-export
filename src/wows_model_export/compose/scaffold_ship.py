@@ -1131,9 +1131,13 @@ def _absorb_gameparams_passes(
 
     components = _gp_autofill.resolve_components(ship_dict, hull_choice="upgraded")
 
-    # Pass 1: ship metadata
+    # Pass 1: ship metadata + movement (maneuverability) stats from the
+    # gameplay-active hull/engine (before any rendered-hull reassignment below).
     try:
-        doc = sidecar.absorb_gameparams_ship(doc, ship_dict, full_ship_id=full_id)
+        movement = _gp_autofill.ship_movement_extras(components)
+        doc = sidecar.absorb_gameparams_ship(
+            doc, ship_dict, full_ship_id=full_id, movement=movement,
+        )
     except Exception as e:
         _warn(warnings, f"gameparams ship-extras failed ({e})")
 
