@@ -412,7 +412,11 @@
   // sidecar). Bumped by `revision` so a ship swap re-reads.
   const nodeRows: readonly NodeEntry[] = $derived.by(() => {
     void revision;
-    return viewer?.getNodeList() ?? [];
+    // List the bones / VFX / hardpoints / structural nodes — skip raw
+    // geometry (`mesh`) nodes, which are numerous (thousands) and aren't
+    // "bones". They remain available as overlay markers via the side
+    // panel's "Mesh nodes" category toggle.
+    return (viewer?.getNodeList() ?? []).filter((n) => n.category !== 'mesh');
   });
   const hasNodesTab = $derived(nodeRows.length > 0);
   let nodeFilter = $state('');
@@ -981,7 +985,7 @@
               <span>position (m)</span>
               <span></span>
             </div>
-            {#each filteredNodes as n (n.owner + '/' + n.name + '/' + n.position.x)}
+            {#each filteredNodes as n, i (i)}
               {@const isPinned = pinnedNode === n.name}
               <div
                 class="grid grid-cols-[1.6rem_minmax(8rem,1.4fr)_minmax(6rem,1fr)_minmax(9rem,1fr)_auto] items-center gap-x-2 border-b border-border/30 py-0.5 text-[11px]"
