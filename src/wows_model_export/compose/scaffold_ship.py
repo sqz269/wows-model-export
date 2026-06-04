@@ -1289,6 +1289,24 @@ def _absorb_gameparams_passes(
             ship_dict, components,
         )
         if attachments:
+            # Resolve hull EP_* effect-point world positions from the
+            # toolkit-emitted `{ship}_skel_ext.json` (the `_ep` segment
+            # records are keyed by Murmur3(EP_node_name)). Best-effort:
+            # ships without `_ep` data keep name-only attachments.
+            try:
+                sx_json = (
+                    (gm3d_dir / f"{ship}_skel_ext.json") if gm3d_dir else None
+                )
+                ep_stats = _gp_autofill.resolve_hull_effect_positions(
+                    attachments, sx_json,
+                )
+                if ep_stats["hull"]:
+                    print(
+                        f"  effects: hull EP_ positions "
+                        f"{ep_stats['resolved']}/{ep_stats['hull']} resolved",
+                    )
+            except Exception as e:
+                _warn(warnings, f"gameparams effects: EP_ positions failed ({e})")
             try:
                 from . import library_particles as _lib_particles
                 lib_status = _lib_particles.ensure_built(config=config)
