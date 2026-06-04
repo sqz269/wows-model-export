@@ -23,8 +23,15 @@
   import { Button } from '$lib/components/ui/button';
   import { SHIP_SECTIONS, SEAMS } from '$lib/types';
   import type { SeamKey, SeamState, ShipSectionKey } from '$lib/types';
-  import type { ColorMode, LodPolicy, ShipViewer } from '$lib/ship';
-  import { DEFAULT_BLOOM_PARAMS, ARMOR_THICKNESS_STOPS, hitboxStyleFor } from '$lib/ship';
+  import type { ColorMode, LodPolicy, NodeCategory, ShipViewer } from '$lib/ship';
+  import {
+    DEFAULT_BLOOM_PARAMS,
+    ARMOR_THICKNESS_STOPS,
+    hitboxStyleFor,
+    NODE_CATEGORIES,
+    NODE_CATEGORY_LABEL,
+    NODE_CATEGORY_COLOR,
+  } from '$lib/ship';
   import type { CamoDiagnostics } from '$lib/ship/textures';
   import { loadState, patchState, patchNestedState, type PanelSection } from '$lib/store';
   import { rowCls, labelCls, inputBoxCls } from '$lib/ui/controls';
@@ -80,6 +87,20 @@
   let hasArmor = $state(false);
   let hasHitbox = $state(false);
   let hitboxCats = $state<Array<{ label: string; hex: string }>>([]);
+  // WG bones & VFX-points overlay. Per-ship inspection state (reset on swap,
+  // not persisted) — mirrors the armor/aim sections.
+  let hasNodes = $state(false);
+  let nodesView = $state(false);
+  let nodeCats = $state<Record<NodeCategory, boolean>>(
+    Object.fromEntries(NODE_CATEGORIES.map((c) => [c, false])) as Record<NodeCategory, boolean>,
+  );
+  let nodeCounts = $state<Record<NodeCategory, number>>(
+    Object.fromEntries(NODE_CATEGORIES.map((c) => [c, 0])) as Record<NodeCategory, number>,
+  );
+  // Color swatch CSS for the legend (hex int -> #rrggbb).
+  function catSwatch(cat: NodeCategory): string {
+    return '#' + NODE_CATEGORY_COLOR[cat].toString(16).padStart(6, '0');
+  }
   let seamStates = $state<Record<SeamKey, SeamState>>({
     'Bow-MidFront': 'Intact',
     'MidFront-MidBack': 'Intact',
@@ -222,6 +243,15 @@
       }
       hitboxCats = [...catMap].map(([label, hex]) => ({ label, hex }));
 
+      // Bones & VFX overlay state (per-ship; not persisted). Re-read the
+      // overlay's current visibility + per-category state + counts.
+      hasNodes = viewer.hasNodeData();
+      nodesView = viewer.getNodesViewEnabled();
+      nodeCounts = viewer.getNodeCounts();
+      const nc = {} as Record<NodeCategory, boolean>;
+      for (const c of NODE_CATEGORIES) nc[c] = viewer.getNodeCategoryVisible(c);
+      nodeCats = nc;
+
       // Honor the persisted Show-textures choice. Each ship's viewer
       // starts with textures off (TextureManager.clearShip()); kick off
       // the async decode here so the user's last toggle carries across
@@ -296,6 +326,15 @@
   function toggleHideHull(v: boolean) {
     hideHull = v;
     viewer.setArmorOnly(v);
+  }
+  function toggleNodesView(v: boolean) {
+    nodesView = v;
+    viewer.setNodesView(v);
+  }
+  function toggleNodeCat(cat: NodeCategory, v: boolean) {
+    nodeCats[cat] = v;
+    nodeCats = { ...nodeCats };
+    viewer.setNodeCategoryVisible(cat, v);
   }
   function toggleDamageVariants(v: boolean) {
     damageVariants = v;
@@ -607,6 +646,51 @@
             Hide ship (armor only)
           </label>
         {/if}
+      </div>
+    </details>
+  {/if}
+
+  {#if hasNodes}
+    <details
+      open={panelOpen['bones-vfx']}
+      ontoggle={(e) => togglePanel('bones-vfx', e.currentTarget.open)}
+      class="group {detailsCls}"
+    >
+      <summary class={summaryCls}>Bones &amp; VFX</summary>
+      <div class={bodyCls}>
+        <label class={rowCls}>
+          <input
+            type="checkbox"
+            checked={nodesView}
+            onchange={(e) => toggleNodesView(e.currentTarget.checked)}
+          />
+          Show WG bones &amp; VFX points
+        </label>
+        <p class="text-muted-foreground text-[10px] leading-snug">
+          Hull EP_ effect points (magenta) come from the sidecar; accessory bones, hardpoints +
+          muzzle anchors are read live from the model. Hover a marker for its name; pin from the
+          Nodes tab.
+        </p>
+        <div class="flex flex-col gap-1 {!nodesView ? 'opacity-55' : ''}">
+          {#each NODE_CATEGORIES as cat (cat)}
+            {#if nodeCounts[cat] > 0}
+              <label class={rowCls}>
+                <input
+                  type="checkbox"
+                  checked={nodeCats[cat]}
+                  disabled={!nodesView}
+                  onchange={(e) => toggleNodeCat(cat, e.currentTarget.checked)}
+                />
+                <span class="inline-block size-2.5 rounded-full" style="background:{catSwatch(cat)}"
+                ></span>
+                {NODE_CATEGORY_LABEL[cat]}
+                <span class="text-muted-foreground tabular-nums text-[10px]">
+                  ({nodeCounts[cat]})
+                </span>
+              </label>
+            {/if}
+          {/each}
+        </div>
       </div>
     </details>
   {/if}

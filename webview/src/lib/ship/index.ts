@@ -20,3 +20,10 @@ export * as camo from './camo';
 export * as textures from './textures';
 export { TurretRigManager } from './turret_rig';
 export type { TurretRig } from './turret_rig';
+export {
+  NODE_CATEGORIES,
+  NODE_CATEGORY_LABEL,
+  NODE_CATEGORY_COLOR,
+  NODE_CATEGORY_DEFAULT_ON,
+} from './node_overlay';
+export type { NodeCategory, NodeEntry } from './node_overlay';

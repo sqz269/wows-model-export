@@ -557,6 +557,16 @@ export interface ParticleAttachment {
   /** Source category — added in the 2026-05-16 multi-scope absorb. */
   source?: ParticleSource;
   /**
+   * Hull effect-point world position `[x, y, z]` in hull-GLB metric space
+   * (same frame as the hull mesh vertices — drop a marker here directly).
+   * Present only for `source: "hull"` `EP_*` nodes, resolved by the
+   * pipeline from the model's `<segment>_ep.skel_ext` records (keyed by
+   * `Murmur3(EP_node_name)`). Absent on gun / AA / munition rows (those
+   * resolve against the accessory rig's own nodes in the live scene),
+   * and on `EP_*` rows the pipeline couldn't resolve (no `_ep` data).
+   */
+  position?: [number, number, number];
+  /**
    * Identifier of the owning entity within the source category.
    *  - hull: omitted (the `group` field is the identifier).
    *  - gun-type sources: hardpoint name (`HP_AGM_1`).
