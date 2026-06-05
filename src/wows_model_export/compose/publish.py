@@ -31,11 +31,19 @@ What it copies (per domain):
                     decal library must be built first with
                     ``wows-build-decal-library``; when it's absent the
                     copy is a graceful no-op.
+* ``environment``  — the IBL / tonemap library: the PMREM cube + BRDF-LUT
+                    cache (``content/environment/`` DDS) + the per-weather
+                    ``library/environment/manifest.json`` (GT tonemap params,
+                    SH, cube format). The ``content/`` + ``library/`` prefixes
+                    are PRESERVED under the target so the manifest's
+                    workspace-relative URLs resolve against the published root.
+                    Built with ``wows-build-environment-library``; absent ->
+                    no-op.
 
 Canonical :class:`StepEvent` step names emitted to ``on_event``:
 
     "discover_domain_files"  "copy_ships"  "copy_library"
-    "copy_projectiles"       "copy_decals"
+    "copy_projectiles"       "copy_decals"  "copy_environment"
 
 Each step emits ``started`` -> ``completed`` (or ``skipped``).
 
@@ -66,6 +74,7 @@ _DOMAIN_STEPS: dict[str, str] = {
     "library":     "copy_library",
     "projectiles": "copy_projectiles",
     "decals":      "copy_decals",
+    "environment": "copy_environment",
 }
 
 
@@ -292,7 +301,9 @@ def publish(
     workspace: Path | None = None,
     config: PipelineConfig | None = None,
     only_ships: tuple[str, ...] | None = None,
-    domains: tuple[str, ...] = ("ships", "library", "projectiles", "decals"),
+    domains: tuple[str, ...] = (
+        "ships", "library", "projectiles", "decals", "environment",
+    ),
     force: bool = False,
     on_event: OnEvent | None = None,
     cancel: threading.Event | None = None,
@@ -498,12 +509,58 @@ def publish(
     else:
         runner.emit("copy_decals", "skipped", detail="domain not requested")
 
+    # ── Step: copy_environment ────────────────────────────────────────
+    # The PMREM cube / BRDF-LUT cache + the per-weather IBL/tonemap
+    # manifest, built by `wows-build-environment-library`. Unlike the
+    # other domains, the `content/` + `library/` path prefixes are
+    # PRESERVED under the target so the manifest's workspace-relative
+    # URLs (`content/environment/...`) resolve identically against the
+    # published root. No-op when the library hasn't been built.
+    environment_counts = PublishCounts()
+    if "environment" in domain_set:
+        with runner.step("copy_environment") as ctx:
+            env_dds = _publish_tree(
+                workspace / "content" / "environment",
+                target_dir / "content" / "environment",
+                force=force,
+                allow_json=False,
+                allow_glb=False,
+                allow_dds=True,
+            )
+            env_manifest = _publish_tree(
+                workspace / "library" / "environment",
+                target_dir / "library" / "environment",
+                force=force,
+                allow_json=True,
+                allow_glb=False,
+                allow_dds=False,
+            )
+            environment_counts = _combine_counts(env_dds, env_manifest)
+            ctx.annotate(
+                f"copied={environment_counts.copied} "
+                f"skipped={environment_counts.skipped}",
+                data={
+                    "copied":  environment_counts.copied,
+                    "skipped": environment_counts.skipped,
+                    "cubes_brdf": {
+                        "copied":  env_dds.copied, "skipped":  env_dds.skipped,
+                    },
+                    "manifest": {
+                        "copied":  env_manifest.copied,
+                        "skipped": env_manifest.skipped,
+                    },
+                },
+            )
+    else:
+        runner.emit("copy_environment", "skipped", detail="domain not requested")
+
     return PublishResult(
         target_dir=target_dir,
         ships=ships_counts,
         library=library_counts,
         projectiles=projectiles_counts,
         decals=decals_counts,
+        environment=environment_counts,
         warnings=tuple(warnings),
     )
 

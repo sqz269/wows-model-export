@@ -1,0 +1,268 @@
+"""Parse ``spaces/<space>/space.ubersettings`` — per-weather HDR tonemap +
+IBL environment settings.
+
+A space's ``.ubersettings`` is BigWorld "verbose XML": every leaf is a
+``<name><value>\\t...\\t</value></name>`` pair, vectors are space-separated
+inside the value, booleans are ``true`` / ``false``, and ``null`` marks an
+empty ref. The file carries **one ``<Weather>`` block per weather preset** —
+the first (no ``user_name`` attribute) is the base / ``Default`` preset, the
+rest carry ``user_name="Storm"`` / ``"Cloudy"`` / … joining to the ``<param>``
+ids in the sibling ``weathers.xml``.
+
+Three render-parity asset classes live in each ``<Weather>`` block — these are
+the producer-side inputs the webview / Unity consumers need to match WG's
+final color + IBL (see ``reference/engine/wg_render_hdr_tonemap.md`` and
+``wg_render_pmrem_ibl.md``):
+
+* ``HDR`` — the GT (Uchimura) tonemap curve (``middleGray`` + ``gtContrast`` /
+  ``gtLinearSectionStart`` / ``gtLinearSectionLength`` / ``gtBlack``), the
+  bloom set, the eye-adaptation set, and the environment multipliers. (The
+  Uchimura ``P`` / ``b`` params are not authored anywhere — fixed ``P=1,
+  b=0``.)
+* ``PBS/settings/cubemapsPath`` — the directory holding the prefiltered PMREM
+  reflection cube (conventionally ``main_probe.dds``; a few old docks use a
+  numbered ``<n>/PMREM.dds``). The cube is a single-file 6-face DDS with a
+  full prefiltered mip chain (mip index = roughness).
+* ``PBS/SphericalHarmonics`` — the diffuse-irradiance SH: a base64 blob that
+  decodes to 27 little-endian ``float32`` = **9 RGB L2 coefficients**
+  (coeff-major, RGB-interleaved). Stored on disk, so no offline cube→SH
+  projection is needed.
+
+The ``PbsExtras`` block (``indirectMultShips`` / ``microShadowsIntensityShips``
+/ …) carries the per-space IBL modulation knobs and is captured verbatim.
+
+This module is pure Layer-1: it takes a path (or raw XML text) and returns
+plain JSON-serialisable dicts. Locating / extracting the file from the VFS is
+the caller's job (see ``compose.environment``).
+"""
+
+from __future__ import annotations
+
+import base64
+import struct
+from pathlib import Path
+from typing import Any
+from xml.etree import ElementTree as ET
+
+# The five Uchimura "Gran Turismo" curve knobs that a consumer's tonemap pass
+# needs (``middleGray`` is the keyed-exposure target; the other four shape the
+# curve). Kept as a named tuple of keys so consumers can pull just the curve.
+GT_PARAM_KEYS: tuple[str, ...] = (
+    "middleGray",
+    "gtContrast",
+    "gtLinearSectionStart",
+    "gtLinearSectionLength",
+    "gtBlack",
+)
+
+# Number of RGB spherical-harmonics coefficients (L2 / 3 bands).
+SH_COEFF_COUNT = 9
+# 9 coeffs * 3 channels * 4 bytes (float32).
+_SH_BYTE_LEN = SH_COEFF_COUNT * 3 * 4
+
+
+def _coerce(raw: str | None) -> Any:
+    """Coerce a BigWorld ``<value>`` string into a Python scalar / list.
+
+    ``"0.2040"`` -> ``0.204``; ``"1 1 1"`` -> ``[1.0, 1.0, 1.0]``;
+    ``"true"``/``"false"`` -> ``bool``; ``"null"`` -> ``None``; anything that
+    isn't all-numeric (paths, base64) is returned verbatim as ``str``.
+    """
+    if raw is None:
+        return None
+    s = raw.strip()
+    if not s or s == "null":
+        return None
+    low = s.lower()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    toks = s.split()
+    try:
+        nums = [float(t) for t in toks]
+    except ValueError:
+        return s
+    return nums[0] if len(nums) == 1 else nums
+
+
+def _settings_dict(settings_elem: ET.Element | None) -> dict[str, Any]:
+    """Flatten a ``<settings>`` block into ``{leaf_tag: coerced_value}``.
+
+    Each direct child is a ``<name><value>...</value></name>`` pair; children
+    without a ``<value>`` (nested sub-blocks) are skipped — callers descend
+    into those explicitly.
+    """
+    out: dict[str, Any] = {}
+    if settings_elem is None:
+        return out
+    for child in settings_elem:
+        value_node = child.find("value")
+        if value_node is None:
+            continue
+        out[child.tag] = _coerce(value_node.text)
+    return out
+
+
+def decode_harmonics(b64: str | None) -> list[list[float]] | None:
+    """Decode the ``harmonics`` base64 blob into 9 ``[r, g, b]`` SH coeffs.
+
+    Returns ``None`` if the blob is absent, undecodable, or not exactly
+    ``9 * 3 * 4`` bytes. Layout is coeff-major, RGB-interleaved, little-endian
+    ``float32`` (``[c0.r, c0.g, c0.b, c1.r, ...]``).
+    """
+    if not b64:
+        return None
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except (base64.binascii.Error, ValueError):
+        return None
+    if len(raw) != _SH_BYTE_LEN:
+        return None
+    flat = struct.unpack(f"<{SH_COEFF_COUNT * 3}f", raw)
+    return [list(flat[i * 3 : i * 3 + 3]) for i in range(SH_COEFF_COUNT)]
+
+
+def _parse_hdr(weather: ET.Element) -> dict[str, Any]:
+    """Flatten the ``<HDR>`` sub-tree (own settings + Bloom / Tonemapping /
+    Environment) into one dict of leaf params."""
+    hdr_elem = weather.find("HDR")
+    if hdr_elem is None:
+        return {}
+    out: dict[str, Any] = {}
+    out.update(_settings_dict(hdr_elem.find("settings")))
+    for sub in ("Bloom", "Tonemapping", "Environment"):
+        sub_elem = hdr_elem.find(sub)
+        if sub_elem is not None:
+            out.update(_settings_dict(sub_elem.find("settings")))
+    return out
+
+
+def _parse_pbs(weather: ET.Element) -> dict[str, Any]:
+    """Pull cubemapsPath, the SH coeffs, and the PbsExtras knobs from
+    ``<PBS>``."""
+    pbs_elem = weather.find("PBS")
+    if pbs_elem is None:
+        return {"cubemaps_path": None, "sh": None, "pbs_extras": {}}
+
+    settings = _settings_dict(pbs_elem.find("settings"))
+    cubemaps_path = settings.get("cubemapsPath")
+
+    sh_b64: str | None = None
+    sh_elem = pbs_elem.find("SphericalHarmonics")
+    if sh_elem is not None:
+        sh_settings = _settings_dict(sh_elem.find("settings"))
+        raw = sh_settings.get("harmonics")
+        sh_b64 = raw if isinstance(raw, str) else None
+
+    extras_elem = pbs_elem.find("PbsExtras")
+    pbs_extras = (
+        _settings_dict(extras_elem.find("settings"))
+        if extras_elem is not None
+        else {}
+    )
+
+    return {
+        "cubemaps_path": cubemaps_path if isinstance(cubemaps_path, str) else None,
+        "sh": decode_harmonics(sh_b64),
+        "pbs_extras": pbs_extras,
+    }
+
+
+def parse_ubersettings_text(xml_text: str) -> dict[str, Any]:
+    """Parse ubersettings XML text into a per-weather environment dict.
+
+    Returns::
+
+        {
+          "version": <int|None>,
+          "weather_order": ["Default", "Storm", ...],
+          "weathers": {
+            "Default": {
+              "cubemaps_path": "content/location/skybox/.../Default/",
+              "hdr": {middleGray, gtContrast, gtLinearSectionStart,
+                      gtLinearSectionLength, gtBlack, brightThreshold,
+                      bloomAmount, bloomRadius, bloomTint, adaptationSpeed,
+                      eyeDarkLimit, eyeLightLimit, skyLumMultiplier,
+                      ambientLumMultiplier, hdrMapExposureOffset, ...},
+              "sh": [[r, g, b], ... x9] | None,
+              "pbs_extras": {indirectMultShips, microShadowsIntensityShips, ...},
+            },
+            "Storm": {...}, ...
+          },
+        }
+
+    The base ``<Weather>`` (no ``user_name``) is keyed ``"Default"``.
+    """
+    root = ET.fromstring(xml_text)
+    # Tolerate being handed either the document root (<space.ubersettings>)
+    # or a pre-located <Root> element.
+    root_elem = root.find("Root")
+    if root_elem is None:
+        root_elem = root if root.tag == "Root" else root
+
+    version_raw = root.find("version")
+    version = None
+    if version_raw is not None:
+        v = _coerce(version_raw.text)
+        version = int(v) if isinstance(v, (int, float)) else None
+
+    weathers: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for weather in root_elem.findall("Weather"):
+        name = weather.get("user_name") or "Default"
+        # Defend against an unexpected second nameless block.
+        if name in weathers:
+            name = f"{name}_{len(weathers)}"
+        pbs = _parse_pbs(weather)
+        weathers[name] = {
+            "cubemaps_path": pbs["cubemaps_path"],
+            "hdr": _parse_hdr(weather),
+            "sh": pbs["sh"],
+            "pbs_extras": pbs["pbs_extras"],
+        }
+        order.append(name)
+
+    return {"version": version, "weather_order": order, "weathers": weathers}
+
+
+def parse_ubersettings(path: Path | str) -> dict[str, Any]:
+    """Parse a ``space.ubersettings`` file from disk. See
+    :func:`parse_ubersettings_text`."""
+    text = Path(path).read_text(encoding="utf-8")
+    return parse_ubersettings_text(text)
+
+
+def gt_tonemap(weather: dict[str, Any]) -> dict[str, float]:
+    """Extract just the GT tonemap curve params from a parsed weather dict.
+
+    Returns the five :data:`GT_PARAM_KEYS` (missing ones default to the
+    Uchimura-neutral value) plus a ``P``/``b`` of ``1.0``/``0.0`` so a
+    consumer can feed a complete curve. ``hdrMapExposureOffset`` is included
+    because the keyed exposure (``middleGray / avgLum * exp2(offset)``) needs
+    it.
+    """
+    hdr = weather.get("hdr") or {}
+    out: dict[str, float] = {}
+    for key in GT_PARAM_KEYS:
+        v = hdr.get(key)
+        out[key] = float(v) if isinstance(v, (int, float)) else 0.0
+    offset = hdr.get("hdrMapExposureOffset")
+    out["hdrMapExposureOffset"] = (
+        float(offset) if isinstance(offset, (int, float)) else 0.0
+    )
+    # Uchimura P (max display brightness) / b (pedestal) are not authored in
+    # WG content — fixed.
+    out["P"] = 1.0
+    out["b"] = 0.0
+    return out
+
+
+__all__ = [
+    "GT_PARAM_KEYS",
+    "SH_COEFF_COUNT",
+    "decode_harmonics",
+    "parse_ubersettings",
+    "parse_ubersettings_text",
+    "gt_tonemap",
+]
