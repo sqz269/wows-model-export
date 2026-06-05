@@ -590,8 +590,14 @@ class SystemRenderer {
       this.pos[i * 3 + 0] += this.vel[i * 3 + 0] * dt * damp;
       this.pos[i * 3 + 1] += this.vel[i * 3 + 1] * dt * damp;
       this.pos[i * 3 + 2] += this.vel[i * 3 + 2] * dt * damp;
-      // Tint (keyed by particle age in seconds) + alphaSetter (its own bespoke
-      // clock — alpha/tint carry no parameterType; see alphaSetterIsSystemAge).
+      // Final opacity = tint.alpha(age) × alphaSetter(t). RE-CONFIRMED on build
+      // 12506899 (decompiled FUN_140742af0 + FUN_1407423c0, agent-cross-checked):
+      // the tint action does renderRec[0x34..0x40] *= tint.RGBA (alpha @0x40
+      // included) and the alphaSetter does renderRec[0x40] *= ramp — BOTH
+      // multiply, so the product below is correct. Do NOT make either term
+      // "override" the other. (Engine also folds in the base-color alpha + the
+      // per-component scaler-alpha, both ≤1 then clamped [0,1]; not modelled here
+      // — at worst a slight over-bright vs engine.)
       sampleColor(this.tintColor, age, SystemRenderer.TMP_COL);
       const alphaT = this.alphaSetterIsSystemAge ? this.elapsed : age;
       const alpha = sampleRamp(this.alphaRamp, alphaT, 1) * SystemRenderer.TMP_COL[3];
