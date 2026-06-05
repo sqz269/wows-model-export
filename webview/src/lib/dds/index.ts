@@ -127,7 +127,7 @@ function ensureRgtcSupport(renderer: THREE.WebGLRenderer): boolean {
 }
 
 function makeRgtcDataTexture(
-  mip: { data: Uint8Array; width: number; height: number },
+  mip: { data: Uint8Array | Float32Array; width: number; height: number },
   renderer: THREE.WebGLRenderer,
 ): THREE.DataTexture {
   // `as unknown as Uint8Array<ArrayBuffer>` strips the SharedArrayBuffer
@@ -157,7 +157,7 @@ function makeRgtcDataTexture(
  * GRADIENT_MAP color ramps and any other non-BC particle texture.
  */
 function makeRgba8DataTexture(
-  mip: { data: Uint8Array; width: number; height: number },
+  mip: { data: Uint8Array | Float32Array; width: number; height: number },
   renderer: THREE.WebGLRenderer,
 ): THREE.DataTexture {
   const tex = new THREE.DataTexture(
@@ -166,6 +166,36 @@ function makeRgba8DataTexture(
     mip.height,
     THREE.RGBAFormat,
     THREE.UnsignedByteType,
+  );
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  tex.flipY = false;
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/**
+ * Wrap a worker-decoded BC6H HDR mip (Float32 RGBA, R/G/B = decoded HDR value,
+ * A = 1.0) into a Three.js FloatType ``DataTexture``. Used for HDR particle
+ * colour ramps (e.g. ``particles/ramps/fire_yellow_3_HDR.dds``, DXGI 95). The
+ * data is linear HDR — never display-referred — so NoColorSpace (no sRGB
+ * decode). Clamp + Linear, same as the 8-bit ramp path: it's a 1D LUT sampled
+ * at ``vec2(base.r, 0.5)``.
+ */
+function makeRgbafDataTexture(
+  mip: { data: Uint8Array | Float32Array; width: number; height: number },
+  renderer: THREE.WebGLRenderer,
+): THREE.DataTexture {
+  const tex = new THREE.DataTexture(
+    mip.data as unknown as Float32Array<ArrayBuffer>,
+    mip.width,
+    mip.height,
+    THREE.RGBAFormat,
+    THREE.FloatType,
   );
   tex.wrapS = THREE.ClampToEdgeWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
@@ -229,6 +259,14 @@ export async function loadDdsMipChain(
   const firstRgba8 = parses.find((p): p is ParseSuccess => !!p && p.kind === 'rgba8');
   if (firstRgba8) {
     return makeRgba8DataTexture(firstRgba8.mipmaps[0], renderer);
+  }
+
+  // BC6H HDR fast-path: worker software-decoded to a Float32 RGBA buffer.
+  // No GL extension needed — wrap the top mip in a FloatType DataTexture.
+  // Live case: HDR particle colour ramps (fire_*_HDR.dds, DXGI 95).
+  const firstRgbaf = parses.find((p): p is ParseSuccess => !!p && p.kind === 'rgbaf');
+  if (firstRgbaf) {
+    return makeRgbafDataTexture(firstRgbaf.mipmaps[0], renderer);
   }
 
   type Mip = ParseSuccess['mipmaps'][number];

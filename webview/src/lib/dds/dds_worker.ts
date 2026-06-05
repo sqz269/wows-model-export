@@ -8,6 +8,8 @@
 // the CompressedTexture / DataTexture from the response. Worker bundle
 // does not import three.js — DXT classic parse is inlined.
 
+import { decodeBc6hToRgbaFloat } from './bc6h';
+
 const DDS_MAGIC = 0x20534444;
 const DDS_DX10_FOURCC = 0x30315844;
 
@@ -38,6 +40,14 @@ const RGTC_DXGI: Record<number, { signed: boolean }> = {
   81: { signed: true }, // BC4_SNORM
 };
 
+// BC6H HDR formats. Decoded in software (no widely-available WebGL float-BPTC
+// sampling) to a Float32 RGBA DataTexture. UF16 (95) is the live case — WG's
+// fire/smoke colour ramps (particles/ramps/*_HDR.dds); SF16 (96) handled too.
+const BC6H_DXGI: Record<number, { signed: boolean }> = {
+  95: { signed: false }, // BC6H_UF16
+  96: { signed: true }, // BC6H_SF16
+};
+
 // DX10-wrapped classic BC formats. WG's toolkit emits some `_mr.dds`
 // files this way: DDS fourCC = "DX10", DXGI format = 71 (BC1_UNORM)
 // rather than the older fourCC = "DXT1" header. Same block layout,
@@ -52,13 +62,15 @@ const CLASSIC_DXGI: Record<number, { format: number; blockSize: number; sRGB: bo
 };
 
 interface Mip {
-  data: Uint8Array;
+  // Uint8Array for compressed/8-bit paths; Float32Array for the BC6H HDR
+  // ('rgbaf') path where each pixel is 4 float32 (R,G,B,A=1).
+  data: Uint8Array | Float32Array;
   width: number;
   height: number;
 }
 
 export interface ParseSuccess {
-  kind: 'bptc' | 'rgtc' | 'classic' | 'rgba8';
+  kind: 'bptc' | 'rgtc' | 'classic' | 'rgba8' | 'rgbaf';
   format: number;
   mipmaps: Mip[];
   width: number;
@@ -212,6 +224,45 @@ function parseRgtc(buf: ArrayBuffer): ParseSuccess | null {
   if (mipmaps.length === 0) return null;
   return {
     kind: 'rgtc',
+    format: RGBAFormat,
+    mipmaps,
+    width: topW,
+    height: topH,
+  };
+}
+
+// DX10-wrapped BC6H (DXGI 95 UF16 / 96 SF16). Same DDS header layout + mip
+// loop as parseRgtc, but each 4x4 block is 16 bytes and we software-decode it
+// to a Float32 RGBA buffer (HDR; no alpha → A=1). Returned as kind 'rgbaf'
+// for the main thread to wrap in a FloatType DataTexture.
+function parseBc6h(buf: ArrayBuffer, signed: boolean): ParseSuccess | null {
+  const view = new DataView(buf);
+  if (buf.byteLength < 148) return null;
+
+  let height = view.getUint32(12, true);
+  let width = view.getUint32(16, true);
+  const topW = width;
+  const topH = height;
+  const mipCount = Math.max(1, view.getUint32(28, true));
+
+  let offset = 148;
+  const mipmaps: Mip[] = [];
+  for (let i = 0; i < mipCount; i++) {
+    const blockW = Math.max(1, Math.ceil(width / 4));
+    const blockH = Math.max(1, Math.ceil(height / 4));
+    const byteSize = blockW * blockH * 16;
+    if (offset + byteSize > buf.byteLength) break;
+    const blockData = new Uint8Array(buf, offset, byteSize);
+    const rgbaf = decodeBc6hToRgbaFloat(blockData, width, height, signed);
+    mipmaps.push({ data: rgbaf, width, height });
+    offset += byteSize;
+    if (width === 1 && height === 1) break;
+    width = Math.max(1, width >> 1);
+    height = Math.max(1, height >> 1);
+  }
+  if (mipmaps.length === 0) return null;
+  return {
+    kind: 'rgbaf',
     format: RGBAFormat,
     mipmaps,
     width: topW,
@@ -384,15 +435,12 @@ function parseUncompressedRgba8(buf: ArrayBuffer): ParseSuccess | null {
   return { kind: 'rgba8', format: RGBAFormat, mipmaps, width: topW, height: topH };
 }
 
-// DXGI formats the worker recognises but can't decode in software yet.
-// Reported back as a distinct ``ParseSuccess.kind = 'unsupported'`` so
-// callers can downgrade their console message from "malformed" to
-// "format X not implemented" (BC6H HDR particle ramps are the live case
-// — fire_yellow_*_HDR.dds is DXGI 95).
-const UNSUPPORTED_DXGI: Record<number, string> = {
-  95: 'BC6H_UF16',
-  96: 'BC6H_SF16',
-};
+// DXGI formats the worker recognises by name but can't decode in software.
+// Used only by describeFailure to give a precise "format X not implemented"
+// message. BC6H (95/96) was here previously and is now decoded — see
+// parseBc6h / ./bc6h.ts — so the table is currently empty. Kept as the hook
+// for the next unsupported DXGI code we encounter.
+const UNSUPPORTED_DXGI: Record<number, string> = {};
 
 function parse(buf: ArrayBuffer): ParseSuccess | null {
   const view = new DataView(buf);
@@ -403,6 +451,7 @@ function parse(buf: ArrayBuffer): ParseSuccess | null {
     const dxgi = view.getUint32(128, true);
     if (BPTC_DXGI[dxgi]) return parseBptc(buf);
     if (RGTC_DXGI[dxgi]) return parseRgtc(buf);
+    if (BC6H_DXGI[dxgi]) return parseBc6h(buf, BC6H_DXGI[dxgi].signed);
     if (CLASSIC_DXGI[dxgi]) return parseDx10Classic(buf, dxgi);
     return null;
   }
