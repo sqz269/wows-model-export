@@ -664,6 +664,13 @@ interface ParticleMaterialOptions {
   framesRangeEnd?: number;
   /** Animation cycle length in seconds. 0 disables animation. */
   animationPeriod?: number;
+  /** PS_PAT animation type (renderer/animation.animationType). The flipbook
+   *  grid is applied ONLY for ``framesPlayback`` / ``motionVectors``;
+   *  ``noAnimation`` (the engine default) leaves framesPerX/Y/range/period as
+   *  vestigial authoring data and must sample the FULL texture — gridding a
+   *  single-frame sprite (e.g. a logo) crops it to mostly-transparent cells and
+   *  it renders as nothing. Accepts the named or raw ``type_N`` schema form. */
+  animationType?: string;
   /** Manifest-resolved atlas UV rect ``[u0, v0, u1, v1]`` (sidecar's
    *  ``textureAtlas0``). When set, the fragment shader maps the (already
    *  grid-sampled) UV through this rect — composes with the grid rather
@@ -783,6 +790,14 @@ const PS_RLT_LIGHTMAP_MODES = new Set(['lightmapping4Way', 'lightmappingHL2']);
 function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.ShaderMaterial {
   const blend = blendConfigForPsRbt(opts.blendType);
   const rect = opts.atlasRect;
+  // PS_PAT gate: only framesPlayback / motionVectors actually flip through the
+  // framesPerX*Y grid. noAnimation (PS_PAT type_0) keeps the grid fields as
+  // vestigial authoring data — applying the grid then crops a single-frame
+  // sprite into 1/N mostly-transparent cells (a logo renders as nothing). Accept
+  // both the named and raw `type_N` forms; default-on when absent so real
+  // flipbooks never regress.
+  const at = opts.animationType;
+  const gridEnabled = at !== 'noAnimation' && at !== 'type_0';
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       map: { value: null as THREE.Texture | null },
@@ -802,8 +817,8 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       },
       useAtlasRect: { value: rect ? 1 : 0 },
       // Animation grid (framesPerX, framesPerY) + range (begin, end) +
-      // period. The shader skips the grid sample unless framesPerX*Y > 1
-      // AND (end - begin) > 0 AND period > 0.
+      // period. The shader skips the grid sample unless useFrameGrid (PS_PAT
+      // != noAnimation) AND framesPerX*Y > 1 AND (end - begin) > 0 AND period > 0.
       framesPerXY: {
         value: new THREE.Vector2(opts.framesPerX ?? 1, opts.framesPerY ?? 1),
       },
@@ -811,6 +826,9 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         value: new THREE.Vector2(opts.framesRangeBegin ?? 0, opts.framesRangeEnd ?? 0),
       },
       animationPeriod: { value: opts.animationPeriod ?? 0 },
+      // PS_PAT gate (gridEnabled): suppress the flipbook grid for noAnimation
+      // so a single-frame sprite (logo) shows whole instead of a cropped cell.
+      useFrameGrid: { value: gridEnabled ? 1 : 0 },
       // Directional-lightmap (PS_RLT) reconstruction. uLightingMode=1 when
       // the texture is an `_LM` lightmap (lightmapping4Way/HL2); the
       // fragment shader then treats `map` RGB as a 3-direction HL2-basis
@@ -883,6 +901,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform vec2 framesPerXY;
       uniform vec2 frameRange;
       uniform float animationPeriod;
+      uniform float useFrameGrid;
       uniform float uLightingMode;
       uniform vec3 uSunDirWorld;
       uniform sampler2D mvMap;
@@ -903,7 +922,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           float fx = framesPerXY.x;
           float fy = framesPerXY.y;
           float total = frameRange.y - frameRange.x;
-          bool animated = (fx * fy > 1.0 && total > 0.0 && animationPeriod > 0.0);
+          bool animated = (useFrameGrid > 0.5 && fx * fy > 1.0 && total > 0.0 && animationPeriod > 0.0);
           float mvEmissive = 0.0;   // additive emission from _MVEA.R (if on)
 
           if (animated && useMv > 0.5) {
@@ -1156,6 +1175,7 @@ export class ParticleScene {
           framesRangeBegin: anim?.framesRangeBegin,
           framesRangeEnd: anim?.framesRangeEnd,
           animationPeriod: anim?.animationPeriod,
+          animationType: anim?.animationType,
           atlasRect: useAtlas ? r!.textureAtlas0!.rect : undefined,
           useLut,
           motionVectorsDistortion: useMv ? anim?.motionVectorsDistortion : undefined,
