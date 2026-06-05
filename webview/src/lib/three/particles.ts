@@ -128,21 +128,85 @@ function sampleScalarVg(vg: ParticleValueGenerator | undefined, t = 0, fallback 
   }
 }
 
-/** A representative constant from a scalar ``ValueGenerator``, used to fold an
- *  emitter/creator base size into a constant size multiplier: linear →
- *  midpoint, constant → value, ramp → mid-sample, none → fallback. */
-function representativeScalar(vg: ParticleValueGenerator | undefined, fallback = 1): number {
-  if (!vg) return fallback;
-  switch (vg.type) {
-    case 'constant':
-      return vg.value ?? fallback;
-    case 'linear':
-      return ((vg.from ?? 0) + (vg.to ?? vg.from ?? 0)) / 2;
-    case 'ramp':
-      return sampleRamp(vg.ramp, 0.5, fallback);
+/** Per-particle clock state for the PS_VALG_RAMP_PARAMETER axis selection.
+ *  Times are SECONDS; velocity axes are m/s magnitudes; particleIndex is the
+ *  per-particle u8 spawn counter (0..254). RE 2026-06-04 (build 12506899) —
+ *  see memory project-particle-runtime-eval-size-model. */
+interface ParticleClocks {
+  particleAge: number;
+  systemAge: number;
+  systemActiveTime: number;
+  particleSpeed: number;
+  systemSpeed: number;
+  particleIndex: number;
+}
+
+/** PS_VALG_RAMP_PARAMETER → the ramp X axis. The shipped order is
+ *  {0:systemAge,1:particleAge,2:systemVelocity,3:particleVelocity,
+ *  4:systemActiveTime,5:particleIndex}; standalone/unkeyed ramps default to
+ *  particle age. Ramp `.time` is SECONDS of this clock, NOT a normalized
+ *  [0,1] (the prior consumer + spec were wrong on this). */
+function rampAxisX(vg: ParticleValueGenerator, c: ParticleClocks): number {
+  switch (vg.parameterType) {
+    case 'systemAge':
+      return c.systemAge;
+    case 'particleAge':
+      return c.particleAge;
+    case 'systemActiveTime':
+      return c.systemActiveTime;
+    case 'systemVelocity':
+      return c.systemSpeed;
+    case 'particleVelocity':
+      return c.particleSpeed;
+    case 'particleIndex':
+      return c.particleIndex;
     default:
-      return fallback;
+      return c.particleAge;
   }
+}
+
+/** PS_VALG_RAMP_SAMPLING wrap against the ramp's last-key time:
+ *  {0:loop → fmod, 1:pingPong → triangle, 2:once → clamp}. `once`/undefined
+ *  rely on sampleRamp's built-in clamp to [t0, tmax]. */
+function wrapRampAxis(x: number, tmax: number, sampling: string | number | undefined): number {
+  if (!(tmax > 0)) return x;
+  if (sampling === 'loop') {
+    const m = x % tmax;
+    return m < 0 ? m + tmax : m;
+  }
+  if (sampling === 'pingPong') {
+    const period = tmax * 2;
+    let m = x % period;
+    if (m < 0) m += period;
+    return m <= tmax ? m : period - m;
+  }
+  return x; // 'once' / undefined
+}
+
+/** Sample a scalar ValueGenerator on its authored parameterType axis
+ *  (seconds-clock / velocity / particleIndex), wrapped by samplingType. The
+ *  RE-correct replacement for sampling ramps at a normalized [0,1] age.
+ *  ``linear`` is random per call — sample ONCE at spawn for per-particle-fixed
+ *  quantities (e.g. the emitter size base). */
+function sampleGenAxis(
+  vg: ParticleValueGenerator | undefined,
+  c: ParticleClocks,
+  fallback = 0,
+): number {
+  if (!vg) return fallback;
+  if (vg.type === 'constant') return vg.value ?? fallback;
+  if (vg.type === 'linear') {
+    const f = vg.from ?? 0;
+    const t = vg.to ?? f;
+    return f + Math.random() * (t - f);
+  }
+  if (vg.type === 'ramp') {
+    const pts = vg.ramp?.points;
+    if (!pts || pts.length === 0) return fallback;
+    const tmax = pts[pts.length - 1].time;
+    return sampleRamp(vg.ramp, wrapRampAxis(rampAxisX(vg, c), tmax, vg.samplingType), fallback);
+  }
+  return fallback;
 }
 
 /** Pick a random point inside the union of all prototypes in the
@@ -241,10 +305,23 @@ class SystemRenderer {
   // Record-level emission window (seconds). >0 ⇒ one-shot burst that
   // re-bursts after window+maxAge; <=0 ⇒ continuous emitter. See tick().
   private maxEmittingDuration: number;
-  // Constant size base folded out of the emitter/creator sizeGenerator when a
-  // component scaler/resizer (a multiplier) drives the per-frame size. 1 when
-  // the size generator already yields absolute metres. See constructor.
-  private baseSizeScalar = 1;
+  // SIZE model (RE 2026-06-04, build 12506899; memory
+  // project-particle-runtime-eval-size-model). Engine:
+  //   size = emitter.sizeGenerator (BASE, in METRES, per-particle)
+  //        × ageScaleGenerator (per-particle multiplier)
+  //        × Π scaler/resizer.sizeGenerator (per-frame multipliers, own axis)
+  // NO ×15 on size. `psize[i]` caches the per-particle base × ageScale (both
+  // usually linear→random, fixed at spawn); the scaler ramps are evaluated
+  // per-frame on their parameterType axis. The prior code had this INVERTED
+  // (scaler-as-base, sampled at a normalized [0,1] age).
+  private emitterSizeGen: ParticleValueGenerator | undefined;
+  private ageScaleGen: ParticleValueGenerator | undefined;
+  private scalerGens: ParticleValueGenerator[] = [];
+  // dampfer.velocityGenerator — a per-frame drag MULTIPLIER on the velocity's
+  // contribution to position (1.0 → ~0). Undefined = no damping.
+  private dampGen: ParticleValueGenerator | undefined;
+  // Per-system u8 spawn counter → the particleIndex ramp axis (0..254 wrap).
+  private spawnCounter = 0;
   // Creator (PSAT idx=12) — additive secondary burst layer, present on
   // ~12% of corpus systems. When present, the simulator uses creator's
   // VGs for spawning AND its rateRamp for emission. When absent, the
@@ -263,7 +340,6 @@ class SystemRenderer {
   // Per-action driver fields.
   private tintColor: ParticleColor | undefined;
   private alphaRamp: ParticleRamp | undefined;
-  private sizeRampVg: ParticleValueGenerator | undefined;
   private forceX: ParticleValueGenerator | undefined;
   private forceY: ParticleValueGenerator | undefined;
   private forceZ: ParticleValueGenerator | undefined;
@@ -275,6 +351,11 @@ class SystemRenderer {
   private lifetime: Float32Array;
   private colorRGBA: Float32Array;
   private sizeArr: Float32Array;
+  // Per-slot (CPU-only) size base (emitter × ageScale, metres) + the u8
+  // particleIndex counter, both assigned at spawn. Consumed to produce
+  // sizeArr each frame; not packed for the GPU.
+  private psize: Float32Array;
+  private pidx: Float32Array;
   private alive = 0; // count of currently-alive particles
 
   // Reusable scratch buffers for the geometry attributes (we update
@@ -310,6 +391,16 @@ class SystemRenderer {
   private static readonly TMP_POS = new THREE.Vector3();
   private static readonly TMP_VEL = new THREE.Vector3();
   private static readonly TMP_COL = new Float32Array(4);
+  // Reused per-particle clock scratch (mutated in tick/spawn; the per-particle
+  // update loop and the emit/spawn phase run sequentially, never concurrently).
+  private static readonly TMP_CLOCKS: ParticleClocks = {
+    particleAge: 0,
+    systemAge: 0,
+    systemActiveTime: 0,
+    particleSpeed: 0,
+    systemSpeed: 0,
+    particleIndex: 0,
+  };
 
   /** Resolved ShaderMaterial. Owned per-instance so each system can bind
    *  its own DDS map without uniform clobbering between systems. */
@@ -358,7 +449,10 @@ class SystemRenderer {
       } else if (c.action === 'alphaSetter') {
         if (body.ramp) this.alphaRamp = body.ramp as ParticleRamp;
       } else if (c.action === 'scaler' || c.action === 'resizer') {
-        if (body.sizeGenerator) this.sizeRampVg = body.sizeGenerator as ParticleValueGenerator;
+        if (body.sizeGenerator) this.scalerGens.push(body.sizeGenerator as ParticleValueGenerator);
+      } else if (c.action === 'dampfer') {
+        if (body.velocityGenerator)
+          this.dampGen = body.velocityGenerator as ParticleValueGenerator;
       } else if (c.action === 'force') {
         if (body.forceXGenerator) this.forceX = body.forceXGenerator as ParticleValueGenerator;
         if (body.forceYGenerator) this.forceY = body.forceYGenerator as ParticleValueGenerator;
@@ -374,21 +468,13 @@ class SystemRenderer {
     this.emitterPosVg = system.emitter?.initialPositionGenerator;
     this.emitterVelVg = system.emitter?.initialVelocityGenerator;
     this.emitterActivePeriod = Math.max(0, system.emitter?.activePeriod ?? 0);
-    // Size = base × multiplier. WG's scaler/resizer sizeGenerator is a
-    // MULTIPLIER over the emitter/creator base size, not an absolute size.
-    // When a component scaler set this.sizeRampVg AND the emitter carries a
-    // base size, fold the base in as a constant scalar so the puff renders at
-    // its authored metres (~2.5 m for this flak burst) rather than the
-    // multiplier's [0,1] range — the prior code used the [0,1] multiplier as
-    // the absolute size, so puffs rendered ~1 m and lost all texture detail.
-    const emitterSize = system.emitter?.sizeGenerator;
-    if (this.sizeRampVg && emitterSize) {
-      this.baseSizeScalar = representativeScalar(emitterSize, DEFAULT_SIZE_M);
-    } else if (!this.sizeRampVg && emitterSize) {
-      // No component scaler — the emitter generator IS the absolute size.
-      this.sizeRampVg = emitterSize;
-      this.baseSizeScalar = 1;
-    }
+    // SIZE base (RE 2026-06-04): the emitter's sizeGenerator is the per-particle
+    // BASE size in METRES; ageScaleGenerator is a per-particle life multiplier.
+    // Both are typically linear (random) → sampled once at spawn into psize[].
+    // The scaler/resizer ramps (scalerGens, captured above) are the per-frame
+    // multipliers, evaluated on their own parameterType axes in tick(). NO ×15.
+    this.emitterSizeGen = system.emitter?.sizeGenerator;
+    this.ageScaleGen = system.emitter?.ageScaleGenerator;
 
     // Decide whether the alphaSetter ramp is keyed by particle age or
     // system age. Heuristic: if the last keyframe is well past the
@@ -408,6 +494,8 @@ class SystemRenderer {
     this.colorRGBA = new Float32Array(this.capacity * 4);
     this.sizeArr = new Float32Array(this.capacity);
     this.ageGpu = new Float32Array(this.capacity);
+    this.psize = new Float32Array(this.capacity);
+    this.pidx = new Float32Array(this.capacity);
     for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
 
     // Geometry: one vertex per particle. Three.js's `Points` renders
@@ -479,21 +567,31 @@ class SystemRenderer {
         continue;
       }
       const age = this.age[i];
-      const u = age / this.lifetime[i];
-      // Force integration. Forces don't typically use ramps in the
-      // corpus (mostly constants), so the normalised arg is fine.
-      const fx = sampleScalarVg(this.forceX, u, 0);
-      const fy = sampleScalarVg(this.forceY, u, 0);
-      const fz = sampleScalarVg(this.forceZ, u, 0);
-      this.vel[i * 3 + 0] += fx * dt;
-      this.vel[i * 3 + 1] += fy * dt;
-      this.vel[i * 3 + 2] += fz * dt;
-      this.pos[i * 3 + 0] += this.vel[i * 3 + 0] * dt;
-      this.pos[i * 3 + 1] += this.vel[i * 3 + 1] * dt;
-      this.pos[i * 3 + 2] += this.vel[i * 3 + 2] * dt;
-      // Tint + alpha curves drive the color attribute. Tint is keyed
-      // by particle age in seconds. alphaSetter may be particle-age or
-      // system-age — see `alphaSetterIsSystemAge` for the heuristic.
+      // Per-particle clocks for the parameterType axis (RE 2026-06-04): ramps
+      // are sampled on their own clock in SECONDS (or m/s, or the u8 index) —
+      // NOT a normalized [0,1] age.
+      const vx = this.vel[i * 3 + 0];
+      const vy = this.vel[i * 3 + 1];
+      const vz = this.vel[i * 3 + 2];
+      const clocks = SystemRenderer.TMP_CLOCKS;
+      clocks.particleAge = age;
+      clocks.systemAge = this.elapsed;
+      clocks.systemActiveTime =
+        this.emitterActivePeriod > 0 ? this.elapsed % this.emitterActivePeriod : this.elapsed;
+      clocks.particleSpeed = Math.hypot(vx, vy, vz);
+      clocks.systemSpeed = 0;
+      clocks.particleIndex = this.pidx[i];
+      // Force integration (constants ignore the axis; ramps use parameterType).
+      this.vel[i * 3 + 0] += sampleGenAxis(this.forceX, clocks, 0) * dt;
+      this.vel[i * 3 + 1] += sampleGenAxis(this.forceY, clocks, 0) * dt;
+      this.vel[i * 3 + 2] += sampleGenAxis(this.forceZ, clocks, 0) * dt;
+      // dampfer: a per-frame drag multiplier on the velocity's displacement.
+      const damp = this.dampGen ? sampleGenAxis(this.dampGen, clocks, 1) : 1;
+      this.pos[i * 3 + 0] += this.vel[i * 3 + 0] * dt * damp;
+      this.pos[i * 3 + 1] += this.vel[i * 3 + 1] * dt * damp;
+      this.pos[i * 3 + 2] += this.vel[i * 3 + 2] * dt * damp;
+      // Tint (keyed by particle age in seconds) + alphaSetter (its own bespoke
+      // clock — alpha/tint carry no parameterType; see alphaSetterIsSystemAge).
       sampleColor(this.tintColor, age, SystemRenderer.TMP_COL);
       const alphaT = this.alphaSetterIsSystemAge ? this.elapsed : age;
       const alpha = sampleRamp(this.alphaRamp, alphaT, 1) * SystemRenderer.TMP_COL[3];
@@ -501,15 +599,13 @@ class SystemRenderer {
       this.colorRGBA[i * 4 + 1] = SystemRenderer.TMP_COL[1];
       this.colorRGBA[i * 4 + 2] = SystemRenderer.TMP_COL[2];
       this.colorRGBA[i * 4 + 3] = alpha;
-      // Size curve. Most size generators are scaler.sizeGenerator
-      // ramp-by-particleIndex (the data uses a [0,1] axis to spread
-      // sizes across the population). Fall back to the emitter's
-      // generator otherwise — most of those are linear ranges where
-      // the args don't matter.
-      this.sizeArr[i] = Math.max(
-        0.01,
-        sampleScalarVg(this.sizeRampVg, u, DEFAULT_SIZE_M) * this.baseSizeScalar,
-      );
+      // SIZE (RE 2026-06-04): per-particle base (emitter × ageScale, cached in
+      // psize at spawn) × Π scaler multipliers, each on its own axis. Metres.
+      let sz = this.psize[i];
+      for (let s = 0; s < this.scalerGens.length; s++) {
+        sz *= sampleGenAxis(this.scalerGens[s], clocks, 1);
+      }
+      this.sizeArr[i] = Math.max(0, sz);
     }
 
     // Emit from BOTH sources (RE-aligned, 2026-05-29): the always-on emitter
@@ -632,10 +728,27 @@ class SystemRenderer {
     this.colorRGBA[slot * 4 + 1] = SystemRenderer.TMP_COL[1];
     this.colorRGBA[slot * 4 + 2] = SystemRenderer.TMP_COL[2];
     this.colorRGBA[slot * 4 + 3] = alpha;
-    this.sizeArr[slot] = Math.max(
-      0.01,
-      sampleScalarVg(this.sizeRampVg, Math.random(), DEFAULT_SIZE_M) * this.baseSizeScalar,
-    );
+    // Per-particle u8 spawn index (the particleIndex ramp axis) + the cached
+    // size base = emitter.sizeGenerator (METRES) × ageScale, sampled ONCE here
+    // (both are typically linear→random). Scaler multipliers are per-frame.
+    this.pidx[slot] = this.spawnCounter;
+    this.spawnCounter = (this.spawnCounter + 1) & 0xff;
+    const sc = SystemRenderer.TMP_CLOCKS;
+    sc.particleAge = 0;
+    sc.systemAge = this.elapsed;
+    sc.systemActiveTime =
+      this.emitterActivePeriod > 0 ? this.elapsed % this.emitterActivePeriod : this.elapsed;
+    sc.particleSpeed = 0;
+    sc.systemSpeed = 0;
+    sc.particleIndex = this.pidx[slot];
+    const base = sampleGenAxis(this.emitterSizeGen, sc, DEFAULT_SIZE_M);
+    const ageScale = this.ageScaleGen ? sampleGenAxis(this.ageScaleGen, sc, 1) : 1;
+    this.psize[slot] = base * ageScale;
+    let sz0 = this.psize[slot];
+    for (let s = 0; s < this.scalerGens.length; s++) {
+      sz0 *= sampleGenAxis(this.scalerGens[s], sc, 1);
+    }
+    this.sizeArr[slot] = Math.max(0, sz0);
     this.alive++;
   }
 
