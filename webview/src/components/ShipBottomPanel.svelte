@@ -35,8 +35,13 @@
     SidecarDoc,
     Skin,
   } from '$lib/types';
-  import type { PickResult, ShipLoadStats, ShipViewer } from '$lib/ship';
-  import { thicknessToColorHex, hitboxStyleFor } from '$lib/ship';
+  import type { NodeCategory, NodeEntry, PickResult, ShipLoadStats, ShipViewer } from '$lib/ship';
+  import {
+    thicknessToColorHex,
+    hitboxStyleFor,
+    NODE_CATEGORY_LABEL,
+    NODE_CATEGORY_COLOR,
+  } from '$lib/ship';
   import DdsTexturePreview from './DdsTexturePreview.svelte';
 
   export type ShipBottomTab =
@@ -48,6 +53,7 @@
     | 'skins'
     | 'damage'
     | 'textures'
+    | 'nodes'
     | 'pick';
 
   // PBR-read slot order for the Textures tab, matching the AssetDetail
@@ -141,6 +147,7 @@
     'skins',
     'damage',
     'textures',
+    'nodes',
   ];
 
   onMount(() => {
@@ -399,6 +406,46 @@
       hitboxRegionRows.length > 0,
   );
 
+  // ── Nodes tab (WG bones & VFX points) ────────────────────────────────
+  // Full node inventory read off the overlay (accessory bones / hardpoints
+  // / gun-fire anchors from the live scene + hull EP_ points from the
+  // sidecar). Bumped by `revision` so a ship swap re-reads.
+  const nodeRows: readonly NodeEntry[] = $derived.by(() => {
+    void revision;
+    // List the bones / VFX / hardpoints / structural nodes — skip raw
+    // geometry (`mesh`) nodes, which are numerous (thousands) and aren't
+    // "bones". They remain available as overlay markers via the side
+    // panel's "Mesh nodes" category toggle.
+    return (viewer?.getNodeList() ?? []).filter((n) => n.category !== 'mesh');
+  });
+  const hasNodesTab = $derived(nodeRows.length > 0);
+  let nodeFilter = $state('');
+  let pinnedNode = $state<string | null>(null);
+  const filteredNodes = $derived.by(() => {
+    const needle = nodeFilter.trim().toLowerCase();
+    if (!needle) return nodeRows;
+    return nodeRows.filter(
+      (n) =>
+        n.name.toLowerCase().includes(needle) ||
+        n.owner.toLowerCase().includes(needle) ||
+        NODE_CATEGORY_LABEL[n.category].toLowerCase().includes(needle),
+    );
+  });
+  function catSwatchHex(cat: NodeCategory): string {
+    return '#' + NODE_CATEGORY_COLOR[cat].toString(16).padStart(6, '0');
+  }
+  function togglePinNode(name: string) {
+    const next = pinnedNode === name ? null : name;
+    pinnedNode = next;
+    viewer?.pinNode(next);
+  }
+  function frameNode(name: string) {
+    viewer?.frameOnNode(name);
+  }
+  function fmtCoord(n: number): string {
+    return (n >= 0 ? '+' : '') + n.toFixed(2);
+  }
+
   const tabs: Array<{ id: ShipBottomTab; label: string; hide?: boolean; badge?: number }> =
     $derived([
       { id: 'overview', label: 'Overview' },
@@ -414,6 +461,7 @@
       { id: 'skins', label: 'Skins', hide: skins.length <= 1 },
       { id: 'damage', label: 'Damage' },
       { id: 'textures', label: 'Textures', hide: !hasHullTextures },
+      { id: 'nodes', label: 'Nodes', hide: !hasNodesTab },
       { id: 'pick', label: 'Pick', hide: !selectedPick },
     ]);
 
@@ -911,6 +959,73 @@
             {/each}
           </div>
         {/if}
+      {:else if activeTab === 'nodes'}
+        <div class="flex flex-col gap-2">
+          <div class="flex items-center gap-3 text-[11px]">
+            <span class="text-muted-foreground tabular-nums">
+              {filteredNodes.length}/{nodeRows.length} node{nodeRows.length === 1 ? '' : 's'}
+            </span>
+            <input
+              type="text"
+              placeholder="filter by name / owner / type (e.g. EP_Fire, HP_gunFire, Rotate)"
+              bind:value={nodeFilter}
+              class="h-6 flex-1 max-w-[340px] rounded border border-border bg-popover px-1.5 text-[11px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30 focus:border-ring"
+            />
+            <span class="text-muted-foreground/70 text-[10px]">
+              Enable “Bones &amp; VFX” in the side panel to see markers · pin to label in 3D
+            </span>
+          </div>
+          <div class="flex flex-col">
+            <div
+              class="grid grid-cols-[1.6rem_minmax(8rem,1.4fr)_minmax(6rem,1fr)_minmax(9rem,1fr)_auto] gap-x-2 border-b border-border/60 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground"
+            >
+              <span></span>
+              <span>node</span>
+              <span>owner</span>
+              <span>position (m)</span>
+              <span></span>
+            </div>
+            {#each filteredNodes as n, i (i)}
+              {@const isPinned = pinnedNode === n.name}
+              <div
+                class="grid grid-cols-[1.6rem_minmax(8rem,1.4fr)_minmax(6rem,1fr)_minmax(9rem,1fr)_auto] items-center gap-x-2 border-b border-border/30 py-0.5 text-[11px]"
+                class:bg-accent={isPinned}
+              >
+                <span
+                  class="inline-block size-2.5 rounded-full justify-self-center"
+                  style="background:{catSwatchHex(n.category)}"
+                  title={NODE_CATEGORY_LABEL[n.category]}
+                ></span>
+                <code class="font-mono text-foreground truncate" title={n.name}>{n.name}</code>
+                <span class="text-muted-foreground truncate" title={n.owner}>
+                  {n.owner}{n.effectGroup ? ` · ${n.effectGroup}` : ''}
+                </span>
+                <span class="text-muted-foreground tabular-nums text-[10px]">
+                  {fmtCoord(n.position.x)}, {fmtCoord(n.position.y)}, {fmtCoord(n.position.z)}
+                </span>
+                <div class="flex gap-1 justify-self-end">
+                  <button
+                    type="button"
+                    onclick={() => togglePinNode(n.name)}
+                    class="rounded border border-border bg-popover hover:bg-accent px-1.5 py-0.5 text-[10px]"
+                    class:border-primary={isPinned}
+                    title="Pin a labelled marker at this node"
+                  >
+                    {isPinned ? '● pinned' : '○ pin'}
+                  </button>
+                  <button
+                    type="button"
+                    onclick={() => frameNode(n.name)}
+                    class="rounded border border-border bg-popover hover:bg-accent px-1.5 py-0.5 text-[10px]"
+                    title="Move the camera to this node"
+                  >
+                    frame
+                  </button>
+                </div>
+              </div>
+            {/each}
+          </div>
+        </div>
       {:else if activeTab === 'pick'}
         {#if pickInfo}
           <div class="flex flex-col gap-2">

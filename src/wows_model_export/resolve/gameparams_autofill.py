@@ -1995,6 +1995,97 @@ def collect_all_particle_attachments(
     return out
 
 
+def resolve_hull_effect_positions(
+    attachments: list[dict[str, Any]],
+    skel_ext_candidates_json: Path | str | None,
+) -> dict[str, int]:
+    """Stamp a ``position`` (and ``matrix``) onto hull effect attachments.
+
+    Hull VFX nodes (``EP_Fire_1``, ``EP_Death_1``, ``EP_WakeTrace``, …)
+    carry no transform in GameParams nor in the ``.visual`` node tree —
+    they live ONLY in the model's ``<segment>_ep.skel_ext`` files, keyed
+    by ``Murmur3_x86_32(seed=0, "<EP_node_name>")`` (the same hash field
+    the toolkit emits as a candidate's ``p0_hash``). The toolkit already
+    parses every ``.skel_ext`` (incl. the ``_ep`` variants) into
+    ``{ship}_skel_ext.json`` via ``--skel-ext-candidates-json``; this
+    function joins each hull attachment's node name to its candidate by
+    that hash and copies the transform across.
+
+    Frame: the candidate JSON is schema_v1 (``to_metric_glft`` = S·M·S
+    z-mirror + ×15), the SAME frame the hull GLB vertices use, and
+    ``EP_*`` records are parented to ``Scene Root`` — so the candidate
+    ``transform.position`` is already in hull-GLB metric space and is
+    copied verbatim (no extra composition).
+
+    Mutates ``attachments`` in place (only rows whose ``node`` resolves).
+    Returns ``{"hull": <hull rows>, "resolved": <rows stamped>}`` for
+    the caller's log line. A missing / unreadable candidates file, or a
+    sidecar with no ``_ep`` records, is a no-op (returns counts, never
+    raises) — older or ``_ep``-less ships simply keep name-only entries.
+    """
+    # Lazy import: keep the murmur3 dependency out of module import time
+    # and avoid any resolve-package import-order coupling.
+    from .skel_ext_hashes import murmur3_32
+
+    hull_rows = [
+        a for a in attachments
+        if a.get("source") == "hull" or str(a.get("node", "")).startswith("EP_")
+    ]
+    stats = {"hull": len(hull_rows), "resolved": 0}
+    if not hull_rows or not skel_ext_candidates_json:
+        return stats
+    path = Path(skel_ext_candidates_json)
+    if not path.is_file():
+        return stats
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return stats
+    candidates = doc.get("candidates")
+    if not isinstance(candidates, list):
+        return stats
+
+    # Build hash → transform maps from the `_ep` segments. Prefer the base
+    # record block (`record_offset == "0x0"`, the base ship — variant blocks
+    # are per-permoflage, mirroring the decorative resolver's
+    # `keep_record_offsets=("0x0",)` convention); fall back to any `_ep`
+    # record for a name only present in a variant block.
+    base: dict[int, dict[str, Any]] = {}
+    fallback: dict[int, dict[str, Any]] = {}
+    for c in candidates:
+        seg = c.get("segment")
+        if not isinstance(seg, str) or not seg.endswith("_ep"):
+            continue
+        p0 = c.get("p0_hash")
+        if not isinstance(p0, str):
+            continue
+        try:
+            key = int(p0, 16)
+        except ValueError:
+            continue
+        transform = c.get("transform")
+        if not isinstance(transform, dict) or "position" not in transform:
+            continue
+        target = base if c.get("record_offset") == "0x0" else fallback
+        # First writer wins — base block records are emitted in matrix order.
+        target.setdefault(key, transform)
+
+    for a in hull_rows:
+        node = a.get("node")
+        if not isinstance(node, str) or not node:
+            continue
+        h = murmur3_32(node)
+        transform = base.get(h) or fallback.get(h)
+        if transform is None:
+            continue
+        pos = transform.get("position")
+        if isinstance(pos, list) and len(pos) == 3:
+            a["position"] = [float(pos[0]), float(pos[1]), float(pos[2])]
+            stats["resolved"] += 1
+
+    return stats
+
+
 def classify_splash_boxes(
     ship: dict[str, Any],
     components: dict[str, Any] | None = None,

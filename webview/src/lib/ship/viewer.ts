@@ -74,6 +74,7 @@ import {
   prepareHitboxMeshes,
   type HitboxMeshEntry,
 } from './hitbox_view';
+import { NodeOverlay, type NodeCategory, type NodeEntry } from './node_overlay';
 
 /**
  * Info resolved from `userData` on the clicked accessory instance. The
@@ -269,6 +270,12 @@ export class ShipViewer {
   private hitboxEntries: HitboxMeshEntry[] | null = null;
   private hitboxViewEnabled = false;
 
+  // WG-authored bones & VFX-points overlay. Lives in the scene from
+  // construction (like the accessory viewer's rig overlay); rebuilt per
+  // ship from the live scene graph + the sidecar's hull EP_ positions.
+  private nodeOverlay = new NodeOverlay();
+  private removeNodeHover: (() => void) | null = null;
+
   // Texture pipeline
   private textures: TextureManager;
 
@@ -293,6 +300,7 @@ export class ShipViewer {
     this.shipRoot = new THREE.Group();
     this.shipRoot.name = 'Ship';
     this.env.scene.add(this.shipRoot);
+    this.env.scene.add(this.nodeOverlay.group);
 
     this.sectionGroups = Object.fromEntries(
       SHIP_SECTIONS.map((k) => {
@@ -331,6 +339,19 @@ export class ShipViewer {
     if (typeof window !== 'undefined') {
       (window as unknown as { __wowsShipViewer__?: unknown }).__wowsShipViewer__ = this;
     }
+
+    // Hover labels for the node overlay. Only does work while the overlay
+    // is visible (pickAt short-circuits otherwise); a single transient
+    // sprite tracks the nearest marker to the cursor.
+    const canvas = this.env.renderer.domElement;
+    const onMove = (e: PointerEvent) => {
+      if (!this.nodeOverlay.isVisible()) return;
+      const rect = canvas.getBoundingClientRect();
+      const hit = this.nodeOverlay.pickAt(e.clientX, e.clientY, this.env.camera, rect);
+      this.nodeOverlay.setHover(hit?.entry ?? null);
+    };
+    canvas.addEventListener('pointermove', onMove);
+    this.removeNodeHover = () => canvas.removeEventListener('pointermove', onMove);
   }
 
   // ── Public API ────────────────────────────────────────────────────────
@@ -690,6 +711,12 @@ export class ShipViewer {
     // Apply current visibility state across hull + cascaded placements.
     this.applyAllStates();
 
+    // Build the WG bones / VFX-points overlay from the freshly-composed
+    // scene graph (accessory bones + hardpoints + gun-fire anchors) plus
+    // the sidecar's resolved hull EP_ positions. Markers stay hidden until
+    // the user enables the overlay.
+    this.nodeOverlay.rebuild(this.shipRoot, this.sidecar?.effects?.attachments ?? null);
+
     const loadMs = performance.now() - t0;
     report(`Loaded in ${(loadMs / 1000).toFixed(1)}s.`);
 
@@ -754,6 +781,7 @@ export class ShipViewer {
     this.textures.clearShip();
     this.attachedDocCache.clear();
     this.turretRigs.clear();
+    this.nodeOverlay.clear();
     this.sidecar = null;
     this.hullBaseUrl = null;
   }
@@ -897,6 +925,74 @@ export class ShipViewer {
 
   getHitboxViewEnabled(): boolean {
     return this.hitboxViewEnabled;
+  }
+
+  // ── Bones & VFX-points overlay ────────────────────────────────────────
+
+  /** True when the loaded ship has any overlay node (always true once a
+   *  ship with accessories is loaded; gates the control panel section). */
+  hasNodeData(): boolean {
+    return this.nodeOverlay.getNodes().length > 0;
+  }
+
+  /** Toggle the whole WG bones / VFX-points overlay. */
+  setNodesView(on: boolean): void {
+    this.nodeOverlay.setVisible(on);
+  }
+
+  getNodesViewEnabled(): boolean {
+    return this.nodeOverlay.isVisible();
+  }
+
+  setNodeCategoryVisible(cat: NodeCategory, on: boolean): void {
+    this.nodeOverlay.setCategoryVisible(cat, on);
+  }
+
+  getNodeCategoryVisible(cat: NodeCategory): boolean {
+    return this.nodeOverlay.getCategoryVisible(cat);
+  }
+
+  /** Per-category marker counts for the legend / control panel. */
+  getNodeCounts(): Record<NodeCategory, number> {
+    return this.nodeOverlay.getCounts();
+  }
+
+  /** Full node inventory for the bottom-panel list. */
+  getNodeList(): readonly NodeEntry[] {
+    return this.nodeOverlay.getNodes();
+  }
+
+  /** Pin a persistent marker + label at the named node (or clear with
+   *  null). Enabling the overlay first if needed so the pin is visible. */
+  pinNode(name: string | null): void {
+    if (name && !this.nodeOverlay.isVisible()) this.nodeOverlay.setVisible(true);
+    this.nodeOverlay.pin(name);
+  }
+
+  /** Drop the camera onto the named node's position (keeps current view
+   *  direction; pulls back a fixed distance so a single point still
+   *  frames sensibly). No-op for an unknown name. */
+  frameOnNode(name: string): void {
+    const entry = this.nodeOverlay.getNodes().find((e) => e.name === name);
+    if (!entry) return;
+    const center = new THREE.Vector3(entry.position.x, entry.position.y, entry.position.z);
+    const dir = new THREE.Vector3()
+      .subVectors(this.env.camera.position, this.env.controls.target)
+      .normalize();
+    if (dir.lengthSq() < 1e-6) dir.set(1, 0.6, 1).normalize();
+    this.env.controls.target.copy(center);
+    this.env.camera.position.copy(center).addScaledVector(dir, 30);
+    this.env.controls.update();
+  }
+
+  getPinnedNode(): string | null {
+    return this.nodeOverlay.getPinned();
+  }
+
+  /** Re-capture accessory marker positions (e.g. after the user aims the
+   *  turrets). Hull EP_ points are static. */
+  refreshNodes(): void {
+    this.nodeOverlay.refresh(this.shipRoot, this.sidecar?.effects?.attachments ?? null);
   }
 
   setLodPolicy(p: LodPolicy): void {
@@ -1177,6 +1273,8 @@ export class ShipViewer {
   async dispose(): Promise<void> {
     this.stopLoop();
     this.stopResize();
+    this.removeNodeHover?.();
+    this.nodeOverlay.dispose();
     this.clearShip();
     this.textures.dispose();
     await this.accessoryCache.dispose();
