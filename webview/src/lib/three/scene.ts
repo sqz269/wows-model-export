@@ -6,9 +6,10 @@
 // render *something*, but no domain-specific geometry. Callers append
 // their own groups to `scene` and call `dispose()` when done.
 //
-// Optional post-FX (currently UnrealBloomPass + OutputPass) are built
-// lazily on first `setBloomEnabled(true)` — viewers that never enable
-// bloom don't pay the render-target cost.
+// The composer is the ALWAYS-ON render path: RenderPass -> UnrealBloomPass
+// (toggled) -> GT (Uchimura) tonemap pass. The GT pass replaces Three's
+// built-in tonemapper (renderer.toneMapping = NoToneMapping) to match WG's
+// Gran-Turismo tonemap curve — see reference/engine/wg_render_hdr_tonemap.md.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -16,7 +17,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 
 export interface BloomParams {
   /** Overall bloom contribution (UnrealBloomPass.strength). */
@@ -31,6 +32,93 @@ export const DEFAULT_BLOOM_PARAMS: BloomParams = {
   strength: 0.6,
   radius: 0.35,
   threshold: 0.75,
+};
+
+/** GT (Uchimura "Gran Turismo") tonemap curve parameters. Seeded from WG's
+ *  `14_Atlantic` / Default `space.ubersettings` (HDR/Tonemapping). `exposure`
+ *  is the keyed-exposure multiplier (WG: `middleGray / avgLum * 2^offset`;
+ *  with the static `avgLum ≈ middleGray` approximation this reduces to
+ *  `2^hdrMapExposureOffset`). Uchimura `P` (max display brightness) and `b`
+ *  (pedestal) are fixed at 1 / 0 — WG does not author them. See
+ *  reference/engine/wg_render_hdr_tonemap.md. */
+export interface GTTonemapParams {
+  /** keyed exposure multiplier applied before the curve (linear space). */
+  exposure: number;
+  /** `a` — gtContrast. */
+  contrast: number;
+  /** `m` — gtLinearSectionStart. */
+  linearStart: number;
+  /** `l` — gtLinearSectionLength. */
+  linearLength: number;
+  /** `c` — gtBlack (toe tightness). */
+  black: number;
+}
+
+export const DEFAULT_TONEMAP_PARAMS: GTTonemapParams = {
+  exposure: 1.1,
+  contrast: 0.7,
+  linearStart: 0.5,
+  linearLength: 0.0,
+  black: 1.21,
+};
+
+// Uchimura GT tonemap (GDC 2017) + sRGB OETF as an EffectComposer ShaderPass.
+// Input is linear scene radiance (RenderPass renders into a linear HDR target
+// with Three's tonemapper disabled); output is display-encoded sRGB written
+// straight to the canvas. Replaces OutputPass.
+const GTTonemapShader = {
+  name: 'GTTonemapShader',
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    uExposure: { value: DEFAULT_TONEMAP_PARAMS.exposure },
+    uContrast: { value: DEFAULT_TONEMAP_PARAMS.contrast },
+    uLinearStart: { value: DEFAULT_TONEMAP_PARAMS.linearStart },
+    uLinearLength: { value: DEFAULT_TONEMAP_PARAMS.linearLength },
+    uBlack: { value: DEFAULT_TONEMAP_PARAMS.black },
+    uMaxBright: { value: 1.0 }, // Uchimura P (fixed)
+    uPedestal: { value: 0.0 }, // Uchimura b (fixed)
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    varying vec2 vUv;
+    uniform sampler2D tDiffuse;
+    uniform float uExposure, uContrast, uLinearStart, uLinearLength, uBlack, uMaxBright, uPedestal;
+
+    // Uchimura "Gran Turismo" curve. x is linear scene-referred; returns [0,P].
+    float uchimura(float x) {
+      float P = uMaxBright, a = uContrast, m = uLinearStart, l = uLinearLength, c = uBlack, b = uPedestal;
+      float l0 = ((P - m) * l) / a;
+      float S0 = m + l0;
+      float S1 = m + a * l0;
+      float C2 = (a * P) / (P - S1);
+      float CP = -C2 / P;
+      float w0 = 1.0 - smoothstep(0.0, m, x);
+      float w2 = step(m + l0, x);
+      float w1 = 1.0 - w0 - w2;
+      float T = m * pow(x / m, c) + b;             // toe
+      float S = P - (P - S1) * exp(CP * (x - S0)); // shoulder
+      float L = m + a * (x - m);                   // linear
+      return T * w0 + L * w1 + S * w2;
+    }
+
+    vec3 linearToSRGB(vec3 c) {
+      c = clamp(c, 0.0, 1.0);
+      return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+    }
+
+    void main() {
+      vec4 texel = texture2D(tDiffuse, vUv);
+      vec3 c = max(texel.rgb, 0.0) * uExposure;               // keyed exposure
+      c = vec3(uchimura(c.r), uchimura(c.g), uchimura(c.b));   // GT curve (linear)
+      gl_FragColor = vec4(linearToSRGB(c), texel.a);          // sRGB OETF
+    }
+  `,
 };
 
 export interface SceneEnvironment {
@@ -52,6 +140,9 @@ export interface SceneEnvironment {
   setBloomParams(p: Partial<BloomParams>): void;
   isBloomEnabled(): boolean;
   getBloomParams(): Readonly<BloomParams>;
+  /** Patch any subset of the GT tonemap params (curve + keyed exposure);
+   *  missing keys keep their current value. */
+  setTonemapParams(p: Partial<GTTonemapParams>): void;
   /** Forwarded by the resize observer so the composer stays in sync. */
   setSize(width: number, height: number): void;
   /** Replace the scene background color (e.g. to switch a particle
@@ -77,8 +168,10 @@ export interface SceneOptions {
   gridDivisions?: number;
   /** Axes helper size (default: 10). */
   axesSize?: number;
-  /** Tone mapping exposure (default: 1.1). */
+  /** Keyed-exposure multiplier for the GT tonemap pass (default: 1.1). */
   exposure?: number;
+  /** Override GT tonemap curve params (default: WG 14_Atlantic / Default). */
+  tonemap?: Partial<GTTonemapParams>;
 }
 
 export function createSceneEnvironment(
@@ -96,6 +189,14 @@ export function createSceneEnvironment(
     exposure = 1.1,
   } = opts;
 
+  // GT tonemap curve + keyed exposure (seeded from WG 14_Atlantic / Default;
+  // override via opts.tonemap or env.setTonemapParams()).
+  const tonemapParams: GTTonemapParams = {
+    ...DEFAULT_TONEMAP_PARAMS,
+    exposure,
+    ...(opts.tonemap ?? {}),
+  };
+
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(background);
 
@@ -105,8 +206,10 @@ export function createSceneEnvironment(
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = exposure;
+  // The GT (Uchimura) tonemap runs in the composer's final pass, so disable
+  // Three's built-in tonemapper to avoid double-tonemapping. (Was ACESFilmic
+  // — the wrong curve for WG; see wg_render_hdr_tonemap.md.)
+  renderer.toneMapping = THREE.NoToneMapping;
   container.appendChild(renderer.domElement);
 
   const controls = new OrbitControls(camera, renderer.domElement);
@@ -134,17 +237,28 @@ export function createSceneEnvironment(
   const axes = new THREE.AxesHelper(axesSize);
   scene.add(grid, axes);
 
-  // ── Post-FX (lazy) ────────────────────────────────────────────────
-  // Composer + UnrealBloomPass + OutputPass are built on first
-  // setBloomEnabled(true). Viewers that never use bloom skip the cost
-  // entirely. Current params + enabled flag are tracked here so the
-  // viewer can call setBloomParams *before* enabling without losing
-  // the values.
+  // ── Post-FX (always-on composer) ──────────────────────────────────
+  // The composer is the SOLE render path: RenderPass -> UnrealBloomPass
+  // (enabled-toggled) -> GTTonemapPass (renderToScreen). The GT pass owns
+  // exposure + the Uchimura curve + the sRGB OETF, replacing OutputPass and
+  // Three's built-in (disabled) tonemapper. Built lazily on first render()
+  // so the canvas size is known; bloom toggles via bloomPass.enabled.
   let bloomEnabled = false;
   const bloomParams: BloomParams = { ...DEFAULT_BLOOM_PARAMS };
   let composer: EffectComposer | null = null;
   let bloomPass: UnrealBloomPass | null = null;
+  let gtPass: ShaderPass | null = null;
   let lastSize = { w: 1, h: 1 };
+
+  const applyTonemapParams = () => {
+    if (!gtPass) return;
+    const u = gtPass.uniforms;
+    u.uExposure.value = tonemapParams.exposure;
+    u.uContrast.value = tonemapParams.contrast;
+    u.uLinearStart.value = tonemapParams.linearStart;
+    u.uLinearLength.value = tonemapParams.linearLength;
+    u.uBlack.value = tonemapParams.black;
+  };
 
   const buildComposer = () => {
     if (composer) return;
@@ -165,11 +279,15 @@ export function createSceneEnvironment(
       bloomParams.radius,
       bloomParams.threshold,
     );
+    bloomPass.enabled = bloomEnabled;
     composer.addPass(bloomPass);
-    // OutputPass applies tone mapping + sRGB conversion in the composer
-    // path; without it the composer output is linear and looks washed-out
-    // since RenderPass renders into a linear half-float target.
-    composer.addPass(new OutputPass());
+    // GT (Uchimura) tonemap + sRGB OETF — final, screen-bound pass. The
+    // scene reaches it as linear HDR (Three's tonemapper is disabled), so
+    // this pass alone owns the color transform. Replaces OutputPass.
+    gtPass = new ShaderPass(GTTonemapShader);
+    gtPass.renderToScreen = true;
+    composer.addPass(gtPass);
+    applyTonemapParams();
   };
 
   const applyBloomParams = () => {
@@ -188,15 +306,13 @@ export function createSceneEnvironment(
     grid,
     axes,
     render() {
-      if (bloomEnabled && composer) {
-        composer.render();
-      } else {
-        renderer.render(scene, camera);
-      }
+      if (!composer) buildComposer();
+      composer!.render();
     },
     setBloomEnabled(on: boolean) {
-      if (on && !composer) buildComposer();
       bloomEnabled = on;
+      if (!composer) buildComposer();
+      if (bloomPass) bloomPass.enabled = on;
     },
     setBloomParams(p: Partial<BloomParams>) {
       if (p.strength !== undefined) bloomParams.strength = p.strength;
@@ -209,6 +325,14 @@ export function createSceneEnvironment(
     },
     getBloomParams() {
       return bloomParams;
+    },
+    setTonemapParams(p: Partial<GTTonemapParams>) {
+      if (p.exposure !== undefined) tonemapParams.exposure = p.exposure;
+      if (p.contrast !== undefined) tonemapParams.contrast = p.contrast;
+      if (p.linearStart !== undefined) tonemapParams.linearStart = p.linearStart;
+      if (p.linearLength !== undefined) tonemapParams.linearLength = p.linearLength;
+      if (p.black !== undefined) tonemapParams.black = p.black;
+      applyTonemapParams();
     },
     setSize(w: number, h: number) {
       lastSize = { w, h };
@@ -235,6 +359,7 @@ export function createSceneEnvironment(
       composer?.dispose();
       composer = null;
       bloomPass = null;
+      gtPass = null;
       renderer.dispose();
       if (renderer.domElement.parentElement === container) {
         container.removeChild(renderer.domElement);
