@@ -372,6 +372,15 @@ class SystemRenderer {
    *  source). */
   private ageGpu: Float32Array;
   private ageAttr: THREE.BufferAttribute;
+  /** Per-particle random atlas cell (H5, RE doc 63). Assigned once at spawn
+   *  = floor(rand() * framesRangeEnd); the fragment shader reads it via the
+   *  `frameSeed` vertex attribute when `uRandomFrame` is set, freezing each
+   *  particle on one cell. Packed to the front like ``ageGpu``. */
+  private frameSeed: Float32Array;
+  private frameSeedAttr: THREE.BufferAttribute;
+  /** Number of cells a randomFrameOnly particle can land on (framesRangeEnd,
+   *  falling back to framesPerX*framesPerY). 0 ⇒ feature inert. */
+  private framesRangeEnd = 0;
 
   // Fractional-particle accumulators, one per emission source. RE
   // (2026-05-29): the always-on emitter.rateGenerator is the PRIMARY source
@@ -478,6 +487,13 @@ class SystemRenderer {
     // multipliers, evaluated on their own parameterType axes in tick(). NO ×15.
     this.emitterSizeGen = system.emitter?.sizeGenerator;
     this.ageScaleGen = system.emitter?.ageScaleGenerator;
+    // H5 random-cell cap: the count of frames a randomFrameOnly particle can
+    // land on. Engine seeds the frame byte in [0, framesRangeEnd); fall back
+    // to the full grid when the range wasn't authored.
+    const anim = system.animation;
+    const fx = anim?.framesPerX ?? 1;
+    const fy = anim?.framesPerY ?? 1;
+    this.framesRangeEnd = Math.max(0, anim?.framesRangeEnd ?? fx * fy);
 
     // Decide whether the alphaSetter ramp is keyed by particle age or
     // system age. Heuristic: if the last keyframe is well past the
@@ -497,6 +513,7 @@ class SystemRenderer {
     this.colorRGBA = new Float32Array(this.capacity * 4);
     this.sizeArr = new Float32Array(this.capacity);
     this.ageGpu = new Float32Array(this.capacity);
+    this.frameSeed = new Float32Array(this.capacity);
     this.psize = new Float32Array(this.capacity);
     this.pidx = new Float32Array(this.capacity);
     for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
@@ -513,10 +530,13 @@ class SystemRenderer {
     this.sizeAttr.setUsage(THREE.DynamicDrawUsage);
     this.ageAttr = new THREE.BufferAttribute(this.ageGpu, 1);
     this.ageAttr.setUsage(THREE.DynamicDrawUsage);
+    this.frameSeedAttr = new THREE.BufferAttribute(this.frameSeed, 1);
+    this.frameSeedAttr.setUsage(THREE.DynamicDrawUsage);
     geom.setAttribute('position', this.posAttr);
     geom.setAttribute('color', this.colorAttr);
     geom.setAttribute('size', this.sizeAttr);
     geom.setAttribute('age', this.ageAttr);
+    geom.setAttribute('frameSeed', this.frameSeedAttr);
     geom.setDrawRange(0, 0);
     this.points = new THREE.Points(geom, material);
     this.points.frustumCulled = false;
@@ -694,6 +714,7 @@ class SystemRenderer {
         this.colorRGBA[writeIdx * 4 + 2] = this.colorRGBA[i * 4 + 2];
         this.colorRGBA[writeIdx * 4 + 3] = this.colorRGBA[i * 4 + 3];
         this.sizeArr[writeIdx] = this.sizeArr[i];
+        this.frameSeed[writeIdx] = this.frameSeed[i];
       }
       this.ageGpu[writeIdx] = this.age[i];
       writeIdx++;
@@ -703,6 +724,7 @@ class SystemRenderer {
     this.colorAttr.needsUpdate = true;
     this.sizeAttr.needsUpdate = true;
     this.ageAttr.needsUpdate = true;
+    this.frameSeedAttr.needsUpdate = true;
   }
 
   /** Pre-fill the ring buffer to the engine's frame-1 density: run STEPS
@@ -776,6 +798,11 @@ class SystemRenderer {
     // (both are typically linear→random). Scaler multipliers are per-frame.
     this.pidx[slot] = this.spawnCounter;
     this.spawnCounter = (this.spawnCounter + 1) & 0xff;
+    // H5 (RE doc 63): pick this particle's fixed random atlas cell once, in
+    // [0, framesRangeEnd). The fragment shader reads it via `frameSeed` only
+    // when uRandomFrame is set; harmless to assign unconditionally.
+    this.frameSeed[slot] =
+      this.framesRangeEnd > 0 ? Math.floor(Math.random() * this.framesRangeEnd) : 0;
     const sc = SystemRenderer.TMP_CLOCKS;
     sc.particleAge = 0;
     sc.systemAge = this.elapsed;
@@ -856,6 +883,18 @@ interface ParticleMaterialOptions {
   /** animation.useEmissionAlphaFromMV — when set, the `_MVEA` texture's R
    *  channel drives emission and its A channel drives opacity. */
   useEmissionAlphaFromMV?: boolean;
+  /** animation.randomFrameOnly — when set, each particle shows ONE fixed
+   *  random atlas cell for its whole life (no flipbook). Engine
+   *  FUN_14071b7f0 @0x14071c5b6 leaves the spawn-seeded random frame byte
+   *  and skips the integral/modulus (RE doc 63 H5). The cell is chosen
+   *  per-particle at spawn via the `frameSeed` vertex attribute. */
+  randomFrameOnly?: boolean;
+  /** animation.frameRateRamp — a ramp of frames-per-second over particle
+   *  age (RE doc 63 L1). The GPU only has `vAge`, so buildParticleMaterial
+   *  collapses the ramp to a representative constant `frameRate` (mean of
+   *  the point values) and the shader uses `frame = floor(vAge*frameRate)`.
+   *  Full per-particle integration is out of scope. */
+  frameRateRamp?: ParticleRamp;
 }
 
 /**
@@ -957,6 +996,26 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
   // flipbooks never regress.
   const at = opts.animationType;
   const gridEnabled = at !== 'noAnimation' && at !== 'type_0';
+  // L1 (RE doc 63): the engine drives the flipbook from `frameRateRamp`
+  // (fps over particle age, trapezoid-integrated), NOT `animationPeriod`.
+  // The GPU only has vAge, so collapse the ramp to a representative
+  // constant rate (mean of its point values; fall back to the first value)
+  // and use `frame = floor(vAge * frameRate)` in the shader. A non-ramp /
+  // missing curve leaves frameRate=0 → the `animated` gate stays off, so a
+  // static grid still shows cell 0 (H4) rather than freezing on frame 0.
+  let frameRate = 0;
+  const rrPts = opts.frameRateRamp?.points;
+  if (rrPts && rrPts.length > 0) {
+    let acc = 0;
+    for (const p of rrPts) acc += p.value;
+    frameRate = acc / rrPts.length;
+  }
+  // L2: the engine wraps the frame by `framesRangeEnd` then adds
+  // `framesRangeBegin` (@0x14071c5ee IDIV [framesRangeEnd]; ADD [framesRangeBegin]).
+  // Carry both raw bounds to the shader so the cell math matches; the old
+  // (end - begin) modulus was wrong.
+  const framesBegin = opts.framesRangeBegin ?? 0;
+  const framesEnd = opts.framesRangeEnd ?? 0;
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       map: { value: null as THREE.Texture | null },
@@ -982,12 +1041,27 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         value: new THREE.Vector2(opts.framesPerX ?? 1, opts.framesPerY ?? 1),
       },
       frameRange: {
-        value: new THREE.Vector2(opts.framesRangeBegin ?? 0, opts.framesRangeEnd ?? 0),
+        value: new THREE.Vector2(framesBegin, framesEnd),
       },
+      // L1/L2/L4 (RE doc 63): authored frame rate (fps, collapsed from
+      // frameRateRamp) + the raw range bounds. The shader uses
+      // `cell = mod(floor(vAge*uFrameRate), uFramesEnd) + uFramesBegin`,
+      // cross-fading by fract(vAge*uFrameRate). `animationPeriod` is never
+      // read by the engine; the uniform is kept (unused) so the option type
+      // stays stable.
+      uFrameRate: { value: frameRate },
+      uFramesBegin: { value: framesBegin },
+      uFramesEnd: { value: framesEnd },
+      // L4: now-unused (engine never loads animationPeriod). Retained so the
+      // option type and any external callers don't break.
       animationPeriod: { value: opts.animationPeriod ?? 0 },
       // PS_PAT gate (gridEnabled): suppress the flipbook grid for noAnimation
       // so a single-frame sprite (logo) shows whole instead of a cropped cell.
       useFrameGrid: { value: gridEnabled ? 1 : 0 },
+      // H5 (RE doc 63): randomFrameOnly → each particle shows one fixed
+      // random cell (selected from the per-particle `frameSeed` attribute),
+      // no time advance. Takes precedence over the animated flipbook.
+      uRandomFrame: { value: opts.randomFrameOnly ? 1 : 0 },
       // Directional-lightmap (PS_RLT) reconstruction. uLightingMode=1 when
       // the texture is an `_LM` lightmap (lightmapping4Way/HL2); the
       // fragment shader then treats `map` RGB as a 3-direction HL2-basis
@@ -997,6 +1071,11 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uLightingMode: {
         value: PS_RLT_LIGHTMAP_MODES.has(opts.lightingType ?? '') ? 1 : 0,
       },
+      // TODO M2/H7 (RE doc 63): replace the hard-coded sun dir/scalar with the
+      // live scene DirectionalLight (scene.ts:125-126) world direction + a
+      // sunColor/(luma+1) vec3 in place of uSmokeLightScale. No-op today: the
+      // scene sun is exactly (50,80,50), white — so this constant IS correct.
+      // Wiring a live per-frame uniform across scene.ts isn't worth it yet.
       uSunDirWorld: { value: new THREE.Vector3(50, 80, 50).normalize() },
       // Motion-vector flipbook blending (`_MVEA`). useMv is flipped to 1 by
       // bindMvTexture once the MV DDS loads; the shader then samples two
@@ -1025,6 +1104,14 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uPremultiply: {
         value: PS_RBT_LUT_MODES.has(opts.blendType ?? '') ? 1 : 0,
       },
+      // DEFORM_WATER_SURFACE / SHIMMER are screen-space distortion passes whose
+      // tex0 is a normal/deform map (not albedo) — we can't do the refraction,
+      // so render a faint white foam/haze hint rather than the raw blue deform
+      // texture as colour (RE doc 63 H3/M1; see the fragment shader).
+      uDistortion: {
+        value:
+          opts.blendType === 'DEFORM_WATER_SURFACE' || opts.blendType === 'SHIMMER' ? 1 : 0,
+      },
       // Warm "detonation glow" strength for the lightmapping + GRADIENT_MAP
       // path. RE (DXBC) shows the engine pins the ramp lookup to U=0 (the
       // ramp's brightest texel) in lightmapping mode and adds it as an
@@ -1038,12 +1125,15 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       attribute vec4 color;
       attribute float size;
       attribute float age;
+      attribute float frameSeed;
       varying vec4 vColor;
       varying float vAge;
+      varying float vFrameSeed;
 
       void main() {
         vColor = color;
         vAge = age;
+        vFrameSeed = frameSeed;
         vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * mvPosition;
         // size is metres (world space); divide by distance for perspective.
@@ -1059,8 +1149,12 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float useAtlasRect;
       uniform vec2 framesPerXY;
       uniform vec2 frameRange;
+      uniform float uFrameRate;
+      uniform float uFramesBegin;
+      uniform float uFramesEnd;
       uniform float animationPeriod;
       uniform float useFrameGrid;
+      uniform float uRandomFrame;
       uniform float uLightingMode;
       uniform vec3 uSunDirWorld;
       uniform sampler2D mvMap;
@@ -1068,10 +1162,12 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float mvDistortion;
       uniform float useEmissionAlphaFromMV;
       uniform float uPremultiply;
+      uniform float uDistortion;
       uniform float uGlowStrength;
       uniform float uSmokeLightScale;
       varying vec4 vColor;
       varying float vAge;
+      varying float vFrameSeed;
 
       void main() {
         vec4 base;
@@ -1080,11 +1176,24 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           vec2 local = gl_PointCoord;
           float fx = framesPerXY.x;
           float fy = framesPerXY.y;
-          float total = frameRange.y - frameRange.x;
-          bool animated = (useFrameGrid > 0.5 && fx * fy > 1.0 && total > 0.0 && animationPeriod > 0.0);
+          // L4 (RE doc 63): the engine never reads animationPeriod. Gate the
+          // flipbook on a real authored frame rate + range end instead.
+          bool hasGrid = (useFrameGrid > 0.5 && fx * fy > 1.0);
+          bool animated = (hasGrid && uFramesEnd > 0.0 && uFrameRate > 0.0);
+          // H5 (RE doc 63): a randomFrameOnly system is NOT animated — each
+          // particle freezes on its spawn-seeded cell. Takes precedence.
+          bool randomCell = (hasGrid && uRandomFrame > 0.5);
           float mvEmissive = 0.0;   // additive emission from _MVEA.R (if on)
 
-          if (animated && useMv > 0.5) {
+          if (randomCell) {
+            // Fixed per-particle random cell (no time advance, no cross-fade).
+            // vFrameSeed was assigned floor(rand()*framesRangeEnd) at spawn.
+            vec2 puv = (vec2(mod(vFrameSeed, fx), floor(vFrameSeed / fx)) + local) / vec2(fx, fy);
+            if (useAtlasRect > 0.5) {
+              puv = mix(atlasRect.xy, atlasRect.zw, puv);
+            }
+            base = texture2D(map, puv);
+          } else if (animated && useMv > 0.5) {
             // Motion-vector flipbook blend (WG _MVEA): sample the two
             // adjacent frames, warp each along the per-pixel optical-flow
             // field stored in the MV texture's (G,B) channels, and cross-
@@ -1092,11 +1201,14 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             // mvDistortion scales the warp. RE'd instruction-for-instruction
             // from particles.win.dx11.fxo (20 motion-vector PS permutations,
             // identical math). Replaces the hard age-driven frame step.
-            float fps = total / animationPeriod;
-            float idxF = mod(vAge * fps, total);
+            // L1/L2: frame law is now frameRate-driven and wrapped by
+            // framesRangeEnd + framesRangeBegin (was period-driven, wrapped by
+            // end-begin). The MV warp/cross-fade is unchanged.
+            float idxF = vAge * uFrameRate;
             float f = fract(idxF);
-            float n0 = floor(idxF) + frameRange.x;
-            float n1 = mod(floor(idxF) + 1.0, total) + frameRange.x;
+            float fl = floor(idxF);
+            float n0 = mod(fl, uFramesEnd) + uFramesBegin;
+            float n1 = mod(fl + 1.0, uFramesEnd) + uFramesBegin;
             vec2 grid = vec2(fx, fy);
             vec2 cell0 = (vec2(mod(n0, fx), floor(n0 / fx)) + local) / grid;
             vec2 cell1 = (vec2(mod(n1, fx), floor(n1 / fx)) + local) / grid;
@@ -1116,19 +1228,33 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
               base.a = mix(e0.a, e1.a, f);
               mvEmissive = mix(e0.r, e1.r, f);
             }
+          } else if (animated) {
+            // Age-driven flipbook (framesPlayback / no MV texture), composed
+            // with the manifest atlas-rect mapping when present. L1/L2: frame
+            // = floor(vAge*frameRate) mod framesRangeEnd + framesRangeBegin.
+            // L3: cross-fade the floored cell into the next by fract(vAge*rate)
+            // (the engine writes blend byte +0x7d = frac*255 for any nonzero
+            // animationType — the prior non-MV branch hard-popped).
+            float idxF = vAge * uFrameRate;
+            float f = fract(idxF);
+            float fl = floor(idxF);
+            float n0 = mod(fl, uFramesEnd) + uFramesBegin;
+            float n1 = mod(fl + 1.0, uFramesEnd) + uFramesBegin;
+            vec2 grid = vec2(fx, fy);
+            vec2 puv0 = (vec2(mod(n0, fx), floor(n0 / fx)) + local) / grid;
+            vec2 puv1 = (vec2(mod(n1, fx), floor(n1 / fx)) + local) / grid;
+            if (useAtlasRect > 0.5) {
+              puv0 = mix(atlasRect.xy, atlasRect.zw, puv0);
+              puv1 = mix(atlasRect.xy, atlasRect.zw, puv1);
+            }
+            base = mix(texture2D(map, puv0), texture2D(map, puv1), f);
           } else {
-            // Hard age-driven frame step (framesPlayback / no MV texture),
-            // composed with the manifest atlas-rect mapping when present.
+            // Static cell. H4 (RE doc 63): a noAnimation system on a multi-cell
+            // atlas shows CELL 0 only (engine forces the frame byte to 0,
+            // FUN_14071b7f0 @0x14071c5a3) — without this the whole grid crams
+            // into one quad and reads as garbage. fx*fy==1 → full texture.
             vec2 puv = local;
-            if (animated) {
-              float fps = total / animationPeriod;
-              float idx = mod(floor(vAge * fps), total) + frameRange.x;
-              puv = (vec2(mod(idx, fx), floor(idx / fx)) + puv) / vec2(fx, fy);
-            } else if (fx * fy > 1.0) {
-              // H4 (RE doc 63): a noAnimation system on a multi-cell atlas shows
-              // CELL 0 only (engine forces the frame byte to 0, FUN_14071b7f0
-              // @0x14071c5a3). Without this the whole grid is crammed into one
-              // quad and reads as garbage.
+            if (fx * fy > 1.0) {
               puv = puv / vec2(fx, fy);
             }
             if (useAtlasRect > 0.5) {
@@ -1136,6 +1262,11 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             }
             base = texture2D(map, puv);
           }
+          // M3 (RE doc 63, ps4.txt:614-628): the GRADIENT_MAP+lightmapping glow
+          // samples the ramp at U = 1 - glow, where glow is the particle
+          // texture's value at the sprite UV BEFORE the LM relight overwrites
+          // base. Capture it here (the relight block below replaces base.rgb).
+          float gmag = base.r;
           if (uLightingMode > 0.5) {
             // _LM directional lightmap (PS_RLT lightmapping4Way/HL2):
             // base.rgb are 3 grayscale renders of the same sprite baked-lit
@@ -1175,16 +1306,18 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           }
           if (useLut > 0.5) {
             if (uLightingMode > 0.5) {
-              // GRADIENT_MAP + lightmapping (RE 2026-05-29, DXBC): the engine
-              // PINS the ramp lookup to U=0 (the ramp's brightest texel) in
-              // lightmapping mode — the gradient does NOT recolor the sprite by
-              // luminance here (that's the lambert path). The brightest ramp
-              // colour is instead added as a warm emissive "detonation" glow on
-              // top of the relit smoke body, OUTSIDE the per-particle tint
-              // (engine: rgb = base*lit + emis*v10.x). Shaped by the output
-              // alpha via the premultiply below; the dim relit body stays the
-              // occluding smoke.
-              vec4 g = texture2D(lut, vec2(0.0, 0.5));
+              // GRADIENT_MAP + lightmapping (RE doc 63 M3, ps4.txt:614-628;
+              // corrects the prior "U pinned to 0"): the engine samples the HDR
+              // ramp at U = 1 - glow (glow = the particle texture value at the
+              // sprite UV, captured as gmag before the LM relight). The warm
+              // ramp colour is added as an emissive "detonation" glow on top of
+              // the relit smoke body, OUTSIDE the per-particle tint (engine:
+              // rgb = base*lit + emis*v10.x). The posterize step-count (bits
+              // 16..23) isn't carried by the parser, so we use the unposterized
+              // U. uGlowStrength stays as the v10.x intensity approximation.
+              // Now varies per-texel → a warm GRADIENT across the sprite, not
+              // one flat tan colour.
+              vec4 g = texture2D(lut, vec2(1.0 - gmag, 0.5));
               glow = g.rgb * g.a * uGlowStrength;
             } else {
               // Lambert GRADIENT_MAP: luminance-keyed recolor (engine lambert
@@ -1205,6 +1338,12 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         }
         float outA = vColor.a * base.a;
         vec3 outRgb = vColor.rgb * base.rgb + glow;
+        if (uDistortion > 0.5) {
+          // No refraction pass: show a faint white foam/haze hint instead of the
+          // raw blue normal/deform texture as opaque colour (RE doc 63 H3/M1).
+          outRgb = vec3(1.0);
+          outA = base.a * 0.15;
+        }
         if (uPremultiply > 0.5) {
           // Premultiplied alpha-over (matches the engine's premultiplied PS
           // output + One/INV_SRC_ALPHA blend). The glow (outRgb may exceed 1)
@@ -1344,6 +1483,8 @@ export class ParticleScene {
           useLut,
           motionVectorsDistortion: useMv ? anim?.motionVectorsDistortion : undefined,
           useEmissionAlphaFromMV: useMv ? anim?.useEmissionAlphaFromMV : undefined,
+          randomFrameOnly: anim?.randomFrameOnly,
+          frameRateRamp: anim?.frameRateRamp,
         });
         const renderer = new SystemRenderer(sys, mat, rec.maxEmittingDuration);
         renderer.setActive(false); // start inactive — UI toggles on
