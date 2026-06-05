@@ -147,10 +147,19 @@ export interface SceneEnvironment {
    *  the default procedural RoomEnvironment when passed `null`. The caller
    *  owns the passed texture's lifecycle. */
   setEnvironment(tex: THREE.Texture | null): void;
-  /** Set the procedural fill-light intensities (hemisphere + key
-   *  directional). Both default to 0.85; dim them when a WG IBL is active so
-   *  the cube radiance dominates (and the keyed exposure stays meaningful). */
-  setFillLights(hemisphere: number, directional: number): void;
+  /** Set the procedural fill-light intensities (hemisphere + key directional).
+   *  `directional` is optional so the key can be driven separately by
+   *  {@link setSunLight}. Both default to 0.85; dim the hemisphere when a WG
+   *  IBL is active so the cube radiance dominates (keyed exposure stays sane). */
+  setFillLights(hemisphere: number, directional?: number): void;
+  /** Aim + tint the key directional ("sun"). `direction` points TOWARD the sun
+   *  (the light travels the opposite way). Used to drive the per-weather WG
+   *  sun; only the provided fields change. */
+  setSunLight(opts: {
+    direction?: THREE.Vector3;
+    color?: THREE.ColorRepresentation;
+    intensity?: number;
+  }): void;
   /** Forwarded by the resize observer so the composer stays in sync. */
   setSize(width: number, height: number): void;
   /** Replace the scene background color (e.g. to switch a particle
@@ -350,9 +359,21 @@ export function createSceneEnvironment(
     setEnvironment(tex: THREE.Texture | null) {
       scene.environment = tex ?? envRT.texture;
     },
-    setFillLights(hemisphere: number, directional: number) {
+    setFillLights(hemisphere: number, directional?: number) {
       hemi.intensity = hemisphere;
-      dir.intensity = directional;
+      if (directional !== undefined) dir.intensity = directional;
+    },
+    setSunLight(opts: {
+      direction?: THREE.Vector3;
+      color?: THREE.ColorRepresentation;
+      intensity?: number;
+    }) {
+      // DirectionalLight travels from `position` toward its target (origin),
+      // so position along the to-sun direction makes the light shine "down"
+      // from the sun. Magnitude is irrelevant (directional), so push it out.
+      if (opts.direction) dir.position.copy(opts.direction).multiplyScalar(100);
+      if (opts.color !== undefined) dir.color.set(opts.color);
+      if (opts.intensity !== undefined) dir.intensity = opts.intensity;
     },
     setBackground(color: number) {
       if (scene.background instanceof THREE.Color) {

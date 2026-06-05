@@ -17,6 +17,13 @@ import * as THREE from 'three';
 import { repoUrl } from '$lib/api/client';
 import { decodeCubeDds } from '$lib/dds/cube_dds';
 
+/** Directional sun for a weather: azimuth/elevation in degrees + RGB color. */
+export interface SunParams {
+  yaw: number | null;
+  pitch: number | null;
+  color: number[] | null;
+}
+
 export interface WeatherEnvEntry {
   cube_url: string | null;
   cube: { format: string; width: number; height: number; mips: number; is_cube: boolean } | null;
@@ -24,6 +31,7 @@ export interface WeatherEnvEntry {
   hdr: Record<string, number | number[] | boolean>;
   sh: number[][] | null;
   pbs_extras: Record<string, number | number[] | boolean>;
+  sun: SunParams | null;
 }
 
 export interface EnvManifest {
@@ -41,6 +49,8 @@ export interface WgEnvironment {
   hdr: Record<string, number | number[] | boolean>;
   /** 9 RGB L2 SH coefficients (diffuse irradiance), if present. */
   sh: number[][] | null;
+  /** Directional sun (azimuth/elevation° + RGB color) for this weather. */
+  sun: SunParams | null;
   /** Log-average luminance of the cube's mip 0 — the scene-average the WG
    *  keyed exposure (`middleGray / avgLum`) divides by. Log-space (geometric
    *  mean) so the small bright sun disc doesn't dominate, matching WG's
@@ -205,6 +215,7 @@ export async function loadWgEnvironment(
     weather: pick.weather,
     hdr: pick.entry.hdr ?? {},
     sh: pick.entry.sh ?? null,
+    sun: pick.entry.sun ?? null,
     avgLum,
     dispose() {
       rt.dispose();

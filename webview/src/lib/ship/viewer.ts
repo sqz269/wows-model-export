@@ -117,14 +117,26 @@ export interface PickResult {
 const pickRaycaster = new THREE.Raycaster();
 const pickPointer = new THREE.Vector2();
 
-// Fill-light intensities when a WG IBL cube is active — dimmed so the cube
-// radiance dominates and the keyed exposure stays meaningful. The cube
-// supplies ambient + specular; a low directional stands in for the sun's
-// shaping. PROCEDURAL_* match scene.ts's creation defaults (restored on clear).
+// Lighting when a WG IBL cube is active — the cube supplies ambient + specular,
+// so the hemisphere fill is killed and the key directional is driven from the
+// per-weather WG sun (yaw/pitch/color) at a fixed intensity multiplier (the
+// color carries the per-weather brightness/tint). PROCEDURAL_* match scene.ts's
+// creation defaults, restored on clear.
 const WG_FILL_HEMI = 0.0;
-const WG_FILL_DIR = 0.35;
+const WG_SUN_INTENSITY = 3.0;
 const PROCEDURAL_FILL_HEMI = 0.85;
 const PROCEDURAL_FILL_DIR = 0.85;
+const PROCEDURAL_SUN_DIR = new THREE.Vector3(50, 80, 50).normalize();
+
+/** WG sun azimuth (yaw) + elevation (pitch) in degrees -> a unit vector
+ *  pointing TOWARD the sun. Azimuth from +Z toward +X; elevation above the
+ *  horizon (+Y up). Sign/reference tuned empirically against the render. */
+function sunDirection(yaw: number, pitch: number): THREE.Vector3 {
+  const y = THREE.MathUtils.degToRad(yaw);
+  const p = THREE.MathUtils.degToRad(pitch);
+  const cp = Math.cos(p);
+  return new THREE.Vector3(cp * Math.sin(y), Math.sin(p), cp * Math.cos(y));
+}
 
 function isVisibleChain(o: THREE.Object3D): boolean {
   let n: THREE.Object3D | null = o;
@@ -1335,7 +1347,26 @@ export class ShipViewer {
       curve.linearLength = hdr.gtLinearSectionLength;
     if (typeof hdr.gtBlack === 'number') curve.black = hdr.gtBlack;
     this.env.setTonemapParams(curve);
-    this.env.setFillLights(WG_FILL_HEMI, WG_FILL_DIR);
+
+    // Drive the key directional from the per-weather WG sun (replacing the flat
+    // stand-in). The cube owns ambient + specular, so kill the hemisphere fill.
+    this.env.setFillLights(WG_FILL_HEMI);
+    const sun = env.sun;
+    if (sun && sun.yaw != null && sun.pitch != null) {
+      const color = new THREE.Color();
+      if (sun.color && sun.color.length >= 3) {
+        color.setRGB(sun.color[0], sun.color[1], sun.color[2], THREE.LinearSRGBColorSpace);
+      } else {
+        color.setRGB(1, 1, 1, THREE.LinearSRGBColorSpace);
+      }
+      this.env.setSunLight({
+        direction: sunDirection(sun.yaw, sun.pitch),
+        color,
+        intensity: WG_SUN_INTENSITY,
+      });
+    } else {
+      this.env.setSunLight({ intensity: 0.35 });
+    }
     return true;
   }
 
@@ -1352,6 +1383,7 @@ export class ShipViewer {
       black: DEFAULT_TONEMAP_PARAMS.black,
     });
     this.env.setFillLights(PROCEDURAL_FILL_HEMI, PROCEDURAL_FILL_DIR);
+    this.env.setSunLight({ direction: PROCEDURAL_SUN_DIR.clone(), color: 0xffffff });
   }
 
   /** The active WG environment selection, or null when procedural. */
