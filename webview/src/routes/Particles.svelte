@@ -440,8 +440,8 @@
     }
     if (placeholderBlends.size > 0) {
       gaps.push(
-        `blend mode ${[...placeholderBlends].join(' / ')} approximated with ` +
-          'an additive placeholder — no bespoke water-deform/refraction shader yet',
+        `blend mode ${[...placeholderBlends].join(' / ')} approximated as ` +
+          'plain alpha-over (occluding) — no bespoke water-deform/refraction pass yet',
       );
     }
     if (anyUnresolvedTexture) {

@@ -907,10 +907,13 @@ function blendConfigForPsRbt(label: string | undefined): {
       };
     case 'SHIMMER':
     case 'DEFORM_WATER_SURFACE':
-      // Need bespoke shader paths; AdditiveBlending placeholder until
-      // they land (water-deform / refraction effects are usually bright
-      // on dark water — additive at least keeps them visible).
-      return { blending: THREE.AdditiveBlending };
+      // RE doc 63 H3/M1: these are screen-space DISTORTION passes (water-deform
+      // / heat-haze refraction) with their own NON-additive engine techniques —
+      // not in the 0x2e8 order-dependent set, not additive. We don't model the
+      // refraction; render alpha-over (NormalBlending) so the sprite occludes
+      // faintly instead of an additive bloom that washes out the whole burst.
+      // (Full fix = a background-RTT UV-warp pass driven by tex0/tex1.)
+      return { blending: THREE.NormalBlending };
     default:
       // Unknown / missing label — keep the historical additive default
       // so behaviour matches the pre-blendType-RE'd renderer.
@@ -1121,6 +1124,12 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
               float fps = total / animationPeriod;
               float idx = mod(floor(vAge * fps), total) + frameRange.x;
               puv = (vec2(mod(idx, fx), floor(idx / fx)) + puv) / vec2(fx, fy);
+            } else if (fx * fy > 1.0) {
+              // H4 (RE doc 63): a noAnimation system on a multi-cell atlas shows
+              // CELL 0 only (engine forces the frame byte to 0, FUN_14071b7f0
+              // @0x14071c5a3). Without this the whole grid is crammed into one
+              // quad and reads as garbage.
+              puv = puv / vec2(fx, fy);
             }
             if (useAtlasRect > 0.5) {
               puv = mix(atlasRect.xy, atlasRect.zw, puv);
@@ -1150,15 +1159,14 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
                           max(0.0, dot(B1, sunV)),
                           max(0.0, dot(B2, sunV)));
             w *= w;                       // HL2 weighting is dot^2
-            float wsum = w.x + w.y + w.z;
             float flatLum = (base.r + base.g + base.b) / 3.0;
-            // Energy-normalised directional blend; fall back to the flat
-            // average when the sun is edge-on/behind (wsum~0) so smoke never
-            // goes fully black.
-            float lit = wsum > 1e-4 ? dot(w, base.rgb) / wsum : flatLum;
-            // Ambient floor (engine carries a lightingAmbient term) — keeps
-            // back-lit sprites visible rather than crushing them to zero.
-            lit = mix(lit, flatLum, 0.30);
+            // RE doc 63 H6: the engine does NOT energy-normalize (no /wsum) and
+            // has no 30% flat mix — lit = saturate(Σ LMi·(axisi·sun)²) via
+            // mad_sat (ps4.txt:789-794). The old /wsum cancelled the directional
+            // magnitude (constant flat shade) and the 0.30 mix washed it out.
+            // Keep only a small additive ambient floor so fully back-lit sprites
+            // are not crushed to black.
+            float lit = clamp(dot(w, base.rgb), 0.0, 1.0) + 0.06 * flatLum;
             // Sun-color Reinhard normalization × lighting factor (RE): keeps
             // the relit smoke DARK so it occludes, rather than ~2x too bright
             // once the authored HDR tint multiplies in.
