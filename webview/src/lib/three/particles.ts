@@ -34,12 +34,12 @@ import { repoUrl } from '$lib/api';
 import { loadDdsMipChain } from '$lib/dds';
 
 const DEFAULT_PARTICLE_LIFETIME = 4.0; // seconds, when WG didn't author one
-const ABSOLUTE_MAX_CAPACITY = 512;     // hard cap per system
-const DEFAULT_SIZE_M = 0.3;            // metres — sane baseline if the
-                                        // particle didn't author a size
-                                        // generator
-const HARD_MAX_EMIT_RATE_HZ = 200;     // safety clamp on the per-frame
-                                        // particles-emitted count
+const ABSOLUTE_MAX_CAPACITY = 512; // hard cap per system
+const DEFAULT_SIZE_M = 0.3; // metres — sane baseline if the
+// particle didn't author a size
+// generator
+const HARD_MAX_EMIT_RATE_HZ = 200; // safety clamp on the per-frame
+// particles-emitted count
 
 /** Sample a 1D ``Ramp`` curve at parameter ``t ∈ [0, 1]``. */
 function sampleRamp(ramp: ParticleRamp | undefined, t: number, fallback = 1): number {
@@ -63,17 +63,26 @@ function sampleRamp(ramp: ParticleRamp | undefined, t: number, fallback = 1): nu
 /** Sample a Color (RGBA) curve at parameter ``t ∈ [0, 1]``. Out → 4 floats. */
 function sampleColor(color: ParticleColor | undefined, t: number, out: Float32Array): void {
   if (!color || !color.points || color.points.length === 0) {
-    out[0] = 1; out[1] = 1; out[2] = 1; out[3] = 1;
+    out[0] = 1;
+    out[1] = 1;
+    out[2] = 1;
+    out[3] = 1;
     return;
   }
   const pts = color.points;
   if (t <= pts[0].time) {
-    out[0] = pts[0].r; out[1] = pts[0].g; out[2] = pts[0].b; out[3] = pts[0].a;
+    out[0] = pts[0].r;
+    out[1] = pts[0].g;
+    out[2] = pts[0].b;
+    out[3] = pts[0].a;
     return;
   }
   if (t >= pts[pts.length - 1].time) {
     const p = pts[pts.length - 1];
-    out[0] = p.r; out[1] = p.g; out[2] = p.b; out[3] = p.a;
+    out[0] = p.r;
+    out[1] = p.g;
+    out[2] = p.b;
+    out[3] = p.a;
     return;
   }
   for (let i = 1; i < pts.length; i++) {
@@ -82,7 +91,10 @@ function sampleColor(color: ParticleColor | undefined, t: number, out: Float32Ar
       const b = pts[i];
       const span = b.time - a.time;
       if (span <= 0) {
-        out[0] = a.r; out[1] = a.g; out[2] = a.b; out[3] = a.a;
+        out[0] = a.r;
+        out[1] = a.g;
+        out[2] = a.b;
+        out[3] = a.a;
         return;
       }
       const u = (t - a.time) / span;
@@ -101,18 +113,37 @@ function sampleColor(color: ParticleColor | undefined, t: number, out: Float32Ar
 function sampleScalarVg(vg: ParticleValueGenerator | undefined, t = 0, fallback = 0): number {
   if (!vg) return fallback;
   switch (vg.type) {
-    case 'constant': return vg.value ?? fallback;
+    case 'constant':
+      return vg.value ?? fallback;
     case 'linear': {
       // Random pick in [from, to]. Caller can re-sample for randomness.
       const f = vg.from ?? 0;
       const tt = vg.to ?? f;
       return f + Math.random() * (tt - f);
     }
-    case 'ramp': return sampleRamp(vg.ramp, t, fallback);
-    default: return fallback;
+    case 'ramp':
+      return sampleRamp(vg.ramp, t, fallback);
+    default:
+      return fallback;
   }
 }
 
+/** A representative constant from a scalar ``ValueGenerator``, used to fold an
+ *  emitter/creator base size into a constant size multiplier: linear →
+ *  midpoint, constant → value, ramp → mid-sample, none → fallback. */
+function representativeScalar(vg: ParticleValueGenerator | undefined, fallback = 1): number {
+  if (!vg) return fallback;
+  switch (vg.type) {
+    case 'constant':
+      return vg.value ?? fallback;
+    case 'linear':
+      return ((vg.from ?? 0) + (vg.to ?? vg.from ?? 0)) / 2;
+    case 'ramp':
+      return sampleRamp(vg.ramp, 0.5, fallback);
+    default:
+      return fallback;
+  }
+}
 
 /** Pick a random point inside the union of all prototypes in the
  *  variant VG (creator.initialPositionGenerator / initialVelocityGenerator).
@@ -128,7 +159,10 @@ function samplePosFromVariantVg(vg: ParticleVariantVg | undefined, out: THREE.Ve
 
 function samplePosFromPrototype(proto: ParticleVgtPrototype, out: THREE.Vector3): void {
   const body = proto.body;
-  if (!body) { out.set(0, 0, 0); return; }
+  if (!body) {
+    out.set(0, 0, 0);
+    return;
+  }
   switch (proto.vgt_type) {
     case 'point': {
       const p = body.position ?? [0, 0, 0];
@@ -204,6 +238,13 @@ class SystemRenderer {
   readonly points: THREE.Points;
   private capacity: number;
   private maxAge: number;
+  // Record-level emission window (seconds). >0 ⇒ one-shot burst that
+  // re-bursts after window+maxAge; <=0 ⇒ continuous emitter. See tick().
+  private maxEmittingDuration: number;
+  // Constant size base folded out of the emitter/creator sizeGenerator when a
+  // component scaler/resizer (a multiplier) drives the per-frame size. 1 when
+  // the size generator already yields absolute metres. See constructor.
+  private baseSizeScalar = 1;
   // Creator (PSAT idx=12) — additive secondary burst layer, present on
   // ~12% of corpus systems. When present, the simulator uses creator's
   // VGs for spawning AND its rateRamp for emission. When absent, the
@@ -230,11 +271,11 @@ class SystemRenderer {
   // Particle attribute arrays.
   private pos: Float32Array;
   private vel: Float32Array;
-  private age: Float32Array;   // age in seconds; -1 = empty slot
+  private age: Float32Array; // age in seconds; -1 = empty slot
   private lifetime: Float32Array;
   private colorRGBA: Float32Array;
   private sizeArr: Float32Array;
-  private alive = 0;            // count of currently-alive particles
+  private alive = 0; // count of currently-alive particles
 
   // Reusable scratch buffers for the geometry attributes (we update
   // each frame in-place).
@@ -248,8 +289,15 @@ class SystemRenderer {
   private ageGpu: Float32Array;
   private ageAttr: THREE.BufferAttribute;
 
-  // Accumulator for the emission rate (particles per second).
-  private emissionAccumulator = 0;
+  // Fractional-particle accumulators, one per emission source. RE
+  // (2026-05-29): the always-on emitter.rateGenerator is the PRIMARY source
+  // and the PSAT creator is an ADDITIVE secondary burst — BOTH spawn. The
+  // prior code used creator-XOR-emitter with creator precedence, which
+  // under-emitted any system carrying both (this flak burst spawned 1
+  // particle from the creator's ~0.8/s ramp instead of ~12 from the emitter's
+  // 11/s). Sources with rate 0 contribute nothing.
+  private emitAccum = 0;
+  private creatorAccum = 0;
   private elapsed = 0;
   /** Tail-end of the alphaSetter ramp's time domain. Used to detect
    *  ramps that are keyed by system age (extending into 10s of seconds)
@@ -285,8 +333,9 @@ class SystemRenderer {
     return this.maxAge;
   }
 
-  constructor(system: ParticleSystem, material: THREE.ShaderMaterial) {
+  constructor(system: ParticleSystem, material: THREE.ShaderMaterial, maxEmittingDuration = 0) {
     this.material = material;
+    this.maxEmittingDuration = maxEmittingDuration;
     const gen = system.general;
     this.maxAge = Math.max(0.05, gen?.maxParticleAge ?? DEFAULT_PARTICLE_LIFETIME);
     const desiredCap = Math.max(1, gen?.capacity ?? 32);
@@ -300,8 +349,10 @@ class SystemRenderer {
       const body = c.body ?? {};
       if (c.action === 'creator') {
         if (body.rateRamp) this.rateRamp = body.rateRamp as ParticleRamp;
-        if (body.initialPositionGenerator) this.initialPosVg = body.initialPositionGenerator as ParticleVariantVg;
-        if (body.initialVelocityGenerator) this.initialVelVg = body.initialVelocityGenerator as ParticleVariantVg;
+        if (body.initialPositionGenerator)
+          this.initialPosVg = body.initialPositionGenerator as ParticleVariantVg;
+        if (body.initialVelocityGenerator)
+          this.initialVelVg = body.initialVelocityGenerator as ParticleVariantVg;
       } else if (c.action === 'tint') {
         if (body.tint) this.tintColor = body.tint as ParticleColor;
       } else if (c.action === 'alphaSetter') {
@@ -322,14 +373,21 @@ class SystemRenderer {
     this.emitterRateVg = system.emitter?.rateGenerator;
     this.emitterPosVg = system.emitter?.initialPositionGenerator;
     this.emitterVelVg = system.emitter?.initialVelocityGenerator;
-    this.emitterActivePeriod = Math.max(
-      0,
-      system.emitter?.activePeriod ?? 0,
-    );
-    // Fall back to the emitter's sizeGenerator if the components didn't
-    // ship a scaler.
-    if (!this.sizeRampVg && system.emitter?.sizeGenerator) {
-      this.sizeRampVg = system.emitter.sizeGenerator;
+    this.emitterActivePeriod = Math.max(0, system.emitter?.activePeriod ?? 0);
+    // Size = base × multiplier. WG's scaler/resizer sizeGenerator is a
+    // MULTIPLIER over the emitter/creator base size, not an absolute size.
+    // When a component scaler set this.sizeRampVg AND the emitter carries a
+    // base size, fold the base in as a constant scalar so the puff renders at
+    // its authored metres (~2.5 m for this flak burst) rather than the
+    // multiplier's [0,1] range — the prior code used the [0,1] multiplier as
+    // the absolute size, so puffs rendered ~1 m and lost all texture detail.
+    const emitterSize = system.emitter?.sizeGenerator;
+    if (this.sizeRampVg && emitterSize) {
+      this.baseSizeScalar = representativeScalar(emitterSize, DEFAULT_SIZE_M);
+    } else if (!this.sizeRampVg && emitterSize) {
+      // No component scaler — the emitter generator IS the absolute size.
+      this.sizeRampVg = emitterSize;
+      this.baseSizeScalar = 1;
     }
 
     // Decide whether the alphaSetter ramp is keyed by particle age or
@@ -386,6 +444,25 @@ class SystemRenderer {
     }
     this.elapsed += dt;
 
+    // One-shot emission window + re-burst cycle (RE 2026-05-29). The record's
+    // `maxEmittingDuration` bounds how long the effect emits; WoWS flak/
+    // explosion effects burst ONCE (e.g. 1.1 s) then their particles fade over
+    // `maxAge`. The inspector previously ignored this and emitted forever,
+    // showing every flipbook frame at once. We now gate emission to the window
+    // and, once the whole burst has dissipated (window + maxAge elapsed), reset
+    // for a fresh one-shot so it loops cleanly for inspection.
+    // `maxEmittingDuration <= 0` ⇒ continuous emitter (no gate), e.g.
+    // persistent fire/smoke.
+    const oneShot = this.maxEmittingDuration > 0;
+    if (oneShot && this.elapsed >= this.maxEmittingDuration + this.maxAge) {
+      for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
+      this.alive = 0;
+      this.emitAccum = 0;
+      this.creatorAccum = 0;
+      this.elapsed = 0;
+    }
+    const emitting = !oneShot || this.elapsed <= this.maxEmittingDuration;
+
     // Per-particle update. WG's authoring convention: ramp + color
     // curves are keyed by particle age in *seconds*, not normalised
     // [0,1]. A 4.2-second fire particle samples its tint curve at
@@ -431,52 +508,45 @@ class SystemRenderer {
       // the args don't matter.
       this.sizeArr[i] = Math.max(
         0.01,
-        sampleScalarVg(this.sizeRampVg, u, DEFAULT_SIZE_M),
+        sampleScalarVg(this.sizeRampVg, u, DEFAULT_SIZE_M) * this.baseSizeScalar,
       );
     }
 
-    // Emit new particles. Pick exactly one rate source per system —
-    // creator takes precedence when present (matches WG's ordering: the
-    // additive creator burst layer drives explicit emission), otherwise
-    // fall through to the always-on emitter.rateGenerator. Both paths
-    // share ``emissionAccumulator`` so a system can't double-spawn.
-    let rate = 0;
-    let posVg: ParticleVariantVg | undefined;
-    let velVg: ParticleVariantVg | undefined;
-    if (this.rateRamp) {
-      // Creator path. Legacy normalised-against-maxAge axis kept here
-      // for compatibility — the empirical audit shows this is wrong
-      // (creator.rateRamp is in seconds against systemAge), but most
-      // creator systems have short ramps where the difference is
-      // visually negligible. Refining is queued.
-      const period = Math.max(0.01, this.maxAge);
-      const tNorm = (this.elapsed % period) / period;
-      rate = sampleRamp(this.rateRamp, tNorm, 0);
-      posVg = this.initialPosVg;
-      velVg = this.initialVelVg;
-    } else if (this.emitterRateVg) {
-      // Emitter path (~88% of corpus). Ramp is keyed in SECONDS against
-      // systemAge, sampled at ``elapsed mod activePeriod``. ``elapsed``
-      // alone covers the activePeriod==0 case (constant/linear VGs
-      // ignore t; ramp VGs hold their last value past the tail).
-      const t = this.emitterActivePeriod > 0
-        ? this.elapsed % this.emitterActivePeriod
-        : this.elapsed;
-      rate = sampleScalarVg(this.emitterRateVg, t, 0);
-      posVg = this.emitterPosVg;
-      velVg = this.emitterVelVg;
-    }
-    if (rate > 0) {
-      rate = Math.min(rate, HARD_MAX_EMIT_RATE_HZ);
-      this.emissionAccumulator += rate * dt;
-      while (this.emissionAccumulator >= 1 && this.alive < this.capacity) {
-        this.emissionAccumulator -= 1;
-        this.spawnParticle(posVg, velVg);
+    // Emit from BOTH sources (RE-aligned, 2026-05-29): the always-on emitter
+    // is the primary spawn source; the PSAT creator is an additive secondary
+    // burst. Each carries its own fractional accumulator and its own
+    // position/velocity volume generators; they share the capacity cap so the
+    // system can't exceed `capacity`. A source whose rate is 0 spawns nothing.
+    if (emitting) {
+      if (this.emitterRateVg) {
+        // Emitter ramp keyed in SECONDS against systemAge, sampled at
+        // `elapsed mod activePeriod` (constant/linear VGs ignore t; ramp VGs
+        // hold their last value past the tail; activePeriod==0 ⇒ raw elapsed).
+        const t =
+          this.emitterActivePeriod > 0 ? this.elapsed % this.emitterActivePeriod : this.elapsed;
+        const eRate = sampleScalarVg(this.emitterRateVg, t, 0);
+        this.emitAccum = this.emitFromSource(
+          eRate,
+          dt,
+          this.emitAccum,
+          this.emitterPosVg,
+          this.emitterVelVg,
+        );
       }
-      // Don't let the accumulator overflow if the system is at capacity
-      // (avoids a burst of particles when an idle system frees slots).
-      if (this.alive >= this.capacity) {
-        this.emissionAccumulator = Math.min(this.emissionAccumulator, 1);
+      if (this.rateRamp) {
+        // Creator rate on the legacy normalised systemAge axis (an
+        // approximation flagged in the RE notes — creator.rateRamp is really
+        // in seconds — but visually negligible for the short corpus ramps).
+        const period = Math.max(0.01, this.maxAge);
+        const tNorm = (this.elapsed % period) / period;
+        const cRate = sampleRamp(this.rateRamp, tNorm, 0);
+        this.creatorAccum = this.emitFromSource(
+          cRate,
+          dt,
+          this.creatorAccum,
+          this.initialPosVg,
+          this.initialVelVg,
+        );
       }
     }
 
@@ -508,6 +578,30 @@ class SystemRenderer {
     this.ageAttr.needsUpdate = true;
   }
 
+  /** Spawn whole particles from one emission source at ``rate`` Hz, carrying
+   *  the fractional remainder in ``accum`` across frames. Returns the updated
+   *  accumulator. Honors the shared capacity cap (so multiple sources can't
+   *  overflow the ring buffer). */
+  private emitFromSource(
+    rate: number,
+    dt: number,
+    accum: number,
+    posVg: ParticleVariantVg | undefined,
+    velVg: ParticleVariantVg | undefined,
+  ): number {
+    if (rate <= 0) return accum;
+    rate = Math.min(rate, HARD_MAX_EMIT_RATE_HZ);
+    accum += rate * dt;
+    while (accum >= 1 && this.alive < this.capacity) {
+      accum -= 1;
+      this.spawnParticle(posVg, velVg);
+    }
+    // Don't let the accumulator run away while at capacity (avoids a burst
+    // when slots free up).
+    if (this.alive >= this.capacity) accum = Math.min(accum, 1);
+    return accum;
+  }
+
   private spawnParticle(
     posVg: ParticleVariantVg | undefined,
     velVg: ParticleVariantVg | undefined,
@@ -515,7 +609,10 @@ class SystemRenderer {
     // Find an empty slot.
     let slot = -1;
     for (let i = 0; i < this.capacity; i++) {
-      if (this.age[i] < 0) { slot = i; break; }
+      if (this.age[i] < 0) {
+        slot = i;
+        break;
+      }
     }
     if (slot < 0) return;
     samplePosFromVariantVg(posVg, SystemRenderer.TMP_POS);
@@ -537,7 +634,7 @@ class SystemRenderer {
     this.colorRGBA[slot * 4 + 3] = alpha;
     this.sizeArr[slot] = Math.max(
       0.01,
-      sampleScalarVg(this.sizeRampVg, Math.random(), DEFAULT_SIZE_M),
+      sampleScalarVg(this.sizeRampVg, Math.random(), DEFAULT_SIZE_M) * this.baseSizeScalar,
     );
     this.alive++;
   }
@@ -579,6 +676,23 @@ interface ParticleMaterialOptions {
    *  UNDERWATER_GRADIENT_MAP). The fragment shader switches to
    *  ``texture2D(lut, vec2(base.r, 0.5)).rgb`` when ``useLut=1``. */
   useLut?: boolean;
+  /** PS_RLT lighting mode (renderer.lightingType). For the lightmapping
+   *  modes (``lightmapping4Way`` / ``lightmappingHL2``) the bound texture
+   *  is a DIRECTIONAL LIGHTMAP, not albedo: its RGB are 3 grayscale
+   *  renders of the same sprite baked-lit from 3 fixed HL2-basis
+   *  directions, and A is the opacity mask (RE-verified 2026-05-29 — see
+   *  memory `project-particle-lm-lightmap`). The fragment shader then
+   *  reconstructs one lit luminance from a sun direction instead of
+   *  showing the RGB directly (which reads as a wrong rainbow). */
+  lightingType?: string;
+  /** Motion-vector flipbook blending (animation.motionVectorsDistortion).
+   *  The per-pixel optical-flow warp magnitude; scales the UV displacement
+   *  decoded from the `_MVEA` texture's (G,B) channels. 0 → pure cross-fade
+   *  (no spatial warp), still smoother than a hard frame step. */
+  motionVectorsDistortion?: number;
+  /** animation.useEmissionAlphaFromMV — when set, the `_MVEA` texture's R
+   *  channel drives emission and its A channel drives opacity. */
+  useEmissionAlphaFromMV?: boolean;
 }
 
 /**
@@ -613,10 +727,21 @@ function blendConfigForPsRbt(label: string | undefined): {
       };
     case 'GRADIENT_MAP':
     case 'UNDERWATER_GRADIENT_MAP':
-      // LUT remap applies via the fragment shader (useLut). The blend
-      // itself is additive — fire/explosion gradient sheets are
-      // authored to add light, not occlude.
-      return { blending: THREE.AdditiveBlending };
+      // RE-corrected 2026-05-29 (Ghidra + DXBC, two independent agents): the
+      // engine renders GRADIENT_MAP particles PREMULTIPLIED alpha-over
+      // (Src=ONE, Dst=INV_SRC_ALPHA), depth-sorted back-to-front,
+      // depth-write off — NOT additive. Ghidra: blendType=7 sits in the
+      // depth-sort bitmask 0x2e8 (order-dependent ⇒ alpha, not additive).
+      // DXBC: the PS emits premultiplied RGB and only zeroes alpha for the
+      // additive blend bit (which GRADIENT_MAP does not set). The warm
+      // gradient glow rides inside the alpha so it adds light where opacity
+      // is partial, while the smoke body OCCLUDES. The prior additive
+      // assumption made smoke puffs glow instead of darken.
+      return {
+        blending: THREE.CustomBlending,
+        blendSrc: THREE.OneFactor,
+        blendDst: THREE.OneMinusSrcAlphaFactor,
+      };
     case 'SHIMMER':
     case 'DEFORM_WATER_SURFACE':
       // Need bespoke shader paths; AdditiveBlending placeholder until
@@ -632,10 +757,14 @@ function blendConfigForPsRbt(label: string | undefined): {
 
 /** PS_RBT labels that should sample textureName1 as a 1D color LUT and
  *  remap textureName0's red channel through it. */
-const PS_RBT_LUT_MODES = new Set([
-  'GRADIENT_MAP',
-  'UNDERWATER_GRADIENT_MAP',
-]);
+const PS_RBT_LUT_MODES = new Set(['GRADIENT_MAP', 'UNDERWATER_GRADIENT_MAP']);
+
+/** PS_RLT labels whose textureName0 is a directional lightmap (RGB = 3
+ *  baked light-direction renders, A = opacity), NOT albedo. The fragment
+ *  shader reconstructs a single lit luminance against the sun direction
+ *  instead of sampling RGB as colour. See memory
+ *  `project-particle-lm-lightmap`. */
+const PS_RLT_LIGHTMAP_MODES = new Set(['lightmapping4Way', 'lightmappingHL2']);
 
 /**
  * Build a per-system point-sprite material. Each SystemRenderer owns
@@ -669,9 +798,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       // Manifest atlas rect (u0, v0, u1, v1). useAtlasRect=1 lerps the
       // (already grid-sampled) UV through the rect — composes with grid.
       atlasRect: {
-        value: new THREE.Vector4(
-          rect?.[0] ?? 0, rect?.[1] ?? 0, rect?.[2] ?? 1, rect?.[3] ?? 1,
-        ),
+        value: new THREE.Vector4(rect?.[0] ?? 0, rect?.[1] ?? 0, rect?.[2] ?? 1, rect?.[3] ?? 1),
       },
       useAtlasRect: { value: rect ? 1 : 0 },
       // Animation grid (framesPerX, framesPerY) + range (begin, end) +
@@ -681,11 +808,54 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         value: new THREE.Vector2(opts.framesPerX ?? 1, opts.framesPerY ?? 1),
       },
       frameRange: {
-        value: new THREE.Vector2(
-          opts.framesRangeBegin ?? 0, opts.framesRangeEnd ?? 0,
-        ),
+        value: new THREE.Vector2(opts.framesRangeBegin ?? 0, opts.framesRangeEnd ?? 0),
       },
       animationPeriod: { value: opts.animationPeriod ?? 0 },
+      // Directional-lightmap (PS_RLT) reconstruction. uLightingMode=1 when
+      // the texture is an `_LM` lightmap (lightmapping4Way/HL2); the
+      // fragment shader then treats `map` RGB as a 3-direction HL2-basis
+      // lightmap reconstructed against uSunDirWorld, not albedo. The sun
+      // dir defaults to the scene's key DirectionalLight (scene.ts:121-122,
+      // positioned at (50,80,50)) so particle lighting matches the hull.
+      uLightingMode: {
+        value: PS_RLT_LIGHTMAP_MODES.has(opts.lightingType ?? '') ? 1 : 0,
+      },
+      uSunDirWorld: { value: new THREE.Vector3(50, 80, 50).normalize() },
+      // Motion-vector flipbook blending (`_MVEA`). useMv is flipped to 1 by
+      // bindMvTexture once the MV DDS loads; the shader then samples two
+      // adjacent frames, warps each along the MV (G,B) optical-flow field,
+      // and cross-fades them — replacing the hard age-driven frame step.
+      // Math RE'd instruction-for-instruction from particles.win.dx11.fxo.
+      mvMap: { value: null as THREE.Texture | null },
+      useMv: { value: 0 },
+      mvDistortion: { value: opts.motionVectorsDistortion ?? 0 },
+      useEmissionAlphaFromMV: { value: opts.useEmissionAlphaFromMV ? 1 : 0 },
+      // Relit-smoke brightness scale (RE 2026-05-29). The engine multiplies
+      // the relit lightmap luminance by sunColor/(luma(sunColor)+1) (a Reinhard
+      // normalization ≈ 0.5 for a white sun) × g_particleLightingFactor before
+      // the per-particle tint. The webview's scene sun is white and we don't
+      // carry the lighting factor, so 0.5 approximates that attenuation — it's
+      // what keeps the relit smoke DARK (occluding) rather than ~2× too bright
+      // once the authored HDR tint (e.g. (2,2,2)) is applied. Lightmapping
+      // path only.
+      uSmokeLightScale: { value: 0.5 },
+      // Premultiplied-alpha output (RE 2026-05-29). GRADIENT_MAP /
+      // UNDERWATER_GRADIENT_MAP blend premultiplied alpha-over in the engine
+      // (Src=ONE, Dst=INV_SRC_ALPHA), so the fragment shader must premultiply
+      // its RGB by the output alpha. Every other blend mode outputs straight
+      // (non-premultiplied) colour as before. Keyed off blendType — the two
+      // gradient modes are exactly PS_RBT_LUT_MODES.
+      uPremultiply: {
+        value: PS_RBT_LUT_MODES.has(opts.blendType ?? '') ? 1 : 0,
+      },
+      // Warm "detonation glow" strength for the lightmapping + GRADIENT_MAP
+      // path. RE (DXBC) shows the engine pins the ramp lookup to U=0 (the
+      // ramp's brightest texel) in lightmapping mode and adds it as an
+      // emissive term scaled by a per-particle intensity (v10.x) the parser
+      // doesn't carry — approximated by this constant. 0.15 keeps the puff a
+      // grey occluding smoke body with a warm core (vs a uniformly tan blob at
+      // higher values), matching the flak-burst look.
+      uGlowStrength: { value: 0.15 },
     },
     vertexShader: /* glsl */ `
       attribute vec4 color;
@@ -713,42 +883,135 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform vec2 framesPerXY;
       uniform vec2 frameRange;
       uniform float animationPeriod;
+      uniform float uLightingMode;
+      uniform vec3 uSunDirWorld;
+      uniform sampler2D mvMap;
+      uniform float useMv;
+      uniform float mvDistortion;
+      uniform float useEmissionAlphaFromMV;
+      uniform float uPremultiply;
+      uniform float uGlowStrength;
+      uniform float uSmokeLightScale;
       varying vec4 vColor;
       varying float vAge;
 
       void main() {
         vec4 base;
+        vec3 glow = vec3(0.0);   // additive warm glow (gradient+lightmapping)
         if (useMap > 0.5) {
-          // Compose UV transforms in order: grid -> atlas rect.
-          // gl_PointCoord starts as the sprite-local UV; the grid math
-          // (if active) maps it to the current frame's cell within the
-          // texture's own framesPerX x framesPerY layout; the atlas
-          // rect (if active) then maps that cell-local UV into the
-          // parent atlas page's [u0,v0,u1,v1] sub-region.
-          vec2 puv = gl_PointCoord;
+          vec2 local = gl_PointCoord;
           float fx = framesPerXY.x;
           float fy = framesPerXY.y;
           float total = frameRange.y - frameRange.x;
-          if (fx * fy > 1.0 && total > 0.0 && animationPeriod > 0.0) {
-            // Driven by particle age. fps = totalFrames / period;
-            // current frame loops within [begin, end).
+          bool animated = (fx * fy > 1.0 && total > 0.0 && animationPeriod > 0.0);
+          float mvEmissive = 0.0;   // additive emission from _MVEA.R (if on)
+
+          if (animated && useMv > 0.5) {
+            // Motion-vector flipbook blend (WG _MVEA): sample the two
+            // adjacent frames, warp each along the per-pixel optical-flow
+            // field stored in the MV texture's (G,B) channels, and cross-
+            // fade by the inter-frame fraction. Decode is (G,B)*2-1;
+            // mvDistortion scales the warp. RE'd instruction-for-instruction
+            // from particles.win.dx11.fxo (20 motion-vector PS permutations,
+            // identical math). Replaces the hard age-driven frame step.
             float fps = total / animationPeriod;
-            float idx = mod(floor(vAge * fps), total) + frameRange.x;
-            float col = mod(idx, fx);
-            float row = floor(idx / fx);
-            puv = (vec2(col, row) + puv) / vec2(fx, fy);
+            float idxF = mod(vAge * fps, total);
+            float f = fract(idxF);
+            float n0 = floor(idxF) + frameRange.x;
+            float n1 = mod(floor(idxF) + 1.0, total) + frameRange.x;
+            vec2 grid = vec2(fx, fy);
+            vec2 cell0 = (vec2(mod(n0, fx), floor(n0 / fx)) + local) / grid;
+            vec2 cell1 = (vec2(mod(n1, fx), floor(n1 / fx)) + local) / grid;
+            vec2 mv0 = texture2D(mvMap, cell0).gb * 2.0 - 1.0;
+            vec2 mv1 = texture2D(mvMap, cell1).gb * 2.0 - 1.0;
+            vec2 uv0 = cell0 - mv0 * f * mvDistortion;
+            vec2 uv1 = cell1 + mv1 * (1.0 - f) * mvDistortion;
+            base = mix(texture2D(map, uv0), texture2D(map, uv1), f);
+            if (useEmissionAlphaFromMV > 0.5) {
+              // _MVEA.R = emission, .A = opacity — sampled at the warped
+              // UVs, lerped by f. Opacity overrides the base alpha; emission
+              // is ADDED to the final colour below (the engine replaces in
+              // its non-lit permutation; adding lets it compose with the
+              // lightmap relight without erasing it).
+              vec4 e0 = texture2D(mvMap, uv0);
+              vec4 e1 = texture2D(mvMap, uv1);
+              base.a = mix(e0.a, e1.a, f);
+              mvEmissive = mix(e0.r, e1.r, f);
+            }
+          } else {
+            // Hard age-driven frame step (framesPlayback / no MV texture),
+            // composed with the manifest atlas-rect mapping when present.
+            vec2 puv = local;
+            if (animated) {
+              float fps = total / animationPeriod;
+              float idx = mod(floor(vAge * fps), total) + frameRange.x;
+              puv = (vec2(mod(idx, fx), floor(idx / fx)) + puv) / vec2(fx, fy);
+            }
+            if (useAtlasRect > 0.5) {
+              puv = mix(atlasRect.xy, atlasRect.zw, puv);
+            }
+            base = texture2D(map, puv);
           }
-          if (useAtlasRect > 0.5) {
-            puv = mix(atlasRect.xy, atlasRect.zw, puv);
+          if (uLightingMode > 0.5) {
+            // _LM directional lightmap (PS_RLT lightmapping4Way/HL2):
+            // base.rgb are 3 grayscale renders of the same sprite baked-lit
+            // from 3 fixed HL2-basis directions; base.a is the opacity mask.
+            // Showing rgb directly reads as a wrong rainbow — instead blend
+            // the 3 directional renders by how strongly each basis direction
+            // faces the sun, recovering "the sprite lit from the sun".
+            //
+            // Point sprites are screen-aligned, so the sprite tangent frame
+            // is the view-space axes (tangent +X, bitangent +Y, normal +Z
+            // toward camera). viewMatrix is auto-injected by three.js and
+            // updates every frame, so transforming the world sun dir into
+            // view space gives a live relight with no per-frame uniform
+            // plumbing.
+            vec3 sunV = normalize((viewMatrix * vec4(uSunDirWorld, 0.0)).xyz);
+            // Half-Life-2 radiosity-normal-map basis (tangent space).
+            const vec3 B0 = vec3(-0.40824829, -0.70710678, 0.57735027);
+            const vec3 B1 = vec3(-0.40824829,  0.70710678, 0.57735027);
+            const vec3 B2 = vec3( 0.81649658,  0.0,        0.57735027);
+            vec3 w = vec3(max(0.0, dot(B0, sunV)),
+                          max(0.0, dot(B1, sunV)),
+                          max(0.0, dot(B2, sunV)));
+            w *= w;                       // HL2 weighting is dot^2
+            float wsum = w.x + w.y + w.z;
+            float flatLum = (base.r + base.g + base.b) / 3.0;
+            // Energy-normalised directional blend; fall back to the flat
+            // average when the sun is edge-on/behind (wsum~0) so smoke never
+            // goes fully black.
+            float lit = wsum > 1e-4 ? dot(w, base.rgb) / wsum : flatLum;
+            // Ambient floor (engine carries a lightingAmbient term) — keeps
+            // back-lit sprites visible rather than crushing them to zero.
+            lit = mix(lit, flatLum, 0.30);
+            // Sun-color Reinhard normalization × lighting factor (RE): keeps
+            // the relit smoke DARK so it occludes, rather than ~2x too bright
+            // once the authored HDR tint multiplies in.
+            lit *= uSmokeLightScale;
+            base = vec4(vec3(lit), base.a);
           }
-          base = texture2D(map, puv);
           if (useLut > 0.5) {
-            // Remap luminance via the color LUT (textureName1).
-            // WG's GRADIENT_MAP shader keys the LUT by texture red;
-            // alpha stays from the base (the "shape" channel).
-            vec3 remapped = texture2D(lut, vec2(base.r, 0.5)).rgb;
-            base = vec4(remapped, base.a);
+            if (uLightingMode > 0.5) {
+              // GRADIENT_MAP + lightmapping (RE 2026-05-29, DXBC): the engine
+              // PINS the ramp lookup to U=0 (the ramp's brightest texel) in
+              // lightmapping mode — the gradient does NOT recolor the sprite by
+              // luminance here (that's the lambert path). The brightest ramp
+              // colour is instead added as a warm emissive "detonation" glow on
+              // top of the relit smoke body, OUTSIDE the per-particle tint
+              // (engine: rgb = base*lit + emis*v10.x). Shaped by the output
+              // alpha via the premultiply below; the dim relit body stays the
+              // occluding smoke.
+              vec4 g = texture2D(lut, vec2(0.0, 0.5));
+              glow = g.rgb * g.a * uGlowStrength;
+            } else {
+              // Lambert GRADIENT_MAP: luminance-keyed recolor (engine lambert
+              // path) — sweep the ramp by the sprite luminance (base.r).
+              base = vec4(texture2D(lut, vec2(base.r, 0.5)).rgb, base.a);
+            }
           }
+          // _MVEA emission (when useEmissionAlphaFromMV): additive glow on
+          // top of the lit/remapped colour. Zero when not enabled.
+          base.rgb += vec3(mvEmissive);
         } else {
           vec2 c = gl_PointCoord - vec2(0.5);
           float r = length(c) * 2.0;
@@ -757,7 +1020,18 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           float a = (1.0 - r * r);
           base = vec4(1.0, 1.0, 1.0, a);
         }
-        gl_FragColor = vec4(vColor.rgb * base.rgb, vColor.a * base.a);
+        float outA = vColor.a * base.a;
+        vec3 outRgb = vColor.rgb * base.rgb + glow;
+        if (uPremultiply > 0.5) {
+          // Premultiplied alpha-over (matches the engine's premultiplied PS
+          // output + One/INV_SRC_ALPHA blend). The glow (outRgb may exceed 1)
+          // adds light where outA < 1, while the body occludes.
+          gl_FragColor = vec4(outRgb * outA, outA);
+        } else {
+          // Straight output for additive / normal blends — the blend equation
+          // applies the alpha weighting itself.
+          gl_FragColor = vec4(outRgb, outA);
+        }
       }
     `,
     blending: blend.blending,
@@ -870,10 +1144,13 @@ export class ParticleScene {
         // narrows gl_PointCoord into that sub-region). Both paths
         // compose with the animation grid if framesPerX*Y > 1.
         const useAtlas = !r?.textureUrl0 && !!r?.textureAtlas0;
-        const useLut = !!r?.blendType && PS_RBT_LUT_MODES.has(r.blendType)
-          && !!r?.textureUrl1;
+        const useLut = !!r?.blendType && PS_RBT_LUT_MODES.has(r.blendType) && !!r?.textureUrl1;
+        // Motion-vector flipbook blend only when the engine authored it
+        // (animationType === 'motionVectors') AND the `_MVEA` DDS resolved.
+        const useMv = anim?.animationType === 'motionVectors' && !!anim?.motionVectorsTextureUrl;
         const mat = buildParticleMaterial({
           blendType: r?.blendType,
+          lightingType: r?.lightingType,
           framesPerX: anim?.framesPerX,
           framesPerY: anim?.framesPerY,
           framesRangeBegin: anim?.framesRangeBegin,
@@ -881,9 +1158,11 @@ export class ParticleScene {
           animationPeriod: anim?.animationPeriod,
           atlasRect: useAtlas ? r!.textureAtlas0!.rect : undefined,
           useLut,
+          motionVectorsDistortion: useMv ? anim?.motionVectorsDistortion : undefined,
+          useEmissionAlphaFromMV: useMv ? anim?.useEmissionAlphaFromMV : undefined,
         });
-        const renderer = new SystemRenderer(sys, mat);
-        renderer.setActive(false);   // start inactive — UI toggles on
+        const renderer = new SystemRenderer(sys, mat, rec.maxEmittingDuration);
+        renderer.setActive(false); // start inactive — UI toggles on
         grp.add(renderer.points);
         systems.push(renderer);
         // Texture binding: direct URL takes precedence; otherwise load
@@ -895,6 +1174,9 @@ export class ParticleScene {
         }
         if (useLut && r?.textureUrl1) {
           void this.bindLutTexture(mat, r.textureUrl1);
+        }
+        if (useMv && anim?.motionVectorsTextureUrl) {
+          void this.bindMvTexture(mat, anim.motionVectorsTextureUrl);
         }
       }
       const handle: ParticleAttachmentHandle = {
@@ -914,7 +1196,8 @@ export class ParticleScene {
   /** Resolve a workspace-relative DDS path through the texture cache
    *  and bind it onto `material.uniforms.map`. Idempotent per URL. */
   private async bindTexture(
-    material: THREE.ShaderMaterial, workspaceRelPath: string,
+    material: THREE.ShaderMaterial,
+    workspaceRelPath: string,
   ): Promise<void> {
     const r = this.renderer;
     if (!r) return;
@@ -938,7 +1221,8 @@ export class ParticleScene {
    *  UNDERWATER_GRADIENT_MAP. Same cache as ``bindTexture`` — many fire
    *  systems share the same ``fire_yellow_*.dds`` ramp. */
   private async bindLutTexture(
-    material: THREE.ShaderMaterial, workspaceRelPath: string,
+    material: THREE.ShaderMaterial,
+    workspaceRelPath: string,
   ): Promise<void> {
     const r = this.renderer;
     if (!r) return;
@@ -955,6 +1239,32 @@ export class ParticleScene {
     if (!tex) return;
     material.uniforms.lut.value = tex;
     material.uniforms.useLut.value = 1;
+    material.needsUpdate = true;
+  }
+
+  /** Bind ``workspaceRelPath`` as the motion-vector sampler (`_MVEA`) for
+   *  the motionVectors animation path. Loaded LINEAR (sRGB=false) — its
+   *  (G,B) channels are signed optical-flow data, not colour, so an sRGB
+   *  curve would corrupt the (G,B)*2-1 decode. Same cache as bindTexture. */
+  private async bindMvTexture(
+    material: THREE.ShaderMaterial,
+    workspaceRelPath: string,
+  ): Promise<void> {
+    const r = this.renderer;
+    if (!r) return;
+    const url = repoUrl(workspaceRelPath);
+    let pending = this.textureCache.get(url);
+    if (!pending) {
+      pending = loadDdsMipChain([url], false, r).catch((err) => {
+        console.warn('[particles] MV DDS load failed', workspaceRelPath, err);
+        return null;
+      });
+      this.textureCache.set(url, pending);
+    }
+    const tex = await pending;
+    if (!tex) return;
+    material.uniforms.mvMap.value = tex;
+    material.uniforms.useMv.value = 1;
     material.needsUpdate = true;
   }
 

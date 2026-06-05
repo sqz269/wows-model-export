@@ -32,11 +32,7 @@
   import { createSceneEnvironment, type SceneEnvironment } from '$lib/three/scene';
   import { observeResize } from '$lib/three/resize';
   import { startRenderLoop } from '$lib/three/render_loop';
-  import type {
-    ParticleAttachment,
-    ParticleRecord,
-    ParticleSystem,
-  } from '$lib/types/sidecar';
+  import type { ParticleAttachment, ParticleRecord, ParticleSystem } from '$lib/types/sidecar';
   import DdsTexturePreview from '$components/DdsTexturePreview.svelte';
 
   interface Props {
@@ -93,6 +89,19 @@
   let aliveCount = $state(0);
   let elapsedS = $state(0);
   let playing = $state(true);
+
+  // Inspector backdrop. Occluding / alpha-blended smoke (flak bursts, fire
+  // smoke — the GRADIENT_MAP + lightmapping path) is near-invisible against a
+  // night sky because it darkens the background rather than adding light; a
+  // daylit sky reveals it the way it reads in-game. Additive emissive effects
+  // (fire glow, sparks, tracers) read on either. Default to sky so the common
+  // smoke effects are visible out of the box; toggle to night for additive-only
+  // effects that were authored against a dark scene.
+  const BACKDROPS = { sky: 0x8c9fb0, night: 0x0a0c11 } as const;
+  let backdrop = $state<'sky' | 'night'>('sky');
+  $effect(() => {
+    env?.setBackground(BACKDROPS[backdrop]);
+  });
 
   // ── List fetch ──────────────────────────────────────────────────────
 
@@ -204,6 +213,11 @@
     });
     env.setBloomEnabled(true);
     env.setBloomParams({ strength: 0.7, radius: 0.4, threshold: 0.6 });
+    env.setBackground(BACKDROPS[backdrop]);
+    // Every inspected effect spawns at the origin, so the axes helper sits
+    // right inside the effect — and its bright-green Y axis blooms into a beam
+    // that reads as part of the particle. Hide it (the grid still gives scale).
+    env.axes.visible = false;
 
     scene = new ParticleScene(env.renderer);
     env.scene.add(scene.root);
@@ -364,46 +378,81 @@
    *  `SystemRenderer` constructor's switch on `c.action`.
    */
   const RENDERED_ACTIONS = new Set([
-    'creator', 'tint', 'alphaSetter', 'scaler', 'resizer', 'force',
+    'creator',
+    'tint',
+    'alphaSetter',
+    'scaler',
+    'resizer',
+    'force',
   ]);
 
-  /** Parser-side fields known to NOT be surfaced yet — these are
-   *  blockers for bit-exact rendering, called out per record so the
-   *  user can correlate "this fire looks wrong" with which open RE
-   *  task it depends on. Source: `particle_render_roadmap.md` P2/P3
-   *  and the comments in `read/particles.py` _decode_renderer /
-   *  _decode_animation. */
-  function parserGapsForRecord(rec: ParticleRecord | null): string[] {
+  /** PS_RBT blend modes the renderer can only approximate with an additive
+   *  placeholder — no bespoke water-deform / refraction shader yet. Mirror
+   *  of the placeholder branch in `three/particles.ts` `blendConfigForPsRbt`. */
+  const PLACEHOLDER_BLEND_MODES = new Set(['SHIMMER', 'DEFORM_WATER_SURFACE']);
+
+  /** Render-fidelity caveats that actually apply to THIS record, keyed off
+   *  the decoded data rather than guessed from filenames.
+   *
+   *  Note: `framesPerX/Y` (animation grid) and `blendType` (PS_RBT, 10
+   *  values) ARE decoded by the parser (`read/particles.py`
+   *  _decode_animation / _decode_renderer) and consumed by the renderer
+   *  (`three/particles.ts` `blendConfigForPsRbt` + the flipbook-UV shader
+   *  math) since the 2026-05-23 gap-closing pass — they are no longer gaps.
+   *  What remains:
+   *    - a few PS_RBT modes (SHIMMER / DEFORM_WATER_SURFACE) fall back to an
+   *      additive placeholder pending a bespoke shader;
+   *    - a texture ref that resolved to neither a direct extract
+   *      (`textureUrl0`) nor an atlas region (`textureAtlas0`) renders as a
+   *      procedural soft disc. */
+  function renderCaveatsForRecord(rec: ParticleRecord | null): string[] {
     if (!rec) return [];
     const gaps: string[] = [];
-    let anySystemHasAtlas = false;
-    let anySystemHasTexture = false;
-    let anyTextureStamped = false;
+    const placeholderBlends = new Set<string>();
+    let anyUnresolvedTexture = false;
+    let anyLightmap = false;
+    let anyMvEmission = false;
     for (const s of rec.systems ?? []) {
-      if (s.renderer?.textureName0) {
-        anySystemHasTexture = true;
-        // Texture name with 8x8 / 6x6 / 4x4 in the filename is almost
-        // certainly a sprite-sheet flipbook (e.g. Sparkles_8x8.dds).
-        if (/\d+x\d+/i.test(s.renderer.textureName0)) anySystemHasAtlas = true;
+      const r = s.renderer;
+      if (!r) continue;
+      if (r.blendType && PLACEHOLDER_BLEND_MODES.has(r.blendType)) {
+        placeholderBlends.add(r.blendType);
       }
-      if (s.renderer?.textureUrl0) anyTextureStamped = true;
+      // textureName0 referenced, but it resolved to neither a direct DDS
+      // extract nor an atlas region -> the renderer draws a procedural disc.
+      if (r.textureName0 && !r.textureUrl0 && !r.textureAtlas0) {
+        anyUnresolvedTexture = true;
+      }
+      // Directional lightmap (`_LM`): relit approximately (see below).
+      if (r.lightingType === 'lightmapping4Way' || r.lightingType === 'lightmappingHL2') {
+        anyLightmap = true;
+      }
+      // `_MVEA` motion-vector blend IS now applied; the one residual is the
+      // emission-from-MV path (engine replaces colour, we add — see below).
+      if (s.animation?.useEmissionAlphaFromMV) anyMvEmission = true;
     }
-    if (anySystemHasAtlas) {
+    if (placeholderBlends.size > 0) {
       gaps.push(
-        'sprite atlas grid (framesPerX/Y) not decoded — flipbook ' +
-        'frames collapse into the full atlas image',
+        `blend mode ${[...placeholderBlends].join(' / ')} approximated with ` +
+          'an additive placeholder — no bespoke water-deform/refraction shader yet',
       );
     }
-    if (anySystemHasTexture) {
+    if (anyUnresolvedTexture) {
       gaps.push(
-        'Renderer.blendType not decoded — every system renders ' +
-        'additive (PS_RBT_ADDITIVE) regardless of authored mode',
+        'texture(s) referenced but resolved to neither a direct extract nor ' +
+          'an atlas region — render falls back to a procedural disc',
       );
     }
-    if (anySystemHasTexture && !anyTextureStamped) {
+    if (anyLightmap) {
       gaps.push(
-        'texture(s) referenced but not extracted to ' +
-        'content/effects_textures/ — render falls back to procedural disc',
+        'directional lightmap (lightingType=lightmapping*) relit approximately ' +
+          'from a fixed sun direction (HL2 basis) — not the engine-exact 4-way decode',
+      );
+    }
+    if (anyMvEmission) {
+      gaps.push(
+        '_MVEA emission (useEmissionAlphaFromMV) added on top of the lit ' +
+          'colour rather than replacing it — keeps the lightmap, not bit-exact',
       );
     }
     return gaps;
@@ -485,9 +534,7 @@
           {listError}
         </div>
       {:else if filteredList.length === 0}
-        <div class="text-muted-foreground px-3 py-3 text-[11px]">
-          no matches
-        </div>
+        <div class="text-muted-foreground px-3 py-3 text-[11px]">no matches</div>
       {:else}
         <ul class="flex flex-col">
           {#each filteredList as p (p)}
@@ -513,9 +560,7 @@
   <!-- ── Centre: scene + controls ─────────────────────────────────── -->
   <section class="relative flex flex-1 min-w-0 flex-col">
     <!-- Toolbar -->
-    <div
-      class="bg-card border-border flex flex-none items-center gap-2 border-b px-4 py-2 text-xs"
-    >
+    <div class="bg-card border-border flex flex-none items-center gap-2 border-b px-4 py-2 text-xs">
       {#if selectedPath}
         <code class="text-foreground font-mono">{shortName(selectedPath)}</code>
         <span class="text-muted-foreground/60">·</span>
@@ -525,15 +570,31 @@
       {/if}
 
       <div class="ml-auto flex items-center gap-2">
+        <div
+          class="flex rounded border border-border overflow-hidden"
+          title="Inspector backdrop — occluding smoke (flak/fire smoke) needs a lit sky to be visible; additive effects read on either"
+        >
+          {#each ['sky', 'night'] as const as bg (bg)}
+            <button
+              type="button"
+              onclick={() => (backdrop = bg)}
+              class="px-2 py-0.5 text-[10px] font-medium tracking-wider uppercase {backdrop === bg
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-popover text-muted-foreground hover:text-foreground'}"
+            >
+              {bg}
+            </button>
+          {/each}
+        </div>
         {#if availableQualities.length > 1}
           <div class="flex rounded border border-border overflow-hidden">
             {#each availableQualities as q (q)}
               <button
                 type="button"
                 onclick={() => (qualityChoice = q as 'high' | 'low' | 'shared')}
-                title="{q === qualityChoice && q !== qualityUsed
+                title={q === qualityChoice && q !== qualityUsed
                   ? `you picked ${q}, this particle has no ${q} variant — showing ${qualityUsed}`
-                  : `quality variant: ${q}`}"
+                  : `quality variant: ${q}`}
                 class="px-2 py-0.5 text-[10px] font-medium tracking-wider uppercase {qualityUsed ===
                 q
                   ? 'bg-primary text-primary-foreground'
@@ -564,10 +625,7 @@
 
     <!-- Canvas -->
     <div class="relative flex-1 min-h-0">
-      <div
-        bind:this={canvasContainer}
-        class="absolute inset-0"
-      ></div>
+      <div bind:this={canvasContainer} class="absolute inset-0"></div>
 
       {#if !selectedPath}
         <div
@@ -601,7 +659,9 @@
             t <span class="text-foreground tabular-nums">{elapsedS.toFixed(2)}s</span>
           </div>
           <div class="text-muted-foreground">
-            systems <span class="text-foreground tabular-nums">{activeRecord.systems?.length ?? 0}</span>
+            systems <span class="text-foreground tabular-nums"
+              >{activeRecord.systems?.length ?? 0}</span
+            >
           </div>
         </div>
       {/if}
@@ -619,15 +679,13 @@
       {#if !activeRecord}
         <div class="text-muted-foreground">no record loaded</div>
       {:else}
-        {@const gaps = parserGapsForRecord(activeRecord)}
+        {@const gaps = renderCaveatsForRecord(activeRecord)}
 
         <!-- Render-fidelity caveats -->
         {#if gaps.length > 0}
           <section class="mb-3 rounded border border-amber-900/50 bg-amber-950/30 p-2">
-            <div
-              class="text-amber-300 mb-1 text-[10px] uppercase tracking-wider font-semibold"
-            >
-              parser gaps
+            <div class="text-amber-300 mb-1 text-[10px] uppercase tracking-wider font-semibold">
+              render caveats
             </div>
             <ul class="text-amber-200/90 text-[10px] flex flex-col gap-0.5">
               {#each gaps as g (g)}
@@ -661,18 +719,15 @@
         {:else if textureCount.missing > 0}
           <section class="mb-3 rounded border border-border bg-muted/20 p-2">
             <div class="text-muted-foreground text-[10px]">
-              textures referenced but not extracted yet — render falls back to
-              procedural disc. Scaffold a ship that uses this particle to
-              populate the cache.
+              textures referenced but not extracted yet — render falls back to procedural disc.
+              Scaffold a ship that uses this particle to populate the cache.
             </div>
           </section>
         {/if}
 
         <!-- Per-system breakdown -->
         <section class="mb-3 flex flex-col gap-2">
-          <div class="text-muted-foreground text-[9px] uppercase tracking-wider">
-            systems
-          </div>
+          <div class="text-muted-foreground text-[9px] uppercase tracking-wider">systems</div>
           {#each activeRecord.systems ?? [] as s, si (si)}
             {@const checklist = actionChecklist(s)}
             <details
@@ -682,8 +737,9 @@
               <summary
                 class="text-foreground cursor-pointer text-[11px] font-mono hover:text-primary"
               >
-                #{si} · cap {s.general?.capacity ?? '—'} · maxAge {(s.general?.maxParticleAge ?? 0).toFixed(2)}s
-                · {checklist.length} comps
+                #{si} · cap {s.general?.capacity ?? '—'} · maxAge {(
+                  s.general?.maxParticleAge ?? 0
+                ).toFixed(2)}s · {checklist.length} comps
               </summary>
               <div class="mt-2 flex flex-col gap-2">
                 <!-- Emitter sub-fields -->
@@ -692,7 +748,11 @@
                     emitter
                   </div>
                   <pre
-                    class="text-foreground bg-background/40 mt-1 max-h-32 overflow-auto rounded border border-border/60 p-1 font-mono text-[10px]">{JSON.stringify(s.emitter ?? {}, null, 2)}</pre>
+                    class="text-foreground bg-background/40 mt-1 max-h-32 overflow-auto rounded border border-border/60 p-1 font-mono text-[10px]">{JSON.stringify(
+                      s.emitter ?? {},
+                      null,
+                      2,
+                    )}</pre>
                 </div>
                 <!-- Renderer + animation -->
                 <div>
@@ -728,13 +788,15 @@
                 </div>
                 <!-- Raw component bodies -->
                 <details class="text-[10px]">
-                  <summary
-                    class="text-muted-foreground cursor-pointer hover:text-foreground"
-                  >
+                  <summary class="text-muted-foreground cursor-pointer hover:text-foreground">
                     raw component bodies
                   </summary>
                   <pre
-                    class="text-foreground bg-background/40 mt-1 max-h-64 overflow-auto rounded border border-border/60 p-1 font-mono text-[10px]">{JSON.stringify(s.components ?? [], null, 2)}</pre>
+                    class="text-foreground bg-background/40 mt-1 max-h-64 overflow-auto rounded border border-border/60 p-1 font-mono text-[10px]">{JSON.stringify(
+                      s.components ?? [],
+                      null,
+                      2,
+                    )}</pre>
                 </details>
               </div>
             </details>
@@ -747,7 +809,11 @@
             full parsed record (JSON)
           </summary>
           <pre
-            class="text-foreground bg-background/40 mt-1 max-h-96 overflow-auto rounded border border-border/60 p-1 font-mono text-[10px]">{JSON.stringify(activeRecord, null, 2)}</pre>
+            class="text-foreground bg-background/40 mt-1 max-h-96 overflow-auto rounded border border-border/60 p-1 font-mono text-[10px]">{JSON.stringify(
+              activeRecord,
+              null,
+              2,
+            )}</pre>
         </details>
       {/if}
     </div>

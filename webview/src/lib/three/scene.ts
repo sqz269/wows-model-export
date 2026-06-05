@@ -54,6 +54,10 @@ export interface SceneEnvironment {
   getBloomParams(): Readonly<BloomParams>;
   /** Forwarded by the resize observer so the composer stays in sync. */
   setSize(width: number, height: number): void;
+  /** Replace the scene background color (e.g. to switch a particle
+   *  inspector between a night sky and a daylit sky so occluding,
+   *  alpha-blended smoke is actually visible). */
+  setBackground(color: number): void;
   /** Dispose every resource created here. Idempotent. */
   dispose(): void;
 }
@@ -210,6 +214,13 @@ export function createSceneEnvironment(
       lastSize = { w, h };
       composer?.setSize(w, h);
       bloomPass?.setSize(w, h);
+    },
+    setBackground(color: number) {
+      if (scene.background instanceof THREE.Color) {
+        scene.background.set(color);
+      } else {
+        scene.background = new THREE.Color(color);
+      }
     },
     dispose() {
       if (disposed) return;
