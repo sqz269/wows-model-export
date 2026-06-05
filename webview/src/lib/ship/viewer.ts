@@ -19,6 +19,7 @@ import { createSceneEnvironment, type BloomParams, type SceneEnvironment } from 
 import { observeResize } from '$lib/three/resize';
 import { startRenderLoop } from '$lib/three/render_loop';
 import { disposeTree } from '$lib/three/dispose';
+import { loadWgEnvironment, type WgEnvironment } from '$lib/three/env_ibl';
 import { repoUrl } from '$lib/api';
 import { SHIP_SECTIONS } from '$lib/types';
 import type {
@@ -293,6 +294,9 @@ export class ShipViewer {
   private lodPolicy: LodPolicy = 'lod0';
   private damageVariantsVisible = false;
   private helpersVisible = true;
+  // WG sky-cube IBL (PMREM), best-effort-loaded after construction; null
+  // until the environment library is present + decoded.
+  private wgEnv: WgEnvironment | null = null;
 
   constructor(container: HTMLElement) {
     this.env = createSceneEnvironment(container);
@@ -339,6 +343,11 @@ export class ShipViewer {
     if (typeof window !== 'undefined') {
       (window as unknown as { __wowsShipViewer__?: unknown }).__wowsShipViewer__ = this;
     }
+
+    // Best-effort: light the ship with WG's sky-cube IBL (PMREM from the
+    // environment library) instead of the procedural RoomEnvironment.
+    // Silently keeps RoomEnvironment when the library isn't built.
+    void this.applyWgEnvironment();
 
     // Hover labels for the node overlay. Only does work while the overlay
     // is visible (pickAt short-circuits otherwise); a single transient
@@ -1270,6 +1279,41 @@ export class ShipViewer {
     return this.colorMode;
   }
 
+  /**
+   * Light the ship with a WG sky-cube IBL (PMREM) for the given space/weather
+   * (defaults to a clear-weather representative). Also data-drives the GT
+   * tonemap curve from that weather's HDR settings. Returns false (and keeps
+   * the procedural RoomEnvironment) when the environment library is absent.
+   */
+  async applyWgEnvironment(opts: { space?: string; weather?: string } = {}): Promise<boolean> {
+    const env = await loadWgEnvironment(this.env.renderer, opts);
+    if (!env) return false;
+    this.wgEnv?.dispose();
+    this.wgEnv = env;
+    this.env.setEnvironment(env.texture);
+    const hdr = env.hdr;
+    const curve: Partial<{
+      contrast: number;
+      linearStart: number;
+      linearLength: number;
+      black: number;
+    }> = {};
+    if (typeof hdr.gtContrast === 'number') curve.contrast = hdr.gtContrast;
+    if (typeof hdr.gtLinearSectionStart === 'number') curve.linearStart = hdr.gtLinearSectionStart;
+    if (typeof hdr.gtLinearSectionLength === 'number')
+      curve.linearLength = hdr.gtLinearSectionLength;
+    if (typeof hdr.gtBlack === 'number') curve.black = hdr.gtBlack;
+    this.env.setTonemapParams(curve);
+    return true;
+  }
+
+  /** Restore the procedural RoomEnvironment IBL. */
+  clearWgEnvironment(): void {
+    this.wgEnv?.dispose();
+    this.wgEnv = null;
+    this.env.setEnvironment(null);
+  }
+
   async dispose(): Promise<void> {
     this.stopLoop();
     this.stopResize();
@@ -1279,6 +1323,7 @@ export class ShipViewer {
     this.textures.dispose();
     await this.accessoryCache.dispose();
     disposeColorMaterials(this.colorMaterials);
+    this.wgEnv?.dispose();
     this.env.dispose();
   }
 

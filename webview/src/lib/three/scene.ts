@@ -143,6 +143,10 @@ export interface SceneEnvironment {
   /** Patch any subset of the GT tonemap params (curve + keyed exposure);
    *  missing keys keep their current value. */
   setTonemapParams(p: Partial<GTTonemapParams>): void;
+  /** Replace `scene.environment` with a WG PMREM (from `env_ibl`), or restore
+   *  the default procedural RoomEnvironment when passed `null`. The caller
+   *  owns the passed texture's lifecycle. */
+  setEnvironment(tex: THREE.Texture | null): void;
   /** Forwarded by the resize observer so the composer stays in sync. */
   setSize(width: number, height: number): void;
   /** Replace the scene background color (e.g. to switch a particle
@@ -338,6 +342,9 @@ export function createSceneEnvironment(
       lastSize = { w, h };
       composer?.setSize(w, h);
       bloomPass?.setSize(w, h);
+    },
+    setEnvironment(tex: THREE.Texture | null) {
+      scene.environment = tex ?? envRT.texture;
     },
     setBackground(color: number) {
       if (scene.background instanceof THREE.Color) {
