@@ -147,6 +147,10 @@ export interface SceneEnvironment {
    *  the default procedural RoomEnvironment when passed `null`. The caller
    *  owns the passed texture's lifecycle. */
   setEnvironment(tex: THREE.Texture | null): void;
+  /** Set the procedural fill-light intensities (hemisphere + key
+   *  directional). Both default to 0.85; dim them when a WG IBL is active so
+   *  the cube radiance dominates (and the keyed exposure stays meaningful). */
+  setFillLights(hemisphere: number, directional: number): void;
   /** Forwarded by the resize observer so the composer stays in sync. */
   setSize(width: number, height: number): void;
   /** Replace the scene background color (e.g. to switch a particle
@@ -345,6 +349,10 @@ export function createSceneEnvironment(
     },
     setEnvironment(tex: THREE.Texture | null) {
       scene.environment = tex ?? envRT.texture;
+    },
+    setFillLights(hemisphere: number, directional: number) {
+      hemi.intensity = hemisphere;
+      dir.intensity = directional;
     },
     setBackground(color: number) {
       if (scene.background instanceof THREE.Color) {

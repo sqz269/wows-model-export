@@ -19,7 +19,7 @@
   // those reset per ship by design, matching the legacy v3 rule that
   // bumping a seam doesn't bleed into the next ship.
   import { toast } from 'svelte-sonner';
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { Button } from '$lib/components/ui/button';
   import { SHIP_SECTIONS, SEAMS } from '$lib/types';
   import type { SeamKey, SeamState, ShipSectionKey } from '$lib/types';
@@ -35,6 +35,7 @@
   import type { CamoDiagnostics } from '$lib/ship/textures';
   import { loadState, patchState, patchNestedState, type PanelSection } from '$lib/store';
   import { rowCls, labelCls, inputBoxCls } from '$lib/ui/controls';
+  import { listEnvironments } from '$lib/three/env_ibl';
 
   interface Props {
     viewer: ShipViewer;
@@ -272,6 +273,49 @@
       }
     });
   });
+
+  // ── Environment IBL selector ────────────────────────────────────────────
+  // WG sky-cube IBL (PMREM) + keyed exposure, driven by the environment
+  // library. The viewer auto-applies a default on construction; this panel
+  // reflects + controls it. Empty list (library not built) hides the section.
+  let envList = $state<{ space: string; weathers: string[] }[]>([]);
+  let envSpace = $state(''); // '' = Procedural (studio)
+  let envWeather = $state('');
+  let envPanelOpen = $state(true);
+
+  onMount(async () => {
+    envList = await listEnvironments();
+    if (envList.length === 0) return;
+    const cur = viewer.getWgEnvironment();
+    if (cur) {
+      envSpace = cur.space;
+      envWeather = cur.weather;
+    } else {
+      // Auto-apply may not have resolved yet — mirror its default choice.
+      const def = envList.find((e) => e.space === '14_Atlantic') ?? envList[0];
+      envSpace = def.space;
+      envWeather = def.weathers.includes('Default') ? 'Default' : (def.weathers[0] ?? '');
+    }
+  });
+
+  function envWeathersFor(space: string): string[] {
+    return envList.find((e) => e.space === space)?.weathers ?? [];
+  }
+  async function onEnvSpace(v: string) {
+    envSpace = v;
+    if (v === '') {
+      viewer.clearWgEnvironment();
+      envWeather = '';
+      return;
+    }
+    const weathers = envWeathersFor(v);
+    envWeather = weathers.includes('Default') ? 'Default' : (weathers[0] ?? '');
+    await viewer.applyWgEnvironment({ space: v, weather: envWeather });
+  }
+  async function onEnvWeather(v: string) {
+    envWeather = v;
+    if (envSpace) await viewer.applyWgEnvironment({ space: envSpace, weather: v });
+  }
 
   function toggleHelpers(v: boolean) {
     helpers = v;
@@ -542,6 +586,45 @@
       </label>
     </div>
   </details>
+
+  {#if envList.length > 0}
+    <details bind:open={envPanelOpen} class="group {detailsCls}">
+      <summary class={summaryCls}>Environment</summary>
+      <div class={bodyCls}>
+        <label class={labelCls}>
+          Sky / lighting
+          <select
+            value={envSpace}
+            onchange={(e) => onEnvSpace(e.currentTarget.value)}
+            class={inputBoxCls}
+          >
+            <option value="">Procedural (studio)</option>
+            {#each envList as e (e.space)}
+              <option value={e.space}>{e.space}</option>
+            {/each}
+          </select>
+        </label>
+        {#if envSpace}
+          <label class={labelCls}>
+            Weather
+            <select
+              value={envWeather}
+              onchange={(e) => onEnvWeather(e.currentTarget.value)}
+              class={inputBoxCls}
+            >
+              {#each envWeathersFor(envSpace) as w (w)}
+                <option value={w}>{w}</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
+        <p class="text-muted-foreground text-[10px] leading-snug">
+          WG sky-cube IBL (PMREM) with keyed GT exposure from the space's HDR settings. “Procedural”
+          uses a neutral studio environment.
+        </p>
+      </div>
+    </details>
+  {/if}
 
   <details
     open={panelOpen.sections}

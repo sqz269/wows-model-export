@@ -15,7 +15,12 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-import { createSceneEnvironment, type BloomParams, type SceneEnvironment } from '$lib/three/scene';
+import {
+  createSceneEnvironment,
+  DEFAULT_TONEMAP_PARAMS,
+  type BloomParams,
+  type SceneEnvironment,
+} from '$lib/three/scene';
 import { observeResize } from '$lib/three/resize';
 import { startRenderLoop } from '$lib/three/render_loop';
 import { disposeTree } from '$lib/three/dispose';
@@ -111,6 +116,15 @@ export interface PickResult {
 
 const pickRaycaster = new THREE.Raycaster();
 const pickPointer = new THREE.Vector2();
+
+// Fill-light intensities when a WG IBL cube is active — dimmed so the cube
+// radiance dominates and the keyed exposure stays meaningful. The cube
+// supplies ambient + specular; a low directional stands in for the sun's
+// shaping. PROCEDURAL_* match scene.ts's creation defaults (restored on clear).
+const WG_FILL_HEMI = 0.0;
+const WG_FILL_DIR = 0.35;
+const PROCEDURAL_FILL_HEMI = 0.85;
+const PROCEDURAL_FILL_DIR = 0.85;
 
 function isVisibleChain(o: THREE.Object3D): boolean {
   let n: THREE.Object3D | null = o;
@@ -1291,27 +1305,58 @@ export class ShipViewer {
     this.wgEnv?.dispose();
     this.wgEnv = env;
     this.env.setEnvironment(env.texture);
+
+    // WG keyed exposure: scale scene radiance so its log-average maps to
+    // middleGray, then apply the per-space EV offset; avgLum is clamped to the
+    // space's eye-adaptation window [eyeDarkLimit, eyeLightLimit]. The cube IBL
+    // is now the dominant light, so dim the procedural fill to keep this
+    // exposure meaningful (a data float CubeTexture would otherwise be lit by
+    // both the cube AND the studio fill, over-exposing).
     const hdr = env.hdr;
+    const numOf = (k: string, d: number): number =>
+      typeof hdr[k] === 'number' ? (hdr[k] as number) : d;
+    const middleGray = numOf('middleGray', 0.18);
+    const off = numOf('hdrMapExposureOffset', 0);
+    const darkLimit = numOf('eyeDarkLimit', 0.01);
+    const lightLimit = numOf('eyeLightLimit', 100);
+    const avg = Math.min(Math.max(env.avgLum, darkLimit), lightLimit);
+    const exposure = (middleGray / avg) * Math.pow(2, off);
+
     const curve: Partial<{
+      exposure: number;
       contrast: number;
       linearStart: number;
       linearLength: number;
       black: number;
-    }> = {};
+    }> = { exposure };
     if (typeof hdr.gtContrast === 'number') curve.contrast = hdr.gtContrast;
     if (typeof hdr.gtLinearSectionStart === 'number') curve.linearStart = hdr.gtLinearSectionStart;
     if (typeof hdr.gtLinearSectionLength === 'number')
       curve.linearLength = hdr.gtLinearSectionLength;
     if (typeof hdr.gtBlack === 'number') curve.black = hdr.gtBlack;
     this.env.setTonemapParams(curve);
+    this.env.setFillLights(WG_FILL_HEMI, WG_FILL_DIR);
     return true;
   }
 
-  /** Restore the procedural RoomEnvironment IBL. */
+  /** Restore the procedural RoomEnvironment IBL + its default exposure/lights. */
   clearWgEnvironment(): void {
     this.wgEnv?.dispose();
     this.wgEnv = null;
     this.env.setEnvironment(null);
+    this.env.setTonemapParams({
+      exposure: DEFAULT_TONEMAP_PARAMS.exposure,
+      contrast: DEFAULT_TONEMAP_PARAMS.contrast,
+      linearStart: DEFAULT_TONEMAP_PARAMS.linearStart,
+      linearLength: DEFAULT_TONEMAP_PARAMS.linearLength,
+      black: DEFAULT_TONEMAP_PARAMS.black,
+    });
+    this.env.setFillLights(PROCEDURAL_FILL_HEMI, PROCEDURAL_FILL_DIR);
+  }
+
+  /** The active WG environment selection, or null when procedural. */
+  getWgEnvironment(): { space: string; weather: string } | null {
+    return this.wgEnv ? { space: this.wgEnv.space, weather: this.wgEnv.weather } : null;
   }
 
   async dispose(): Promise<void> {

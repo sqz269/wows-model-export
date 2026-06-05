@@ -41,7 +41,28 @@ export interface WgEnvironment {
   hdr: Record<string, number | number[] | boolean>;
   /** 9 RGB L2 SH coefficients (diffuse irradiance), if present. */
   sh: number[][] | null;
+  /** Log-average luminance of the cube's mip 0 — the scene-average the WG
+   *  keyed exposure (`middleGray / avgLum`) divides by. Log-space (geometric
+   *  mean) so the small bright sun disc doesn't dominate, matching WG's
+   *  log-luminance eye-adaptation. */
+  avgLum: number;
   dispose(): void;
+}
+
+/** Log-average (geometric-mean) luminance over the 6 cube faces (subsampled). */
+function cubeLogAvgLuminance(faces: Float32Array[]): number {
+  const EPS = 1e-4;
+  const STEP = 4; // sample every 4th texel per axis (×4 channels)
+  let logSum = 0;
+  let n = 0;
+  for (const face of faces) {
+    for (let i = 0; i < face.length; i += 4 * STEP) {
+      const lum = 0.2126 * face[i] + 0.7152 * face[i + 1] + 0.0722 * face[i + 2];
+      logSum += Math.log(Math.max(lum, EPS));
+      n++;
+    }
+  }
+  return n > 0 ? Math.exp(logSum / n) : EPS;
 }
 
 let _manifest: EnvManifest | null | undefined;
@@ -118,6 +139,10 @@ export async function loadWgEnvironment(
   const decoded = decodeCubeDds(buf);
   if (!decoded) return null;
 
+  // Measure the cube's log-average luminance BEFORE the faces are disposed —
+  // it feeds the consumer's WG keyed exposure.
+  const avgLum = cubeLogAvgLuminance(decoded.faces);
+
   // Get the 6 decoded faces (mip 0) onto a renderable cube. A data-backed
   // float CubeTexture trips Three's cube texSubImage2D upload path, so we go
   // via 6 float DataTextures (a proven upload) blitted into a cube RT.
@@ -180,6 +205,7 @@ export async function loadWgEnvironment(
     weather: pick.weather,
     hdr: pick.entry.hdr ?? {},
     sh: pick.entry.sh ?? null,
+    avgLum,
     dispose() {
       rt.dispose();
     },
