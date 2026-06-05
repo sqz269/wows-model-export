@@ -305,6 +305,9 @@ class SystemRenderer {
   // Record-level emission window (seconds). >0 ⇒ one-shot burst that
   // re-bursts after window+maxAge; <=0 ⇒ continuous emitter. See tick().
   private maxEmittingDuration: number;
+  // False until the first active tick has pre-filled the ring buffer (H1
+  // prewarm). Reset on each one-shot re-burst so the next burst re-warms.
+  private prewarmed = false;
   // SIZE model (RE 2026-06-04, build 12506899; memory
   // project-particle-runtime-eval-size-model). Engine:
   //   size = emitter.sizeGenerator (BASE, in METRES, per-particle)
@@ -530,6 +533,22 @@ class SystemRenderer {
       // frozen. Optional — for MVP we just fully freeze.
       return;
     }
+    // Prewarm on the first active frame (and after each one-shot re-burst): the
+    // engine pre-runs ~10 substeps on activation (FUN_1406ce8a0, scale 0.1) so a
+    // continuous emitter is at steady-state and a one-shot at peak on frame 1.
+    // Without it the buffer fills from empty over ~maxAge — 3-4x too sparse in
+    // the visible window, and a one-shot never catches up. See RE doc 63 (H1).
+    if (!this.prewarmed) {
+      this.runPrewarm();
+      this.prewarmed = true;
+    }
+    this.advance(dt);
+    this.writeBuffers();
+  }
+
+  /** Advance the CPU simulation by `dt` seconds (emission + per-particle
+   *  update). Does NOT touch the GPU buffers — see writeBuffers(). */
+  private advance(dt: number): void {
     this.elapsed += dt;
 
     // One-shot emission window + re-burst cycle (RE 2026-05-29). The record's
@@ -548,6 +567,7 @@ class SystemRenderer {
       this.emitAccum = 0;
       this.creatorAccum = 0;
       this.elapsed = 0;
+      this.prewarmed = false; // re-warm the next burst (engine re-warms on re-activation)
     }
     const emitting = !oneShot || this.elapsed <= this.maxEmittingDuration;
 
@@ -651,7 +671,12 @@ class SystemRenderer {
         );
       }
     }
+  }
 
+  /** Pack the live particles to the front of the attribute arrays and push the
+   *  GPU buffers. Called once per visible frame (after advance()), never during
+   *  prewarm. */
+  private writeBuffers(): void {
     // Update geometry attribute buffers + draw range. We pack the live
     // particles to the front; saves GPU vertex count vs. always drawing
     // `capacity` slots. ``ageGpu`` is always packed (unlike ``age[]``,
@@ -678,6 +703,18 @@ class SystemRenderer {
     this.colorAttr.needsUpdate = true;
     this.sizeAttr.needsUpdate = true;
     this.ageAttr.needsUpdate = true;
+  }
+
+  /** Pre-fill the ring buffer to the engine's frame-1 density: run STEPS
+   *  internal sub-steps (no GPU writes) before the first visible frame, like the
+   *  engine's 10x activation prewarm (FUN_1406ce8a0, scale 0.1). Continuous
+   *  emitters reach steady-state; one-shot bursts reach peak. See RE doc 63 (H1). */
+  private runPrewarm(): void {
+    const window = this.maxEmittingDuration > 0 ? this.maxEmittingDuration : this.maxAge;
+    if (!(window > 0)) return;
+    const STEPS = 10;
+    const dt = window / STEPS;
+    for (let s = 0; s < STEPS; s++) this.advance(dt);
   }
 
   /** Spawn whole particles from one emission source at ``rate`` Hz, carrying
