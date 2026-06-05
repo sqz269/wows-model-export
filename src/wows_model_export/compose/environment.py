@@ -145,6 +145,7 @@ def _extract_to_cache(
     *,
     config: PipelineConfig,
     workspace: Path,
+    extract: bool = True,
 ) -> dict[str, str]:
     """Extract each VFS path into the env cache; return ``{vfs_path: url}``.
 
@@ -152,6 +153,10 @@ def _extract_to_cache(
     leading-``/`` prepend works around the toolkit glob matcher (VFS keys
     carry a leading slash; a slash-less literal never matches) — same fix as
     ``effects_textures``.
+
+    ``extract=False`` resolves only the paths already in the cache (no toolkit
+    call) — a params-only manifest refresh still links previously-extracted
+    cubes instead of dropping them.
     """
     cache_root = (workspace / CACHE_ROOT).resolve()
     cache_root.mkdir(parents=True, exist_ok=True)
@@ -167,7 +172,7 @@ def _extract_to_cache(
         else:
             to_extract.append((vfs_path, on_disk, url))
 
-    if not to_extract:
+    if not extract or not to_extract:
         return resolved
 
     with tempfile.TemporaryDirectory(prefix="wms-env-") as td:
@@ -388,14 +393,16 @@ def build(
             if isinstance(cp, str) and cp:
                 cube_candidates.add(_resolve_cube_vfs(cp))
 
-    # Extract: the one shared BRDF LUT + every primary cube candidate.
-    cube_urls: dict[str, str] = {}
-    env_brdf_url: str | None = None
-    if extract_assets:
-        batch = sorted(cube_candidates) + [ENV_BRDF_LUT_VFS]
-        resolved = _extract_to_cache(batch, config=cfg, workspace=workspace)
-        env_brdf_url = resolved.get(ENV_BRDF_LUT_VFS)
-        cube_urls = {k: v for k, v in resolved.items() if k != ENV_BRDF_LUT_VFS}
+    # Resolve cube + BRDF URLs from the cache. With extract_assets the missing
+    # ones are pulled from the VFS; without it, only already-cached files are
+    # linked (a params-only refresh keeps the cube links instead of nulling
+    # them).
+    batch = sorted(cube_candidates) + [ENV_BRDF_LUT_VFS]
+    resolved = _extract_to_cache(
+        batch, config=cfg, workspace=workspace, extract=extract_assets
+    )
+    env_brdf_url = resolved.get(ENV_BRDF_LUT_VFS)
+    cube_urls = {k: v for k, v in resolved.items() if k != ENV_BRDF_LUT_VFS}
 
     # Assemble the per-space / per-weather manifest.
     spaces_out: dict[str, Any] = {}
@@ -430,6 +437,7 @@ def build(
                 "hdr": w.get("hdr") or {},
                 "sh": w.get("sh"),
                 "pbs_extras": w.get("pbs_extras") or {},
+                "sun": w.get("sun"),
             }
         spaces_out[name] = {
             "weather_order": env.get("weather_order") or list(weathers_out),

@@ -169,6 +169,37 @@ def _parse_pbs(weather: ET.Element) -> dict[str, Any]:
     }
 
 
+def _parse_sun(weather: ET.Element) -> dict[str, Any] | None:
+    """Pull the directional sun from ``<Sky><Sun>`` — ``yaw`` / ``pitch``
+    (azimuth / elevation in degrees) + ``color`` (RGB; alpha dropped). Returns
+    ``None`` when the weather authors no Sun block.
+
+    Note: ``Sea/sunLightPow`` (water-specular power) and ``Sky/SunDisk`` (the
+    visible sun sprite) are deliberately NOT this — only the directional light.
+    """
+    sky = weather.find("Sky")
+    if sky is None:
+        return None
+    sun = sky.find("Sun")
+    if sun is None:
+        return None
+    s = _settings_dict(sun.find("settings"))
+    yaw = s.get("yaw")
+    pitch = s.get("pitch")
+    raw_color = s.get("color")
+    if isinstance(raw_color, list):
+        color = [float(c) for c in raw_color[:3]]
+    elif isinstance(raw_color, (int, float)):
+        color = [float(raw_color)] * 3
+    else:
+        color = None
+    return {
+        "yaw": float(yaw) if isinstance(yaw, (int, float)) else None,
+        "pitch": float(pitch) if isinstance(pitch, (int, float)) else None,
+        "color": color,
+    }
+
+
 def parse_ubersettings_text(xml_text: str) -> dict[str, Any]:
     """Parse ubersettings XML text into a per-weather environment dict.
 
@@ -220,6 +251,7 @@ def parse_ubersettings_text(xml_text: str) -> dict[str, Any]:
             "hdr": _parse_hdr(weather),
             "sh": pbs["sh"],
             "pbs_extras": pbs["pbs_extras"],
+            "sun": _parse_sun(weather),
         }
         order.append(name)
 
