@@ -65,8 +65,10 @@ import {
   buildArmorEntries,
   createArmorXrayMaterial,
   disposeArmorView,
+  materialIdAtIntersection,
   mountArmorThicknessOf,
   type ArmorMeshEntry,
+  type ArmorThicknessFn,
 } from './armor_view';
 import {
   applyHitboxView,
@@ -106,6 +108,34 @@ export interface PickResult {
   point: THREE.Vector3;
   distance: number;
   info: PickedAssetInfo;
+}
+
+/**
+ * Result of hovering an armor surface in the X-ray view. Resolved from the
+ * per-vertex `_MATERIAL_ID` at the raycast hit → the sidecar thickness table.
+ */
+export interface ArmorPickResult {
+  /** Effective plate thickness at the hit point (summed layers), in mm. */
+  thicknessMm: number;
+  /** The raw `_MATERIAL_ID` the thickness was resolved from. */
+  materialId: number;
+  /** Hull belt/deck plating vs. a turret/secondary mount's own armor. */
+  source: 'hull' | 'mount';
+  /** Short zone label derived from the armor mesh name (`Armor_Citadel`
+   *  → `Citadel`), or null when the mesh is unnamed. */
+  zoneLabel: string | null;
+  /** Outer→inner layer thicknesses (hull armor only; null for mounts). */
+  layers: number[] | null;
+  /** Armor zones this material spans (hull armor only). */
+  zones: string[] | null;
+  /** Owning hardpoint for mount armor (e.g. `HP_AGM_1`), else null. */
+  hp: string | null;
+  /** Owning mount's library asset_id (mount armor only). */
+  owner: string | null;
+  /** Typed section the mount sits in (mount armor only). */
+  section: string | null;
+  /** World-space hit point. */
+  point: THREE.Vector3;
 }
 
 const pickRaycaster = new THREE.Raycaster();
@@ -165,6 +195,18 @@ function resolveAssetUserData(start: THREE.Object3D): PickedAssetInfo | null {
   return null;
 }
 
+/** Friendly zone label from an armor mesh name: strips the `Armor_` prefix
+ *  and any trailing ` [HP_…]` instance tag (`Armor_Citadel` → `Citadel`,
+ *  `Armor_Turret [HP_AGM_1]` → `Turret`). Null for an empty / bare name. */
+function armorZoneLabel(name: string): string | null {
+  if (!name) return null;
+  let s = name.replace(/^Armor[_-]?/i, '');
+  const br = s.indexOf('[');
+  if (br >= 0) s = s.slice(0, br);
+  s = s.trim();
+  return s || null;
+}
+
 export interface ShipLoadStats {
   ship: ShipSummary;
   hullMeshCount: number;
@@ -187,12 +229,21 @@ export interface ShipLoadStats {
 interface MountArmorRecord {
   /** Owning hardpoint (e.g. `HP_AGM_1`) for the `mount_armor[hp]` lookup. */
   hp: string | null;
+  /** Library asset_id of the owning mount (turret), for the hover label. */
+  assetId: string;
+  /** Sidecar instance_id of the owning placement. */
+  instanceId: string;
+  /** Typed section the mount sits in (`turrets`, `secondaries`, …). */
+  section: ShipSectionKey;
   /** The accessory's armor meshes (under its `Armor` group). */
   meshes: THREE.Mesh[];
   /** The mount's rig, when present — armor attaches to `rig.yaw`. */
   rig: TurretRig | null;
   /** Built lazily on first armor-view enable (per-instance coloured + cloned). */
   entries: ArmorMeshEntry[];
+  /** material_id → thickness(mm) resolver, cached on first prepare so the
+   *  hover pick doesn't re-collapse the `mount_armor[hp]` table per move. */
+  thicknessOf: ArmorThicknessFn | null;
 }
 
 /** Detach an accessory's `Armor` group from its parent so the normal
@@ -622,9 +673,13 @@ export class ShipViewer {
             for (const m of armorDetached.meshes) m.visible = false;
             this.mountArmorRecords.push({
               hp: this.hpByInstanceId.get(e.placement.instance_id) ?? null,
+              assetId: e.placement.asset_id,
+              instanceId: e.placement.instance_id,
+              section: e.section,
               meshes: armorDetached.meshes,
               rig,
               entries: [],
+              thicknessOf: null,
             });
           }
           this.sectionGroups[e.section].add(inst);
@@ -869,6 +924,7 @@ export class ShipViewer {
           materialsTable,
         );
         rec.entries = buildArmorEntries(rec.meshes, thicknessOf, { cloneGeometry: true });
+        rec.thicknessOf = thicknessOf;
         const yaw = rec.rig?.yaw;
         if (yaw) {
           for (const m of rec.meshes) yaw.attach(m);
@@ -1145,6 +1201,82 @@ export class ShipViewer {
           info,
         };
       }
+    }
+    return null;
+  }
+
+  /**
+   * Resolve the armor surface under a screen-space point for the X-ray
+   * hover read-out. Raycasts only the armor meshes (hull `Armor` group +
+   * each mount's own armor), so a hit reports the nearest armor plate along
+   * the ray even when the ship's visual hull is still shown on top. Reads
+   * the per-vertex `_MATERIAL_ID` at the hit triangle and joins it to the
+   * sidecar thickness table (hull `materials_table` or the mount's
+   * `mount_armor[hp]`). Returns null when the armor view is off or the
+   * cursor missed every armor surface.
+   *
+   * `clientX` / `clientY` are document coords (`event.clientX` / `clientY`).
+   */
+  pickArmorAt(clientX: number, clientY: number): ArmorPickResult | null {
+    if (!this.armorViewEnabled) return null;
+    const materialsTable = this.sidecar?.armor?.materials_table ?? {};
+
+    // Gather every armor mesh currently in the scene. Hull armor lives under
+    // the `Armor` group (toggled visible as a group); mount armor meshes were
+    // re-parented onto their yaw bones. We rely on `isVisibleChain` below to
+    // skip anything hidden rather than pre-filtering here.
+    const meshes: THREE.Mesh[] = [];
+    if (this.armorEntries) {
+      for (const e of this.armorEntries) meshes.push(e.mesh);
+    }
+    for (const rec of this.mountArmorRecords) {
+      for (const m of rec.meshes) meshes.push(m);
+    }
+    if (meshes.length === 0) return null;
+
+    const canvas = this.env.renderer.domElement;
+    const rect = canvas.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    pickPointer.set(x, y);
+    pickRaycaster.setFromCamera(pickPointer, this.env.camera);
+    const hits = pickRaycaster.intersectObjects(meshes, false);
+    for (const hit of hits) {
+      if (!isVisibleChain(hit.object)) continue;
+      const matId = materialIdAtIntersection(hit);
+      if (matId == null) continue;
+      const mesh = hit.object as THREE.Mesh;
+      const rec = this.mountArmorRecords.find((r) => r.meshes.includes(mesh));
+      if (rec) {
+        const thicknessOf =
+          rec.thicknessOf ??
+          mountArmorThicknessOf(this.sidecar?.armor?.mount_armor?.[rec.hp ?? ''], materialsTable);
+        return {
+          thicknessMm: thicknessOf(matId),
+          materialId: matId,
+          source: 'mount',
+          zoneLabel: armorZoneLabel(mesh.name),
+          layers: null,
+          zones: null,
+          hp: rec.hp,
+          owner: rec.assetId,
+          section: rec.section,
+          point: hit.point.clone(),
+        };
+      }
+      const m = materialsTable[String(matId)];
+      return {
+        thicknessMm: m?.thickness_mm ?? 0,
+        materialId: matId,
+        source: 'hull',
+        zoneLabel: armorZoneLabel(mesh.name),
+        layers: m?.layers ?? null,
+        zones: m?.zones ?? null,
+        hp: null,
+        owner: null,
+        section: null,
+        point: hit.point.clone(),
+      };
     }
     return null;
   }

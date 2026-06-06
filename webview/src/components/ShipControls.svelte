@@ -612,6 +612,9 @@
               {/each}
               <span class="text-muted-foreground/70 text-[9px]">mm</span>
             </div>
+            <p class="text-muted-foreground/70 pl-5 text-[9px] leading-snug">
+              Hover a plate in the 3D view for its thickness, zone &amp; layers.
+            </p>
           {/if}
         {/if}
 
