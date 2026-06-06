@@ -155,6 +155,45 @@ function readMaterialIdAttr(
   return geom.getAttribute('_material_id') ?? geom.getAttribute('_MATERIAL_ID') ?? undefined;
 }
 
+const _localHit = new THREE.Vector3();
+const _vA = new THREE.Vector3();
+const _vB = new THREE.Vector3();
+const _vC = new THREE.Vector3();
+
+/**
+ * Read the per-vertex `_MATERIAL_ID` at a raycaster hit on an armor mesh.
+ * The id is an integer authored per-vertex (one value per armor plate), so
+ * barycentric interpolation across the hit triangle is meaningless — we pick
+ * whichever of the triangle's three vertices is nearest the hit point, which
+ * resolves correctly even where two plates of differing thickness share an
+ * edge. Returns null when the mesh has no material-id attribute or the hit
+ * carries no face (non-mesh geometry).
+ */
+export function materialIdAtIntersection(hit: THREE.Intersection): number | null {
+  const mesh = hit.object as THREE.Mesh;
+  const geom = mesh.geometry as THREE.BufferGeometry | undefined;
+  const face = hit.face;
+  if (!geom || !face) return null;
+  const matAttr = readMaterialIdAttr(geom);
+  if (!matAttr) return null;
+  const pos = geom.getAttribute('position');
+  if (!pos) return matAttr.getX(face.a);
+  // hit.point is world-space; compare against the local-space vertices.
+  mesh.worldToLocal(_localHit.copy(hit.point));
+  _vA.fromBufferAttribute(pos, face.a);
+  _vB.fromBufferAttribute(pos, face.b);
+  _vC.fromBufferAttribute(pos, face.c);
+  let idx = face.a;
+  let best = _localHit.distanceToSquared(_vA);
+  const dB = _localHit.distanceToSquared(_vB);
+  if (dB < best) {
+    best = dB;
+    idx = face.b;
+  }
+  if (_localHit.distanceToSquared(_vC) < best) idx = face.c;
+  return matAttr.getX(idx);
+}
+
 /**
  * Build reversible thickness-colour swap entries for a set of armor meshes.
  *

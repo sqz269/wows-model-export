@@ -13,8 +13,8 @@
   //            overlay, F-frame target) lives in the consumer.
 
   import { onMount, untrack } from 'svelte';
-  import { ShipViewer } from '$lib/ship';
-  import type { PickResult, ShipLoadStats } from '$lib/ship';
+  import { ShipViewer, thicknessToColorHex } from '$lib/ship';
+  import type { ArmorPickResult, PickResult, ShipLoadStats } from '$lib/ship';
   import type { LibraryIndex, ShipSummary } from '$lib/types';
 
   interface Props {
@@ -35,6 +35,11 @@
   let host: HTMLDivElement | null = $state(null);
   let viewer: ShipViewer | null = null;
   let loadToken = 0;
+
+  // Armor X-ray hover read-out. Populated by `pickArmorAt` on pointer move
+  // while the armor view is enabled; rendered as a small tooltip following
+  // the cursor (container-local px in `left`/`top`). Null = hide.
+  let armorTip = $state<(ArmorPickResult & { left: number; top: number }) | null>(null);
   // Distinguish click-to-pick from camera drag. OrbitControls swallows
   // pointer drags; we still want a click to pick. Track pointerdown
   // position + suppress pick if the pointer moved past a small threshold
@@ -74,9 +79,51 @@
     canvas.addEventListener('pointerdown', handleDown);
     canvas.addEventListener('pointerup', handleUp);
 
+    // Armor X-ray hover. pointermove fires fast, so coalesce raycasts to one
+    // per animation frame. Suppressed while a button is held (camera orbit /
+    // pan) and whenever the armor view is off (pickArmorAt short-circuits).
+    let hoverX = 0;
+    let hoverY = 0;
+    let hoverPending = false;
+    const resolveHover = () => {
+      hoverPending = false;
+      if (!viewer || !host || !viewer.getArmorViewEnabled()) {
+        armorTip = null;
+        return;
+      }
+      const hit = viewer.pickArmorAt(hoverX, hoverY);
+      if (!hit) {
+        armorTip = null;
+        return;
+      }
+      const rect = host.getBoundingClientRect();
+      // Offset from the cursor, clamped so the tooltip stays on-canvas.
+      const left = Math.min(Math.max(hoverX - rect.left + 14, 4), rect.width - 196);
+      const top = Math.min(Math.max(hoverY - rect.top + 16, 4), rect.height - 92);
+      armorTip = { ...hit, left, top };
+    };
+    const handleMove = (e: PointerEvent) => {
+      if (e.buttons !== 0 || !viewer || !viewer.getArmorViewEnabled()) {
+        if (armorTip) armorTip = null;
+        return;
+      }
+      hoverX = e.clientX;
+      hoverY = e.clientY;
+      if (hoverPending) return;
+      hoverPending = true;
+      requestAnimationFrame(resolveHover);
+    };
+    const handleLeave = () => {
+      if (armorTip) armorTip = null;
+    };
+    canvas.addEventListener('pointermove', handleMove);
+    canvas.addEventListener('pointerleave', handleLeave);
+
     return () => {
       canvas.removeEventListener('pointerdown', handleDown);
       canvas.removeEventListener('pointerup', handleUp);
+      canvas.removeEventListener('pointermove', handleMove);
+      canvas.removeEventListener('pointerleave', handleLeave);
       bindHandle?.(null);
       viewer = null;
       void v.dispose();
@@ -115,4 +162,48 @@
 <div
   bind:this={host}
   class="relative flex-1 min-w-0 min-h-0 [&_canvas]:block [&_canvas]:w-full [&_canvas]:h-full"
-></div>
+>
+  {#if armorTip}
+    <!--
+      Armor X-ray hover read-out. Floats over the canvas at the cursor;
+      pointer-events-none so it never eats the orbit/pick gestures.
+    -->
+    <div
+      class="pointer-events-none absolute z-20 rounded-md border border-border bg-popover/95 px-2.5 py-1.5 text-[11px] shadow-lg backdrop-blur-sm"
+      style="left:{armorTip.left}px; top:{armorTip.top}px;"
+    >
+      <div class="flex items-center gap-1.5">
+        <span
+          class="inline-block size-3 flex-none rounded-[3px]"
+          style="background:{thicknessToColorHex(armorTip.thicknessMm)}"
+        ></span>
+        <span class="text-foreground font-semibold tabular-nums">
+          {armorTip.thicknessMm > 0 ? `${armorTip.thicknessMm} mm` : 'no armor'}
+        </span>
+        {#if armorTip.zoneLabel}
+          <span class="text-muted-foreground">· {armorTip.zoneLabel}</span>
+        {/if}
+      </div>
+      {#if armorTip.layers && armorTip.layers.length > 1}
+        <div class="text-muted-foreground text-[10px] tabular-nums">
+          layers: {armorTip.layers.join(' + ')} mm
+        </div>
+      {/if}
+      {#if armorTip.source === 'mount'}
+        <div class="text-muted-foreground text-[10px]">
+          turret armor{armorTip.hp ? ` · ${armorTip.hp}` : ''}
+        </div>
+        {#if armorTip.owner}
+          <div class="text-muted-foreground/70 max-w-[180px] truncate font-mono text-[9px]">
+            {armorTip.owner}
+          </div>
+        {/if}
+      {:else if armorTip.zones && armorTip.zones.length > 0}
+        <div class="text-muted-foreground max-w-[180px] truncate text-[10px]">
+          zones: {armorTip.zones.join(', ')}
+        </div>
+      {/if}
+      <div class="text-muted-foreground/70 text-[9px] tabular-nums">mat #{armorTip.materialId}</div>
+    </div>
+  {/if}
+</div>
