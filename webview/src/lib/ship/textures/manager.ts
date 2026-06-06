@@ -147,12 +147,13 @@ export class TextureManager {
   // lighting. 1.0 = engine-faithful, 0.0 = flat (normal map disabled
   // visually). Live-updatable via setNormalScale.
   private normalScale = 2.0;
-  // Cached rain wetness (Layer 1). The env is applied in the viewer ctor —
-  // before any ship loads — so the params are cached and re-pushed to clones
-  // as they're built (and rebuilt on skin swap). `wetnessColor` is built by
-  // the viewer (which has a runtime THREE import); the manager only copies it.
-  private wetnessOverall = 0;
-  private wetnessColor: THREE.Color | null = null;
+  // Cached rain wetness. The env is applied in the viewer ctor — before any
+  // ship loads — so the params are cached and re-pushed to clones as they're
+  // built (and rebuilt on skin swap). `wetnessColor` is built by the viewer
+  // (which has a runtime THREE import); the manager only copies it.
+  private wetnessOverall = 0; // Layer 1 (global tint)
+  private wetnessColor: THREE.Color | null = null; // Layer 1
+  private wetnessPuddles = 0; // Layer 3 (deck puddle intensity)
 
   private hooks: TextureManagerInit;
 
@@ -656,9 +657,14 @@ export class TextureManager {
    * and cache it. `wg_render_ship_water.md` §5: the per-weather `overallWetness`
    * tints albedo toward `wetnessColor` and drops roughness. Dry = `{0, null}`.
    */
-  setWetness(params: { overallWetness: number; wetnessColor: THREE.Color | null }): void {
+  setWetness(params: {
+    overallWetness: number;
+    wetnessColor: THREE.Color | null;
+    puddlesIntensity?: number;
+  }): void {
     this.wetnessOverall = Math.min(Math.max(params.overallWetness || 0, 0), 1);
     this.wetnessColor = params.wetnessColor ?? null;
+    this.wetnessPuddles = Math.min(Math.max(params.puddlesIntensity || 0, 0), 1);
     this.reapplyWetness();
   }
 
@@ -676,6 +682,7 @@ export class TextureManager {
         for (const w of wetnessUniformsOf(mat)) {
           w.wetOverall.value = this.wetnessOverall;
           if (this.wetnessColor) w.wetColor.value.copy(this.wetnessColor);
+          w.wetPuddles.value = this.wetnessPuddles;
         }
       }
     }

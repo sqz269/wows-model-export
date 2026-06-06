@@ -29,6 +29,12 @@ export interface WetnessUniforms {
   wetWaveAmp: { value: number };
   /** Band thickness over which the waterline wetness fades out upward (m). */
   wetBand: { value: number };
+
+  // ── Layer 3: deck puddles (wg_render_ship_water.md §5b.2) ─────────────────
+  // The per-weather `puddlesIntensity` (0 clear .. 0.75 Storm). Pushed by
+  // `TextureManager.setWetness` from the manifest's `wetness` block. Drives
+  // procedural deck puddles (object/world-XZ planar, up-facing-normal gated).
+  wetPuddles: { value: number };
 }
 
 /** Neutral dark blue-grey — the fallback wet tint when a weather authors no
@@ -43,6 +49,7 @@ export function makeWetnessUniforms(): WetnessUniforms {
     wetWaterY: { value: 0.0 }, // viewer rests ships at y=0
     wetWaveAmp: { value: 0.6 },
     wetBand: { value: 4.0 },
+    wetPuddles: { value: 0.0 }, // 0 until a rainy WG weather is applied
   };
 }
 

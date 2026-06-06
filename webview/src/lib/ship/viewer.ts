@@ -1386,7 +1386,11 @@ export class ShipViewer {
         THREE.LinearSRGBColorSpace,
       );
     }
-    this.textures.setWetness({ overallWetness: wet.overallWetness, wetnessColor: wetColor });
+    this.textures.setWetness({
+      overallWetness: wet.overallWetness,
+      wetnessColor: wetColor,
+      puddlesIntensity: wet.puddlesIntensity,
+    });
     return true;
   }
 
@@ -1405,7 +1409,7 @@ export class ShipViewer {
     this.env.setFillLights(PROCEDURAL_FILL_HEMI, PROCEDURAL_FILL_DIR);
     this.env.setSunLight({ direction: PROCEDURAL_SUN_DIR.clone(), color: 0xffffff });
     // Procedural sky has no weather → dry hull.
-    this.textures.setWetness({ overallWetness: 0, wetnessColor: null });
+    this.textures.setWetness({ overallWetness: 0, wetnessColor: null, puddlesIntensity: 0 });
   }
 
   /** The active WG environment selection, or null when procedural. */
