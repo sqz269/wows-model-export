@@ -50,7 +50,9 @@ CACHE_ROOT = Path("content") / "environment"
 # Global manifest artefact (per-space / per-weather IBL + tonemap params).
 LIBRARY_ROOT = Path("library") / "environment"
 MANIFEST_FILE = LIBRARY_ROOT / "manifest.json"
-SCHEMA_VERSION = 1
+# v2 (2026-06-05): per-weather "wetness" block (puddles/ripples/fallout
+# intensities + overallWetness/wetnessColor) added alongside "sun".
+SCHEMA_VERSION = 2
 
 # The one shared split-sum BRDF LUT (packed only — not in res_unpack).
 ENV_BRDF_LUT_VFS = "system/maps/env_brdf_lut.dds"
@@ -438,6 +440,7 @@ def build(
                 "sh": w.get("sh"),
                 "pbs_extras": w.get("pbs_extras") or {},
                 "sun": w.get("sun"),
+                "wetness": w.get("wetness"),
             }
         spaces_out[name] = {
             "weather_order": env.get("weather_order") or list(weathers_out),

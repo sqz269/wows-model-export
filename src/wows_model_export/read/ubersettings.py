@@ -200,6 +200,52 @@ def _parse_sun(weather: ET.Element) -> dict[str, Any] | None:
     }
 
 
+def _parse_wetness(
+    weather: ET.Element, pbs_extras: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Pull the per-weather rain-wetness drivers.
+
+    Two live in the top-level ``<Weather><settings>`` (``puddlesIntensity`` deck
+    puddles + ``ripplesIntensity`` water ripples; plus the rarely-authored
+    ``falloutIntensity`` map gimmick — note the lowercase ``f``). Two more —
+    ``overallWetness`` (hull surface-wetness scalar) + ``wetnessColor`` (tint) —
+    live one level down in ``<PBS><PbsExtras><settings>`` and arrive here
+    pre-flattened as ``pbs_extras`` (so we don't re-walk ``<PBS>``). All are
+    *independent* knobs: a weather can drive deck puddles without bumping the
+    hull-wetness tint (e.g. 14_Atlantic/Storm = puddles 0.75 but overallWetness 0).
+
+    Returns ``None`` when the weather has no top-level ``<settings>`` at all
+    (defends old/dock spaces; never happens in current builds). Otherwise the
+    five fields with missing scalars defaulted to 0.0 and a missing colour to
+    ``None``. ``wetnessColor`` is RGBA (4 floats) in WG content — the 4th term is
+    an alpha/strength factor, kept verbatim (consumer takes ``[:3]`` for RGB).
+    """
+    settings_elem = weather.find("settings")
+    if settings_elem is None:
+        return None
+    s = _settings_dict(settings_elem)
+
+    def _scalar(d: dict[str, Any], key: str) -> float:
+        v = d.get(key)
+        return float(v) if isinstance(v, (int, float)) else 0.0
+
+    raw_color = pbs_extras.get("wetnessColor")
+    if isinstance(raw_color, list):
+        wetness_color: list[float] | None = [float(c) for c in raw_color]
+    elif isinstance(raw_color, (int, float)):
+        wetness_color = [float(raw_color)]
+    else:
+        wetness_color = None
+
+    return {
+        "puddlesIntensity": _scalar(s, "puddlesIntensity"),
+        "ripplesIntensity": _scalar(s, "ripplesIntensity"),
+        "falloutIntensity": _scalar(s, "falloutIntensity"),
+        "overallWetness": _scalar(pbs_extras, "overallWetness"),
+        "wetnessColor": wetness_color,
+    }
+
+
 def parse_ubersettings_text(xml_text: str) -> dict[str, Any]:
     """Parse ubersettings XML text into a per-weather environment dict.
 
@@ -217,7 +263,11 @@ def parse_ubersettings_text(xml_text: str) -> dict[str, Any]:
                       eyeDarkLimit, eyeLightLimit, skyLumMultiplier,
                       ambientLumMultiplier, hdrMapExposureOffset, ...},
               "sh": [[r, g, b], ... x9] | None,
-              "pbs_extras": {indirectMultShips, microShadowsIntensityShips, ...},
+              "pbs_extras": {indirectMultShips, microShadowsIntensityShips,
+                             overallWetness, wetnessColor, ...},
+              "sun": {yaw, pitch, color} | None,
+              "wetness": {puddlesIntensity, ripplesIntensity, falloutIntensity,
+                          overallWetness, wetnessColor} | None,
             },
             "Storm": {...}, ...
           },
@@ -252,6 +302,7 @@ def parse_ubersettings_text(xml_text: str) -> dict[str, Any]:
             "sh": pbs["sh"],
             "pbs_extras": pbs["pbs_extras"],
             "sun": _parse_sun(weather),
+            "wetness": _parse_wetness(weather, pbs["pbs_extras"]),
         }
         order.append(name)
 
