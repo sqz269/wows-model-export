@@ -30,6 +30,7 @@ def ammo_json(
     *,
     config: PipelineConfig | None = None,
     hull: str | None = None,
+    vehicle: str | None = None,
 ) -> ToolkitResult:
     """Dump the ship's per-shell ballistic profiles to ``out_path``.
 
@@ -37,12 +38,20 @@ def ammo_json(
     ``ranges`` calculation. Shells are always the union across hulls
     (a shell present on hull-stock is the same projectile on hull-elite);
     only the aggregate range needs a hull-specific reference.
+
+    ``vehicle``: optional explicit GameParams vehicle id (param name like
+    ``PASC108_Baltimore_1944`` or short index like ``PASC108``). When set,
+    the ammo/ranges bind to that exact param instead of first-match on the
+    model directory — required when several params share one model dir (a
+    current ship plus a legacy re-release re-skin, e.g. Baltimore).
     """
     cfg = config or PipelineConfig.load()
 
     out = Path(out_path).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     argv = ["--game-dir", str(cfg.require_game_dir()), "ammo", ship, "--json", str(out)]
+    if vehicle is not None:
+        argv += ["--vehicle", vehicle]
     if hull is not None:
         argv += ["--hull", hull]
     return run_toolkit(argv, config=cfg, expect_outputs=(out,))

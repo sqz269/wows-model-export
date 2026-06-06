@@ -1393,6 +1393,15 @@ def scaffold_ship(
     workspace = Path(workspace)
 
     toolkit_name = toolkit_ship or ship
+    # Explicit GameParams vehicle id for the toolkit's armor/ammo/mount
+    # resolution. Several params can share one model directory (a current
+    # ship + a legacy re-release re-skin, e.g. Baltimore's PASC108 vs the
+    # older PASC017); the toolkit's name/model-dir lookup first-matches and
+    # can grab the wrong (incomplete) armor table. When we know the intended
+    # param (the autofill id), pass it through so armor + ammo bind to it.
+    # None → toolkit keeps its model-dir first-match (fine for unambiguous
+    # ships).
+    vehicle_id = gameparams_ship_id
     if variant_permoflage in ("none", ""):
         variant_permoflage = None
 
@@ -1585,7 +1594,7 @@ def scaffold_ship(
         _emit_locked("export_armor", "started", detail=detail)
         t0 = time.perf_counter()
         try:
-            _toolkit_armor_json(toolkit_name, armor_json_path, config=cfg)
+            _toolkit_armor_json(toolkit_name, armor_json_path, config=cfg, vehicle=vehicle_id)
         except Exception as e:
             step_ms = (time.perf_counter() - t0) * 1000.0
             _record_timing("export_armor", step_ms)
@@ -1604,7 +1613,7 @@ def scaffold_ship(
         _emit_locked("export_ammo", "started", detail=detail)
         t0 = time.perf_counter()
         try:
-            _toolkit_ammo_json(toolkit_name, ballistics_json, config=cfg)
+            _toolkit_ammo_json(toolkit_name, ballistics_json, config=cfg, vehicle=vehicle_id)
         except Exception as e:
             step_ms = (time.perf_counter() - t0) * 1000.0
             _record_timing("export_ammo", step_ms)
@@ -1687,6 +1696,7 @@ def scaffold_ship(
                 raw_dds_dir=textures_dds_dir,
                 armor_json=armor_json_path,
                 ammo_json=ballistics_json,
+                vehicle=vehicle_id,
                 config=cfg,
             )
             _variant_and_emissive(out)

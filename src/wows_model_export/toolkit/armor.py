@@ -28,18 +28,27 @@ def armor_json(
     *,
     config: PipelineConfig | None = None,
     hull: str | None = None,
+    vehicle: str | None = None,
 ) -> ToolkitResult:
     """Dump the ship's armor materials_table + zones to ``out_path``.
 
     ``hull``: optional ``PAUH*`` hull-upgrade identifier; when set,
     armor table reflects that hull tier specifically. Default (None)
     uses the stock hull.
+
+    ``vehicle``: optional explicit GameParams vehicle id (param name like
+    ``PASC108_Baltimore_1944`` or short index like ``PASC108``). When set,
+    the armor map binds to that exact param instead of first-match on the
+    model directory — required when several params share one model dir (a
+    current ship plus a legacy re-release re-skin, e.g. Baltimore).
     """
     cfg = config or PipelineConfig.load()
 
     out = Path(out_path).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     argv = ["--game-dir", str(cfg.require_game_dir()), "armor", ship, "--json", str(out)]
+    if vehicle is not None:
+        argv += ["--vehicle", vehicle]
     if hull is not None:
         argv += ["--hull", hull]
     return run_toolkit(argv, config=cfg, expect_outputs=(out,))

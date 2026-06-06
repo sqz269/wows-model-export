@@ -173,6 +173,7 @@ def ingest_ship_bundle(
     armor_json: Path | str | os.PathLike | None = None,
     ammo_json: Path | str | os.PathLike | None = None,
     ammo_hull: str | None = None,
+    vehicle: str | None = None,
 ) -> ToolkitResult:
     """One-shot per-ship ingest: GLB + placements + skel_ext + material
     mappings + armor JSON + ammo JSON from a SINGLE ``wowsunpack`` process
@@ -188,6 +189,12 @@ def ingest_ship_bundle(
     ``armor_json`` / ``ammo_json`` are optional — omit one to skip that
     output. ``ammo_hull`` selects the hull for the ammo ``ranges`` section
     only; it is decoupled from ``hull`` (which drives the GLB + armor).
+
+    ``vehicle``: optional explicit GameParams vehicle id (param name like
+    ``PASC108_Baltimore_1944``). When set, the armor map + mounts + ammo
+    bind to that exact param instead of first-match on the model directory
+    — required when several params share one model dir (a current ship plus
+    a legacy re-release re-skin, e.g. Baltimore's PASC108 vs PASC017).
 
     Applies the same ``Armor_*`` / ``CM_SB_*`` winding flip as
     :func:`export_ship` after a successful export (the GLB is produced by
@@ -210,6 +217,8 @@ def ingest_ship_bundle(
         "--lod", str(lod),
         "--accessories", accessories,
     ]
+    if vehicle is not None:
+        argv += ["--vehicle", vehicle]
     if hull is not None:
         argv += ["--hull", hull]
     if no_textures:
