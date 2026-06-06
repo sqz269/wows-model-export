@@ -9,6 +9,7 @@
 
 import type * as THREE from 'three';
 import { makeCamoUniforms, type CamoUniforms } from './uniforms';
+import { makeWetnessUniforms } from '../wetness';
 
 /**
  * Attach the camo overlay chunk to a freshly-cloned material. Returns
@@ -17,6 +18,13 @@ import { makeCamoUniforms, type CamoUniforms } from './uniforms';
  */
 export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
   const uniforms = makeCamoUniforms();
+  // Rain wetness (Layer 1) rides this same `onBeforeCompile` — Three.js gives
+  // one slot per material, so the wetness GLSL is appended to the camo chunk
+  // below rather than a second injection. Its uniforms are a SEPARATE object
+  // stashed on userData so the camo skin-swap dispatch never clobbers them;
+  // `material.ts`'s userData spread (after this call) preserves it.
+  const wetness = makeWetnessUniforms();
+  mat.userData = { ...(mat.userData ?? {}), wetnessUniforms: wetness };
   mat.onBeforeCompile = (shader) => {
     // Wire the per-clone uniform set into the shader. Three.js's
     // `onBeforeCompile` runs once per program compile; uniforms must be
@@ -45,6 +53,11 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.uniforms.detailScale = uniforms.detailScale;
     shader.uniforms.detailInfluence = uniforms.detailInfluence;
     shader.uniforms.detailFadeDistance = uniforms.detailFadeDistance;
+
+    // Rain-wetness (Layer 1) uniforms — pushed by `TextureManager.setWetness`.
+    shader.uniforms.wetOverall = wetness.wetOverall;
+    shader.uniforms.wetColor = wetness.wetColor;
+    shader.uniforms.wetRoughDrop = wetness.wetRoughDrop;
 
     // Vertex: compute per-mesh camo UV. `camoUV` packs (scale.xy,
     // offset.xy); `vCamoUv` is what the fragment shader samples the
@@ -87,6 +100,9 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
       'uniform vec2 detailScale;\n' +
       'uniform vec3 detailInfluence;\n' +
       'uniform float detailFadeDistance;\n' +
+      'uniform float wetOverall;\n' +
+      'uniform vec3 wetColor;\n' +
+      'uniform float wetRoughDrop;\n' +
       'varying vec2 vCamoUv;\n' +
       shader.fragmentShader
         .replace(
@@ -280,6 +296,16 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
     diffuseColor *= baseSample;
   }
 #endif
+
+// ── Rain wetness Layer 1: global tint (wg_render_ship_water.md §5) ──────────
+// The per-weather 'overallWetness' lerps the (painted) albedo toward
+// 'wetnessColor'. Runs AFTER camo — diffuseColor is final here — so it wets the
+// painted hull, and is a no-op when dry (wetOverall == 0). The 0.5 tint cap +
+// coefficients are tunable consumer defaults, NOT engine-extracted. Composes
+// before tonemap and never touches the _mg/_mr/_n texel inputs (§9a). Layer 2
+// (waterline band) + Layer 3 (deck puddles, §5b.2) extend this block.
+float wetGlobal = clamp( wetOverall, 0.0, 1.0 );
+diffuseColor.rgb = mix( diffuseColor.rgb, wetColor, wetGlobal * 0.5 );
 `,
         )
         // WG-pack metallicRoughness override. WG `_mg.dds` ACTUAL layout
@@ -326,6 +352,14 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
   roughTexel = mix( roughTexel, 1.0 - catMgnSample.r, catGlossMix );
   roughnessFactor *= roughTexel;
 #endif
+
+// ── Rain wetness Layer 1: global roughness drop ────────────────────────────
+// Wet surfaces read glossier; scale the final roughnessFactor toward
+// 'wetRoughDrop' by overallWetness. roughnessFactor is in scope (declared
+// above, OUTSIDE the USE_ROUGHNESSMAP guard), so this also wets materials with
+// no roughness map. Scales only the final factor — never the _mr/_mg texel
+// reads (§9a). No-op when dry.
+roughnessFactor *= mix( 1.0, wetRoughDrop, clamp( wetOverall, 0.0, 1.0 ) );
 `,
         )
         .replace(

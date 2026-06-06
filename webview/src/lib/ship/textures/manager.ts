@@ -22,6 +22,7 @@ import { resolveDdsMipUrls } from '$lib/dds';
 import { classifyPartCategory, classifyPlacementCategory } from '$lib/types';
 import type { ShipPlacement, Skin, SidecarDoc, SidecarTextureScheme, SkinMatCategoryParams, TextureSet } from '$lib/types';
 import { dummyMaskTexture, dummyMatAlbedoTexture, uniformsOf } from '../camo';
+import { wetnessUniformsOf } from '../wetness';
 import {
   applyTexturesToMaterial,
   buildTextured,
@@ -146,6 +147,12 @@ export class TextureManager {
   // lighting. 1.0 = engine-faithful, 0.0 = flat (normal map disabled
   // visually). Live-updatable via setNormalScale.
   private normalScale = 2.0;
+  // Cached rain wetness (Layer 1). The env is applied in the viewer ctor —
+  // before any ship loads — so the params are cached and re-pushed to clones
+  // as they're built (and rebuilt on skin swap). `wetnessColor` is built by
+  // the viewer (which has a runtime THREE import); the manager only copies it.
+  private wetnessOverall = 0;
+  private wetnessColor: THREE.Color | null = null;
 
   private hooks: TextureManagerInit;
 
@@ -645,6 +652,36 @@ export class TextureManager {
   }
 
   /**
+   * Push the active weather's rain wetness (Layer 1) to every textured clone
+   * and cache it. `wg_render_ship_water.md` §5: the per-weather `overallWetness`
+   * tints albedo toward `wetnessColor` and drops roughness. Dry = `{0, null}`.
+   */
+  setWetness(params: { overallWetness: number; wetnessColor: THREE.Color | null }): void {
+    this.wetnessOverall = Math.min(Math.max(params.overallWetness || 0, 0), 1);
+    this.wetnessColor = params.wetnessColor ?? null;
+    this.reapplyWetness();
+  }
+
+  /**
+   * Re-push the cached wetness onto every current clone. Called after a ship
+   * load or skin swap rebuilds materials (their wetness uniforms default to
+   * dry), so the active weather's wetness survives those rebuilds.
+   */
+  reapplyWetness(): void {
+    for (const entry of this.entries) {
+      const mats: THREE.Material[] = [];
+      if (entry.textured) for (const m of asArray(entry.textured)) mats.push(m);
+      for (const m of entry.texturedByScheme.values()) for (const mm of asArray(m)) mats.push(mm);
+      for (const mat of mats) {
+        for (const w of wetnessUniformsOf(mat)) {
+          w.wetOverall.value = this.wetnessOverall;
+          if (this.wetnessColor) w.wetColor.value.copy(this.wetnessColor);
+        }
+      }
+    }
+  }
+
+  /**
    * Snapshot of normal-map binding state, for runtime diagnostics
    * (live-inspect via `viewer.getNormalDiagnostics()` in dev console).
    * Useful when the slider appears to have no effect — surfaces
@@ -1059,6 +1096,10 @@ export class TextureManager {
         this.lastPathBLog = msg;
       }
     }
+
+    // A skin/scheme swap may have rebuilt clones (with fresh dry-default wetness
+    // uniforms) — re-push the active weather's wetness so it survives the swap.
+    this.reapplyWetness();
   }
 }
 

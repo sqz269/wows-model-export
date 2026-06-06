@@ -24,6 +24,17 @@ export interface SunParams {
   color: number[] | null;
 }
 
+/** Per-weather rain wetness drivers (reference/engine/wg_render_ship_water.md
+ *  §5/§5b). Layer 1 uses `overallWetness` + `wetnessColor`; `puddlesIntensity`
+ *  / `ripplesIntensity` drive the Layer-3 deck puddles (0 until the producer
+ *  emits them). */
+export interface WetnessParams {
+  overallWetness: number;
+  wetnessColor: number[] | null;
+  puddlesIntensity: number;
+  ripplesIntensity: number;
+}
+
 export interface WeatherEnvEntry {
   cube_url: string | null;
   cube: { format: string; width: number; height: number; mips: number; is_cube: boolean } | null;
@@ -51,6 +62,8 @@ export interface WgEnvironment {
   sh: number[][] | null;
   /** Directional sun (azimuth/elevation° + RGB color) for this weather. */
   sun: SunParams | null;
+  /** Per-weather rain wetness (Layer 1 tint + Layer 3 puddle intensities). */
+  wetness: WetnessParams;
   /** Log-average luminance of the cube's mip 0 — the scene-average the WG
    *  keyed exposure (`middleGray / avgLum`) divides by. Log-space (geometric
    *  mean) so the small bright sun disc doesn't dominate, matching WG's
@@ -98,6 +111,34 @@ export async function listEnvironments(): Promise<{ space: string; weathers: str
     space,
     weathers: s.weather_order?.length ? s.weather_order : Object.keys(s.weathers),
   }));
+}
+
+/** Derive the per-weather wetness drivers from a manifest entry. Today
+ *  `overallWetness` / `wetnessColor` live in `pbs_extras` (the producer
+ *  flattens `<PBS>/<PbsExtras>/<settings>` verbatim); `puddlesIntensity` /
+ *  `ripplesIntensity` come from a dedicated `wetness` block once the producer
+ *  emits it (Layer 3). Reads both, defaults to dry. This one function isolates
+ *  "where the producer put it" so the consumer is churn-proof. */
+export function wetnessFromEntry(entry: WeatherEnvEntry): WetnessParams {
+  const px = (entry.pbs_extras ?? {}) as Record<string, unknown>;
+  const w = ((entry as { wetness?: Record<string, unknown> }).wetness ?? {}) as Record<
+    string,
+    unknown
+  >;
+  const num = (...vs: unknown[]): number => {
+    for (const v of vs) if (typeof v === 'number' && isFinite(v)) return v;
+    return 0;
+  };
+  const rgb = (...vs: unknown[]): number[] | null => {
+    for (const v of vs) if (Array.isArray(v) && v.length >= 3) return v as number[];
+    return null;
+  };
+  return {
+    overallWetness: num(px.overallWetness, w.overallWetness),
+    wetnessColor: rgb(px.wetnessColor, w.wetnessColor),
+    puddlesIntensity: num(w.puddlesIntensity, px.puddlesIntensity),
+    ripplesIntensity: num(w.ripplesIntensity, px.ripplesIntensity),
+  };
 }
 
 function pickEntry(
@@ -216,6 +257,7 @@ export async function loadWgEnvironment(
     hdr: pick.entry.hdr ?? {},
     sh: pick.entry.sh ?? null,
     sun: pick.entry.sun ?? null,
+    wetness: wetnessFromEntry(pick.entry),
     avgLum,
     dispose() {
       rt.dispose();

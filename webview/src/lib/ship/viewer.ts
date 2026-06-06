@@ -752,6 +752,11 @@ export class ShipViewer {
     // the user enables the overlay.
     this.nodeOverlay.rebuild(this.shipRoot, this.sidecar?.effects?.attachments ?? null);
 
+    // Re-push the active weather's rain wetness onto the freshly-built hull/
+    // accessory materials — the WG environment is applied in the constructor,
+    // before this ship loaded, so its wetness must be re-applied here.
+    this.textures.reapplyWetness();
+
     const loadMs = performance.now() - t0;
     report(`Loaded in ${(loadMs / 1000).toFixed(1)}s.`);
 
@@ -1367,6 +1372,21 @@ export class ShipViewer {
     } else {
       this.env.setSunLight({ intensity: 0.35 });
     }
+
+    // Layer-1 rain wetness: tint albedo toward `wetnessColor` + drop roughness,
+    // scaled by the per-weather `overallWetness` (dry in clear weather). The WG
+    // `wetnessColor` is authored in linear RGB (same as the SH / sun color).
+    const wet = env.wetness;
+    let wetColor: THREE.Color | null = null;
+    if (wet.wetnessColor && wet.wetnessColor.length >= 3) {
+      wetColor = new THREE.Color().setRGB(
+        wet.wetnessColor[0],
+        wet.wetnessColor[1],
+        wet.wetnessColor[2],
+        THREE.LinearSRGBColorSpace,
+      );
+    }
+    this.textures.setWetness({ overallWetness: wet.overallWetness, wetnessColor: wetColor });
     return true;
   }
 
@@ -1384,6 +1404,8 @@ export class ShipViewer {
     });
     this.env.setFillLights(PROCEDURAL_FILL_HEMI, PROCEDURAL_FILL_DIR);
     this.env.setSunLight({ direction: PROCEDURAL_SUN_DIR.clone(), color: 0xffffff });
+    // Procedural sky has no weather → dry hull.
+    this.textures.setWetness({ overallWetness: 0, wetnessColor: null });
   }
 
   /** The active WG environment selection, or null when procedural. */
