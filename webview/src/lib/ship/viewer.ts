@@ -15,10 +15,16 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-import { createSceneEnvironment, type BloomParams, type SceneEnvironment } from '$lib/three/scene';
+import {
+  createSceneEnvironment,
+  DEFAULT_TONEMAP_PARAMS,
+  type BloomParams,
+  type SceneEnvironment,
+} from '$lib/three/scene';
 import { observeResize } from '$lib/three/resize';
 import { startRenderLoop } from '$lib/three/render_loop';
 import { disposeTree } from '$lib/three/dispose';
+import { loadWgEnvironment, type WgEnvironment } from '$lib/three/env_ibl';
 import { repoUrl } from '$lib/api';
 import { SHIP_SECTIONS } from '$lib/types';
 import type {
@@ -140,6 +146,27 @@ export interface ArmorPickResult {
 
 const pickRaycaster = new THREE.Raycaster();
 const pickPointer = new THREE.Vector2();
+
+// Lighting when a WG IBL cube is active — the cube supplies ambient + specular,
+// so the hemisphere fill is killed and the key directional is driven from the
+// per-weather WG sun (yaw/pitch/color) at a fixed intensity multiplier (the
+// color carries the per-weather brightness/tint). PROCEDURAL_* match scene.ts's
+// creation defaults, restored on clear.
+const WG_FILL_HEMI = 0.0;
+const WG_SUN_INTENSITY = 3.0;
+const PROCEDURAL_FILL_HEMI = 0.85;
+const PROCEDURAL_FILL_DIR = 0.85;
+const PROCEDURAL_SUN_DIR = new THREE.Vector3(50, 80, 50).normalize();
+
+/** WG sun azimuth (yaw) + elevation (pitch) in degrees -> a unit vector
+ *  pointing TOWARD the sun. Azimuth from +Z toward +X; elevation above the
+ *  horizon (+Y up). Sign/reference tuned empirically against the render. */
+function sunDirection(yaw: number, pitch: number): THREE.Vector3 {
+  const y = THREE.MathUtils.degToRad(yaw);
+  const p = THREE.MathUtils.degToRad(pitch);
+  const cp = Math.cos(p);
+  return new THREE.Vector3(cp * Math.sin(y), Math.sin(p), cp * Math.cos(y));
+}
 
 function isVisibleChain(o: THREE.Object3D): boolean {
   let n: THREE.Object3D | null = o;
@@ -344,6 +371,9 @@ export class ShipViewer {
   private lodPolicy: LodPolicy = 'lod0';
   private damageVariantsVisible = false;
   private helpersVisible = true;
+  // WG sky-cube IBL (PMREM), best-effort-loaded after construction; null
+  // until the environment library is present + decoded.
+  private wgEnv: WgEnvironment | null = null;
 
   constructor(container: HTMLElement) {
     this.env = createSceneEnvironment(container);
@@ -390,6 +420,11 @@ export class ShipViewer {
     if (typeof window !== 'undefined') {
       (window as unknown as { __wowsShipViewer__?: unknown }).__wowsShipViewer__ = this;
     }
+
+    // Best-effort: light the ship with WG's sky-cube IBL (PMREM from the
+    // environment library) instead of the procedural RoomEnvironment.
+    // Silently keeps RoomEnvironment when the library isn't built.
+    void this.applyWgEnvironment();
 
     // Hover labels for the node overlay. Only does work while the overlay
     // is visible (pickAt short-circuits otherwise); a single transient
@@ -771,6 +806,11 @@ export class ShipViewer {
     // the sidecar's resolved hull EP_ positions. Markers stay hidden until
     // the user enables the overlay.
     this.nodeOverlay.rebuild(this.shipRoot, this.sidecar?.effects?.attachments ?? null);
+
+    // Re-push the active weather's rain wetness onto the freshly-built hull/
+    // accessory materials — the WG environment is applied in the constructor,
+    // before this ship loaded, so its wetness must be re-applied here.
+    this.textures.reapplyWetness();
 
     const loadMs = performance.now() - t0;
     report(`Loaded in ${(loadMs / 1000).toFixed(1)}s.`);
@@ -1402,6 +1442,113 @@ export class ShipViewer {
     return this.colorMode;
   }
 
+  /**
+   * Light the ship with a WG sky-cube IBL (PMREM) for the given space/weather
+   * (defaults to a clear-weather representative). Also data-drives the GT
+   * tonemap curve from that weather's HDR settings. Returns false (and keeps
+   * the procedural RoomEnvironment) when the environment library is absent.
+   */
+  async applyWgEnvironment(opts: { space?: string; weather?: string } = {}): Promise<boolean> {
+    const env = await loadWgEnvironment(this.env.renderer, opts);
+    if (!env) return false;
+    this.wgEnv?.dispose();
+    this.wgEnv = env;
+    this.env.setEnvironment(env.texture);
+
+    // WG keyed exposure: scale scene radiance so its log-average maps to
+    // middleGray, then apply the per-space EV offset; avgLum is clamped to the
+    // space's eye-adaptation window [eyeDarkLimit, eyeLightLimit]. The cube IBL
+    // is now the dominant light, so dim the procedural fill to keep this
+    // exposure meaningful (a data float CubeTexture would otherwise be lit by
+    // both the cube AND the studio fill, over-exposing).
+    const hdr = env.hdr;
+    const numOf = (k: string, d: number): number =>
+      typeof hdr[k] === 'number' ? (hdr[k] as number) : d;
+    const middleGray = numOf('middleGray', 0.18);
+    const off = numOf('hdrMapExposureOffset', 0);
+    const darkLimit = numOf('eyeDarkLimit', 0.01);
+    const lightLimit = numOf('eyeLightLimit', 100);
+    const avg = Math.min(Math.max(env.avgLum, darkLimit), lightLimit);
+    const exposure = (middleGray / avg) * Math.pow(2, off);
+
+    const curve: Partial<{
+      exposure: number;
+      contrast: number;
+      linearStart: number;
+      linearLength: number;
+      black: number;
+    }> = { exposure };
+    if (typeof hdr.gtContrast === 'number') curve.contrast = hdr.gtContrast;
+    if (typeof hdr.gtLinearSectionStart === 'number') curve.linearStart = hdr.gtLinearSectionStart;
+    if (typeof hdr.gtLinearSectionLength === 'number')
+      curve.linearLength = hdr.gtLinearSectionLength;
+    if (typeof hdr.gtBlack === 'number') curve.black = hdr.gtBlack;
+    this.env.setTonemapParams(curve);
+
+    // Drive the key directional from the per-weather WG sun (replacing the flat
+    // stand-in). The cube owns ambient + specular, so kill the hemisphere fill.
+    this.env.setFillLights(WG_FILL_HEMI);
+    const sun = env.sun;
+    if (sun && sun.yaw != null && sun.pitch != null) {
+      const color = new THREE.Color();
+      if (sun.color && sun.color.length >= 3) {
+        color.setRGB(sun.color[0], sun.color[1], sun.color[2], THREE.LinearSRGBColorSpace);
+      } else {
+        color.setRGB(1, 1, 1, THREE.LinearSRGBColorSpace);
+      }
+      this.env.setSunLight({
+        direction: sunDirection(sun.yaw, sun.pitch),
+        color,
+        intensity: WG_SUN_INTENSITY,
+      });
+    } else {
+      this.env.setSunLight({ intensity: 0.35 });
+    }
+
+    // Layer-1 rain wetness: tint albedo toward `wetnessColor` + drop roughness,
+    // scaled by the per-weather `overallWetness` (dry in clear weather). The WG
+    // `wetnessColor` is authored in linear RGB (same as the SH / sun color).
+    const wet = env.wetness;
+    let wetColor: THREE.Color | null = null;
+    if (wet.wetnessColor && wet.wetnessColor.length >= 3) {
+      wetColor = new THREE.Color().setRGB(
+        wet.wetnessColor[0],
+        wet.wetnessColor[1],
+        wet.wetnessColor[2],
+        THREE.LinearSRGBColorSpace,
+      );
+    }
+    this.textures.setWetness({
+      overallWetness: wet.overallWetness,
+      wetnessColor: wetColor,
+      puddlesIntensity: wet.puddlesIntensity,
+    });
+    return true;
+  }
+
+  /** Restore the procedural RoomEnvironment IBL + its default exposure/lights. */
+  clearWgEnvironment(): void {
+    this.wgEnv?.dispose();
+    this.wgEnv = null;
+    this.env.setEnvironment(null);
+    this.env.setTonemapParams({
+      exposure: DEFAULT_TONEMAP_PARAMS.exposure,
+      contrast: DEFAULT_TONEMAP_PARAMS.contrast,
+      linearStart: DEFAULT_TONEMAP_PARAMS.linearStart,
+      linearLength: DEFAULT_TONEMAP_PARAMS.linearLength,
+      black: DEFAULT_TONEMAP_PARAMS.black,
+    });
+    this.env.setFillLights(PROCEDURAL_FILL_HEMI, PROCEDURAL_FILL_DIR);
+    this.env.setSunLight({ direction: PROCEDURAL_SUN_DIR.clone(), color: 0xffffff });
+    // Procedural sky has no weather → dry hull.
+    this.textures.setWetness({ overallWetness: 0, wetnessColor: null, puddlesIntensity: 0 });
+  }
+
+  /** The active WG environment selection, or null when procedural. */
+  getWgEnvironment(): { space: string; weather: string } | null {
+    return this.wgEnv ? { space: this.wgEnv.space, weather: this.wgEnv.weather } : null;
+  }
+
   async dispose(): Promise<void> {
     this.stopLoop();
     this.stopResize();
@@ -1411,6 +1558,7 @@ export class ShipViewer {
     this.textures.dispose();
     await this.accessoryCache.dispose();
     disposeColorMaterials(this.colorMaterials);
+    this.wgEnv?.dispose();
     this.env.dispose();
   }
 

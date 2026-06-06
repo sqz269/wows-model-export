@@ -283,6 +283,7 @@ class PublishResult:
     library:      PublishCounts = PublishCounts()
     projectiles:  PublishCounts = PublishCounts()
     decals:       PublishCounts = PublishCounts()
+    environment:  PublishCounts = PublishCounts()
     warnings:     tuple[str, ...] = ()
 
 

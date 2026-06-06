@@ -86,11 +86,17 @@ PS_VGT = {-1: "empty", 0: "box", 1: "point", 2: "cylinder", 3: "sphere", 4: "lin
 # wrap mode for ValueGenerator type=2. Stored as u32 enum indices in the
 # payload; we keep the names mirror-readable so JSON consumers don't have to
 # carry the enum tables.
+# Order CORRECTED 2026-06-04 (build 12506899): the prior maps were ALPHABETICAL
+# guesses and WRONG. Binary truth = the runtime sampler switch (FUN_14071a440 /
+# FUN_140718650) + the .rdata enum tables @0x1420e34e0 / @0x1420e3660. ANY prebuilt
+# library/particles/records.json built before this MUST be regenerated — its
+# parameterType/samplingType strings are mislabeled corpus-wide. See RE doc
+# findings_2026_06_04/62_fx_runtime_eval_size_model.md.
 PS_VALG_RAMP_PARAMETER = {
-    0: "particleAge", 1: "particleIndex", 2: "particleVelocity",
-    3: "systemActiveTime", 4: "systemAge", 5: "systemVelocity",
+    0: "systemAge", 1: "particleAge", 2: "systemVelocity",
+    3: "particleVelocity", 4: "systemActiveTime", 5: "particleIndex",
 }
-PS_VALG_RAMP_SAMPLING = {0: "loop", 1: "once", 2: "pingPong"}
+PS_VALG_RAMP_SAMPLING = {0: "loop", 1: "pingPong", 2: "once"}
 
 # PS_RBT — Render Blend Type. Renderer +0x88 (i32, 10 values). Value
 # order confirmed against the binary enum table @ 0x1420befc0 (WoWS

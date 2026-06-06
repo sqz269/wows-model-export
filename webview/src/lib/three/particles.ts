@@ -128,21 +128,85 @@ function sampleScalarVg(vg: ParticleValueGenerator | undefined, t = 0, fallback 
   }
 }
 
-/** A representative constant from a scalar ``ValueGenerator``, used to fold an
- *  emitter/creator base size into a constant size multiplier: linear →
- *  midpoint, constant → value, ramp → mid-sample, none → fallback. */
-function representativeScalar(vg: ParticleValueGenerator | undefined, fallback = 1): number {
-  if (!vg) return fallback;
-  switch (vg.type) {
-    case 'constant':
-      return vg.value ?? fallback;
-    case 'linear':
-      return ((vg.from ?? 0) + (vg.to ?? vg.from ?? 0)) / 2;
-    case 'ramp':
-      return sampleRamp(vg.ramp, 0.5, fallback);
+/** Per-particle clock state for the PS_VALG_RAMP_PARAMETER axis selection.
+ *  Times are SECONDS; velocity axes are m/s magnitudes; particleIndex is the
+ *  per-particle u8 spawn counter (0..254). RE 2026-06-04 (build 12506899) —
+ *  see memory project-particle-runtime-eval-size-model. */
+interface ParticleClocks {
+  particleAge: number;
+  systemAge: number;
+  systemActiveTime: number;
+  particleSpeed: number;
+  systemSpeed: number;
+  particleIndex: number;
+}
+
+/** PS_VALG_RAMP_PARAMETER → the ramp X axis. The shipped order is
+ *  {0:systemAge,1:particleAge,2:systemVelocity,3:particleVelocity,
+ *  4:systemActiveTime,5:particleIndex}; standalone/unkeyed ramps default to
+ *  particle age. Ramp `.time` is SECONDS of this clock, NOT a normalized
+ *  [0,1] (the prior consumer + spec were wrong on this). */
+function rampAxisX(vg: ParticleValueGenerator, c: ParticleClocks): number {
+  switch (vg.parameterType) {
+    case 'systemAge':
+      return c.systemAge;
+    case 'particleAge':
+      return c.particleAge;
+    case 'systemActiveTime':
+      return c.systemActiveTime;
+    case 'systemVelocity':
+      return c.systemSpeed;
+    case 'particleVelocity':
+      return c.particleSpeed;
+    case 'particleIndex':
+      return c.particleIndex;
     default:
-      return fallback;
+      return c.particleAge;
   }
+}
+
+/** PS_VALG_RAMP_SAMPLING wrap against the ramp's last-key time:
+ *  {0:loop → fmod, 1:pingPong → triangle, 2:once → clamp}. `once`/undefined
+ *  rely on sampleRamp's built-in clamp to [t0, tmax]. */
+function wrapRampAxis(x: number, tmax: number, sampling: string | number | undefined): number {
+  if (!(tmax > 0)) return x;
+  if (sampling === 'loop') {
+    const m = x % tmax;
+    return m < 0 ? m + tmax : m;
+  }
+  if (sampling === 'pingPong') {
+    const period = tmax * 2;
+    let m = x % period;
+    if (m < 0) m += period;
+    return m <= tmax ? m : period - m;
+  }
+  return x; // 'once' / undefined
+}
+
+/** Sample a scalar ValueGenerator on its authored parameterType axis
+ *  (seconds-clock / velocity / particleIndex), wrapped by samplingType. The
+ *  RE-correct replacement for sampling ramps at a normalized [0,1] age.
+ *  ``linear`` is random per call — sample ONCE at spawn for per-particle-fixed
+ *  quantities (e.g. the emitter size base). */
+function sampleGenAxis(
+  vg: ParticleValueGenerator | undefined,
+  c: ParticleClocks,
+  fallback = 0,
+): number {
+  if (!vg) return fallback;
+  if (vg.type === 'constant') return vg.value ?? fallback;
+  if (vg.type === 'linear') {
+    const f = vg.from ?? 0;
+    const t = vg.to ?? f;
+    return f + Math.random() * (t - f);
+  }
+  if (vg.type === 'ramp') {
+    const pts = vg.ramp?.points;
+    if (!pts || pts.length === 0) return fallback;
+    const tmax = pts[pts.length - 1].time;
+    return sampleRamp(vg.ramp, wrapRampAxis(rampAxisX(vg, c), tmax, vg.samplingType), fallback);
+  }
+  return fallback;
 }
 
 /** Pick a random point inside the union of all prototypes in the
@@ -241,10 +305,26 @@ class SystemRenderer {
   // Record-level emission window (seconds). >0 ⇒ one-shot burst that
   // re-bursts after window+maxAge; <=0 ⇒ continuous emitter. See tick().
   private maxEmittingDuration: number;
-  // Constant size base folded out of the emitter/creator sizeGenerator when a
-  // component scaler/resizer (a multiplier) drives the per-frame size. 1 when
-  // the size generator already yields absolute metres. See constructor.
-  private baseSizeScalar = 1;
+  // False until the first active tick has pre-filled the ring buffer (H1
+  // prewarm). Reset on each one-shot re-burst so the next burst re-warms.
+  private prewarmed = false;
+  // SIZE model (RE 2026-06-04, build 12506899; memory
+  // project-particle-runtime-eval-size-model). Engine:
+  //   size = emitter.sizeGenerator (BASE, in METRES, per-particle)
+  //        × ageScaleGenerator (per-particle multiplier)
+  //        × Π scaler/resizer.sizeGenerator (per-frame multipliers, own axis)
+  // NO ×15 on size. `psize[i]` caches the per-particle base × ageScale (both
+  // usually linear→random, fixed at spawn); the scaler ramps are evaluated
+  // per-frame on their parameterType axis. The prior code had this INVERTED
+  // (scaler-as-base, sampled at a normalized [0,1] age).
+  private emitterSizeGen: ParticleValueGenerator | undefined;
+  private ageScaleGen: ParticleValueGenerator | undefined;
+  private scalerGens: ParticleValueGenerator[] = [];
+  // dampfer.velocityGenerator — a per-frame drag MULTIPLIER on the velocity's
+  // contribution to position (1.0 → ~0). Undefined = no damping.
+  private dampGen: ParticleValueGenerator | undefined;
+  // Per-system u8 spawn counter → the particleIndex ramp axis (0..254 wrap).
+  private spawnCounter = 0;
   // Creator (PSAT idx=12) — additive secondary burst layer, present on
   // ~12% of corpus systems. When present, the simulator uses creator's
   // VGs for spawning AND its rateRamp for emission. When absent, the
@@ -263,7 +343,6 @@ class SystemRenderer {
   // Per-action driver fields.
   private tintColor: ParticleColor | undefined;
   private alphaRamp: ParticleRamp | undefined;
-  private sizeRampVg: ParticleValueGenerator | undefined;
   private forceX: ParticleValueGenerator | undefined;
   private forceY: ParticleValueGenerator | undefined;
   private forceZ: ParticleValueGenerator | undefined;
@@ -275,6 +354,11 @@ class SystemRenderer {
   private lifetime: Float32Array;
   private colorRGBA: Float32Array;
   private sizeArr: Float32Array;
+  // Per-slot (CPU-only) size base (emitter × ageScale, metres) + the u8
+  // particleIndex counter, both assigned at spawn. Consumed to produce
+  // sizeArr each frame; not packed for the GPU.
+  private psize: Float32Array;
+  private pidx: Float32Array;
   private alive = 0; // count of currently-alive particles
 
   // Reusable scratch buffers for the geometry attributes (we update
@@ -288,6 +372,15 @@ class SystemRenderer {
    *  source). */
   private ageGpu: Float32Array;
   private ageAttr: THREE.BufferAttribute;
+  /** Per-particle random atlas cell (H5, RE doc 63). Assigned once at spawn
+   *  = floor(rand() * framesRangeEnd); the fragment shader reads it via the
+   *  `frameSeed` vertex attribute when `uRandomFrame` is set, freezing each
+   *  particle on one cell. Packed to the front like ``ageGpu``. */
+  private frameSeed: Float32Array;
+  private frameSeedAttr: THREE.BufferAttribute;
+  /** Number of cells a randomFrameOnly particle can land on (framesRangeEnd,
+   *  falling back to framesPerX*framesPerY). 0 ⇒ feature inert. */
+  private framesRangeEnd = 0;
 
   // Fractional-particle accumulators, one per emission source. RE
   // (2026-05-29): the always-on emitter.rateGenerator is the PRIMARY source
@@ -310,6 +403,16 @@ class SystemRenderer {
   private static readonly TMP_POS = new THREE.Vector3();
   private static readonly TMP_VEL = new THREE.Vector3();
   private static readonly TMP_COL = new Float32Array(4);
+  // Reused per-particle clock scratch (mutated in tick/spawn; the per-particle
+  // update loop and the emit/spawn phase run sequentially, never concurrently).
+  private static readonly TMP_CLOCKS: ParticleClocks = {
+    particleAge: 0,
+    systemAge: 0,
+    systemActiveTime: 0,
+    particleSpeed: 0,
+    systemSpeed: 0,
+    particleIndex: 0,
+  };
 
   /** Resolved ShaderMaterial. Owned per-instance so each system can bind
    *  its own DDS map without uniform clobbering between systems. */
@@ -358,7 +461,10 @@ class SystemRenderer {
       } else if (c.action === 'alphaSetter') {
         if (body.ramp) this.alphaRamp = body.ramp as ParticleRamp;
       } else if (c.action === 'scaler' || c.action === 'resizer') {
-        if (body.sizeGenerator) this.sizeRampVg = body.sizeGenerator as ParticleValueGenerator;
+        if (body.sizeGenerator) this.scalerGens.push(body.sizeGenerator as ParticleValueGenerator);
+      } else if (c.action === 'dampfer') {
+        if (body.velocityGenerator)
+          this.dampGen = body.velocityGenerator as ParticleValueGenerator;
       } else if (c.action === 'force') {
         if (body.forceXGenerator) this.forceX = body.forceXGenerator as ParticleValueGenerator;
         if (body.forceYGenerator) this.forceY = body.forceYGenerator as ParticleValueGenerator;
@@ -374,21 +480,20 @@ class SystemRenderer {
     this.emitterPosVg = system.emitter?.initialPositionGenerator;
     this.emitterVelVg = system.emitter?.initialVelocityGenerator;
     this.emitterActivePeriod = Math.max(0, system.emitter?.activePeriod ?? 0);
-    // Size = base × multiplier. WG's scaler/resizer sizeGenerator is a
-    // MULTIPLIER over the emitter/creator base size, not an absolute size.
-    // When a component scaler set this.sizeRampVg AND the emitter carries a
-    // base size, fold the base in as a constant scalar so the puff renders at
-    // its authored metres (~2.5 m for this flak burst) rather than the
-    // multiplier's [0,1] range — the prior code used the [0,1] multiplier as
-    // the absolute size, so puffs rendered ~1 m and lost all texture detail.
-    const emitterSize = system.emitter?.sizeGenerator;
-    if (this.sizeRampVg && emitterSize) {
-      this.baseSizeScalar = representativeScalar(emitterSize, DEFAULT_SIZE_M);
-    } else if (!this.sizeRampVg && emitterSize) {
-      // No component scaler — the emitter generator IS the absolute size.
-      this.sizeRampVg = emitterSize;
-      this.baseSizeScalar = 1;
-    }
+    // SIZE base (RE 2026-06-04): the emitter's sizeGenerator is the per-particle
+    // BASE size in METRES; ageScaleGenerator is a per-particle life multiplier.
+    // Both are typically linear (random) → sampled once at spawn into psize[].
+    // The scaler/resizer ramps (scalerGens, captured above) are the per-frame
+    // multipliers, evaluated on their own parameterType axes in tick(). NO ×15.
+    this.emitterSizeGen = system.emitter?.sizeGenerator;
+    this.ageScaleGen = system.emitter?.ageScaleGenerator;
+    // H5 random-cell cap: the count of frames a randomFrameOnly particle can
+    // land on. Engine seeds the frame byte in [0, framesRangeEnd); fall back
+    // to the full grid when the range wasn't authored.
+    const anim = system.animation;
+    const fx = anim?.framesPerX ?? 1;
+    const fy = anim?.framesPerY ?? 1;
+    this.framesRangeEnd = Math.max(0, anim?.framesRangeEnd ?? fx * fy);
 
     // Decide whether the alphaSetter ramp is keyed by particle age or
     // system age. Heuristic: if the last keyframe is well past the
@@ -408,6 +513,9 @@ class SystemRenderer {
     this.colorRGBA = new Float32Array(this.capacity * 4);
     this.sizeArr = new Float32Array(this.capacity);
     this.ageGpu = new Float32Array(this.capacity);
+    this.frameSeed = new Float32Array(this.capacity);
+    this.psize = new Float32Array(this.capacity);
+    this.pidx = new Float32Array(this.capacity);
     for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
 
     // Geometry: one vertex per particle. Three.js's `Points` renders
@@ -422,10 +530,13 @@ class SystemRenderer {
     this.sizeAttr.setUsage(THREE.DynamicDrawUsage);
     this.ageAttr = new THREE.BufferAttribute(this.ageGpu, 1);
     this.ageAttr.setUsage(THREE.DynamicDrawUsage);
+    this.frameSeedAttr = new THREE.BufferAttribute(this.frameSeed, 1);
+    this.frameSeedAttr.setUsage(THREE.DynamicDrawUsage);
     geom.setAttribute('position', this.posAttr);
     geom.setAttribute('color', this.colorAttr);
     geom.setAttribute('size', this.sizeAttr);
     geom.setAttribute('age', this.ageAttr);
+    geom.setAttribute('frameSeed', this.frameSeedAttr);
     geom.setDrawRange(0, 0);
     this.points = new THREE.Points(geom, material);
     this.points.frustumCulled = false;
@@ -442,6 +553,22 @@ class SystemRenderer {
       // frozen. Optional — for MVP we just fully freeze.
       return;
     }
+    // Prewarm on the first active frame (and after each one-shot re-burst): the
+    // engine pre-runs ~10 substeps on activation (FUN_1406ce8a0, scale 0.1) so a
+    // continuous emitter is at steady-state and a one-shot at peak on frame 1.
+    // Without it the buffer fills from empty over ~maxAge — 3-4x too sparse in
+    // the visible window, and a one-shot never catches up. See RE doc 63 (H1).
+    if (!this.prewarmed) {
+      this.runPrewarm();
+      this.prewarmed = true;
+    }
+    this.advance(dt);
+    this.writeBuffers();
+  }
+
+  /** Advance the CPU simulation by `dt` seconds (emission + per-particle
+   *  update). Does NOT touch the GPU buffers — see writeBuffers(). */
+  private advance(dt: number): void {
     this.elapsed += dt;
 
     // One-shot emission window + re-burst cycle (RE 2026-05-29). The record's
@@ -460,6 +587,7 @@ class SystemRenderer {
       this.emitAccum = 0;
       this.creatorAccum = 0;
       this.elapsed = 0;
+      this.prewarmed = false; // re-warm the next burst (engine re-warms on re-activation)
     }
     const emitting = !oneShot || this.elapsed <= this.maxEmittingDuration;
 
@@ -479,21 +607,37 @@ class SystemRenderer {
         continue;
       }
       const age = this.age[i];
-      const u = age / this.lifetime[i];
-      // Force integration. Forces don't typically use ramps in the
-      // corpus (mostly constants), so the normalised arg is fine.
-      const fx = sampleScalarVg(this.forceX, u, 0);
-      const fy = sampleScalarVg(this.forceY, u, 0);
-      const fz = sampleScalarVg(this.forceZ, u, 0);
-      this.vel[i * 3 + 0] += fx * dt;
-      this.vel[i * 3 + 1] += fy * dt;
-      this.vel[i * 3 + 2] += fz * dt;
-      this.pos[i * 3 + 0] += this.vel[i * 3 + 0] * dt;
-      this.pos[i * 3 + 1] += this.vel[i * 3 + 1] * dt;
-      this.pos[i * 3 + 2] += this.vel[i * 3 + 2] * dt;
-      // Tint + alpha curves drive the color attribute. Tint is keyed
-      // by particle age in seconds. alphaSetter may be particle-age or
-      // system-age — see `alphaSetterIsSystemAge` for the heuristic.
+      // Per-particle clocks for the parameterType axis (RE 2026-06-04): ramps
+      // are sampled on their own clock in SECONDS (or m/s, or the u8 index) —
+      // NOT a normalized [0,1] age.
+      const vx = this.vel[i * 3 + 0];
+      const vy = this.vel[i * 3 + 1];
+      const vz = this.vel[i * 3 + 2];
+      const clocks = SystemRenderer.TMP_CLOCKS;
+      clocks.particleAge = age;
+      clocks.systemAge = this.elapsed;
+      clocks.systemActiveTime =
+        this.emitterActivePeriod > 0 ? this.elapsed % this.emitterActivePeriod : this.elapsed;
+      clocks.particleSpeed = Math.hypot(vx, vy, vz);
+      clocks.systemSpeed = 0;
+      clocks.particleIndex = this.pidx[i];
+      // Force integration (constants ignore the axis; ramps use parameterType).
+      this.vel[i * 3 + 0] += sampleGenAxis(this.forceX, clocks, 0) * dt;
+      this.vel[i * 3 + 1] += sampleGenAxis(this.forceY, clocks, 0) * dt;
+      this.vel[i * 3 + 2] += sampleGenAxis(this.forceZ, clocks, 0) * dt;
+      // dampfer: a per-frame drag multiplier on the velocity's displacement.
+      const damp = this.dampGen ? sampleGenAxis(this.dampGen, clocks, 1) : 1;
+      this.pos[i * 3 + 0] += this.vel[i * 3 + 0] * dt * damp;
+      this.pos[i * 3 + 1] += this.vel[i * 3 + 1] * dt * damp;
+      this.pos[i * 3 + 2] += this.vel[i * 3 + 2] * dt * damp;
+      // Final opacity = tint.alpha(age) × alphaSetter(t). RE-CONFIRMED on build
+      // 12506899 (decompiled FUN_140742af0 + FUN_1407423c0, agent-cross-checked):
+      // the tint action does renderRec[0x34..0x40] *= tint.RGBA (alpha @0x40
+      // included) and the alphaSetter does renderRec[0x40] *= ramp — BOTH
+      // multiply, so the product below is correct. Do NOT make either term
+      // "override" the other. (Engine also folds in the base-color alpha + the
+      // per-component scaler-alpha, both ≤1 then clamped [0,1]; not modelled here
+      // — at worst a slight over-bright vs engine.)
       sampleColor(this.tintColor, age, SystemRenderer.TMP_COL);
       const alphaT = this.alphaSetterIsSystemAge ? this.elapsed : age;
       const alpha = sampleRamp(this.alphaRamp, alphaT, 1) * SystemRenderer.TMP_COL[3];
@@ -501,15 +645,13 @@ class SystemRenderer {
       this.colorRGBA[i * 4 + 1] = SystemRenderer.TMP_COL[1];
       this.colorRGBA[i * 4 + 2] = SystemRenderer.TMP_COL[2];
       this.colorRGBA[i * 4 + 3] = alpha;
-      // Size curve. Most size generators are scaler.sizeGenerator
-      // ramp-by-particleIndex (the data uses a [0,1] axis to spread
-      // sizes across the population). Fall back to the emitter's
-      // generator otherwise — most of those are linear ranges where
-      // the args don't matter.
-      this.sizeArr[i] = Math.max(
-        0.01,
-        sampleScalarVg(this.sizeRampVg, u, DEFAULT_SIZE_M) * this.baseSizeScalar,
-      );
+      // SIZE (RE 2026-06-04): per-particle base (emitter × ageScale, cached in
+      // psize at spawn) × Π scaler multipliers, each on its own axis. Metres.
+      let sz = this.psize[i];
+      for (let s = 0; s < this.scalerGens.length; s++) {
+        sz *= sampleGenAxis(this.scalerGens[s], clocks, 1);
+      }
+      this.sizeArr[i] = Math.max(0, sz);
     }
 
     // Emit from BOTH sources (RE-aligned, 2026-05-29): the always-on emitter
@@ -549,7 +691,12 @@ class SystemRenderer {
         );
       }
     }
+  }
 
+  /** Pack the live particles to the front of the attribute arrays and push the
+   *  GPU buffers. Called once per visible frame (after advance()), never during
+   *  prewarm. */
+  private writeBuffers(): void {
     // Update geometry attribute buffers + draw range. We pack the live
     // particles to the front; saves GPU vertex count vs. always drawing
     // `capacity` slots. ``ageGpu`` is always packed (unlike ``age[]``,
@@ -567,6 +714,7 @@ class SystemRenderer {
         this.colorRGBA[writeIdx * 4 + 2] = this.colorRGBA[i * 4 + 2];
         this.colorRGBA[writeIdx * 4 + 3] = this.colorRGBA[i * 4 + 3];
         this.sizeArr[writeIdx] = this.sizeArr[i];
+        this.frameSeed[writeIdx] = this.frameSeed[i];
       }
       this.ageGpu[writeIdx] = this.age[i];
       writeIdx++;
@@ -576,6 +724,19 @@ class SystemRenderer {
     this.colorAttr.needsUpdate = true;
     this.sizeAttr.needsUpdate = true;
     this.ageAttr.needsUpdate = true;
+    this.frameSeedAttr.needsUpdate = true;
+  }
+
+  /** Pre-fill the ring buffer to the engine's frame-1 density: run STEPS
+   *  internal sub-steps (no GPU writes) before the first visible frame, like the
+   *  engine's 10x activation prewarm (FUN_1406ce8a0, scale 0.1). Continuous
+   *  emitters reach steady-state; one-shot bursts reach peak. See RE doc 63 (H1). */
+  private runPrewarm(): void {
+    const window = this.maxEmittingDuration > 0 ? this.maxEmittingDuration : this.maxAge;
+    if (!(window > 0)) return;
+    const STEPS = 10;
+    const dt = window / STEPS;
+    for (let s = 0; s < STEPS; s++) this.advance(dt);
   }
 
   /** Spawn whole particles from one emission source at ``rate`` Hz, carrying
@@ -632,10 +793,32 @@ class SystemRenderer {
     this.colorRGBA[slot * 4 + 1] = SystemRenderer.TMP_COL[1];
     this.colorRGBA[slot * 4 + 2] = SystemRenderer.TMP_COL[2];
     this.colorRGBA[slot * 4 + 3] = alpha;
-    this.sizeArr[slot] = Math.max(
-      0.01,
-      sampleScalarVg(this.sizeRampVg, Math.random(), DEFAULT_SIZE_M) * this.baseSizeScalar,
-    );
+    // Per-particle u8 spawn index (the particleIndex ramp axis) + the cached
+    // size base = emitter.sizeGenerator (METRES) × ageScale, sampled ONCE here
+    // (both are typically linear→random). Scaler multipliers are per-frame.
+    this.pidx[slot] = this.spawnCounter;
+    this.spawnCounter = (this.spawnCounter + 1) & 0xff;
+    // H5 (RE doc 63): pick this particle's fixed random atlas cell once, in
+    // [0, framesRangeEnd). The fragment shader reads it via `frameSeed` only
+    // when uRandomFrame is set; harmless to assign unconditionally.
+    this.frameSeed[slot] =
+      this.framesRangeEnd > 0 ? Math.floor(Math.random() * this.framesRangeEnd) : 0;
+    const sc = SystemRenderer.TMP_CLOCKS;
+    sc.particleAge = 0;
+    sc.systemAge = this.elapsed;
+    sc.systemActiveTime =
+      this.emitterActivePeriod > 0 ? this.elapsed % this.emitterActivePeriod : this.elapsed;
+    sc.particleSpeed = 0;
+    sc.systemSpeed = 0;
+    sc.particleIndex = this.pidx[slot];
+    const base = sampleGenAxis(this.emitterSizeGen, sc, DEFAULT_SIZE_M);
+    const ageScale = this.ageScaleGen ? sampleGenAxis(this.ageScaleGen, sc, 1) : 1;
+    this.psize[slot] = base * ageScale;
+    let sz0 = this.psize[slot];
+    for (let s = 0; s < this.scalerGens.length; s++) {
+      sz0 *= sampleGenAxis(this.scalerGens[s], sc, 1);
+    }
+    this.sizeArr[slot] = Math.max(0, sz0);
     this.alive++;
   }
 
@@ -664,6 +847,13 @@ interface ParticleMaterialOptions {
   framesRangeEnd?: number;
   /** Animation cycle length in seconds. 0 disables animation. */
   animationPeriod?: number;
+  /** PS_PAT animation type (renderer/animation.animationType). The flipbook
+   *  grid is applied ONLY for ``framesPlayback`` / ``motionVectors``;
+   *  ``noAnimation`` (the engine default) leaves framesPerX/Y/range/period as
+   *  vestigial authoring data and must sample the FULL texture — gridding a
+   *  single-frame sprite (e.g. a logo) crops it to mostly-transparent cells and
+   *  it renders as nothing. Accepts the named or raw ``type_N`` schema form. */
+  animationType?: string;
   /** Manifest-resolved atlas UV rect ``[u0, v0, u1, v1]`` (sidecar's
    *  ``textureAtlas0``). When set, the fragment shader maps the (already
    *  grid-sampled) UV through this rect — composes with the grid rather
@@ -693,6 +883,18 @@ interface ParticleMaterialOptions {
   /** animation.useEmissionAlphaFromMV — when set, the `_MVEA` texture's R
    *  channel drives emission and its A channel drives opacity. */
   useEmissionAlphaFromMV?: boolean;
+  /** animation.randomFrameOnly — when set, each particle shows ONE fixed
+   *  random atlas cell for its whole life (no flipbook). Engine
+   *  FUN_14071b7f0 @0x14071c5b6 leaves the spawn-seeded random frame byte
+   *  and skips the integral/modulus (RE doc 63 H5). The cell is chosen
+   *  per-particle at spawn via the `frameSeed` vertex attribute. */
+  randomFrameOnly?: boolean;
+  /** animation.frameRateRamp — a ramp of frames-per-second over particle
+   *  age (RE doc 63 L1). The GPU only has `vAge`, so buildParticleMaterial
+   *  collapses the ramp to a representative constant `frameRate` (mean of
+   *  the point values) and the shader uses `frame = floor(vAge*frameRate)`.
+   *  Full per-particle integration is out of scope. */
+  frameRateRamp?: ParticleRamp;
 }
 
 /**
@@ -744,10 +946,13 @@ function blendConfigForPsRbt(label: string | undefined): {
       };
     case 'SHIMMER':
     case 'DEFORM_WATER_SURFACE':
-      // Need bespoke shader paths; AdditiveBlending placeholder until
-      // they land (water-deform / refraction effects are usually bright
-      // on dark water — additive at least keeps them visible).
-      return { blending: THREE.AdditiveBlending };
+      // RE doc 63 H3/M1: these are screen-space DISTORTION passes (water-deform
+      // / heat-haze refraction) with their own NON-additive engine techniques —
+      // not in the 0x2e8 order-dependent set, not additive. We don't model the
+      // refraction; render alpha-over (NormalBlending) so the sprite occludes
+      // faintly instead of an additive bloom that washes out the whole burst.
+      // (Full fix = a background-RTT UV-warp pass driven by tex0/tex1.)
+      return { blending: THREE.NormalBlending };
     default:
       // Unknown / missing label — keep the historical additive default
       // so behaviour matches the pre-blendType-RE'd renderer.
@@ -783,6 +988,34 @@ const PS_RLT_LIGHTMAP_MODES = new Set(['lightmapping4Way', 'lightmappingHL2']);
 function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.ShaderMaterial {
   const blend = blendConfigForPsRbt(opts.blendType);
   const rect = opts.atlasRect;
+  // PS_PAT gate: only framesPlayback / motionVectors actually flip through the
+  // framesPerX*Y grid. noAnimation (PS_PAT type_0) keeps the grid fields as
+  // vestigial authoring data — applying the grid then crops a single-frame
+  // sprite into 1/N mostly-transparent cells (a logo renders as nothing). Accept
+  // both the named and raw `type_N` forms; default-on when absent so real
+  // flipbooks never regress.
+  const at = opts.animationType;
+  const gridEnabled = at !== 'noAnimation' && at !== 'type_0';
+  // L1 (RE doc 63): the engine drives the flipbook from `frameRateRamp`
+  // (fps over particle age, trapezoid-integrated), NOT `animationPeriod`.
+  // The GPU only has vAge, so collapse the ramp to a representative
+  // constant rate (mean of its point values; fall back to the first value)
+  // and use `frame = floor(vAge * frameRate)` in the shader. A non-ramp /
+  // missing curve leaves frameRate=0 → the `animated` gate stays off, so a
+  // static grid still shows cell 0 (H4) rather than freezing on frame 0.
+  let frameRate = 0;
+  const rrPts = opts.frameRateRamp?.points;
+  if (rrPts && rrPts.length > 0) {
+    let acc = 0;
+    for (const p of rrPts) acc += p.value;
+    frameRate = acc / rrPts.length;
+  }
+  // L2: the engine wraps the frame by `framesRangeEnd` then adds
+  // `framesRangeBegin` (@0x14071c5ee IDIV [framesRangeEnd]; ADD [framesRangeBegin]).
+  // Carry both raw bounds to the shader so the cell math matches; the old
+  // (end - begin) modulus was wrong.
+  const framesBegin = opts.framesRangeBegin ?? 0;
+  const framesEnd = opts.framesRangeEnd ?? 0;
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       map: { value: null as THREE.Texture | null },
@@ -802,15 +1035,33 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       },
       useAtlasRect: { value: rect ? 1 : 0 },
       // Animation grid (framesPerX, framesPerY) + range (begin, end) +
-      // period. The shader skips the grid sample unless framesPerX*Y > 1
-      // AND (end - begin) > 0 AND period > 0.
+      // period. The shader skips the grid sample unless useFrameGrid (PS_PAT
+      // != noAnimation) AND framesPerX*Y > 1 AND (end - begin) > 0 AND period > 0.
       framesPerXY: {
         value: new THREE.Vector2(opts.framesPerX ?? 1, opts.framesPerY ?? 1),
       },
       frameRange: {
-        value: new THREE.Vector2(opts.framesRangeBegin ?? 0, opts.framesRangeEnd ?? 0),
+        value: new THREE.Vector2(framesBegin, framesEnd),
       },
+      // L1/L2/L4 (RE doc 63): authored frame rate (fps, collapsed from
+      // frameRateRamp) + the raw range bounds. The shader uses
+      // `cell = mod(floor(vAge*uFrameRate), uFramesEnd) + uFramesBegin`,
+      // cross-fading by fract(vAge*uFrameRate). `animationPeriod` is never
+      // read by the engine; the uniform is kept (unused) so the option type
+      // stays stable.
+      uFrameRate: { value: frameRate },
+      uFramesBegin: { value: framesBegin },
+      uFramesEnd: { value: framesEnd },
+      // L4: now-unused (engine never loads animationPeriod). Retained so the
+      // option type and any external callers don't break.
       animationPeriod: { value: opts.animationPeriod ?? 0 },
+      // PS_PAT gate (gridEnabled): suppress the flipbook grid for noAnimation
+      // so a single-frame sprite (logo) shows whole instead of a cropped cell.
+      useFrameGrid: { value: gridEnabled ? 1 : 0 },
+      // H5 (RE doc 63): randomFrameOnly → each particle shows one fixed
+      // random cell (selected from the per-particle `frameSeed` attribute),
+      // no time advance. Takes precedence over the animated flipbook.
+      uRandomFrame: { value: opts.randomFrameOnly ? 1 : 0 },
       // Directional-lightmap (PS_RLT) reconstruction. uLightingMode=1 when
       // the texture is an `_LM` lightmap (lightmapping4Way/HL2); the
       // fragment shader then treats `map` RGB as a 3-direction HL2-basis
@@ -820,6 +1071,11 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uLightingMode: {
         value: PS_RLT_LIGHTMAP_MODES.has(opts.lightingType ?? '') ? 1 : 0,
       },
+      // TODO M2/H7 (RE doc 63): replace the hard-coded sun dir/scalar with the
+      // live scene DirectionalLight (scene.ts:125-126) world direction + a
+      // sunColor/(luma+1) vec3 in place of uSmokeLightScale. No-op today: the
+      // scene sun is exactly (50,80,50), white — so this constant IS correct.
+      // Wiring a live per-frame uniform across scene.ts isn't worth it yet.
       uSunDirWorld: { value: new THREE.Vector3(50, 80, 50).normalize() },
       // Motion-vector flipbook blending (`_MVEA`). useMv is flipped to 1 by
       // bindMvTexture once the MV DDS loads; the shader then samples two
@@ -848,6 +1104,14 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uPremultiply: {
         value: PS_RBT_LUT_MODES.has(opts.blendType ?? '') ? 1 : 0,
       },
+      // DEFORM_WATER_SURFACE / SHIMMER are screen-space distortion passes whose
+      // tex0 is a normal/deform map (not albedo) — we can't do the refraction,
+      // so render a faint white foam/haze hint rather than the raw blue deform
+      // texture as colour (RE doc 63 H3/M1; see the fragment shader).
+      uDistortion: {
+        value:
+          opts.blendType === 'DEFORM_WATER_SURFACE' || opts.blendType === 'SHIMMER' ? 1 : 0,
+      },
       // Warm "detonation glow" strength for the lightmapping + GRADIENT_MAP
       // path. RE (DXBC) shows the engine pins the ramp lookup to U=0 (the
       // ramp's brightest texel) in lightmapping mode and adds it as an
@@ -861,12 +1125,15 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       attribute vec4 color;
       attribute float size;
       attribute float age;
+      attribute float frameSeed;
       varying vec4 vColor;
       varying float vAge;
+      varying float vFrameSeed;
 
       void main() {
         vColor = color;
         vAge = age;
+        vFrameSeed = frameSeed;
         vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * mvPosition;
         // size is metres (world space); divide by distance for perspective.
@@ -882,7 +1149,12 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float useAtlasRect;
       uniform vec2 framesPerXY;
       uniform vec2 frameRange;
+      uniform float uFrameRate;
+      uniform float uFramesBegin;
+      uniform float uFramesEnd;
       uniform float animationPeriod;
+      uniform float useFrameGrid;
+      uniform float uRandomFrame;
       uniform float uLightingMode;
       uniform vec3 uSunDirWorld;
       uniform sampler2D mvMap;
@@ -890,10 +1162,12 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float mvDistortion;
       uniform float useEmissionAlphaFromMV;
       uniform float uPremultiply;
+      uniform float uDistortion;
       uniform float uGlowStrength;
       uniform float uSmokeLightScale;
       varying vec4 vColor;
       varying float vAge;
+      varying float vFrameSeed;
 
       void main() {
         vec4 base;
@@ -902,11 +1176,24 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           vec2 local = gl_PointCoord;
           float fx = framesPerXY.x;
           float fy = framesPerXY.y;
-          float total = frameRange.y - frameRange.x;
-          bool animated = (fx * fy > 1.0 && total > 0.0 && animationPeriod > 0.0);
+          // L4 (RE doc 63): the engine never reads animationPeriod. Gate the
+          // flipbook on a real authored frame rate + range end instead.
+          bool hasGrid = (useFrameGrid > 0.5 && fx * fy > 1.0);
+          bool animated = (hasGrid && uFramesEnd > 0.0 && uFrameRate > 0.0);
+          // H5 (RE doc 63): a randomFrameOnly system is NOT animated — each
+          // particle freezes on its spawn-seeded cell. Takes precedence.
+          bool randomCell = (hasGrid && uRandomFrame > 0.5);
           float mvEmissive = 0.0;   // additive emission from _MVEA.R (if on)
 
-          if (animated && useMv > 0.5) {
+          if (randomCell) {
+            // Fixed per-particle random cell (no time advance, no cross-fade).
+            // vFrameSeed was assigned floor(rand()*framesRangeEnd) at spawn.
+            vec2 puv = (vec2(mod(vFrameSeed, fx), floor(vFrameSeed / fx)) + local) / vec2(fx, fy);
+            if (useAtlasRect > 0.5) {
+              puv = mix(atlasRect.xy, atlasRect.zw, puv);
+            }
+            base = texture2D(map, puv);
+          } else if (animated && useMv > 0.5) {
             // Motion-vector flipbook blend (WG _MVEA): sample the two
             // adjacent frames, warp each along the per-pixel optical-flow
             // field stored in the MV texture's (G,B) channels, and cross-
@@ -914,11 +1201,14 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             // mvDistortion scales the warp. RE'd instruction-for-instruction
             // from particles.win.dx11.fxo (20 motion-vector PS permutations,
             // identical math). Replaces the hard age-driven frame step.
-            float fps = total / animationPeriod;
-            float idxF = mod(vAge * fps, total);
+            // L1/L2: frame law is now frameRate-driven and wrapped by
+            // framesRangeEnd + framesRangeBegin (was period-driven, wrapped by
+            // end-begin). The MV warp/cross-fade is unchanged.
+            float idxF = vAge * uFrameRate;
             float f = fract(idxF);
-            float n0 = floor(idxF) + frameRange.x;
-            float n1 = mod(floor(idxF) + 1.0, total) + frameRange.x;
+            float fl = floor(idxF);
+            float n0 = mod(fl, uFramesEnd) + uFramesBegin;
+            float n1 = mod(fl + 1.0, uFramesEnd) + uFramesBegin;
             vec2 grid = vec2(fx, fy);
             vec2 cell0 = (vec2(mod(n0, fx), floor(n0 / fx)) + local) / grid;
             vec2 cell1 = (vec2(mod(n1, fx), floor(n1 / fx)) + local) / grid;
@@ -938,20 +1228,45 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
               base.a = mix(e0.a, e1.a, f);
               mvEmissive = mix(e0.r, e1.r, f);
             }
+          } else if (animated) {
+            // Age-driven flipbook (framesPlayback / no MV texture), composed
+            // with the manifest atlas-rect mapping when present. L1/L2: frame
+            // = floor(vAge*frameRate) mod framesRangeEnd + framesRangeBegin.
+            // L3: cross-fade the floored cell into the next by fract(vAge*rate)
+            // (the engine writes blend byte +0x7d = frac*255 for any nonzero
+            // animationType — the prior non-MV branch hard-popped).
+            float idxF = vAge * uFrameRate;
+            float f = fract(idxF);
+            float fl = floor(idxF);
+            float n0 = mod(fl, uFramesEnd) + uFramesBegin;
+            float n1 = mod(fl + 1.0, uFramesEnd) + uFramesBegin;
+            vec2 grid = vec2(fx, fy);
+            vec2 puv0 = (vec2(mod(n0, fx), floor(n0 / fx)) + local) / grid;
+            vec2 puv1 = (vec2(mod(n1, fx), floor(n1 / fx)) + local) / grid;
+            if (useAtlasRect > 0.5) {
+              puv0 = mix(atlasRect.xy, atlasRect.zw, puv0);
+              puv1 = mix(atlasRect.xy, atlasRect.zw, puv1);
+            }
+            base = mix(texture2D(map, puv0), texture2D(map, puv1), f);
           } else {
-            // Hard age-driven frame step (framesPlayback / no MV texture),
-            // composed with the manifest atlas-rect mapping when present.
+            // Static cell. H4 (RE doc 63): a noAnimation system on a multi-cell
+            // atlas shows CELL 0 only (engine forces the frame byte to 0,
+            // FUN_14071b7f0 @0x14071c5a3) — without this the whole grid crams
+            // into one quad and reads as garbage. fx*fy==1 → full texture.
             vec2 puv = local;
-            if (animated) {
-              float fps = total / animationPeriod;
-              float idx = mod(floor(vAge * fps), total) + frameRange.x;
-              puv = (vec2(mod(idx, fx), floor(idx / fx)) + puv) / vec2(fx, fy);
+            if (fx * fy > 1.0) {
+              puv = puv / vec2(fx, fy);
             }
             if (useAtlasRect > 0.5) {
               puv = mix(atlasRect.xy, atlasRect.zw, puv);
             }
             base = texture2D(map, puv);
           }
+          // M3 (RE doc 63, ps4.txt:614-628): the GRADIENT_MAP+lightmapping glow
+          // samples the ramp at U = 1 - glow, where glow is the particle
+          // texture's value at the sprite UV BEFORE the LM relight overwrites
+          // base. Capture it here (the relight block below replaces base.rgb).
+          float gmag = base.r;
           if (uLightingMode > 0.5) {
             // _LM directional lightmap (PS_RLT lightmapping4Way/HL2):
             // base.rgb are 3 grayscale renders of the same sprite baked-lit
@@ -975,15 +1290,14 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
                           max(0.0, dot(B1, sunV)),
                           max(0.0, dot(B2, sunV)));
             w *= w;                       // HL2 weighting is dot^2
-            float wsum = w.x + w.y + w.z;
             float flatLum = (base.r + base.g + base.b) / 3.0;
-            // Energy-normalised directional blend; fall back to the flat
-            // average when the sun is edge-on/behind (wsum~0) so smoke never
-            // goes fully black.
-            float lit = wsum > 1e-4 ? dot(w, base.rgb) / wsum : flatLum;
-            // Ambient floor (engine carries a lightingAmbient term) — keeps
-            // back-lit sprites visible rather than crushing them to zero.
-            lit = mix(lit, flatLum, 0.30);
+            // RE doc 63 H6: the engine does NOT energy-normalize (no /wsum) and
+            // has no 30% flat mix — lit = saturate(Σ LMi·(axisi·sun)²) via
+            // mad_sat (ps4.txt:789-794). The old /wsum cancelled the directional
+            // magnitude (constant flat shade) and the 0.30 mix washed it out.
+            // Keep only a small additive ambient floor so fully back-lit sprites
+            // are not crushed to black.
+            float lit = clamp(dot(w, base.rgb), 0.0, 1.0) + 0.06 * flatLum;
             // Sun-color Reinhard normalization × lighting factor (RE): keeps
             // the relit smoke DARK so it occludes, rather than ~2x too bright
             // once the authored HDR tint multiplies in.
@@ -992,16 +1306,18 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           }
           if (useLut > 0.5) {
             if (uLightingMode > 0.5) {
-              // GRADIENT_MAP + lightmapping (RE 2026-05-29, DXBC): the engine
-              // PINS the ramp lookup to U=0 (the ramp's brightest texel) in
-              // lightmapping mode — the gradient does NOT recolor the sprite by
-              // luminance here (that's the lambert path). The brightest ramp
-              // colour is instead added as a warm emissive "detonation" glow on
-              // top of the relit smoke body, OUTSIDE the per-particle tint
-              // (engine: rgb = base*lit + emis*v10.x). Shaped by the output
-              // alpha via the premultiply below; the dim relit body stays the
-              // occluding smoke.
-              vec4 g = texture2D(lut, vec2(0.0, 0.5));
+              // GRADIENT_MAP + lightmapping (RE doc 63 M3, ps4.txt:614-628;
+              // corrects the prior "U pinned to 0"): the engine samples the HDR
+              // ramp at U = 1 - glow (glow = the particle texture value at the
+              // sprite UV, captured as gmag before the LM relight). The warm
+              // ramp colour is added as an emissive "detonation" glow on top of
+              // the relit smoke body, OUTSIDE the per-particle tint (engine:
+              // rgb = base*lit + emis*v10.x). The posterize step-count (bits
+              // 16..23) isn't carried by the parser, so we use the unposterized
+              // U. uGlowStrength stays as the v10.x intensity approximation.
+              // Now varies per-texel → a warm GRADIENT across the sprite, not
+              // one flat tan colour.
+              vec4 g = texture2D(lut, vec2(1.0 - gmag, 0.5));
               glow = g.rgb * g.a * uGlowStrength;
             } else {
               // Lambert GRADIENT_MAP: luminance-keyed recolor (engine lambert
@@ -1022,6 +1338,12 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         }
         float outA = vColor.a * base.a;
         vec3 outRgb = vColor.rgb * base.rgb + glow;
+        if (uDistortion > 0.5) {
+          // No refraction pass: show a faint white foam/haze hint instead of the
+          // raw blue normal/deform texture as opaque colour (RE doc 63 H3/M1).
+          outRgb = vec3(1.0);
+          outA = base.a * 0.15;
+        }
         if (uPremultiply > 0.5) {
           // Premultiplied alpha-over (matches the engine's premultiplied PS
           // output + One/INV_SRC_ALPHA blend). The glow (outRgb may exceed 1)
@@ -1156,10 +1478,13 @@ export class ParticleScene {
           framesRangeBegin: anim?.framesRangeBegin,
           framesRangeEnd: anim?.framesRangeEnd,
           animationPeriod: anim?.animationPeriod,
+          animationType: anim?.animationType,
           atlasRect: useAtlas ? r!.textureAtlas0!.rect : undefined,
           useLut,
           motionVectorsDistortion: useMv ? anim?.motionVectorsDistortion : undefined,
           useEmissionAlphaFromMV: useMv ? anim?.useEmissionAlphaFromMV : undefined,
+          randomFrameOnly: anim?.randomFrameOnly,
+          frameRateRamp: anim?.frameRateRamp,
         });
         const renderer = new SystemRenderer(sys, mat, rec.maxEmittingDuration);
         renderer.setActive(false); // start inactive — UI toggles on

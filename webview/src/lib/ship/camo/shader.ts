@@ -9,6 +9,40 @@
 
 import type * as THREE from 'three';
 import { makeCamoUniforms, type CamoUniforms } from './uniforms';
+import { makeWetnessUniforms } from '../wetness';
+
+// Procedural deck-puddle helpers (Layer 3, wg_render_ship_water.md §5b.2). The
+// engine generates a `PuddlesMap` coverage mask + a `RipplesMap` tangent normal
+// at runtime; the consumer has neither, so we stand in with value-noise coverage
+// over world XZ + a finite-difference ripple normal. Declared at fragment global
+// scope (before main). Static (no time uniform) — animated ripples are a TODO.
+const WET_PUDDLE_GLSL = `
+float wetHash( vec2 p ) {
+  return fract( sin( dot( p, vec2( 127.1, 311.7 ) ) ) * 43758.5453123 );
+}
+float wetNoise( vec2 p ) {
+  vec2 i = floor( p ), f = fract( p );
+  f = f * f * ( 3.0 - 2.0 * f );
+  float a = wetHash( i );
+  float b = wetHash( i + vec2( 1.0, 0.0 ) );
+  float c = wetHash( i + vec2( 0.0, 1.0 ) );
+  float d = wetHash( i + vec2( 1.0, 1.0 ) );
+  return mix( mix( a, b, f.x ), mix( c, d, f.x ), f.y );
+}
+float wetPuddleCoverage( vec2 p ) {
+  // 2-octave value noise thresholded into sparse soft pools (the engine
+  // PuddlesMap is patchy coverage, not a full wash).
+  float n = wetNoise( p ) * 0.65 + wetNoise( p * 2.7 ) * 0.35;
+  return smoothstep( 0.55, 0.72, n );
+}
+vec3 wetRippleNormal( vec2 p ) {
+  // finite-difference gradient of the noise -> small tangent-space ripple bump
+  float e = 0.06;
+  float nx = wetNoise( p + vec2( e, 0.0 ) ) - wetNoise( p - vec2( e, 0.0 ) );
+  float nz = wetNoise( p + vec2( 0.0, e ) ) - wetNoise( p - vec2( 0.0, e ) );
+  return vec3( -nx, -nz, 1.0 );
+}
+`;
 
 /**
  * Attach the camo overlay chunk to a freshly-cloned material. Returns
@@ -17,6 +51,13 @@ import { makeCamoUniforms, type CamoUniforms } from './uniforms';
  */
 export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
   const uniforms = makeCamoUniforms();
+  // Rain wetness (Layer 1) rides this same `onBeforeCompile` — Three.js gives
+  // one slot per material, so the wetness GLSL is appended to the camo chunk
+  // below rather than a second injection. Its uniforms are a SEPARATE object
+  // stashed on userData so the camo skin-swap dispatch never clobbers them;
+  // `material.ts`'s userData spread (after this call) preserves it.
+  const wetness = makeWetnessUniforms();
+  mat.userData = { ...(mat.userData ?? {}), wetnessUniforms: wetness };
   mat.onBeforeCompile = (shader) => {
     // Wire the per-clone uniform set into the shader. Three.js's
     // `onBeforeCompile` runs once per program compile; uniforms must be
@@ -46,6 +87,17 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.uniforms.detailInfluence = uniforms.detailInfluence;
     shader.uniforms.detailFadeDistance = uniforms.detailFadeDistance;
 
+    // Rain-wetness uniforms. Layer 1 (tint) is pushed by
+    // `TextureManager.setWetness`; Layer 2 (waterline band) is static scene
+    // geometry that stays at the `makeWetnessUniforms` defaults.
+    shader.uniforms.wetOverall = wetness.wetOverall;
+    shader.uniforms.wetColor = wetness.wetColor;
+    shader.uniforms.wetRoughDrop = wetness.wetRoughDrop;
+    shader.uniforms.wetWaterY = wetness.wetWaterY;
+    shader.uniforms.wetWaveAmp = wetness.wetWaveAmp;
+    shader.uniforms.wetBand = wetness.wetBand;
+    shader.uniforms.wetPuddles = wetness.wetPuddles;
+
     // Vertex: compute per-mesh camo UV. `camoUV` packs (scale.xy,
     // offset.xy); `vCamoUv` is what the fragment shader samples the
     // mask at — identity (1,1,0,0) for hull meshes, per-camo authored
@@ -53,6 +105,7 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.vertexShader =
       'varying vec2 vCamoUv;\n' +
       'uniform vec4 camoUV;\n' +
+      'varying vec3 vWetWorldPos;\n' +
       shader.vertexShader.replace(
         '#include <project_vertex>',
         `#include <project_vertex>
@@ -60,7 +113,11 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
   vCamoUv = vMapUv * camoUV.xy + camoUV.zw;
 #else
   vCamoUv = vec2( 0.0 );
-#endif`,
+#endif
+  // World-space position for the Layer-2 waterline band (.y) + Layer-3 deck
+  // puddle projection (.xz) — the hull shader has no world position otherwise.
+  // 'transformed' is the post-skinning local pos.
+  vWetWorldPos = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;`,
       );
 
     shader.fragmentShader =
@@ -87,7 +144,16 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
       'uniform vec2 detailScale;\n' +
       'uniform vec3 detailInfluence;\n' +
       'uniform float detailFadeDistance;\n' +
+      'uniform float wetOverall;\n' +
+      'uniform vec3 wetColor;\n' +
+      'uniform float wetRoughDrop;\n' +
+      'uniform float wetWaterY;\n' +
+      'uniform float wetWaveAmp;\n' +
+      'uniform float wetBand;\n' +
+      'uniform float wetPuddles;\n' +
+      'varying vec3 vWetWorldPos;\n' +
       'varying vec2 vCamoUv;\n' +
+      WET_PUDDLE_GLSL +
       shader.fragmentShader
         .replace(
           '#include <map_fragment>',
@@ -280,6 +346,26 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
     diffuseColor *= baseSample;
   }
 #endif
+
+// ── Rain wetness Layer 1: global tint (wg_render_ship_water.md §5) ──────────
+// The per-weather 'overallWetness' lerps the (painted) albedo toward
+// 'wetnessColor'. Runs AFTER camo — diffuseColor is final here — so it wets the
+// painted hull, and is a no-op when dry (wetOverall == 0). The 0.5 tint cap +
+// coefficients are tunable consumer defaults, NOT engine-extracted. Composes
+// before tonemap and never touches the _mg/_mr/_n texel inputs (§9a). Layer 2
+// (waterline band) + Layer 3 (deck puddles, §5b.2) extend this block.
+float wetGlobal = clamp( wetOverall, 0.0, 1.0 );
+diffuseColor.rgb = mix( diffuseColor.rgb, wetColor, wetGlobal * 0.5 );
+
+// ── Rain wetness Layer 2: waterline band (wg_render_ship_water.md §4/§9a) ───
+// Approximates the per-ship WetnessManager mask: the hull darkens + glosses
+// near/below the waterline. wetRegionTop = wetWaterY + wetWaveAmp (the engine's
+// "waterline + maxWaveHeight" clamp, §4); the webview has no water plane + no
+// static per-ship draft (§9c), so wetWaterY is a flat sea-level stand-in.
+// NO geometry clip (§9d) — this is shading only. 'wetBandF' is reused by the
+// roughness chunk below (same main() scope; map_fragment runs before it).
+float wetBandF = clamp( ( wetWaterY + wetWaveAmp - vWetWorldPos.y ) / max( wetBand, 1e-3 ), 0.0, 1.0 );
+diffuseColor.rgb *= mix( 1.0, 0.6, wetBandF );
 `,
         )
         // WG-pack metallicRoughness override. WG `_mg.dds` ACTUAL layout
@@ -326,6 +412,17 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
   roughTexel = mix( roughTexel, 1.0 - catMgnSample.r, catGlossMix );
   roughnessFactor *= roughTexel;
 #endif
+
+// ── Rain wetness Layer 1: global roughness drop ────────────────────────────
+// Wet surfaces read glossier; scale the final roughnessFactor toward
+// 'wetRoughDrop' by overallWetness. roughnessFactor is in scope (declared
+// above, OUTSIDE the USE_ROUGHNESSMAP guard), so this also wets materials with
+// no roughness map. Scales only the final factor — never the _mr/_mg texel
+// reads (§9a). No-op when dry.
+roughnessFactor *= mix( 1.0, wetRoughDrop, clamp( wetOverall, 0.0, 1.0 ) );
+// Layer 2 waterline band: extra gloss near the waterline. 'wetBandF' comes
+// from the map_fragment tail (earlier chunk, same main() scope).
+roughnessFactor *= mix( 1.0, 0.35, wetBandF );
 `,
         )
         .replace(
@@ -355,7 +452,8 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
         // Reconstruct Z from the unit-vector identity when wgPackN=1.0.
         .replace(
           '#include <normal_fragment_maps>',
-          `#ifdef USE_NORMALMAP_OBJECTSPACE
+          `vec3 wetGeoNormal = normal; // geometric normal (pre-normal-map) for the Layer-3 up-gate
+#ifdef USE_NORMALMAP_OBJECTSPACE
   normal = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;
   #ifdef FLIP_SIDED
     normal = - normal;
@@ -412,6 +510,40 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
 #elif defined( USE_BUMPMAP )
   normal = perturbNormalArb( - vViewPosition, normal, dHdxy_fwd(), faceDirection );
 #endif
+
+// ── Rain wetness Layer 3: deck puddles (wg_render_ship_water.md §5b.2) ──────
+// Global weather puddles on up-facing (deck) surfaces. Engine (ship_material.fx
+// chunk046): PuddlesMap x puddlesIntensity, projected object/world-XZ PLANAR
+// (NOT mesh-UV), gated by smoothstep(0.6,0.85, N.y) so pools form only on
+// horizontal decks; inside the pool the engine darkens albedo, raises
+// reflectance toward a mirror (low roughness), and flattens + ripples the
+// normal. We stand in for the runtime PuddlesMap/RipplesMap with procedural
+// coverage + a finite-difference ripple. 'normal' is final + view-space here;
+// diffuseColor / roughnessFactor / metalnessFactor are still in scope (consumed
+// later in lights_*). Composes after camo + Layers 1-2; emissive untouched.
+if ( wetPuddles > 0.001 ) {
+  vec3 worldUpView = normalize( mat3( viewMatrix ) * vec3( 0.0, 1.0, 0.0 ) );
+  // Up-facing gate is the real selector (engine smoothstep(0.6,0.85, N.y)) — it
+  // catches decks/turret-tops at ANY height. Gate on the GEOMETRIC normal
+  // (pre-normal-map), not the perturbed shading normal: the planked-deck normal
+  // map otherwise tilts per-pixel normals past the cutoff and kills the pools.
+  // (An earlier height band keyed to the waterline wrongly zeroed the ~10m-high
+  // main deck — removed.)
+  float upGate = smoothstep( 0.6, 0.85, dot( normalize( wetGeoNormal ), worldUpView ) );
+  // Patchy coverage (the engine PuddlesMap is sparse, not a full wash).
+  float puddleCov = wetPuddleCoverage( vWetWorldPos.xz * 0.18 );
+  float pud = clamp( wetPuddles * puddleCov * upGate, 0.0, 1.0 );
+  if ( pud > 0.001 ) {
+    diffuseColor.rgb *= ( 1.0 - 0.6 * pud );               // wet pools darken
+    roughnessFactor   = mix( roughnessFactor, 0.05, pud ); // -> mirror sheen
+    metalnessFactor   = mix( metalnessFactor, 0.0, pud );  // water is dielectric
+    // Flatten the shading normal toward world-up, then tilt by a ripple in the
+    // deck (world-XZ) plane.
+    vec3 rip = wetRippleNormal( vWetWorldPos.xz * 1.6 );
+    vec3 ripView = mat3( viewMatrix ) * vec3( rip.x, 0.0, rip.y );
+    normal = normalize( mix( normal, worldUpView, min( 1.0, pud * 0.85 ) ) + ripView * pud * pud * 0.4 );
+  }
+}
 `,
         );
   };

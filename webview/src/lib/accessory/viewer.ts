@@ -17,13 +17,7 @@ import { createSceneEnvironment, type SceneEnvironment } from '$lib/three/scene'
 import { observeResize } from '$lib/three/resize';
 import { startRenderLoop } from '$lib/three/render_loop';
 import { TextureManager } from '$lib/ship/textures';
-import type {
-  LibraryAsset,
-  PieceInfo,
-  RigCategory,
-  RigPivots,
-  ShipPlacement,
-} from '$lib/types';
+import type { LibraryAsset, PieceInfo, RigCategory, RigPivots, ShipPlacement } from '$lib/types';
 
 import { DebugSceneController, type DebugSceneLoadResult } from './debug_scene';
 import { RigPivotOverlay } from './rig_pivots';
@@ -174,6 +168,9 @@ export class AccessoryViewer {
       container,
       renderer: this.env.renderer,
       camera: this.env.camera,
+      // Keep the (always-on) composer + GT tonemap pass sized — without
+      // this the composer renders at its 1×1 default and the viewport is black.
+      onResize: (w, h) => this.env.setSize(w, h),
     });
 
     this.rigOverlay = new RigPivotOverlay();
@@ -181,7 +178,9 @@ export class AccessoryViewer {
 
     this.stopLoop = startRenderLoop(() => {
       this.env.controls.update();
-      this.env.renderer.render(this.env.scene, this.env.camera);
+      // Go through env.render() (the composer + GT tonemap pass), not
+      // renderer.render directly — Three's built-in tonemapper is disabled.
+      this.env.render();
     });
   }
 
@@ -529,7 +528,11 @@ export class AccessoryViewer {
     // Empty `hullBaseUrl` is unused on this path (texture paths inside
     // libEntry resolve against the libEntry.glb location).
     this.textures.bindLibraryAsset(
-      lib.assetId, lib.asset, null, '', lib.libraryRoot ?? 'accessories',
+      lib.assetId,
+      lib.asset,
+      null,
+      '',
+      lib.libraryRoot ?? 'accessories',
     );
     this.textures.setActiveSchemeKey(lib.variant ?? 'main');
     // Flip textures on only when the user wants them — registration

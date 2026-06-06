@@ -100,7 +100,14 @@
   const BACKDROPS = { sky: 0x8c9fb0, night: 0x0a0c11 } as const;
   let backdrop = $state<'sky' | 'night'>('sky');
   $effect(() => {
-    env?.setBackground(BACKDROPS[backdrop]);
+    // Read `backdrop` UNCONDITIONALLY so it's always tracked as a dependency.
+    // `env?.setBackground(BACKDROPS[backdrop])` short-circuits when `env` is
+    // still undefined on the effect's first run (mountViewer assigns env
+    // later) — and optional chaining then skips evaluating the argument, so
+    // `backdrop` was never read, never tracked, and the effect never re-ran
+    // when the SKY/NIGHT toggle changed it.
+    const color = BACKDROPS[backdrop];
+    env?.setBackground(color);
   });
 
   // ── List fetch ──────────────────────────────────────────────────────
@@ -433,8 +440,8 @@
     }
     if (placeholderBlends.size > 0) {
       gaps.push(
-        `blend mode ${[...placeholderBlends].join(' / ')} approximated with ` +
-          'an additive placeholder — no bespoke water-deform/refraction shader yet',
+        `blend mode ${[...placeholderBlends].join(' / ')} approximated as ` +
+          'plain alpha-over (occluding) — no bespoke water-deform/refraction pass yet',
       );
     }
     if (anyUnresolvedTexture) {
