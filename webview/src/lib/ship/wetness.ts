@@ -17,6 +17,18 @@ export interface WetnessUniforms {
   wetColor: { value: THREE.Color };
   /** Roughness multiplier at full wet (lower = glossier). Tunable default. */
   wetRoughDrop: { value: number };
+
+  // ── Layer 2: waterline band (wg_render_ship_water.md §4/§9a) ──────────────
+  // The hull is wetter near/below the waterline. The webview has no water
+  // surface + no per-ship draft, so the band is a flat sea-level stand-in
+  // (§9c): wet region top = wetWaterY + wetWaveAmp, fading over wetBand metres.
+  // Always-on (the engine's per-ship WetnessManager is qb<2, weather-agnostic).
+  /** World-space sea level Y. Ships rest at y=0 in the viewer (stand-in). */
+  wetWaterY: { value: number };
+  /** Wave-amplitude bias raising the wet-region top above the waterline (m). */
+  wetWaveAmp: { value: number };
+  /** Band thickness over which the waterline wetness fades out upward (m). */
+  wetBand: { value: number };
 }
 
 /** Neutral dark blue-grey — the fallback wet tint when a weather authors no
@@ -28,6 +40,9 @@ export function makeWetnessUniforms(): WetnessUniforms {
     wetOverall: { value: 0.0 }, // dry until a WG weather is applied
     wetColor: { value: DEFAULT_WET_COLOR() },
     wetRoughDrop: { value: 0.6 },
+    wetWaterY: { value: 0.0 }, // viewer rests ships at y=0
+    wetWaveAmp: { value: 0.6 },
+    wetBand: { value: 4.0 },
   };
 }
 

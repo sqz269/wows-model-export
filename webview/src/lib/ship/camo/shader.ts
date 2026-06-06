@@ -54,10 +54,15 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.uniforms.detailInfluence = uniforms.detailInfluence;
     shader.uniforms.detailFadeDistance = uniforms.detailFadeDistance;
 
-    // Rain-wetness (Layer 1) uniforms — pushed by `TextureManager.setWetness`.
+    // Rain-wetness uniforms. Layer 1 (tint) is pushed by
+    // `TextureManager.setWetness`; Layer 2 (waterline band) is static scene
+    // geometry that stays at the `makeWetnessUniforms` defaults.
     shader.uniforms.wetOverall = wetness.wetOverall;
     shader.uniforms.wetColor = wetness.wetColor;
     shader.uniforms.wetRoughDrop = wetness.wetRoughDrop;
+    shader.uniforms.wetWaterY = wetness.wetWaterY;
+    shader.uniforms.wetWaveAmp = wetness.wetWaveAmp;
+    shader.uniforms.wetBand = wetness.wetBand;
 
     // Vertex: compute per-mesh camo UV. `camoUV` packs (scale.xy,
     // offset.xy); `vCamoUv` is what the fragment shader samples the
@@ -66,6 +71,7 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.vertexShader =
       'varying vec2 vCamoUv;\n' +
       'uniform vec4 camoUV;\n' +
+      'varying float vWetWorldY;\n' +
       shader.vertexShader.replace(
         '#include <project_vertex>',
         `#include <project_vertex>
@@ -73,7 +79,10 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
   vCamoUv = vMapUv * camoUV.xy + camoUV.zw;
 #else
   vCamoUv = vec2( 0.0 );
-#endif`,
+#endif
+  // World-space height for the Layer-2 waterline band (the hull shader has no
+  // world position otherwise). 'transformed' is the post-skinning local pos.
+  vWetWorldY = ( modelMatrix * vec4( transformed, 1.0 ) ).y;`,
       );
 
     shader.fragmentShader =
@@ -103,6 +112,10 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
       'uniform float wetOverall;\n' +
       'uniform vec3 wetColor;\n' +
       'uniform float wetRoughDrop;\n' +
+      'uniform float wetWaterY;\n' +
+      'uniform float wetWaveAmp;\n' +
+      'uniform float wetBand;\n' +
+      'varying float vWetWorldY;\n' +
       'varying vec2 vCamoUv;\n' +
       shader.fragmentShader
         .replace(
@@ -306,6 +319,16 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
 // (waterline band) + Layer 3 (deck puddles, §5b.2) extend this block.
 float wetGlobal = clamp( wetOverall, 0.0, 1.0 );
 diffuseColor.rgb = mix( diffuseColor.rgb, wetColor, wetGlobal * 0.5 );
+
+// ── Rain wetness Layer 2: waterline band (wg_render_ship_water.md §4/§9a) ───
+// Approximates the per-ship WetnessManager mask: the hull darkens + glosses
+// near/below the waterline. wetRegionTop = wetWaterY + wetWaveAmp (the engine's
+// "waterline + maxWaveHeight" clamp, §4); the webview has no water plane + no
+// static per-ship draft (§9c), so wetWaterY is a flat sea-level stand-in.
+// NO geometry clip (§9d) — this is shading only. 'wetBandF' is reused by the
+// roughness chunk below (same main() scope; map_fragment runs before it).
+float wetBandF = clamp( ( wetWaterY + wetWaveAmp - vWetWorldY ) / max( wetBand, 1e-3 ), 0.0, 1.0 );
+diffuseColor.rgb *= mix( 1.0, 0.6, wetBandF );
 `,
         )
         // WG-pack metallicRoughness override. WG `_mg.dds` ACTUAL layout
@@ -360,6 +383,9 @@ diffuseColor.rgb = mix( diffuseColor.rgb, wetColor, wetGlobal * 0.5 );
 // no roughness map. Scales only the final factor — never the _mr/_mg texel
 // reads (§9a). No-op when dry.
 roughnessFactor *= mix( 1.0, wetRoughDrop, clamp( wetOverall, 0.0, 1.0 ) );
+// Layer 2 waterline band: extra gloss near the waterline. 'wetBandF' comes
+// from the map_fragment tail (earlier chunk, same main() scope).
+roughnessFactor *= mix( 1.0, 0.35, wetBandF );
 `,
         )
         .replace(
