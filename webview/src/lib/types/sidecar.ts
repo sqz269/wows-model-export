@@ -526,11 +526,19 @@ export interface ParticleRecord {
  *                    mounts in the band.
  *  - `munition`    : per-Projectile shell-impact / projectile-destroyed
  *                    / tracer XML refs (one ammo prototype per source_id).
+ *  - `map`         : map-authored `space.bin.particles[]` emitter anchor.
  *
  * Older sidecars (pre-source taxonomy) omit `source`; the consumer
  * defaults to `hull` for back-compat.
  */
-export type ParticleSource = 'hull' | 'artillery' | 'atba' | 'airDefense' | 'aa_aura' | 'munition';
+export type ParticleSource =
+  | 'hull'
+  | 'artillery'
+  | 'atba'
+  | 'airDefense'
+  | 'aa_aura'
+  | 'munition'
+  | 'map';
 
 export interface ParticleAttachment {
   /**

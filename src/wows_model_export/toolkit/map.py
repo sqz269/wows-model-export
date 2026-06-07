@@ -7,11 +7,11 @@ Single callable:
                  vegetation. Wraps `wowsunpack export-map`.
 
 See ``reference/maps/map_extraction.md`` for the surrounding format
-notes, and ``reference/maps/map_extraction_audit_2026_05_21.md`` for
-known scope (only `space.bin.models[]` is consumed; obstacles,
-particles, lights, probes, decals, user-objects, prefabs are silently
-dropped by the toolkit — those are tracked as Phase 2 viewer-fidelity
-work).
+notes, ``reference/maps/map_extraction_audit_2026_05_21.md`` for the
+original audit, and the ``reference/systems/map_pass_*`` notes for the
+current verification state. The current verification branch surfaces
+non-model scene extras and can optionally emit a joined map collision
+manifest sidecar for obstacle/collision-model inspection.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ def export_map(
     no_textures: bool = False,
     vegetation_density: float = 20.0,
     max_texture_size: int | None = None,
+    collision_manifest_json: Path | str | os.PathLike | None = None,
 ) -> ToolkitResult:
     """Export a single space (battle map / dock / operations scenario) to
     a single GLB.
@@ -55,15 +56,20 @@ def export_map(
     - ``Water`` node — flat plane at the space bounds.
     - One node per ``space.bin.models[]`` instance, named after the
       prototype's resolved asset name (``OBC008_47``) when known, else
-      ``Instance_47``.
-    - When ``no_vegetation=False``, one vanilla glTF node per tree
-      (vegetation parser is silently broken on every map until the
-      `forest.rs` fix lands — see the audit doc for the recipe).
+      ``Instance_47``. Node extras include landscape/min-quality/LOD
+      metadata and shallow dye/material-override presence.
+    - Scene extras for bounds, fog, obstacles, particles, decals, probes,
+      user objects, and engine point lights.
+    - When ``no_vegetation=False``, one glTF node per tree from forest
+      Layer[0] Primary LOD0. The webview collapses these into
+      ``THREE.InstancedMesh`` buckets per species at load time.
+    - Optional ``collision_manifest_json`` sidecar with obstacle
+      placements joined to raw collision-model face loops. This is
+      diagnostic/proxy data, not native runtime solver parity.
 
     ``terrain_step`` decimates the heightmap (1 = full, 4 = default, 8 =
     coarse). ``vegetation_density`` (m) is a per-species
-    one-tree-per-cell decimation, applied even though the parser
-    currently emits no trees.
+    one-tree-per-cell decimation.
 
     ``max_texture_size`` caps any dimension of emitted textures via box
     filter; ``None`` keeps original sizes (large maps push GLB size into
@@ -75,6 +81,13 @@ def export_map(
 
     out = Path(out_path).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
+    collision_out = (
+        Path(collision_manifest_json).resolve()
+        if collision_manifest_json is not None
+        else None
+    )
+    if collision_out is not None:
+        collision_out.parent.mkdir(parents=True, exist_ok=True)
 
     argv: list[str] = [
         "--game-dir", str(cfg.require_game_dir()),
@@ -94,8 +107,11 @@ def export_map(
         argv.append("--no-textures")
     if max_texture_size is not None:
         argv += ["--max-texture-size", str(max_texture_size)]
+    if collision_out is not None:
+        argv += ["--collision-manifest-json", str(collision_out)]
 
-    return run_toolkit(argv, config=cfg, expect_outputs=(out,))
+    expect_outputs = (out, collision_out) if collision_out is not None else (out,)
+    return run_toolkit(argv, config=cfg, expect_outputs=expect_outputs)
 
 
 # ── space-listing helper (no toolkit dep, fast) ───────────────────────

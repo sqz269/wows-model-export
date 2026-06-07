@@ -17,10 +17,12 @@
   import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
   import * as THREE from 'three';
 
+  import { fetchJson } from '$lib/api';
   import {
     listMaps,
     exportMap,
     mapGlbUrl,
+    mapCollisionManifestUrl,
     deleteMapCache,
     type MapListEntry,
     type MapCategory,
@@ -33,6 +35,8 @@
   import { observeResize } from '$lib/three/resize';
   import { startRenderLoop } from '$lib/three/render_loop';
   import { disposeTree } from '$lib/three/dispose';
+  import { ParticleScene } from '$lib/three/particles';
+  import type { ParticleAttachment, ParticleRecord } from '$lib/types/sidecar';
 
   interface Props {
     spaceName: string | null;
@@ -98,17 +102,28 @@
     navigate(`#/maps/${encodeURIComponent(name)}`);
   }
 
-  async function triggerExport(): Promise<void> {
-    if (!selected) return;
+  async function triggerExport(extraFlags: MapExportFlags = {}): Promise<boolean> {
+    if (!selected) return false;
     exporting = true;
     exportError = null;
     try {
-      await exportMap(selected.name, exportFlags);
+      await exportMap(selected.name, { ...exportFlags, ...extraFlags });
       await refresh();
+      return true;
     } catch (err) {
       exportError = err instanceof Error ? err.message : String(err);
+      return false;
     } finally {
       exporting = false;
+    }
+  }
+
+  async function triggerBuildCollisionManifest(): Promise<void> {
+    if (!selected) return;
+    const priorFlags = selected.export?.flags ?? exportFlags;
+    if (await triggerExport({ ...priorFlags, collision_manifest: true })) {
+      collisionError = null;
+      showCollision = true;
     }
   }
 
@@ -137,8 +152,17 @@
     fogDensity: number | null;
     lodCullableCount: number;
     lightCount: number;
+    qualityTaggedInstances: number;
+    qualityHiddenInstances: number;
+    qualityTaggedLights: number;
+    qualityHiddenLights: number;
     vegetationSpecies: number;
     vegetationInstances: number;
+    mapParticleAnchors: number;
+    mapParticleResolved: number;
+    collisionModels: number;
+    collisionObstacles: number;
+    collisionTriangles: number;
     dyedInstances: number;
     materialOverrideInstances: number;
   } | null>(null);
@@ -161,6 +185,31 @@
   // cut, not soft fade. Toggle OFF to inspect culled content.
   let lodCullEnabled = $state(true);
 
+  // Raw authored model quality gate. Native token map is descending quality:
+  // MAX/MAXIMUM=0, VERYHIGH=1, HIGH=2, MEDIUM=3, LOW=4,
+  // VERYLOW=5, MIN/MINIMUM=6, OFF=7, USER/CUSTOM=8. Draw only
+  // when runtime raw quality is at least as good as the authored
+  // minimum, i.e. runtime_raw <= authored_min_raw.
+  const QUALITY_RUNTIME_OPTIONS = [
+    { value: 0, label: '0 MAXIMUM (all)' },
+    { value: 1, label: '1 VERYHIGH' },
+    { value: 2, label: '2 HIGH' },
+    { value: 3, label: '3 MEDIUM' },
+    { value: 4, label: '4 LOW' },
+    { value: 5, label: '5 VERYLOW' },
+    { value: 6, label: '6 MINIMUM' },
+    { value: 7, label: '7 OFF' },
+    { value: 8, label: '8 USER/CUSTOM' },
+  ] as const;
+  const DYNAMIC_LIGHTING_RUNTIME_OPTIONS = [
+    { value: 2, label: '2 HIGH' },
+    { value: 3, label: '3 MEDIUM' },
+    { value: 4, label: '4 LOW' },
+    { value: 7, label: '7 OFF/other' },
+  ] as const;
+  let modelRuntimeQualityRaw = $state(0);
+  let dynamicLightingRuntimeRaw = $state(2);
+
   // Engine point lights from `space.bin` pointLights[] (stride 0xc0).
   // Toggle ON to add the engine's atmospheric/accent lights; OFF to inspect
   // the unlit scene. Lights are small-radius accents (~1-5m) and won't be
@@ -176,10 +225,46 @@
   let showVegetation = $state(true);
   let vegetationGroup: THREE.Group | null = null;
 
+  // Map-authored particle anchors from `space.bin.particles[]`. These are
+  // distinct from ship-side Effect attachments: placement comes from the map
+  // scene extras, while effect prototypes still come from /api/particles.
+  let showMapParticles = $state(false);
+  let mapParticleAnchors = $state<MapParticleAnchor[]>([]);
+  let mapParticleLoading = $state(false);
+  let mapParticleError = $state<string | null>(null);
+  let mapParticleStats = $state<{
+    anchors: number;
+    resolvedAnchors: number;
+    uniquePaths: number;
+    records: number;
+    activeAnchors: number;
+    systems: number;
+    missingRecords: number;
+  } | null>(null);
+  let mapParticleScene: ParticleScene | null = null;
+  let mapParticleLoadToken = 0;
+
+  // Diagnostic map collision overlay. Backed by the optional
+  // `wows.map.collision_manifest.v1` sidecar. The proxy meshes use raw
+  // loader-level face loops triangulated as simple fans; this is for
+  // inspection, not native solver parity.
+  let showCollision = $state(false);
+  let collisionLoading = $state(false);
+  let collisionError = $state<string | null>(null);
+  let collisionStats = $state<{
+    models: number;
+    obstacles: number;
+    triangles: number;
+  } | null>(null);
+  let collisionGroup: THREE.Group | null = null;
+  let collisionLoadToken = 0;
+  const MISSING_COLLISION_MANIFEST_ERROR = 'collision manifest not exported';
+
   // Live handles to the scene root + env so the showLandscape toggle
   // doesn't need to rebuild the whole scene. Set by the load effect;
   // cleared on teardown.
   let activeRoot = $state<THREE.Object3D | null>(null);
+  let activeEnv = $state<SceneEnvironment | null>(null);
   let activeFog = $state<THREE.FogExp2 | null>(null);
   let engineFogDensity = $state<number | null>(null);
 
@@ -192,6 +277,7 @@
     worldPos: THREE.Vector3;
     maxExtentSq: number;
     isLandscape: boolean;
+    minQualityLevel: number | null;
   }
   let lodInstances: LodInstance[] = [];
 
@@ -216,6 +302,7 @@
       far_plane: number;
     };
     lights?: MapLight[];
+    particles?: MapParticleAnchor[];
   }
 
   /** A single engine point-light, world-space. RGBA convention: RGB is
@@ -226,6 +313,53 @@
     color: [number, number, number, number];
     radius: number;
     min_quality: number;
+  }
+
+  interface MapParticleAnchor {
+    position?: [number, number, number];
+    transform?: number[];
+    resource_id?: number;
+    resource_id_hex?: string;
+    resource_path?: string | null;
+    intensity_count?: number;
+    intensity_values?: number[];
+  }
+
+  interface CollisionManifest {
+    schema: 'wows.map.collision_manifest.v1';
+    obstacle_count: number;
+    collision_model_count: number;
+    referenced_collision_model_count: number;
+    collision_model_parse_error_count: number;
+    obstacles: CollisionObstacle[];
+    collision_models: CollisionModelRecord[];
+  }
+
+  interface CollisionObstacle {
+    transform: number[];
+    candidate_collision_model_index: number;
+    candidate_collision_model_valid: boolean;
+  }
+
+  interface CollisionModelRecord {
+    index: number;
+    referenced_by_obstacle_count: number;
+    parse_error?: string | null;
+    stats?: {
+      debug_fan_triangle_count: number;
+      native_postload_triangle_candidate_count: number;
+      face_with_vertex_zero_count: number;
+    };
+    objects?: CollisionObjectRecord[];
+  }
+
+  interface CollisionObjectRecord {
+    vertices: [number, number, number][];
+    faces: CollisionFaceRecord[];
+  }
+
+  interface CollisionFaceRecord {
+    debug_fan_triangles: [number, number, number][];
   }
 
   /** Per-instance extras emitted by the toolkit. See
@@ -303,16 +437,48 @@
     return { box, meshCount, landscapeCount, dyedInstances, materialOverrideInstances };
   }
 
-  /** Toggle visibility on landscape-flagged instance nodes. Covers nodes
-   *  without `lod_extents`; the per-frame LOD pass owns visibility for
-   *  those that have extents. */
-  function applyLandscapeFilter(root: THREE.Object3D, show: boolean): void {
+  function rawQualityValue(value: unknown): number | null {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  }
+
+  function passesQualityGate(value: unknown, threshold: number): boolean {
+    const q = rawQualityValue(value);
+    return q == null || threshold <= q;
+  }
+
+  function applyInstanceFilters(
+    root: THREE.Object3D,
+    showLand: boolean,
+    threshold: number,
+  ): { tagged: number; hidden: number } {
+    let tagged = 0;
+    let hidden = 0;
     root.traverse((o) => {
-      const ud = o.userData as InstanceExtras;
-      if (ud && ud.is_landscape) {
-        o.visible = show;
-      }
+      const ud = o.userData as InstanceExtras | undefined;
+      const q = rawQualityValue(ud?.min_quality_level);
+      const hasLandscapeFlag = !!ud?.is_landscape;
+      if (q == null && !hasLandscapeFlag) return;
+      if (q != null) tagged += 1;
+      const visible = (!hasLandscapeFlag || showLand) && passesQualityGate(q, threshold);
+      if (q != null && threshold > q) hidden += 1;
+      if (o.visible !== visible) o.visible = visible;
     });
+    return { tagged, hidden };
+  }
+
+  function updateViewerQualityStats(
+    instanceStats: { tagged: number; hidden: number } | null,
+    lightStats: { tagged: number; hidden: number } | null,
+  ): void {
+    const stats = untrack(() => viewerStats);
+    if (!stats) return;
+    viewerStats = {
+      ...stats,
+      qualityTaggedInstances: instanceStats?.tagged ?? stats.qualityTaggedInstances,
+      qualityHiddenInstances: instanceStats?.hidden ?? stats.qualityHiddenInstances,
+      qualityTaggedLights: lightStats?.tagged ?? stats.qualityTaggedLights,
+      qualityHiddenLights: lightStats?.hidden ?? stats.qualityHiddenLights,
+    };
   }
 
   /** Walk the scene once and gather every instance node that carries a
@@ -344,6 +510,7 @@
         worldPos,
         maxExtentSq: maxExtent * maxExtent,
         isLandscape: !!ud?.is_landscape,
+        minQualityLevel: rawQualityValue(ud?.min_quality_level),
       });
     });
     return out;
@@ -365,6 +532,7 @@
       meshes: THREE.Mesh[];
       geometry: THREE.BufferGeometry;
       material: THREE.Material;
+      minQualityLevel: number | null;
     }
     const bySpecies = new Map<string, SpeciesBucket>();
     const toRemove: THREE.Object3D[] = [];
@@ -377,10 +545,17 @@
       if (!match) return;
       if (Array.isArray(mesh.material)) return;
       const speciesIdx = match[1];
-      let bucket = bySpecies.get(speciesIdx);
+      const minQualityLevel = rawQualityValue(mesh.userData?.min_quality_level);
+      const bucketKey = `${speciesIdx}:${minQualityLevel ?? 'any'}`;
+      let bucket = bySpecies.get(bucketKey);
       if (!bucket) {
-        bucket = { meshes: [], geometry: mesh.geometry, material: mesh.material as THREE.Material };
-        bySpecies.set(speciesIdx, bucket);
+        bucket = {
+          meshes: [],
+          geometry: mesh.geometry,
+          material: mesh.material as THREE.Material,
+          minQualityLevel,
+        };
+        bySpecies.set(bucketKey, bucket);
       } else if (mesh.geometry !== bucket.geometry || mesh.material !== bucket.material) {
         // GLTFLoader shares geometry+material across nodes referencing the
         // same glTF mesh, so this should never trip. If it does, the
@@ -406,9 +581,10 @@
     group.name = 'Vegetation';
     let totalInstances = 0;
 
-    for (const [speciesIdx, bucket] of bySpecies) {
+    for (const [bucketKey, bucket] of bySpecies) {
       const im = new THREE.InstancedMesh(bucket.geometry, bucket.material, bucket.meshes.length);
-      im.name = `Vegetation_${speciesIdx}`;
+      im.name = `Vegetation_${bucketKey.replace(':', '_q')}`;
+      if (bucket.minQualityLevel != null) im.userData.min_quality_level = bucket.minQualityLevel;
       for (let i = 0; i < bucket.meshes.length; i++) {
         tmp.copy(rootInv).multiply(bucket.meshes[i].matrixWorld);
         im.setMatrixAt(i, tmp);
@@ -461,16 +637,359 @@
       const radius = Number.isFinite(l.radius) && l.radius > 0 ? l.radius : 1;
       const light = new THREE.PointLight(color, intensity, radius, 2);
       light.position.set(px, py, pz);
+      light.userData.min_quality = rawQualityValue(l.min_quality);
       root.add(light);
       out.push(light);
     }
     return out;
   }
 
+  function applyLightFilter(
+    lights: THREE.PointLight[],
+    show: boolean,
+    threshold: number,
+  ): { tagged: number; hidden: number } {
+    let tagged = 0;
+    let hidden = 0;
+    for (const lt of lights) {
+      const q = rawQualityValue(lt.userData.min_quality);
+      if (q != null) tagged += 1;
+      const visible = show && passesQualityGate(q, threshold);
+      if (q != null && threshold > q) hidden += 1;
+      if (lt.visible !== visible) lt.visible = visible;
+    }
+    return { tagged, hidden };
+  }
+
+  type ParticleRecordResponse = {
+    ok: boolean;
+    path?: string;
+    quality_used?: string | null;
+    record?: ParticleRecord;
+    error?: string;
+  };
+
+  function usableMapParticleAnchors(anchors: MapParticleAnchor[]): MapParticleAnchor[] {
+    return anchors.filter((a) => {
+      if (!a || typeof a.resource_path !== 'string' || !a.resource_path) return false;
+      return Array.isArray(a.transform) && a.transform.length >= 16;
+    });
+  }
+
+  async function fetchParticleRecord(path: string): Promise<ParticleRecord | null> {
+    const qs = new URLSearchParams({ path, quality: 'high' });
+    const res = await fetchJson<ParticleRecordResponse>(`/api/particles/record?${qs}`);
+    return res.record ?? null;
+  }
+
+  async function fetchParticleRecords(paths: string[]): Promise<Record<string, ParticleRecord>> {
+    const out: Record<string, ParticleRecord> = {};
+    let next = 0;
+    const workerCount = Math.min(6, paths.length);
+
+    async function worker(): Promise<void> {
+      while (next < paths.length) {
+        const path = paths[next++];
+        try {
+          const record = await fetchParticleRecord(path);
+          if (record) out[path] = record;
+        } catch (err) {
+          console.warn('[maps] map particle record unavailable', path, err);
+        }
+      }
+    }
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return out;
+  }
+
+  function disposeMapParticleScene(env: SceneEnvironment | null): void {
+    if (!mapParticleScene) return;
+    if (env) env.scene.remove(mapParticleScene.root);
+    mapParticleScene.dispose();
+    mapParticleScene = null;
+  }
+
+  function disableMapParticleScene(): void {
+    mapParticleLoadToken += 1;
+    mapParticleLoading = false;
+    if (!mapParticleScene) return;
+    mapParticleScene.setAllActive(false);
+    mapParticleScene.root.visible = false;
+  }
+
+  async function loadMapParticleScene(
+    env: SceneEnvironment,
+    anchors: MapParticleAnchor[],
+  ): Promise<void> {
+    const token = ++mapParticleLoadToken;
+    const usable = usableMapParticleAnchors(anchors);
+    const paths = [...new Set(usable.map((a) => a.resource_path as string))].sort();
+    mapParticleLoading = true;
+    mapParticleError = null;
+
+    try {
+      const records = await fetchParticleRecords(paths);
+      if (token !== mapParticleLoadToken) return;
+
+      disposeMapParticleScene(env);
+      const scene = new ParticleScene(env.renderer);
+      scene.root.name = 'MapParticleEffects';
+      env.scene.add(scene.root);
+
+      const renderable = usable.filter((a) => records[a.resource_path as string]);
+      const attachments: ParticleAttachment[] = renderable.map((a, i) => ({
+        group: `map_${i}`,
+        node: a.resource_id_hex ?? 'anchor',
+        particle_path: a.resource_path as string,
+        source: 'map',
+      }));
+      const handles = scene.build(attachments, records, () => new THREE.Vector3(0, 0, 0));
+      const matrix = new THREE.Matrix4();
+      let systems = 0;
+      for (let i = 0; i < handles.length; i++) {
+        const anchor = renderable[i];
+        matrix.fromArray(anchor.transform as number[]);
+        handles[i].group.matrix.copy(matrix);
+        handles[i].group.matrixAutoUpdate = false;
+        handles[i].group.matrixWorldNeedsUpdate = true;
+        scene.setAttachmentActive(handles[i], true);
+        systems += handles[i].systems.length;
+      }
+
+      mapParticleScene = scene;
+      mapParticleStats = {
+        anchors: anchors.length,
+        resolvedAnchors: usable.length,
+        uniquePaths: paths.length,
+        records: Object.keys(records).length,
+        activeAnchors: handles.length,
+        systems,
+        missingRecords: Math.max(0, paths.length - Object.keys(records).length),
+      };
+      if (viewerStats) {
+        viewerStats = {
+          ...viewerStats,
+          mapParticleAnchors: anchors.length,
+          mapParticleResolved: usable.length,
+        };
+      }
+    } catch (err) {
+      if (token === mapParticleLoadToken) {
+        mapParticleError = err instanceof Error ? err.message : String(err);
+        mapParticleStats = null;
+      }
+    } finally {
+      if (token === mapParticleLoadToken) {
+        mapParticleLoading = false;
+      }
+    }
+  }
+
+  function syncMapParticleLayer(
+    show: boolean,
+    env: SceneEnvironment | null,
+    anchors: MapParticleAnchor[],
+  ): void {
+    if (!show) {
+      disableMapParticleScene();
+      return;
+    }
+    if (!env || anchors.length === 0) return;
+    if (mapParticleScene) {
+      mapParticleScene.root.visible = true;
+      mapParticleScene.setAllActive(true);
+      return;
+    }
+    if (untrack(() => mapParticleLoading)) return;
+    void loadMapParticleScene(env, anchors);
+  }
+
+  function buildCollisionGeometry(model: CollisionModelRecord): THREE.BufferGeometry | null {
+    if (!model.objects || model.objects.length === 0) return null;
+    const positions: number[] = [];
+    const indices: number[] = [];
+    for (const object of model.objects) {
+      const base = positions.length / 3;
+      for (const v of object.vertices) {
+        positions.push(v[0], v[1], v[2]);
+      }
+      for (const face of object.faces) {
+        for (const tri of face.debug_fan_triangles ?? []) {
+          indices.push(base + tri[0], base + tri[1], base + tri[2]);
+        }
+      }
+    }
+    if (positions.length === 0 || indices.length === 0) return null;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setIndex(indices);
+    geometry.computeBoundingSphere();
+    return geometry;
+  }
+
+  function buildCollisionOverlay(manifest: CollisionManifest): {
+    group: THREE.Group;
+    modelCount: number;
+    obstacleCount: number;
+    triangleCount: number;
+  } {
+    const byModel = new Map<number, CollisionObstacle[]>();
+    for (const obstacle of manifest.obstacles ?? []) {
+      if (!obstacle.candidate_collision_model_valid) continue;
+      if (!Array.isArray(obstacle.transform) || obstacle.transform.length < 16) continue;
+      const index = obstacle.candidate_collision_model_index;
+      let list = byModel.get(index);
+      if (!list) {
+        list = [];
+        byModel.set(index, list);
+      }
+      list.push(obstacle);
+    }
+
+    const group = new THREE.Group();
+    group.name = 'CollisionProxy';
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xff4d6d,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.32,
+      depthWrite: false,
+    });
+    const matrix = new THREE.Matrix4();
+    let modelCount = 0;
+    let obstacleCount = 0;
+    let triangleCount = 0;
+
+    for (const model of manifest.collision_models ?? []) {
+      if (model.parse_error) continue;
+      const obstacles = byModel.get(model.index);
+      if (!obstacles || obstacles.length === 0) continue;
+      const geometry = buildCollisionGeometry(model);
+      if (!geometry) continue;
+      const mesh = new THREE.InstancedMesh(geometry, material, obstacles.length);
+      mesh.name = `CollisionModel_${model.index}`;
+      mesh.userData.collision_model_index = model.index;
+      mesh.userData.referenced_by_obstacle_count = obstacles.length;
+      for (let i = 0; i < obstacles.length; i++) {
+        matrix.fromArray(obstacles[i].transform);
+        mesh.setMatrixAt(i, matrix);
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.computeBoundingSphere();
+      group.add(mesh);
+      modelCount += 1;
+      obstacleCount += obstacles.length;
+      triangleCount += (geometry.getIndex()?.count ?? 0) / 3 * obstacles.length;
+    }
+
+    group.visible = showCollision;
+    group.userData.collisionStats = {
+      models: modelCount,
+      obstacles: obstacleCount,
+      triangles: triangleCount,
+    };
+    return { group, modelCount, obstacleCount, triangleCount };
+  }
+
+  async function loadCollisionOverlay(space: string, scene: THREE.Scene): Promise<void> {
+    const token = ++collisionLoadToken;
+    collisionLoading = true;
+    collisionError = null;
+    try {
+      const resp = await fetch(mapCollisionManifestUrl(space));
+      if (!resp.ok) {
+        throw new Error(`collision manifest ${resp.status}`);
+      }
+      const manifest = (await resp.json()) as CollisionManifest;
+      if (manifest.schema !== 'wows.map.collision_manifest.v1') {
+        throw new Error(`unsupported collision manifest schema: ${manifest.schema}`);
+      }
+      const built = buildCollisionOverlay(manifest);
+      if (token !== collisionLoadToken) {
+        disposeTree(built.group);
+        return;
+      }
+      if (collisionGroup) {
+        scene.remove(collisionGroup);
+        disposeTree(collisionGroup);
+      }
+      collisionGroup = built.group;
+      collisionStats = {
+        models: built.modelCount,
+        obstacles: built.obstacleCount,
+        triangles: built.triangleCount,
+      };
+      scene.add(collisionGroup);
+      if (viewerStats) {
+        viewerStats = {
+          ...viewerStats,
+          collisionModels: built.modelCount,
+          collisionObstacles: built.obstacleCount,
+          collisionTriangles: built.triangleCount,
+        };
+      }
+    } catch (err) {
+      if (token === collisionLoadToken) {
+        collisionError = err instanceof Error ? err.message : String(err);
+        collisionStats = null;
+      }
+    } finally {
+      if (token === collisionLoadToken) {
+        collisionLoading = false;
+      }
+    }
+  }
+
+  function syncCollisionOverlay(
+    show: boolean,
+    env: SceneEnvironment | null,
+    space: string | null,
+    hasManifest: boolean,
+  ): void {
+    if (!env || !space) return;
+    if (!show) {
+      const group = untrack(() => collisionGroup);
+      if (group) group.visible = false;
+      return;
+    }
+    if (!hasManifest) {
+      collisionError = MISSING_COLLISION_MANIFEST_ERROR;
+      return;
+    }
+
+    const staleError = untrack(() => collisionError);
+    if (staleError === MISSING_COLLISION_MANIFEST_ERROR) {
+      collisionError = null;
+    }
+    const group = untrack(() => collisionGroup);
+    if (group) {
+      group.visible = true;
+      const stats = group.userData.collisionStats as
+        | { models?: unknown; obstacles?: unknown; triangles?: unknown }
+        | undefined;
+      if (
+        !untrack(() => collisionStats) &&
+        typeof stats?.models === 'number' &&
+        typeof stats?.obstacles === 'number' &&
+        typeof stats?.triangles === 'number'
+      ) {
+        collisionStats = {
+          models: stats.models,
+          obstacles: stats.obstacles,
+          triangles: stats.triangles,
+        };
+      }
+      return;
+    }
+    if (untrack(() => collisionLoading)) return;
+    void loadCollisionOverlay(space, env.scene);
+  }
+
   /** Per-frame visibility update for LOD-tagged instances. Composes the
    *  landscape toggle (forces hidden when `is_landscape && !showLandscape`)
-   *  with the engine's hard far-cull at the outermost LOD extent. When
-   *  `lodCullEnabled` is OFF, only the landscape filter applies.
+   *  and raw quality gate with the engine's hard far-cull at the outermost
+   *  LOD extent. When `lodCullEnabled` is OFF, only the static filters apply.
    *
    *  Writes `node.visible` only when it changes — three.js doesn't care
    *  either way, but skipping ~all writes after settle avoids unnecessary
@@ -478,9 +997,12 @@
   function updateLodVisibility(cameraPos: THREE.Vector3): void {
     const cullEnabled = lodCullEnabled;
     const showLand = showLandscape;
+    const threshold = modelRuntimeQualityRaw;
     for (const inst of lodInstances) {
       let visible = true;
       if (inst.isLandscape && !showLand) {
+        visible = false;
+      } else if (inst.minQualityLevel != null && threshold > inst.minQualityLevel) {
         visible = false;
       } else if (cullEnabled) {
         visible = cameraPos.distanceToSquared(inst.worldPos) < inst.maxExtentSq;
@@ -576,6 +1098,7 @@
         });
         env.controls.target.set(0, 0, 0);
         env.controls.update();
+        activeEnv = env;
 
         stopResize = observeResize({
           container,
@@ -590,6 +1113,7 @@
           if (lodInstances.length > 0) {
             updateLodVisibility(env.camera.position);
           }
+          mapParticleScene?.tick();
           env.render();
         });
 
@@ -632,9 +1156,8 @@
           engineFogDensity = null;
         }
 
-        // Apply current filters (default ON) + expose the root so the
+        // Apply current fixed material state + expose the root so the
         // toggle effects below can re-apply without a full reload.
-        applyLandscapeFilter(loadedRoot, showLandscape);
         fixupWaterDepth(loadedRoot, opaqueWater);
         activeRoot = loadedRoot;
 
@@ -645,18 +1168,9 @@
           computeFrameBox(loadedRoot, sceneExtras);
         frameToBox(box, env.camera, env.controls);
 
-        // Pre-collect LOD-cullable instances so the per-frame pass doesn't
-        // re-traverse the scene tree. Must run after frameToBox so the
-        // camera matrix is settled before the first cull pass.
-        lodInstances = collectLodInstances(loadedRoot);
-
-        // Instantiate engine point lights. Toggled visible/invisible via
-        // the `showLights` $state through the effect below. Always reset
-        // `lightObjects` here even when the list is empty, so a re-load
-        // doesn't leak the prior selection's lights into the count.
-        const sceneLights = sceneExtras.lights ?? [];
-        lightObjects = sceneLights.length > 0 ? instantiateLights(loadedRoot, sceneLights) : [];
-        for (const lt of lightObjects) lt.visible = showLights;
+        mapParticleAnchors = sceneExtras.particles ?? [];
+        mapParticleStats = null;
+        mapParticleError = null;
 
         // Collapse per-tree nodes into InstancedMesh per species. Cuts
         // ~5K draw calls down to ~5 on a typical map.
@@ -664,14 +1178,45 @@
         vegetationGroup = veg.group;
         if (vegetationGroup) vegetationGroup.visible = showVegetation;
 
+        // Pre-collect LOD-cullable instances so the per-frame pass doesn't
+        // re-traverse the scene tree. Must run after frameToBox and after
+        // vegetation collapse so removed per-tree nodes are not cached.
+        lodInstances = collectLodInstances(loadedRoot);
+        const instanceQualityStats = applyInstanceFilters(
+          loadedRoot,
+          showLandscape,
+          modelRuntimeQualityRaw,
+        );
+
+        // Instantiate engine point lights. Toggled visible/invisible via
+        // the `showLights` $state through the effect below. Always reset
+        // `lightObjects` here even when the list is empty, so a re-load
+        // doesn't leak the prior selection's lights into the count.
+        const sceneLights = sceneExtras.lights ?? [];
+        lightObjects = sceneLights.length > 0 ? instantiateLights(loadedRoot, sceneLights) : [];
+        const lightQualityStats = applyLightFilter(
+          lightObjects,
+          showLights,
+          dynamicLightingRuntimeRaw,
+        );
+
         viewerStats = {
           nodes: meshCount,
           landscapeCount,
           fogDensity,
           lodCullableCount: lodInstances.length,
           lightCount: lightObjects.length,
+          qualityTaggedInstances: instanceQualityStats.tagged,
+          qualityHiddenInstances: instanceQualityStats.hidden,
+          qualityTaggedLights: lightQualityStats.tagged,
+          qualityHiddenLights: lightQualityStats.hidden,
           vegetationSpecies: veg.speciesCount,
           vegetationInstances: veg.instanceCount,
+          mapParticleAnchors: mapParticleAnchors.length,
+          mapParticleResolved: usableMapParticleAnchors(mapParticleAnchors).length,
+          collisionModels: 0,
+          collisionObstacles: 0,
+          collisionTriangles: 0,
           dyedInstances,
           materialOverrideInstances,
           bbox: box.isEmpty()
@@ -690,12 +1235,28 @@
 
     return () => {
       cancelled = true;
+      collisionLoadToken += 1;
       activeRoot = null;
+      activeEnv = null;
       activeFog = null;
       engineFogDensity = null;
       lodInstances = [];
       lightObjects = [];
       vegetationGroup = null;
+      mapParticleAnchors = [];
+      mapParticleStats = null;
+      mapParticleLoading = false;
+      mapParticleError = null;
+      mapParticleLoadToken += 1;
+      disposeMapParticleScene(env);
+      if (collisionGroup && env) {
+        env.scene.remove(collisionGroup);
+        disposeTree(collisionGroup);
+      }
+      collisionGroup = null;
+      collisionStats = null;
+      collisionLoading = false;
+      collisionError = null;
       stopLoop?.();
       stopResize?.();
       if (loadedRoot && env) {
@@ -711,12 +1272,13 @@
     };
   });
 
-  // Live toggle for the landscape filter — flips visibility on the
-  // already-loaded scene without a re-fetch.
+  // Live toggle for static instance filters. Composes landscape visibility
+  // and raw quality gating on the already-loaded scene without a re-fetch.
   $effect(() => {
     const root = activeRoot;
     if (!root) return;
-    applyLandscapeFilter(root, showLandscape);
+    const stats = applyInstanceFilters(root, showLandscape, modelRuntimeQualityRaw);
+    updateViewerQualityStats(stats, null);
   });
 
   // Live toggle for water opacity.
@@ -726,12 +1288,15 @@
     fixupWaterDepth(root, opaqueWater);
   });
 
-  // Live toggle for engine point lights. Cheap visibility flip — lights
-  // stay attached to the scene root so reactivation is instant.
+  // Live toggle for engine point lights. Native point-light minQuality is
+  // driven by the DYNAMIC_LIGHTING graphics setting, which is separate from
+  // model instance minimumQualityLevel.
   $effect(() => {
     const show = showLights;
+    const threshold = dynamicLightingRuntimeRaw;
     if (lightObjects.length === 0) return;
-    for (const lt of lightObjects) lt.visible = show;
+    const stats = applyLightFilter(lightObjects, show, threshold);
+    updateViewerQualityStats(null, stats);
   });
 
   // Live toggle for vegetation — single visibility flip on the parent
@@ -739,6 +1304,26 @@
   $effect(() => {
     const show = showVegetation;
     if (vegetationGroup) vegetationGroup.visible = show;
+  });
+
+  // Live toggle for map-authored particles. The layer is lazy because it
+  // joins map anchors to shared particle records and DDS textures on demand.
+  $effect(() => {
+    const show = showMapParticles;
+    const env = activeEnv;
+    const anchors = mapParticleAnchors;
+    syncMapParticleLayer(show, env, anchors);
+  });
+
+  // Live collision proxy overlay. Lazily fetches the manifest only when
+  // enabled; if the sidecar is missing, the toolbar exposes a re-export
+  // action that asks the backend to generate it.
+  $effect(() => {
+    const show = showCollision;
+    const env = activeEnv;
+    const sn = selected?.exported ? selected.name : null;
+    const hasManifest = Boolean(selected?.collision_manifest_exported);
+    syncCollisionOverlay(show, env, sn, hasManifest);
   });
 
   // Live fog-density slider — re-scales the engine density into the
@@ -837,6 +1422,9 @@
           <span class="text-muted-foreground ml-auto text-xs">
             GLB: {formatBytes(selected.glb_size)} ·
             {formatMs(selected.export?.elapsed_ms)}
+            {#if selected.collision_manifest_exported}
+              · collision {formatBytes(selected.collision_manifest_size)}
+            {/if}
           </span>
           <Button
             variant="outline"
@@ -845,6 +1433,15 @@
             onclick={() => void triggerExport()}
             disabled={exporting}>Re-export</Button
           >
+          {#if !selected.collision_manifest_exported}
+            <Button
+              variant="outline"
+              size="sm"
+              class="text-xs"
+              onclick={() => void triggerBuildCollisionManifest()}
+              disabled={exporting}>Build collision</Button
+            >
+          {/if}
           <Button
             variant="ghost"
             size="sm"
@@ -873,10 +1470,11 @@
       {#if selected.exported}
         <!-- Three.js GLB viewer; mounts via $effect when canvasContainer
              is wired AND selected.exported is true. Engine ground-truth
-             rendering: fog + far-plane from scene extras, no content
-             filtering beyond the landscape toggle. -->
+             rendering: fog + far-plane from scene extras plus explicit
+             toggles for authored landscape, LOD, quality, light, vegetation,
+             particle, and collision layers. -->
         <div
-          class="text-muted-foreground border-border flex flex-none items-center gap-3 border-b px-4 py-1 text-xs"
+          class="text-muted-foreground border-border flex flex-none flex-wrap items-center gap-x-3 gap-y-1 border-b px-4 py-1 text-xs"
         >
           {#if viewerStats}
             <span>{viewerStats.nodes} meshes</span>
@@ -901,6 +1499,27 @@
                 <span>LOD cull ({viewerStats.lodCullableCount} eligible)</span>
               </label>
             {/if}
+            {#if viewerStats.qualityTaggedInstances > 0}
+              <label
+                class="flex items-center gap-1.5"
+                title="OBJECT_LOD runtime gate. Native raw values descend from MAXIMUM=0 to MINIMUM=6; model content draws when OBJECT_LOD raw quality is less than or equal to authored minimumQualityLevel."
+              >
+                <span>OBJECT_LOD</span>
+                <select
+                  bind:value={modelRuntimeQualityRaw}
+                  class="bg-input border-border rounded border px-1 py-0.5 text-xs"
+                >
+                  {#each QUALITY_RUNTIME_OPTIONS as q}
+                    <option value={q.value}>{q.label}</option>
+                  {/each}
+                </select>
+                {#if viewerStats.qualityHiddenInstances > 0}
+                  <span class="text-muted-foreground/70">
+                    {viewerStats.qualityHiddenInstances.toLocaleString()} hidden
+                  </span>
+                {/if}
+              </label>
+            {/if}
             {#if viewerStats.lightCount > 0}
               <label
                 class="flex items-center gap-1.5"
@@ -908,6 +1527,27 @@
               >
                 <input type="checkbox" bind:checked={showLights} />
                 <span>Lights ({viewerStats.lightCount})</span>
+              </label>
+            {/if}
+            {#if viewerStats.qualityTaggedLights > 0}
+              <label
+                class="flex items-center gap-1.5"
+                title="Point-light minQuality gate. Native point-light lighting uses the DYNAMIC_LIGHTING graphics setting; active raw tiers observed in the callback are HIGH=2, MEDIUM=3, LOW=4, with other raw values disabling dynamic-light resources."
+              >
+                <span>Light q</span>
+                <select
+                  bind:value={dynamicLightingRuntimeRaw}
+                  class="bg-input border-border rounded border px-1 py-0.5 text-xs"
+                >
+                  {#each DYNAMIC_LIGHTING_RUNTIME_OPTIONS as q}
+                    <option value={q.value}>{q.label}</option>
+                  {/each}
+                </select>
+                {#if viewerStats.qualityHiddenLights > 0}
+                  <span class="text-muted-foreground/70">
+                    {viewerStats.qualityHiddenLights.toLocaleString()} hidden
+                  </span>
+                {/if}
               </label>
             {/if}
             {#if viewerStats.vegetationInstances > 0}
@@ -918,6 +1558,53 @@
                 <input type="checkbox" bind:checked={showVegetation} />
                 <span>Vegetation ({viewerStats.vegetationSpecies}sp × {viewerStats.vegetationInstances})</span>
               </label>
+            {/if}
+            {#if viewerStats.mapParticleAnchors > 0}
+              <label
+                class="flex items-center gap-1.5"
+                title="Map-authored space.bin.particles[] anchors. Preview uses the shared particle renderer; authored six-channel intensities are preserved in metadata but not yet bound to EffectManager channel semantics."
+              >
+                <input type="checkbox" bind:checked={showMapParticles} />
+                <span>
+                  Map particles ({viewerStats.mapParticleResolved}/{viewerStats.mapParticleAnchors})
+                  {#if mapParticleStats}
+                    · {mapParticleStats.records} fx · {mapParticleStats.systems} systems
+                  {/if}
+                </span>
+              </label>
+            {/if}
+            {#if selected.collision_manifest_exported}
+              <label
+                class="flex items-center gap-1.5"
+                title="Diagnostic collision proxy from wows.map.collision_manifest.v1. Uses raw face loops triangulated as wireframe fan meshes; not native solver parity."
+              >
+                <input
+                  type="checkbox"
+                  checked={showCollision}
+                  onchange={(event) => {
+                    showCollision = (event.currentTarget as HTMLInputElement).checked;
+                  }}
+                />
+                <span>
+                  Collision
+                  {#if collisionStats}
+                    ({collisionStats.models} models × {collisionStats.obstacles},
+                    {collisionStats.triangles.toLocaleString()} tris)
+                  {/if}
+                </span>
+              </label>
+            {/if}
+            {#if collisionLoading}
+              <span class="text-muted-foreground/70">loading collision…</span>
+            {/if}
+            {#if collisionError}
+              <span class="text-destructive" title={collisionError}>collision unavailable</span>
+            {/if}
+            {#if mapParticleLoading}
+              <span class="text-muted-foreground/70">loading map particles…</span>
+            {/if}
+            {#if mapParticleError}
+              <span class="text-destructive" title={mapParticleError}>map particles unavailable</span>
             {/if}
             {#if viewerStats.dyedInstances > 0 || viewerStats.materialOverrideInstances > 0}
               <span
@@ -1023,6 +1710,13 @@
                 bind:checked={exportFlags.no_textures}
               />
               <span>Skip textures (faster, smaller GLB)</span>
+            </label>
+            <label class="mt-2 flex items-center gap-2">
+              <input
+                type="checkbox"
+                bind:checked={exportFlags.collision_manifest}
+              />
+              <span>Write collision manifest sidecar</span>
             </label>
           </div>
         </div>

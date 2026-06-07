@@ -10,11 +10,13 @@
 //   • BC7 (DXGI 98/99)              → CompressedTexture, RGBA_BPTC_Format
 //   • BC4 (DXGI 80/81)              → software-decoded to RGBA DataTexture
 //     (bypasses three.js r0.165's broken RED_RGTC1 upload path)
+//   • BC6H (DXGI 95/96)             → software-decoded to Float32 RGBA
+//     DataTexture for HDR particle ramps
 //   • DXT1 / DXT3 / DXT5 (classic)  → CompressedTexture, S3TC family
 //
-// BC5 / BC6H / other DXGI codes are intentionally rejected — none appear
-// in WG ship textures and forwarding them as warnings keeps the console
-// quiet during normal loads.
+// BC5 / other unsupported DXGI codes are intentionally rejected — none appear
+// in WG ship textures, and forwarding them as warnings keeps the console quiet
+// during normal loads.
 
 import * as THREE from 'three';
 import type { ParseSuccess } from './dds_worker';

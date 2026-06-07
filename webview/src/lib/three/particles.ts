@@ -1022,10 +1022,10 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       useMap: { value: 0 },
       // LUT (textureName1) for GRADIENT_MAP / UNDERWATER_GRADIENT_MAP.
       // useLut=1 routes the fragment shader through the LUT remap.
-      // Initialised to 0 — flipped to 1 by bindLutTexture only after
-      // the LUT DDS loads successfully (BC6H HDR isn't supported by
-      // the worker yet; failing-but-still-set useLut would render
-      // black against the null sampler).
+      // Initialised to 0 and flipped to 1 by bindLutTexture only after
+      // the LUT DDS loads successfully. BC6H HDR ramps are software-decoded
+      // by the DDS worker; failing-but-still-set useLut would render black
+      // against the null sampler.
       lut: { value: null as THREE.Texture | null },
       useLut: { value: 0 },
       // Manifest atlas rect (u0, v0, u1, v1). useAtlasRect=1 lerps the
@@ -1113,12 +1113,12 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           opts.blendType === 'DEFORM_WATER_SURFACE' || opts.blendType === 'SHIMMER' ? 1 : 0,
       },
       // Warm "detonation glow" strength for the lightmapping + GRADIENT_MAP
-      // path. RE (DXBC) shows the engine pins the ramp lookup to U=0 (the
-      // ramp's brightest texel) in lightmapping mode and adds it as an
-      // emissive term scaled by a per-particle intensity (v10.x) the parser
-      // doesn't carry — approximated by this constant. 0.15 keeps the puff a
-      // grey occluding smoke body with a warm core (vs a uniformly tan blob at
-      // higher values), matching the flak-burst look.
+      // path. RE doc 63 corrected the old pinned-U=0 theory: lightmapping
+      // samples the ramp at U = 1 - glow, where glow comes from the sprite
+      // texture before relight. The engine also scales this emissive term by
+      // a per-particle intensity (v10.x) the parser does not carry, so this
+      // constant approximates that missing scale. 0.15 keeps the puff a grey
+      // occluding smoke body with a warm core.
       uGlowStrength: { value: 0.15 },
     },
     vertexShader: /* glsl */ `
