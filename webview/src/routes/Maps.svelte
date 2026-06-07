@@ -52,10 +52,11 @@
   let exportFlags = $state<MapExportFlags>({
     max_texture_size: 512,
     terrain_step: 4,
+    vegetation_density: 0,
   });
 
   const grouped = $derived(groupByCategory(items));
-  const selected = $derived(spaceName ? items.find((i) => i.name === spaceName) ?? null : null);
+  const selected = $derived(spaceName ? (items.find((i) => i.name === spaceName) ?? null) : null);
 
   // Keep nav_state in sync so the topnav can route back to the last map.
   $effect(() => {
@@ -267,6 +268,8 @@
   let activeEnv = $state<SceneEnvironment | null>(null);
   let activeFog = $state<THREE.FogExp2 | null>(null);
   let engineFogDensity = $state<number | null>(null);
+  let pickedGeometry = $state<MapPickInfo | null>(null);
+  let pickHelper: THREE.BoxHelper | null = null;
 
   // Pre-collected list of instance nodes that carry a `lod_extents` array.
   // Built once per load; the render loop walks this list per-frame instead
@@ -367,6 +370,7 @@
   interface InstanceExtras {
     is_landscape?: boolean;
     min_quality_level?: number;
+    stable_guid?: string;
     lod_extents?: number[];
     /** `[[matter_id, replaces_id], ...]` — opaque u32 pairs identifying
      *  per-instance dye overrides. Themed event maps carry hundreds;
@@ -378,6 +382,56 @@
      *  surfaces the count; decoding the 0x70-byte
      *  MaterialInstancePrototype records is a follow-up. */
     material_instance_count?: number;
+    gltf_node_index?: number;
+    gltf_node_name?: string;
+    gltf_mesh_index?: number;
+    gltf_mesh_name?: string;
+    gltf_primitive_index?: number;
+    vegetation_species_mesh?: number;
+    instance_count?: number;
+  }
+
+  interface GltfJson {
+    nodes?: Array<{ name?: string; mesh?: number }>;
+    meshes?: Array<{ name?: string; primitives?: Array<{ material?: number }> }>;
+    materials?: Array<{ name?: string }>;
+  }
+
+  interface GltfAssociation {
+    nodes?: number;
+    meshes?: number;
+    primitives?: number;
+    materials?: number;
+  }
+
+  interface GltfWithAssociations {
+    parser?: {
+      json?: GltfJson;
+      associations?: { get(object: object): GltfAssociation | undefined };
+    };
+  }
+
+  interface PickHitSummary {
+    objectName: string;
+    meshName: string;
+    geometryName: string;
+    materialNames: string[];
+    distance: number;
+    faceIndex: number | null;
+    instanceId: number | null;
+  }
+
+  interface MapPickInfo extends PickHitSummary {
+    parentPath: string[];
+    point: [number, number, number];
+    objectUuid: string;
+    geometryUuid: string | null;
+    triangles: number | null;
+    stableGuid: string | null;
+    gltfNodeIndex: number | null;
+    gltfMeshIndex: number | null;
+    gltfPrimitiveIndex: number | null;
+    hits: PickHitSummary[];
   }
 
   /** Build a world bbox suitable for camera framing. Prefers scene.extras
@@ -435,6 +489,202 @@
     }
 
     return { box, meshCount, landscapeCount, dyedInstances, materialOverrideInstances };
+  }
+
+  function annotateGltfSourceNames(root: THREE.Object3D, gltf: GltfWithAssociations): void {
+    const parser = gltf.parser;
+    const json = parser?.json;
+    const associations = parser?.associations;
+    if (!json || !associations) return;
+
+    root.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const assoc = associations.get(mesh);
+      const nodeIndex = assoc?.nodes;
+      const meshIndex =
+        assoc?.meshes ?? (nodeIndex != null ? json.nodes?.[nodeIndex]?.mesh : undefined);
+      const primitiveIndex = assoc?.primitives;
+      const materialIndex =
+        assoc?.materials ??
+        (meshIndex != null && primitiveIndex != null
+          ? json.meshes?.[meshIndex]?.primitives?.[primitiveIndex]?.material
+          : undefined);
+      const nodeName = nodeIndex != null ? json.nodes?.[nodeIndex]?.name : undefined;
+      const meshName = meshIndex != null ? json.meshes?.[meshIndex]?.name : undefined;
+      const materialName =
+        materialIndex != null ? json.materials?.[materialIndex]?.name : undefined;
+
+      const ud = mesh.userData as InstanceExtras;
+      if (nodeIndex != null) ud.gltf_node_index = nodeIndex;
+      if (nodeName) ud.gltf_node_name = nodeName;
+      if (meshIndex != null) ud.gltf_mesh_index = meshIndex;
+      if (meshName) {
+        ud.gltf_mesh_name = meshName;
+        if (!mesh.geometry.name) mesh.geometry.name = meshName;
+      }
+      if (primitiveIndex != null) ud.gltf_primitive_index = primitiveIndex;
+      if (materialName) {
+        for (const mat of materialsOf(mesh)) {
+          if (!mat.name) mat.name = materialName;
+        }
+      }
+    });
+  }
+
+  function materialsOf(mesh: THREE.Mesh): THREE.Material[] {
+    const mat = mesh.material;
+    if (!mat) return [];
+    return Array.isArray(mat) ? mat : [mat];
+  }
+
+  function materialNamesOf(mesh: THREE.Mesh): string[] {
+    const names = materialsOf(mesh).map((mat) => mat.name || mat.type || '(unnamed material)');
+    return names.length > 0 ? names : ['(no material)'];
+  }
+
+  function actualVisible(object: THREE.Object3D): boolean {
+    for (let n: THREE.Object3D | null = object; n; n = n.parent) {
+      if (!n.visible) return false;
+    }
+    return true;
+  }
+
+  function pickableMeshes(root: THREE.Object3D): THREE.Mesh[] {
+    const meshes: THREE.Mesh[] = [];
+    root.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh || !actualVisible(mesh)) return;
+      meshes.push(mesh);
+    });
+    return meshes;
+  }
+
+  function parentPath(object: THREE.Object3D): string[] {
+    const names: string[] = [];
+    for (let n: THREE.Object3D | null = object; n && names.length < 12; n = n.parent) {
+      if (n.name) names.push(n.name);
+      if (n === activeRoot || n === collisionGroup) break;
+    }
+    return names.reverse();
+  }
+
+  function ancestorUserData<T>(object: THREE.Object3D, key: keyof InstanceExtras): T | null {
+    for (let n: THREE.Object3D | null = object; n; n = n.parent) {
+      const value = (n.userData as InstanceExtras | undefined)?.[key];
+      if (value != null) return value as T;
+      if (n === activeRoot || n === collisionGroup) break;
+    }
+    return null;
+  }
+
+  function triangleCount(geometry: THREE.BufferGeometry | undefined): number | null {
+    if (!geometry) return null;
+    if (geometry.index) return Math.floor(geometry.index.count / 3);
+    const pos = geometry.getAttribute('position');
+    return pos ? Math.floor(pos.count / 3) : null;
+  }
+
+  function summarizePickHit(hit: THREE.Intersection): PickHitSummary {
+    const mesh = hit.object as THREE.Mesh;
+    const ud = mesh.userData as InstanceExtras;
+    const meshName = ud.gltf_mesh_name || mesh.geometry?.name || mesh.name || mesh.type;
+    return {
+      objectName: mesh.name || ud.gltf_node_name || meshName,
+      meshName,
+      geometryName: mesh.geometry?.name || ud.gltf_mesh_name || '(unnamed geometry)',
+      materialNames: materialNamesOf(mesh),
+      distance: hit.distance,
+      faceIndex: hit.faceIndex ?? null,
+      instanceId: hit.instanceId ?? null,
+    };
+  }
+
+  function buildPickInfo(hit: THREE.Intersection, hits: THREE.Intersection[]): MapPickInfo {
+    const mesh = hit.object as THREE.Mesh;
+    const ud = mesh.userData as InstanceExtras;
+    const point = hit.point;
+    return {
+      ...summarizePickHit(hit),
+      parentPath: parentPath(mesh),
+      point: [point.x, point.y, point.z],
+      objectUuid: mesh.uuid,
+      geometryUuid: mesh.geometry?.uuid ?? null,
+      triangles: triangleCount(mesh.geometry),
+      stableGuid: ancestorUserData<string>(mesh, 'stable_guid'),
+      gltfNodeIndex: ud.gltf_node_index ?? null,
+      gltfMeshIndex: ud.gltf_mesh_index ?? null,
+      gltfPrimitiveIndex: ud.gltf_primitive_index ?? null,
+      hits: hits.slice(0, 8).map(summarizePickHit),
+    };
+  }
+
+  function disposePickHelper(): void {
+    if (!pickHelper) return;
+    pickHelper.parent?.remove(pickHelper);
+    pickHelper.geometry.dispose();
+    const mat = pickHelper.material;
+    if (Array.isArray(mat)) {
+      for (const m of mat) m.dispose();
+    } else {
+      mat.dispose();
+    }
+    pickHelper = null;
+  }
+
+  function setPickHelper(env: SceneEnvironment, object: THREE.Object3D): void {
+    disposePickHelper();
+    pickHelper = new THREE.BoxHelper(object, 0xffd166);
+    pickHelper.name = 'MapPickHighlight';
+    pickHelper.renderOrder = 9999;
+    const mat = pickHelper.material as THREE.Material;
+    mat.depthTest = false;
+    mat.depthWrite = false;
+    pickHelper.update();
+    env.scene.add(pickHelper);
+  }
+
+  function pickGeometryFromPointer(
+    event: PointerEvent,
+    env: SceneEnvironment,
+    root: THREE.Object3D,
+  ): void {
+    const rect = env.renderer.domElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const pointer = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -(((event.clientY - rect.top) / rect.height) * 2 - 1),
+    );
+    const targets = pickableMeshes(root);
+    if (collisionGroup?.visible) targets.push(...pickableMeshes(collisionGroup));
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(pointer, env.camera);
+    const hits = raycaster.intersectObjects(targets, false);
+    if (hits.length === 0) {
+      pickedGeometry = null;
+      disposePickHelper();
+      return;
+    }
+
+    pickedGeometry = buildPickInfo(hits[0], hits);
+    setPickHelper(env, hits[0].object);
+  }
+
+  async function copyPickedGeometry(): Promise<void> {
+    if (!pickedGeometry) return;
+    await navigator.clipboard?.writeText(JSON.stringify(pickedGeometry, null, 2));
+  }
+
+  function formatPickNumber(n: number): string {
+    if (!Number.isFinite(n)) return 'nan';
+    if (Math.abs(n) >= 1000) return n.toFixed(0);
+    if (Math.abs(n) >= 100) return n.toFixed(1);
+    return n.toFixed(2);
+  }
+
+  function formatPickPoint(point: [number, number, number]): string {
+    return point.map(formatPickNumber).join(', ');
   }
 
   function rawQualityValue(value: unknown): number | null {
@@ -516,29 +766,49 @@
     return out;
   }
 
-  /** Collapse per-tree `Tree_<species>_<i>` nodes (emitted as ~5K
-   *  individual meshes by the toolkit) into one `THREE.InstancedMesh`
-   *  per species. Returns the new `Vegetation` Group (added under root)
-   *  plus counts for stats. World matrices of the original tree nodes
-   *  are baked into the per-instance matrices via the root's inverse,
-   *  so the result is positionally identical regardless of any
-   *  hierarchy quirks. Trees with a material array (multi-primitive
-   *  glTF mesh) are left alone — `InstancedMesh` doesn't support that
-   *  case and they're rare in practice. */
-  function collapseVegetation(
-    root: THREE.Object3D,
-  ): { group: THREE.Group | null; speciesCount: number; instanceCount: number } {
+  /** Group vegetation under one layer for stats/toggles. New toolkit GLBs
+   *  arrive as `EXT_mesh_gpu_instancing` nodes named `Tree_<species>_instances`;
+   *  legacy GLBs arrive as per-tree `Tree_<species>_<i>` mesh nodes and are
+   *  collapsed into one `THREE.InstancedMesh` per species at load time.
+   *  World matrices of legacy tree nodes are baked into the per-instance
+   *  matrices via the root's inverse, so the result is positionally identical
+   *  regardless of hierarchy quirks. Trees with a material array are left alone
+   *  because `InstancedMesh` doesn't support that case. */
+  function collapseVegetation(root: THREE.Object3D): {
+    group: THREE.Group | null;
+    speciesCount: number;
+    instanceCount: number;
+  } {
     interface SpeciesBucket {
       meshes: THREE.Mesh[];
       geometry: THREE.BufferGeometry;
       material: THREE.Material;
       minQualityLevel: number | null;
     }
+    interface InstancedVegetation {
+      mesh: THREE.InstancedMesh;
+      bucketKey: string;
+      minQualityLevel: number | null;
+    }
     const bySpecies = new Map<string, SpeciesBucket>();
+    const preInstanced: InstancedVegetation[] = [];
     const toRemove: THREE.Object3D[] = [];
     const TREE_NAME = /^Tree_(\d+)_\d+$/;
+    const TREE_INSTANCED_NAME = /^Tree_(\d+)_instances$/;
 
     root.traverse((o) => {
+      const instanced = o as THREE.InstancedMesh;
+      if (instanced.isInstancedMesh) {
+        const match = instanced.name.match(TREE_INSTANCED_NAME);
+        if (match) {
+          const speciesIdx = match[1];
+          const minQualityLevel = rawQualityValue(instanced.userData?.min_quality_level);
+          const bucketKey = `${speciesIdx}:${minQualityLevel ?? 'any'}`;
+          preInstanced.push({ mesh: instanced, bucketKey, minQualityLevel });
+          return;
+        }
+      }
+
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh) return;
       const match = mesh.name.match(TREE_NAME);
@@ -567,7 +837,7 @@
       toRemove.push(mesh);
     });
 
-    if (bySpecies.size === 0) {
+    if (bySpecies.size === 0 && preInstanced.length === 0) {
       return { group: null, speciesCount: 0, instanceCount: 0 };
     }
 
@@ -579,11 +849,16 @@
 
     const group = new THREE.Group();
     group.name = 'Vegetation';
+    const speciesKeys = new Set<string>();
     let totalInstances = 0;
 
     for (const [bucketKey, bucket] of bySpecies) {
       const im = new THREE.InstancedMesh(bucket.geometry, bucket.material, bucket.meshes.length);
       im.name = `Vegetation_${bucketKey.replace(':', '_q')}`;
+      im.userData = {
+        ...(bucket.meshes[0].userData as InstanceExtras),
+        instance_count: bucket.meshes.length,
+      };
       if (bucket.minQualityLevel != null) im.userData.min_quality_level = bucket.minQualityLevel;
       for (let i = 0; i < bucket.meshes.length; i++) {
         tmp.copy(rootInv).multiply(bucket.meshes[i].matrixWorld);
@@ -596,13 +871,29 @@
       // reference tree drifts in/out of view.
       im.computeBoundingSphere();
       group.add(im);
+      speciesKeys.add(bucketKey);
       totalInstances += bucket.meshes.length;
     }
 
     for (const n of toRemove) n.parent?.remove(n);
+
+    for (const item of preInstanced) {
+      item.mesh.updateMatrixWorld(true);
+      tmp.copy(rootInv).multiply(item.mesh.matrixWorld);
+      item.mesh.parent?.remove(item.mesh);
+      item.mesh.matrix.copy(tmp);
+      item.mesh.matrix.decompose(item.mesh.position, item.mesh.quaternion, item.mesh.scale);
+      item.mesh.matrixWorldNeedsUpdate = true;
+      if (item.minQualityLevel != null) item.mesh.userData.min_quality_level = item.minQualityLevel;
+      item.mesh.userData.instance_count = item.mesh.count;
+      group.add(item.mesh);
+      speciesKeys.add(item.bucketKey);
+      totalInstances += item.mesh.count;
+    }
+
     root.add(group);
 
-    return { group, speciesCount: bySpecies.size, instanceCount: totalInstances };
+    return { group, speciesCount: speciesKeys.size, instanceCount: totalInstances };
   }
 
   /** Instantiate engine point lights from scene extras. Each emitted as a
@@ -880,7 +1171,7 @@
       group.add(mesh);
       modelCount += 1;
       obstacleCount += obstacles.length;
-      triangleCount += (geometry.getIndex()?.count ?? 0) / 3 * obstacles.length;
+      triangleCount += ((geometry.getIndex()?.count ?? 0) / 3) * obstacles.length;
     }
 
     group.visible = showCollision;
@@ -1011,7 +1302,6 @@
     }
   }
 
-
   /** Force the Water plane to write depth so underwater geometry is
    *  occluded from an overview camera — matching how the engine renders
    *  water opaquely + writes depth (refraction is in the water shader,
@@ -1080,11 +1370,16 @@
     let loadedRoot: THREE.Object3D | null = null;
     let stopLoop: (() => void) | null = null;
     let stopResize: (() => void) | null = null;
+    let pickPointerDown: { x: number; y: number } | null = null;
+    let onPickPointerDown: ((event: PointerEvent) => void) | null = null;
+    let onPickPointerUp: ((event: PointerEvent) => void) | null = null;
 
     void (async () => {
       viewerError = null;
       viewerLoading = true;
       viewerStats = null;
+      pickedGeometry = null;
+      disposePickHelper();
       try {
         env = createSceneEnvironment(container, {
           // Initial defaults; overridden below after we read scene
@@ -1099,6 +1394,21 @@
         env.controls.target.set(0, 0, 0);
         env.controls.update();
         activeEnv = env;
+
+        onPickPointerDown = (event: PointerEvent) => {
+          if (event.button !== 0) return;
+          pickPointerDown = { x: event.clientX, y: event.clientY };
+        };
+        onPickPointerUp = (event: PointerEvent) => {
+          if (event.button !== 0 || !pickPointerDown || !env || !loadedRoot) return;
+          const dx = event.clientX - pickPointerDown.x;
+          const dy = event.clientY - pickPointerDown.y;
+          pickPointerDown = null;
+          if (dx * dx + dy * dy > 16) return;
+          pickGeometryFromPointer(event, env, loadedRoot);
+        };
+        env.renderer.domElement.addEventListener('pointerdown', onPickPointerDown);
+        env.renderer.domElement.addEventListener('pointerup', onPickPointerUp);
 
         stopResize = observeResize({
           container,
@@ -1124,6 +1434,7 @@
           return;
         }
         loadedRoot = gltf.scene;
+        annotateGltfSourceNames(loadedRoot, gltf as unknown as GltfWithAssociations);
         env.scene.add(loadedRoot);
 
         // Drive fog + background + camera-far from the engine's per-map
@@ -1257,6 +1568,14 @@
       collisionStats = null;
       collisionLoading = false;
       collisionError = null;
+      pickedGeometry = null;
+      disposePickHelper();
+      if (env && onPickPointerDown) {
+        env.renderer.domElement.removeEventListener('pointerdown', onPickPointerDown);
+      }
+      if (env && onPickPointerUp) {
+        env.renderer.domElement.removeEventListener('pointerup', onPickPointerUp);
+      }
       stopLoop?.();
       stopResize?.();
       if (loadedRoot && env) {
@@ -1352,9 +1671,7 @@
 
 <div class="flex flex-1 min-w-0 min-h-0">
   <!-- Left pane: picker -->
-  <aside
-    class="bg-card border-border w-72 flex-none border-r overflow-y-auto p-2 text-xs"
-  >
+  <aside class="bg-card border-border w-72 flex-none border-r overflow-y-auto p-2 text-xs">
     <div class="flex items-center gap-2 px-2 pb-2">
       <span class="text-muted-foreground font-semibold">Spaces</span>
       <span class="text-muted-foreground/60">({items.length})</span>
@@ -1363,8 +1680,7 @@
         size="sm"
         class="ml-auto text-xs"
         onclick={() => void refresh()}
-        disabled={loading}
-        >Refresh</Button
+        disabled={loading}>Refresh</Button
       >
     </div>
 
@@ -1375,11 +1691,9 @@
         Failed to load spaces: {loadError}
       </div>
     {:else}
-      {#each (['battle', 'dock', 'ops', 'other'] as MapCategory[]) as cat (cat)}
+      {#each ['battle', 'dock', 'ops', 'other'] as MapCategory[] as cat (cat)}
         {#if grouped[cat].length > 0}
-          <div
-            class="text-muted-foreground/80 mt-3 mb-1 px-2 text-[10px] uppercase tracking-wider"
-          >
+          <div class="text-muted-foreground/80 mt-3 mb-1 px-2 text-[10px] uppercase tracking-wider">
             {cat} ({grouped[cat].length})
           </div>
           {#each grouped[cat] as row (row.name)}
@@ -1412,9 +1726,7 @@
         Select a space from the left to preview or export.
       </div>
     {:else}
-      <header
-        class="border-border flex flex-none items-center gap-3 border-b px-4 py-2 text-sm"
-      >
+      <header class="border-border flex flex-none items-center gap-3 border-b px-4 py-2 text-sm">
         <span class="text-foreground font-semibold">{selected.name}</span>
         <span class="text-muted-foreground/60 text-xs">{selected.category}</span>
         <span class="text-muted-foreground text-xs">{selected.vfs_path}</span>
@@ -1455,8 +1767,7 @@
             size="sm"
             class="ml-auto text-xs"
             onclick={() => void triggerExport()}
-            disabled={exporting}
-            >{exporting ? 'Exporting…' : 'Export map'}</Button
+            disabled={exporting}>{exporting ? 'Exporting…' : 'Export map'}</Button
           >
         {/if}
       </header>
@@ -1556,7 +1867,9 @@
                 title="Toggle vegetation (trees + foliage). Collapsed into one InstancedMesh per species at load — far fewer draw calls than the per-instance scene nodes the toolkit emits."
               >
                 <input type="checkbox" bind:checked={showVegetation} />
-                <span>Vegetation ({viewerStats.vegetationSpecies}sp × {viewerStats.vegetationInstances})</span>
+                <span
+                  >Vegetation ({viewerStats.vegetationSpecies}sp × {viewerStats.vegetationInstances})</span
+                >
               </label>
             {/if}
             {#if viewerStats.mapParticleAnchors > 0}
@@ -1604,7 +1917,9 @@
               <span class="text-muted-foreground/70">loading map particles…</span>
             {/if}
             {#if mapParticleError}
-              <span class="text-destructive" title={mapParticleError}>map particles unavailable</span>
+              <span class="text-destructive" title={mapParticleError}
+                >map particles unavailable</span
+              >
             {/if}
             {#if viewerStats.dyedInstances > 0 || viewerStats.materialOverrideInstances > 0}
               <span
@@ -1627,14 +1942,7 @@
                 title="Engine fog density (ρ) is tuned for ship-level cameras. Slider divides ρ for the overview camera; 1 = engine value."
               >
                 <span>fog ρ ÷</span>
-                <input
-                  type="range"
-                  min="1"
-                  max="200"
-                  step="1"
-                  bind:value={fogScale}
-                  class="w-20"
-                />
+                <input type="range" min="1" max="200" step="1" bind:value={fogScale} class="w-20" />
                 <span class="font-mono">{fogScale}</span>
                 <span class="text-muted-foreground/50">
                   (engine: {viewerStats.fogDensity.toFixed(4)})
@@ -1643,19 +1951,74 @@
             {/if}
             {#if viewerStats.bbox}
               <span class="ml-auto text-muted-foreground/70">
-                bbox X[{viewerStats.bbox.min[0].toFixed(0)}, {viewerStats.bbox.max[0].toFixed(
-                  0,
-                )}] Y[{viewerStats.bbox.min[1].toFixed(
-                  0,
-                )}, {viewerStats.bbox.max[1].toFixed(0)}] Z[{viewerStats.bbox.min[2].toFixed(
+                bbox X[{viewerStats.bbox.min[0].toFixed(0)}, {viewerStats.bbox.max[0].toFixed(0)}]
+                Y[{viewerStats.bbox.min[1].toFixed(0)}, {viewerStats.bbox.max[1].toFixed(0)}] Z[{viewerStats.bbox.min[2].toFixed(
                   0,
                 )}, {viewerStats.bbox.max[2].toFixed(0)}] m
               </span>
             {/if}
           {/if}
         </div>
+        {#if pickedGeometry}
+          <div
+            class="text-muted-foreground border-border bg-background/95 flex flex-none flex-wrap items-center gap-x-3 gap-y-1 border-b px-4 py-1 text-xs"
+          >
+            <span class="text-foreground font-semibold">Pick</span>
+            <span
+              class="max-w-[22rem] truncate text-foreground"
+              title={pickedGeometry.parentPath.join(' / ')}
+            >
+              {pickedGeometry.objectName}
+            </span>
+            <span>
+              mesh <span class="font-mono text-foreground">{pickedGeometry.meshName}</span>
+            </span>
+            <span>
+              geom <span class="font-mono text-foreground">{pickedGeometry.geometryName}</span>
+            </span>
+            <span>
+              mat
+              <span class="font-mono text-foreground"
+                >{pickedGeometry.materialNames.join(', ')}</span
+              >
+            </span>
+            {#if pickedGeometry.instanceId != null}
+              <span>inst {pickedGeometry.instanceId}</span>
+            {/if}
+            {#if pickedGeometry.faceIndex != null}
+              <span>face {pickedGeometry.faceIndex}</span>
+            {/if}
+            {#if pickedGeometry.triangles != null}
+              <span>{pickedGeometry.triangles.toLocaleString()} tris</span>
+            {/if}
+            <span>
+              pos <span class="font-mono text-foreground"
+                >{formatPickPoint(pickedGeometry.point)}</span
+              >
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-6 px-2 text-xs"
+              onclick={() => void copyPickedGeometry()}>Copy</Button
+            >
+            {#if pickedGeometry.hits.length > 1}
+              <span
+                class="basis-full truncate text-muted-foreground/70"
+                title={pickedGeometry.hits
+                  .map((h) => `${h.objectName} :: ${h.meshName} @ ${formatPickNumber(h.distance)}m`)
+                  .join(' | ')}
+              >
+                stack:
+                {pickedGeometry.hits
+                  .map((h) => `${h.objectName || h.meshName} (${formatPickNumber(h.distance)}m)`)
+                  .join(' | ')}
+              </span>
+            {/if}
+          </div>
+        {/if}
         <div class="relative flex flex-1 min-h-0 min-w-0">
-          <div bind:this={canvasContainer} class="flex-1"></div>
+          <div bind:this={canvasContainer} class="flex-1 cursor-crosshair"></div>
           {#if viewerLoading}
             <div
               class="text-muted-foreground absolute inset-0 flex items-center justify-center bg-background/40 text-sm"
@@ -1664,9 +2027,7 @@
             </div>
           {/if}
           {#if viewerError}
-            <div
-              class="text-destructive absolute inset-x-0 top-0 bg-background/80 p-2 text-xs"
-            >
+            <div class="text-destructive absolute inset-x-0 top-0 bg-background/80 p-2 text-xs">
               Viewer error: {viewerError}
             </div>
           {/if}
@@ -1704,18 +2065,30 @@
                 <option value={8}>8 (coarse)</option>
               </select>
             </label>
+            <label class="mb-2 flex items-center gap-2">
+              <span class="w-28">Vegetation</span>
+              <select
+                bind:value={exportFlags.vegetation_density}
+                class="bg-input border-border flex-1 rounded border px-2 py-1"
+                disabled={exportFlags.no_vegetation}
+              >
+                <option value={0}>Full density</option>
+                <option value={5}>5 m cell</option>
+                <option value={10}>10 m cell</option>
+                <option value={20}>20 m cell</option>
+                <option value={40}>40 m cell</option>
+              </select>
+            </label>
+            <label class="mb-2 flex items-center gap-2">
+              <input type="checkbox" bind:checked={exportFlags.no_vegetation} />
+              <span>Skip vegetation</span>
+            </label>
             <label class="flex items-center gap-2">
-              <input
-                type="checkbox"
-                bind:checked={exportFlags.no_textures}
-              />
+              <input type="checkbox" bind:checked={exportFlags.no_textures} />
               <span>Skip textures (faster, smaller GLB)</span>
             </label>
             <label class="mt-2 flex items-center gap-2">
-              <input
-                type="checkbox"
-                bind:checked={exportFlags.collision_manifest}
-              />
+              <input type="checkbox" bind:checked={exportFlags.collision_manifest} />
               <span>Write collision manifest sidecar</span>
             </label>
           </div>

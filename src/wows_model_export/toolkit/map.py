@@ -36,7 +36,7 @@ def export_map(
     no_water: bool = False,
     no_vegetation: bool = False,
     no_textures: bool = False,
-    vegetation_density: float = 20.0,
+    vegetation_density: float = 0.0,
     max_texture_size: int | None = None,
     collision_manifest_json: Path | str | os.PathLike | None = None,
 ) -> ToolkitResult:
@@ -69,7 +69,7 @@ def export_map(
 
     ``terrain_step`` decimates the heightmap (1 = full, 4 = default, 8 =
     coarse). ``vegetation_density`` (m) is a per-species
-    one-tree-per-cell decimation.
+    one-tree-per-cell decimation; ``0`` keeps every parsed tree.
 
     ``max_texture_size`` caps any dimension of emitted textures via box
     filter; ``None`` keeps original sizes (large maps push GLB size into
