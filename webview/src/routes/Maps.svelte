@@ -174,6 +174,13 @@
   // playable foreground.
   let showLandscape = $state(true);
 
+  // Generated heightfield from terrain.bin. This is a useful topology
+  // reference, but it is not the fully shaded WG terrain-detail layer and
+  // can sit in front of authored LNR/TILEDLAND meshes during picking.
+  let showTerrain = $state(true);
+  let hasTerrain = $state(false);
+  let terrainObject: THREE.Object3D | null = null;
+
   // Whether to render water opaquely (engine-faithful: water plane
   // occludes underwater geometry from above-water camera angles).
   // Default ON — the engine doesn't show-through; the GLB's alpha=0.85
@@ -269,6 +276,9 @@
   let activeFog = $state<THREE.FogExp2 | null>(null);
   let engineFogDensity = $state<number | null>(null);
   let pickedGeometry = $state<MapPickInfo | null>(null);
+  let pickedObject: THREE.Object3D | null = null;
+  let hiddenSelections = $state<HiddenSelection[]>([]);
+  const hiddenObjects = new Map<string, THREE.Object3D>();
   let pickHelper: THREE.BoxHelper | null = null;
 
   // Pre-collected list of instance nodes that carry a `lod_extents` array.
@@ -389,6 +399,7 @@
     gltf_primitive_index?: number;
     vegetation_species_mesh?: number;
     instance_count?: number;
+    manual_hidden?: boolean;
   }
 
   interface GltfJson {
@@ -432,6 +443,12 @@
     gltfMeshIndex: number | null;
     gltfPrimitiveIndex: number | null;
     hits: PickHitSummary[];
+  }
+
+  interface HiddenSelection {
+    uuid: string;
+    label: string;
+    parentPath: string[];
   }
 
   /** Build a world bbox suitable for camera framing. Prefers scene.extras
@@ -550,6 +567,10 @@
     return true;
   }
 
+  function isManuallyHidden(object: THREE.Object3D): boolean {
+    return !!(object.userData as InstanceExtras | undefined)?.manual_hidden;
+  }
+
   function pickableMeshes(root: THREE.Object3D): THREE.Mesh[] {
     const meshes: THREE.Mesh[] = [];
     root.traverse((o) => {
@@ -644,6 +665,12 @@
     env.scene.add(pickHelper);
   }
 
+  function clearPickedGeometry(): void {
+    pickedGeometry = null;
+    pickedObject = null;
+    disposePickHelper();
+  }
+
   function pickGeometryFromPointer(
     event: PointerEvent,
     env: SceneEnvironment,
@@ -662,11 +689,11 @@
     raycaster.setFromCamera(pointer, env.camera);
     const hits = raycaster.intersectObjects(targets, false);
     if (hits.length === 0) {
-      pickedGeometry = null;
-      disposePickHelper();
+      clearPickedGeometry();
       return;
     }
 
+    pickedObject = hits[0].object;
     pickedGeometry = buildPickInfo(hits[0], hits);
     setPickHelper(env, hits[0].object);
   }
@@ -674,6 +701,43 @@
   async function copyPickedGeometry(): Promise<void> {
     if (!pickedGeometry) return;
     await navigator.clipboard?.writeText(JSON.stringify(pickedGeometry, null, 2));
+  }
+
+  function hidePickedGeometry(): void {
+    const object = pickedObject;
+    const pick = pickedGeometry;
+    if (!object || !pick) return;
+    const ud = object.userData as InstanceExtras;
+    ud.manual_hidden = true;
+    object.visible = false;
+    hiddenObjects.set(object.uuid, object);
+    if (!hiddenSelections.some((h) => h.uuid === object.uuid)) {
+      hiddenSelections = [
+        ...hiddenSelections,
+        {
+          uuid: object.uuid,
+          label: pick.objectName || pick.meshName || object.name || object.type,
+          parentPath: pick.parentPath,
+        },
+      ];
+    }
+    clearPickedGeometry();
+  }
+
+  function restoreAllHiddenSelections(): void {
+    for (const object of hiddenObjects.values()) {
+      const ud = object.userData as InstanceExtras;
+      delete ud.manual_hidden;
+      object.visible = true;
+    }
+    hiddenObjects.clear();
+    hiddenSelections = [];
+    refreshSceneVisibility();
+  }
+
+  function resetHiddenSelections(): void {
+    hiddenObjects.clear();
+    hiddenSelections = [];
   }
 
   function formatPickNumber(n: number): string {
@@ -709,7 +773,8 @@
       const hasLandscapeFlag = !!ud?.is_landscape;
       if (q == null && !hasLandscapeFlag) return;
       if (q != null) tagged += 1;
-      const visible = (!hasLandscapeFlag || showLand) && passesQualityGate(q, threshold);
+      const visible =
+        !isManuallyHidden(o) && (!hasLandscapeFlag || showLand) && passesQualityGate(q, threshold);
       if (q != null && threshold > q) hidden += 1;
       if (o.visible !== visible) o.visible = visible;
     });
@@ -1291,7 +1356,9 @@
     const threshold = modelRuntimeQualityRaw;
     for (const inst of lodInstances) {
       let visible = true;
-      if (inst.isLandscape && !showLand) {
+      if (isManuallyHidden(inst.node)) {
+        visible = false;
+      } else if (inst.isLandscape && !showLand) {
         visible = false;
       } else if (inst.minQualityLevel != null && threshold > inst.minQualityLevel) {
         visible = false;
@@ -1379,6 +1446,8 @@
       viewerLoading = true;
       viewerStats = null;
       pickedGeometry = null;
+      pickedObject = null;
+      resetHiddenSelections();
       disposePickHelper();
       try {
         env = createSceneEnvironment(container, {
@@ -1470,6 +1539,9 @@
         // Apply current fixed material state + expose the root so the
         // toggle effects below can re-apply without a full reload.
         fixupWaterDepth(loadedRoot, opaqueWater);
+        terrainObject = loadedRoot.getObjectByName('Terrain') ?? null;
+        hasTerrain = terrainObject != null;
+        if (terrainObject) terrainObject.visible = showTerrain;
         activeRoot = loadedRoot;
 
         // Frame camera using engine bounds when present (preferred — it's
@@ -1551,6 +1623,8 @@
       activeEnv = null;
       activeFog = null;
       engineFogDensity = null;
+      hasTerrain = false;
+      terrainObject = null;
       lodInstances = [];
       lightObjects = [];
       vegetationGroup = null;
@@ -1568,8 +1642,8 @@
       collisionStats = null;
       collisionLoading = false;
       collisionError = null;
-      pickedGeometry = null;
-      disposePickHelper();
+      clearPickedGeometry();
+      resetHiddenSelections();
       if (env && onPickPointerDown) {
         env.renderer.domElement.removeEventListener('pointerdown', onPickPointerDown);
       }
@@ -1598,6 +1672,14 @@
     if (!root) return;
     const stats = applyInstanceFilters(root, showLandscape, modelRuntimeQualityRaw);
     updateViewerQualityStats(stats, null);
+  });
+
+  // Live toggle for the generated terrain.bin heightfield.
+  $effect(() => {
+    const show = showTerrain;
+    if (terrainObject && !isManuallyHidden(terrainObject)) {
+      terrainObject.visible = show;
+    }
   });
 
   // Live toggle for water opacity.
@@ -1653,6 +1735,27 @@
     if (!fog || eng == null) return;
     fog.density = eng / Math.max(1, fogScale);
   });
+
+  function refreshSceneVisibility(): void {
+    const root = activeRoot;
+    if (root) {
+      const stats = applyInstanceFilters(root, showLandscape, modelRuntimeQualityRaw);
+      updateViewerQualityStats(stats, null);
+    }
+    const env = activeEnv;
+    if (env && lodInstances.length > 0) {
+      updateLodVisibility(env.camera.position);
+    }
+    if (vegetationGroup && !isManuallyHidden(vegetationGroup)) {
+      vegetationGroup.visible = showVegetation;
+    }
+    if (terrainObject && !isManuallyHidden(terrainObject)) {
+      terrainObject.visible = showTerrain;
+    }
+    if (collisionGroup && !isManuallyHidden(collisionGroup)) {
+      collisionGroup.visible = showCollision;
+    }
+  }
 
   function formatBytes(n: number | null | undefined): string {
     if (n == null) return '—';
@@ -1795,6 +1898,15 @@
                 <span>
                   Show landscape ({viewerStats.landscapeCount} of {viewerStats.nodes})
                 </span>
+              </label>
+            {/if}
+            {#if hasTerrain}
+              <label
+                class="flex items-center gap-1.5"
+                title="Generated terrain.bin heightfield. This is an untextured topology/reference layer, not the full WG terrain-detail shader; hide it to inspect authored LNR/TILEDLAND meshes underneath."
+              >
+                <input type="checkbox" bind:checked={showTerrain} />
+                <span>Terrain</span>
               </label>
             {/if}
             <label class="flex items-center gap-1.5">
@@ -1949,6 +2061,22 @@
                 </span>
               </label>
             {/if}
+            {#if hiddenSelections.length > 0}
+              <span
+                class="text-muted-foreground/70"
+                title={hiddenSelections
+                  .map((h) => `${h.label} :: ${h.parentPath.join(' / ')}`)
+                  .join(' | ')}
+              >
+                {hiddenSelections.length.toLocaleString()} hidden
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                class="h-6 px-2 text-xs"
+                onclick={restoreAllHiddenSelections}>Show all</Button
+              >
+            {/if}
             {#if viewerStats.bbox}
               <span class="ml-auto text-muted-foreground/70">
                 bbox X[{viewerStats.bbox.min[0].toFixed(0)}, {viewerStats.bbox.max[0].toFixed(0)}]
@@ -1996,6 +2124,12 @@
                 >{formatPickPoint(pickedGeometry.point)}</span
               >
             </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-6 px-2 text-xs"
+              onclick={hidePickedGeometry}>Hide</Button
+            >
             <Button
               variant="ghost"
               size="sm"
