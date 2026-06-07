@@ -1,10 +1,11 @@
 // Skin / camo types. Mirrors `<Ship>.meta.json::skins[]`.
 //
 // Every ship has at least the mandatory `default` skin (scheme_key =
-// "main"). Each non-default entry points at a `texture_sets[scheme_key]`
-// block on materials that participate in that camo. Phase-A reality:
-// camo entries carry only baseColor; non-baseColor slots inherit from
-// `main` per slot.
+// "main"). Legacy/non-WG skins can point at a `texture_sets[scheme_key]`
+// block on participating materials. Modern WG-authored camos can instead
+// carry all paint data in `categories` / `mat_textures`, resolved from
+// GameParams + camouflages.xml; in that case materials fall back to `main`
+// for base PBR slots.
 
 export interface SkinOverride {
   material_id?: string;
@@ -58,16 +59,14 @@ export interface SkinMatCategoryParams {
 }
 
 /**
- * Per-camo-category shared mask + UV transform applied to accessory
- * meshes. Hull / deckhouse / bulge categories are NOT in this dict —
- * they flow through `materials[i].texture_sets[<scheme_key>]`. See
- * `classifyPartCategory` / `classifyPlacementCategory` for the routing.
+ * Per-camo-category shared mask + UV transform. Modern WG sidecars may
+ * include hull-side categories (`tile`, `deckhouse`, `bulge`) here so
+ * official camo binding does not depend on per-material filename schemes.
+ * See `classifyPartCategory` / `classifyPlacementCategory` for routing.
  */
 export interface SkinCategoryMask {
   /**
-   * Path A mask. Optional because hybrid Path B-only emits omit it
-   * (Phase A's per-stem `texture_sets` cascade carries the base albedo
-   * and there's no separate Path A mask to overlay).
+   * Path A mask. Optional because pure Path B emits omit it.
    */
   mask?: { dds_mips: string[] };
   uv: {
@@ -112,8 +111,8 @@ export interface AssetOverrideEntry {
  *   'mat_albedo'   — pre-baked full-ship albedo replacement. The texture
  *                    IS the final paint; skip the camo overlay and both
  *                    N.B + Y gates entirely.
- *   'mask_palette' — implicit default for legacy skins that carry
- *                    `color_scheme` + per-stem `texture_sets` masks.
+ *   'mask_palette' — implicit default for skins that carry
+ *                    `color_scheme` + category or per-stem masks.
  *   undefined      — same as `mask_palette` (legacy sidecars).
  */
 export type SkinKind = 'mat_albedo' | 'mask_palette';
@@ -126,8 +125,9 @@ export interface Skin {
   color_roll?: string | null;
   color_scheme?: SkinColorScheme | null;
   /**
-   * Per-camo-category overrides for accessory meshes. Keys are canonical
-   * lowercase categories (`gun`, `director`, `plane`, `float`, `misc`).
+   * Per-camo-category overrides. Keys are canonical lowercase categories
+   * (`tile`, `deckhouse`, `bulge`, `gun`, `director`, `plane`, `float`,
+   * `misc`, `wire`).
    */
   categories?: Record<string, SkinCategoryMask>;
   /** Discriminates renderer recipe. Unset = legacy mask + palette. */

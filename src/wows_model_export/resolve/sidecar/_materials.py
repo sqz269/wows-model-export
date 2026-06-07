@@ -266,6 +266,7 @@ def materials_from_glb(
     textures_dir: str | Path | None = None,
     textures_dds_dir: str | Path | None = None,
     material_mappings_json: str | Path | None = None,
+    legacy_name_fallback: bool = True,
     png_uri_prefix: str = "textures/",
     dds_uri_prefix: str = "textures_dds/",
 ) -> list[dict[str, Any]]:
@@ -382,8 +383,10 @@ def materials_from_glb(
             shader_intent = "opaque_pbr"
             render_queue = "opaque"
 
-        # v3: wrap the resolved slots under `texture_sets["main"]`. Per-camo
-        # variants are added by `_bind_dds_textures_by_name()` below.
+        # v3: wrap the resolved slots under `texture_sets["main"]`. Legacy
+        # callers can still opt into `_bind_dds_textures_by_name()` below for
+        # loose/old DDS directories, but WG-authored extraction should prefer
+        # `material_mappings_json` + camouflages.xml.
         entry = {
             "material_id": name,
             "display_name": name,
@@ -397,28 +400,34 @@ def materials_from_glb(
         }
         out.append(entry)
 
-    # DDS-only mode: when the glTF has no texture references, populate
-    # `texture_sets[*]` from the on-disk DDS dir. Two passes:
+    # DDS mode: when the glTF has no texture references, populate
+    # `texture_sets["main"]` from the toolkit's material mappings. When the
+    # glTF did have PNG slots, this pass still replaces/augments their
+    # `dds_mips` with exact MFM-bound stems so WG extraction does not rely on
+    # PNG-name → DDS-name guessing.
     #
-    #   1. Toolkit-emitted material_mappings.json (deterministic, when
-    #      available). Pre-fills `texture_sets["main"]` from authoritative
-    #      .mfm material descriptors — every material identifier maps to
-    #      a definite mfm_stem regardless of WG's filename quirks.
-    #
-    #   2. Filename-heuristic resolver (`_bind_dds_textures_by_name`).
-    #      Catches materials the deterministic pass didn't cover (older
-    #      ships exported pre-toolkit-feature, library shaders not in
-    #      .visual chain, ...) AND fills in per-camo + dead variants on
-    #      every material (the JSON only carries the main appearance —
-    #      camos are a disk-side discovery).
-    #
-    # Either pass alone is functional; running both gives best coverage.
-    if dds_dir is not None and any(not m.get("texture_sets", {}).get("main") for m in out):
-        if material_mappings_json is not None:
-            _apply_material_mappings_json(
-                out, material_mappings_json, dds_dir,
-                dds_uri_prefix=dds_uri_prefix,
-            )
+    # `legacy_name_fallback=True` preserves the old DDS-directory behaviour
+    # for loose mods, projectile/accessory libraries, and pre-mapping exports.
+    # WG ship scaffolding passes False: official skins come from
+    # GameParams + camouflages.xml, not from material-name / stem heuristics.
+    needs_legacy_before_mapping = (
+        dds_dir is not None
+        and any(not m.get("texture_sets", {}).get("main") for m in out)
+    )
+    if dds_dir is not None and material_mappings_json is not None:
+        _apply_material_mappings_json(
+            out, material_mappings_json, dds_dir,
+            dds_uri_prefix=dds_uri_prefix,
+        )
+
+    if dds_dir is not None and legacy_name_fallback and needs_legacy_before_mapping:
+        # Filename-heuristic resolver. Catches older exports, library shaders
+        # not covered by mappings, loose skin packs, and DDS-only assets that
+        # intentionally do not carry WG GameParams context.
+        #
+        # It also fills per-camo/dead schemes from disk for legacy callers.
+        # Normal WG ship scaffolding disables this path and emits skins from
+        # camouflages.xml instead.
         unresolved = _bind_dds_textures_by_name(out, dds_dir, dds_uri_prefix=dds_uri_prefix)
         # Surface opaque-PBR / cutout materials neither resolver could find
         # a stem for — they're almost always new WG-library material variants
@@ -431,6 +440,22 @@ def materials_from_glb(
             print(
                 f"[sidecar] WARNING: {len(uniq)} material(s) unresolved — "
                 f"no matching DDS stem. These will render untextured downstream: "
+                f"{', '.join(uniq)}",
+                file=sys.stderr,
+            )
+    elif dds_dir is not None and not legacy_name_fallback:
+        unresolved = [
+            m.get("material_id") or "<unnamed>"
+            for m in out
+            if m.get("shader_intent") in ("opaque_pbr", "cutout")
+            and not (m.get("texture_sets") or {}).get("main")
+        ]
+        if unresolved:
+            import sys
+            uniq = sorted(set(unresolved))
+            print(
+                f"[sidecar] WARNING: {len(uniq)} material(s) unresolved by "
+                f"material_mappings_json with legacy fallback disabled: "
                 f"{', '.join(uniq)}",
                 file=sys.stderr,
             )
@@ -720,21 +745,17 @@ def _apply_material_mappings_json(
     For each material:
       1. Look up the matching ``materials[]`` entry by
          ``material_identifier`` (case + TL-prefix tolerant).
-      2. Skip if the entry's ``mfm_stem`` is a shared library stem
-         (C002_Razlom etc.) — those are handled by the heuristic's
-         ``_LIBRARY_MATERIAL_STEMS`` table.
-      3. For each MFM property we recognise, take the per-slot ``stem``,
+      2. For each MFM property we recognise, take the per-slot ``stem``,
          normalise (lowercase + ``_strip_year_token``), and pull the
          canonical PBR slots from the dds_index built earlier.
-      4. Synthesised emissive is keyed off the diffuseMap stem (synth
+      3. Synthesised emissive is keyed off the diffuseMap stem (synth
          writes ``<diffuse_stem>_emissive.dd?`` in
          ``textures_dds_dir``); we look up ``emissive`` under that stem.
 
     Mutates ``materials`` in place. Returns the count of materials that
-    got a main appearance from this pass. Materials whose stems are
-    library / unrecognised / missing DDS on disk are left untouched and
-    fall through to the heuristic resolver, which still adds per-camo /
-    dead schemes from disk.
+    got a main appearance from this pass. Existing GLB-driven main slots
+    keep their PNG references but have ``dds_mips`` overwritten from the
+    exact MFM binding when a DDS pyramid exists.
 
     See ``write_material_mappings_json`` in the toolkit's
     ``crates/wowsunpack/src/export/ship.rs`` for the JSON shape.
@@ -759,8 +780,8 @@ def _apply_material_mappings_json(
     # Build index: material_identifier (lowercase, post TL\d+_ strip) →
     # list of full entry dicts. Each glTF material name maps to ONE or
     # MORE entries (one per sub-model the same material is used in).
-    # We pick the first non-library entry; the per-slot stems are read
-    # from that entry's ``textures`` dict.
+    # We use the first concrete MFM entry and read per-slot stems from
+    # its ``textures`` dict, including shared WG library MFMs.
     by_ident: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for entry in doc.get("materials", []):
         ident = (entry.get("material_identifier") or "").strip()
@@ -862,16 +883,11 @@ def _apply_material_mappings_json(
         if not entries:
             continue
 
-        # Pick the first non-library entry. Library mfm_stems
-        # (C002_Razlom — shared damage interior, transparent_glass_alpha,
-        # …) are handled by the heuristic's `_LIBRARY_MATERIAL_STEMS`
-        # table which also fixes up shader_intent. Letting them fall
-        # through preserves that path.
+        # Pick the first entry. Earlier versions skipped shared-library
+        # stems here and depended on `_bind_dds_textures_by_name`; WG
+        # extraction now uses the concrete MFM binding directly.
         chosen: dict[str, Any] | None = None
         for entry in entries:
-            mfm_stem_low = (entry.get("mfm_stem") or "").lower()
-            if mfm_stem_low and _is_library_stem(mfm_stem_low):
-                continue
             chosen = entry
             break
         if chosen is None:
@@ -900,8 +916,17 @@ def _apply_material_mappings_json(
         # influence triplet is present AND at least one is non-zero. For
         # missing Scale keys, fall back to the present axis (uniform
         # scale) or 1.0 (engine default = no UV repeat).
-        textures = chosen["textures"]
-        floats = chosen["floats"]
+        textures = chosen.get("textures") or {}
+        floats = chosen.get("floats") or {}
+        chosen_mfm_stem_low = (chosen.get("mfm_stem") or "").lower()
+        chosen_is_library = _is_library_stem(chosen_mfm_stem_low)
+        if chosen_is_library:
+            raw_id_low = raw_id.lower()
+            for lib_prefix, _stem_tokens, intent in _LIBRARY_MATERIAL_STEMS:
+                if raw_id_low.startswith(lib_prefix):
+                    mat["shader_intent"] = intent
+                    mat["render_queue"] = intent
+                    break
         detail_slot_paths: list[str] | None = None
         if "g_detailNormalInfluence" in floats and (
             floats.get("g_detailNormalInfluence", 0.0) != 0.0
@@ -924,24 +949,24 @@ def _apply_material_mappings_json(
                 "scale_u":          float(scale_u),
                 "scale_v":          float(scale_v),
             }
-            detail_stem = textures["detailMap"]["stem"]
-            for key in _normalise_stem(detail_stem):
-                if key in dds_index and "detail" in dds_index[key]:
-                    detail_slot_paths = list(dds_index[key]["detail"])
-                    break
+            detail_tex = textures.get("detailMap") or {}
+            detail_stem = (detail_tex.get("stem") or "").strip()
+            if detail_stem:
+                for key in _normalise_stem(detail_stem):
+                    if key in dds_index and "detail" in dds_index[key]:
+                        detail_slot_paths = list(dds_index[key]["detail"])
+                        break
 
         existing_main = (mat.get("texture_sets") or {}).get("main") or {}
-        if existing_main:
-            # GLB-driven path already populated PBR slots. The GLB has
-            # no notion of the shared atlas, so the detail slot is
-            # always missing from existing main — inject it alongside.
-            if detail_slot_paths:
-                existing_main["detail"] = {"dds_mips": detail_slot_paths}
-            continue
 
         # Walk per-MFM-property stems and pull canonical slots.
-        slots: dict[str, dict[str, list[str]]] = {}
-        diffuse_keys: tuple[str, str] | None = None
+        slots: dict[str, dict[str, Any]] = {
+            slot: dict(manifest)
+            for slot, manifest in existing_main.items()
+            if isinstance(manifest, dict)
+        }
+        diffuse_keys: tuple[str, ...] | None = None
+        bound_from_mapping = False
         for mfm_prop, pbr_slots in _MFM_PROP_TO_PBR_SLOTS.items():
             tex = textures.get(mfm_prop) or {}
             stem_raw = (tex.get("stem") or "").strip()
@@ -952,20 +977,21 @@ def _apply_material_mappings_json(
             # fallbacks pick the right defaults; binding `default_ao`
             # here would just attach a generic occlusion that overrides
             # the variant's actual AO from another stem.
-            if _is_library_stem(stem_raw.lower()):
+            if _is_library_stem(stem_raw.lower()) and not chosen_is_library:
                 continue
             for key in _normalise_stem(stem_raw):
                 if key not in dds_index:
                     continue
                 slot_table = dds_index[key]
                 for pbr_slot in pbr_slots:
-                    if pbr_slot in slots:
-                        continue  # earlier slot from this prop already won
                     paths = slot_table.get(pbr_slot)
                     if paths:
-                        slots[pbr_slot] = {"dds_mips": list(paths)}
+                        manifest = dict(slots.get(pbr_slot) or {})
+                        manifest["dds_mips"] = list(paths)
+                        slots[pbr_slot] = manifest
+                        bound_from_mapping = True
                 if mfm_prop == "diffuseMap":
-                    diffuse_keys = (key,) if diffuse_keys is None else diffuse_keys
+                    diffuse_keys = (key,)
                 break  # stop at first matching key (raw vs. year-stripped)
 
         # Synthesised emissive: `tools/shared/synth_emission.py` writes a
@@ -979,15 +1005,21 @@ def _apply_material_mappings_json(
         if diffuse_keys:
             for key in diffuse_keys:
                 if key in dds_index and "emissive" in dds_index[key]:
-                    slots["emissive"] = {"dds_mips": list(dds_index[key]["emissive"])}
+                    manifest = dict(slots.get("emissive") or {})
+                    manifest["dds_mips"] = list(dds_index[key]["emissive"])
+                    slots["emissive"] = manifest
+                    bound_from_mapping = True
                     break
         else:
             diffuse_tex = textures.get("diffuseMap") or {}
             stem_raw = (diffuse_tex.get("stem") or "").strip()
-            if stem_raw and not _is_library_stem(stem_raw.lower()):
+            if stem_raw and (chosen_is_library or not _is_library_stem(stem_raw.lower())):
                 for key in _normalise_stem(stem_raw):
                     if key in dds_index and "emissive" in dds_index[key]:
-                        slots["emissive"] = {"dds_mips": list(dds_index[key]["emissive"])}
+                        manifest = dict(slots.get("emissive") or {})
+                        manifest["dds_mips"] = list(dds_index[key]["emissive"])
+                        slots["emissive"] = manifest
+                        bound_from_mapping = True
                         break
 
         # Require at least baseColor before claiming we resolved the
@@ -999,10 +1031,12 @@ def _apply_material_mappings_json(
 
         if detail_slot_paths and "detail" not in slots:
             slots["detail"] = {"dds_mips": detail_slot_paths}
+            bound_from_mapping = True
 
         ts = mat.setdefault("texture_sets", {})
         ts["main"] = slots
-        n_resolved += 1
+        if bound_from_mapping or not existing_main:
+            n_resolved += 1
 
     return n_resolved
 

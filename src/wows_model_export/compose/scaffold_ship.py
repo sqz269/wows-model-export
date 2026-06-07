@@ -407,17 +407,18 @@ def _merged_path_a_b_categories(
     mechanism (so ``setdefault`` here only resolves the pure-Path-A
     additions — hybrid parts have already landed via the Path B pass).
 
-    The Path A walk excludes ``Hull``/``DeckHouse``/``Bulge`` (covered
-    by Phase A's per-stem ``texture_sets`` cascade). The Path B walk
-    includes hull because shared Path B hull textures (e.g.
-    ``mat_250_NAVY_mgn``) don't have an equivalent per-stem cascade.
+    The Path A walk includes ``Hull``/``DeckHouse``/``Bulge`` so WG-authored
+    extraction can bind hull masks from exact ``camouflages.xml`` paths
+    instead of discovering ``materials[*].texture_sets[scheme]`` by filename.
+    Legacy sidecars that still carry per-stem schemes continue to work through
+    the consumer's Step-2 fallback, but this producer path no longer needs it.
     """
     categories = wg_camo.path_b_categories_for_entry(
         entry, mat_mip_index, include_hull=True,
     )
     path_a_cats = wg_camo.categories_for_entry(
         entry, masks_mip_index,
-        include_hull=False,
+        include_hull=True,
         mat_extracted_mips=mat_mip_index,
     )
     for cat, record in path_a_cats.items():
@@ -590,7 +591,7 @@ def _emit_permoflage_skins(
         try:
             wg_camo.ensure_camo_masks_for_entries(
                 [e for _, _, _, e in hull_palette],
-                include_hull=False,
+                include_hull=True,
                 config=config,
             )
         except Exception as e:
@@ -658,10 +659,9 @@ def _emit_permoflage_skins(
 
     # ── hull_palette emit (per-part Path A + Path B merge) ───────────
     # Hybrid Phase A + Path B entries. Pure Path A hull_palette entries
-    # (~932 in corpus, none currently applied to any Vehicle) also
-    # reach here — for those _merged_path_a_b_categories returns the
-    # Path A accessory cats (hull stems covered by per-stem Phase A
-    # cascade in materials/texture_sets).
+    # also reach here. `_merged_path_a_b_categories` now includes hull-side
+    # categories too, so official WG skins are fully driven by
+    # camouflages.xml rather than per-stem DDS filename discovery.
     for exterior_id, camo_name, peculiarity, entry in hull_palette:
         categories = _merged_path_a_b_categories(
             entry, masks_mip_index, mat_mip_index,
@@ -1985,29 +1985,37 @@ def scaffold_ship(
     if hull_glb.is_file() and not skip_materials_skins:
         timer.start("materials_skins")
         try:
+            concrete_wg_extract = material_mappings_json.is_file()
             mats = sidecar.materials_from_glb(
                 hull_glb,
                 textures_dir=textures_dir if textures_dir.is_dir() else None,
                 textures_dds_dir=textures_dds_dir if textures_dds_dir.is_dir() else None,
                 material_mappings_json=material_mappings_json,
+                legacy_name_fallback=not concrete_wg_extract,
             )
             if mats:
                 doc["materials"] = mats
-                palette_resolver = _build_palette_resolver(
-                    cfg, ship_name_hint=ship, warnings=warnings,
-                )
-                name_resolver: Callable[[str], str | None] | None
-                try:
-                    def name_resolver(pat: str) -> str | None:
-                        return wg_camo.display_name_for_camo_entry(pat)
-                except Exception as exc:
-                    _warn(warnings, f"wg_localization unavailable: {exc}")
-                    name_resolver = None
-                doc["skins"] = sidecar.discover_skins_from_materials(
-                    mats,
-                    palette_resolver=palette_resolver,
-                    name_resolver=name_resolver,
-                )
+                if concrete_wg_extract:
+                    # Official WG extraction has authoritative skin membership
+                    # and texture paths in GameParams + camouflages.xml. Do
+                    # not infer skins from per-material DDS filename schemes.
+                    doc["skins"] = [sidecar.make_default_skin()]
+                else:
+                    palette_resolver = _build_palette_resolver(
+                        cfg, ship_name_hint=ship, warnings=warnings,
+                    )
+                    name_resolver: Callable[[str], str | None] | None
+                    try:
+                        def name_resolver(pat: str) -> str | None:
+                            return wg_camo.display_name_for_camo_entry(pat)
+                    except Exception as exc:
+                        _warn(warnings, f"wg_localization unavailable: {exc}")
+                        name_resolver = None
+                    doc["skins"] = sidecar.discover_skins_from_materials(
+                        mats,
+                        palette_resolver=palette_resolver,
+                        name_resolver=name_resolver,
+                    )
                 ship_id_for_perm = (
                     gameparams_ship_id
                     or (doc.get("ship") or {}).get("wg_ship_id")
@@ -2435,7 +2443,8 @@ def _check_camo_coverage_gap(textures_dds_dir: Path, doc: dict) -> str | None:
     sample = ", ".join(camo_files[:5]) + ("..." if len(camo_files) > 5 else "")
     return (
         f"{len(camo_files)} _camo_* DDS file(s) in {textures_dds_dir.name}/ "
-        f"but no camo skin in sidecar; likely a stem-classifier gap. "
+        f"but no camo skin in sidecar; likely a GameParams/camouflages.xml "
+        f"resolver gap or a legacy DDS-only extract. "
         f"Files: {sample}"
     )
 

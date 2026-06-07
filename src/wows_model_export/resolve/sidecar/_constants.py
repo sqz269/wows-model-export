@@ -321,9 +321,10 @@ _MATERIAL_ORDER: tuple[str, ...] = (
 _SKIN_ORDER: tuple[str, ...] = (
     "skin_id",
     "display_name",
-    # v3: which `materials[i].texture_sets[<scheme_key>]` block to sample.
-    # `"main"` for the default skin; `"camo_01"` / `"camo_01_B"` /
-    # `"dead"` etc. for camo + damage variants.
+    # v3: which `materials[i].texture_sets[<scheme_key>]` block to sample
+    # when the skin is material-scheme backed. Official WG camos may instead
+    # bind from `categories` / `mat_textures`; consumers then inherit `main`
+    # PBR slots and use `scheme_key` as provenance.
     "scheme_key",
     "camo_pattern",
     # v3: subvariant identifier within a `camo_pattern` (e.g. "B" / "G")

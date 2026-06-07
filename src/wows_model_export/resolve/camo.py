@@ -426,12 +426,11 @@ def ensure_camo_masks_for_entries(
     directly under ``libraries/camo_masks/<basename>`` regardless of
     their VFS subdirectory.
 
-    Hull / deckhouse / bulge masks are filtered out by default — the
-    standard Phase A path covers them via per-ship ``_camo_NN.dd0``
-    extraction into ``<Ship>/models/textures_dds/``.  ``include_hull=True``
-    lifts the filter for tinted mat_* permoflages whose
-    ``<Hull>``/``<DeckHouse>``/``<Bulge>`` reference shared textures
-    (e.g. ``Black_gun_camo_01.dds``) that aren't shipped per-ship.
+    Hull / deckhouse / bulge masks are filtered out by default to preserve
+    older callers that still rely on per-stem ``texture_sets``. Official WG
+    ship scaffolding passes ``include_hull=True`` so hull-side masks come
+    directly from the exact ``camouflages.xml`` paths instead of DDS filename
+    discovery.
     """
     cfg = config or PipelineConfig.load()
     masks_dir = _masks_dir(cfg)
@@ -612,10 +611,10 @@ def list_extracted_mips(masks_dir: Path | None = None) -> dict[str, list[str]]:
 # Classifier (port of toolkit's classify_part_category)
 # ---------------------------------------------------------------------------
 
-# Hull-side categories the per-stem `materials[i].texture_sets[<scheme>]`
-# cascade already handles via §1ter Layer 1 (per-ship `_camo_NN.dds`
-# files). The `Skin.categories` mechanism only fills the gap for
-# accessory categories — secondaries, AAs, directors, planes, etc.
+# Hull-side categories that legacy callers may still filter out when they
+# rely on per-stem `materials[i].texture_sets[<scheme>]` schemes. Official WG
+# scaffolding now passes `include_hull=True` and emits these categories from
+# concrete `camouflages.xml` paths.
 HULL_CATEGORIES = frozenset({"tile", "deckhouse", "bulge"})
 
 
@@ -1344,18 +1343,12 @@ def categories_for_entry(
     Without ``mat_extracted_mips``, only the Path A ``mask`` + ``uv``
     fields are emitted (legacy behaviour).
 
-    By default skips hull / deckhouse / bulge categories — those are
-    emitted via the per-stem ``materials[i].texture_sets[<scheme>]``
-    cascade in §1ter Layer 1, not via ``Skin.categories``.  Only
-    "accessory" categories the layer-1 path misses appear in the result:
-    ``gun``, ``director``, ``plane``, ``float``, ``misc``, plus ``tile``
-    when a tiled-camo entry uses ``<Tile>`` for the universal mask.
-
-    ``include_hull=True`` lifts the filter so tinted mat_* permoflages
-    can express their full per-category mask set (Hull/DeckHouse/Bulge
-    plus the accessory categories) in one ``Skin.categories`` block.
-    The webview's existing category-mask cascade picks them up without
-    shader changes — see ``ship.ts::updateCamoUniforms`` step 1.
+    By default skips hull / deckhouse / bulge categories to preserve legacy
+    callers that still populate those through per-stem
+    ``materials[i].texture_sets[<scheme>]``. ``include_hull=True`` lifts the
+    filter so official WG extraction can express the full per-category mask
+    set (Hull/DeckHouse/Bulge plus accessory categories) in one
+    ``Skin.categories`` block from concrete ``camouflages.xml`` paths.
 
     ``skip_mat_camo=True`` filters out any category whose texture path
     points into ``content/.../mat_camo/`` — those atlases are albedo

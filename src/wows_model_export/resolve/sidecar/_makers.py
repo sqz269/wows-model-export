@@ -836,9 +836,11 @@ def make_skin(
     """Build an entry for ``skins[]``.
 
     ``scheme_key`` selects which ``materials[i].texture_sets[<scheme_key>]``
-    block to sample. Defaults to the ``skin_id`` itself, which lines up
-    with the convention used by :func:`discover_skins_from_materials`
-    (e.g. skin ``camo_01`` → scheme key ``camo_01``).
+    block to sample when a skin is backed by per-material texture sets.
+    Official WG camos can instead carry all paint data in ``categories`` /
+    ``mat_textures`` from GameParams + ``camouflages.xml``; for those skins
+    ``scheme_key`` is provenance and consumers fall back to ``main`` for base
+    PBR slots.
 
     ``color_roll`` records the subvariant identifier within a parent
     ``camo_pattern`` (e.g. ``"B"`` / ``"G"`` for blue/grey rolls of the
@@ -852,21 +854,20 @@ def make_skin(
     is a mask" rendering).
 
     ``categories`` carries per-camo-category shared masks + UV
-    transforms — the data the per-stem ``texture_sets`` cascade can't
-    surface (see camo_pipeline_survey.md §9). Shape::
+    transforms from ``camouflages.xml``. Shape::
 
         {
+          "tile":  {"mask": {"dds_mips": [...]}, "uv": {"scale": [...], "offset": [...]}},
           "gun":   {"mask": {"dds_mips": [...]}, "uv": {"scale": [...], "offset": [...]}},
           "plane": {"mask": {...}, "uv": {...}},
           "float": {...},
           ...
         }
 
-    Hull / deckhouse / bulge are deliberately NOT in this dict — they
-    flow through per-ship ``texture_sets[<scheme>]``. Empty / missing
-    means "no per-category overrides for this skin"; consumer renders
-    accessories with base albedo (matching the §1ter Layer 1
-    fall-through behaviour).
+    Empty / missing means "no per-category overrides for this skin"; the
+    consumer renders meshes with base albedo or any active per-material
+    scheme. Modern WG extraction includes hull-side categories here when the
+    XML entry authored them, avoiding DDS filename discovery for hull camos.
 
     Only ``overrides`` slots that differ from the resolved scheme need
     listing; unspecified slots inherit via the resolution order
