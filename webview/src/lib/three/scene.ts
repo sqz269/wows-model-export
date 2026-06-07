@@ -132,6 +132,13 @@ export interface SceneEnvironment {
    *  the render loop instead of `renderer.render(scene, camera)` so the
    *  composer (when bloom is enabled) is honored. */
   render(): void;
+  /** Adjust the WebGL backing-store pixel ratio. Lower values are useful
+   *  for huge map scenes where fill-rate dominates interactivity. */
+  setPixelRatio(ratio: number): void;
+  /** Toggle the RenderPass -> GT tonemap composer path. When disabled and
+   *  bloom is also disabled, render() draws directly to the canvas. */
+  setPostprocessEnabled(on: boolean): void;
+  isPostprocessEnabled(): boolean;
   /** Toggle bloom. The composer + passes are built lazily on first
    *  `true` and reused thereafter. */
   setBloomEnabled(on: boolean): void;
@@ -189,6 +196,12 @@ export interface SceneOptions {
   exposure?: number;
   /** Override GT tonemap curve params (default: WG 14_Atlantic / Default). */
   tonemap?: Partial<GTTonemapParams>;
+  /** WebGL antialias flag (default: true). */
+  antialias?: boolean;
+  /** Backing-store pixel ratio cap/override (default: min(devicePixelRatio, 2)). */
+  pixelRatio?: number;
+  /** Use the postprocess composer by default (default: true). */
+  postprocess?: boolean;
 }
 
 export function createSceneEnvironment(
@@ -204,6 +217,9 @@ export function createSceneEnvironment(
     gridDivisions = 12,
     axesSize = 10,
     exposure = 1.1,
+    antialias = true,
+    pixelRatio = Math.min(window.devicePixelRatio, 2),
+    postprocess = true,
   } = opts;
 
   // GT tonemap curve + keyed exposure (seeded from WG 14_Atlantic / Default;
@@ -220,8 +236,8 @@ export function createSceneEnvironment(
   const camera = new THREE.PerspectiveCamera(fov, 1, 0.1, far);
   camera.position.set(...cameraPosition);
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  const renderer = new THREE.WebGLRenderer({ antialias });
+  renderer.setPixelRatio(Math.max(0.25, pixelRatio));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   // The GT (Uchimura) tonemap runs in the composer's final pass, so disable
   // Three's built-in tonemapper to avoid double-tonemapping. (Was ACESFilmic
@@ -266,6 +282,7 @@ export function createSceneEnvironment(
   let bloomPass: UnrealBloomPass | null = null;
   let gtPass: ShaderPass | null = null;
   let lastSize = { w: 1, h: 1 };
+  let postprocessEnabled = postprocess;
 
   const applyTonemapParams = () => {
     if (!gtPass) return;
@@ -323,8 +340,25 @@ export function createSceneEnvironment(
     grid,
     axes,
     render() {
+      if (!postprocessEnabled && !bloomEnabled) {
+        renderer.render(scene, camera);
+        return;
+      }
       if (!composer) buildComposer();
       composer!.render();
+    },
+    setPixelRatio(ratio: number) {
+      renderer.setPixelRatio(Math.max(0.25, ratio));
+      renderer.setSize(lastSize.w, lastSize.h, false);
+      composer?.setSize(lastSize.w, lastSize.h);
+      bloomPass?.setSize(lastSize.w, lastSize.h);
+    },
+    setPostprocessEnabled(on: boolean) {
+      postprocessEnabled = on;
+      if (on && !composer) buildComposer();
+    },
+    isPostprocessEnabled() {
+      return postprocessEnabled;
     },
     setBloomEnabled(on: boolean) {
       bloomEnabled = on;

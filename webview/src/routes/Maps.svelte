@@ -159,6 +159,7 @@
     qualityHiddenLights: number;
     vegetationSpecies: number;
     vegetationInstances: number;
+    vegetationDrawnInstances: number;
     mapParticleAnchors: number;
     mapParticleResolved: number;
     collisionModels: number;
@@ -215,22 +216,38 @@
     { value: 4, label: '4 LOW' },
     { value: 7, label: '7 OFF/other' },
   ] as const;
+  const MAP_RENDER_SCALE_OPTIONS = [
+    { value: 0.75, label: '0.75x fast' },
+    { value: 1, label: '1x' },
+    { value: 1.5, label: '1.5x' },
+    { value: 2, label: '2x sharp' },
+  ] as const;
+  const MAP_VEGETATION_DRAW_OPTIONS = [
+    { value: 0.1, label: '10% fastest' },
+    { value: 0.25, label: '25% fast' },
+    { value: 0.5, label: '50%' },
+    { value: 1, label: '100% full' },
+  ] as const;
   let modelRuntimeQualityRaw = $state(0);
   let dynamicLightingRuntimeRaw = $state(2);
+  let mapRenderScale = $state(1);
+  let mapPostprocess = $state(false);
 
   // Engine point lights from `space.bin` pointLights[] (stride 0xc0).
   // Toggle ON to add the engine's atmospheric/accent lights; OFF to inspect
   // the unlit scene. Lights are small-radius accents (~1-5m) and won't be
   // visible from an overview camera unless the user zooms in.
-  let showLights = $state(true);
+  let showLights = $state(false);
   let lightObjects: THREE.PointLight[] = [];
 
   // Vegetation rendering. The toolkit emits one `Tree_<species>_<i>` node
   // per tree instance — for Okinawa that's ~5,269 individual nodes. We
   // collapse them into one `THREE.InstancedMesh` per species at load time,
-  // cutting draw calls from thousands to single digits. Toggleable; the
-  // whole `Vegetation` group's `.visible` flips in one assignment.
+  // cutting draw calls from thousands to single digits. Large maps can still
+  // submit hundreds of millions of instanced triangles, so the draw budget
+  // defaults below full fidelity but keeps 100% available for inspection.
   let showVegetation = $state(true);
+  let mapVegetationDrawRatio = $state(0.25);
   let vegetationGroup: THREE.Group | null = null;
 
   // Map-authored particle anchors from `space.bin.particles[]`. These are
@@ -606,6 +623,52 @@
     return pos ? Math.floor(pos.count / 3) : null;
   }
 
+  function freezeStaticTransforms(root: THREE.Object3D): void {
+    root.updateMatrixWorld(true);
+    root.traverse((o) => {
+      o.matrixAutoUpdate = false;
+    });
+  }
+
+  function vegetationSortKey(matrix: THREE.Matrix4, index: number): number {
+    const e = matrix.elements;
+    const xi = Math.round(e[12] * 10);
+    const yi = Math.round(e[13] * 10);
+    const zi = Math.round(e[14] * 10);
+    return (
+      Math.imul(xi, 73856093) ^
+      Math.imul(yi, 19349663) ^
+      Math.imul(zi, 83492791) ^
+      Math.imul(index, 2654435761)
+    ) >>> 0;
+  }
+
+  function applyVegetationDrawBudget(
+    group: THREE.Group | null,
+    ratio: number,
+  ): { full: number; drawn: number } {
+    if (!group) return { full: 0, drawn: 0 };
+    const clamped = Math.min(1, Math.max(0.01, ratio));
+    let full = 0;
+    let drawn = 0;
+    group.traverse((o) => {
+      const mesh = o as THREE.InstancedMesh;
+      if (!mesh.isInstancedMesh) return;
+      const ud = mesh.userData as InstanceExtras & {
+        full_instance_count?: number;
+        instance_count?: number;
+      };
+      const source = Number(ud.full_instance_count ?? ud.instance_count ?? mesh.count);
+      if (!Number.isFinite(source) || source <= 0) return;
+      ud.full_instance_count = source;
+      const nextCount = Math.max(1, Math.min(source, Math.ceil(source * clamped)));
+      mesh.count = nextCount;
+      full += source;
+      drawn += nextCount;
+    });
+    return { full, drawn };
+  }
+
   function summarizePickHit(hit: THREE.Intersection): PickHitSummary {
     const mesh = hit.object as THREE.Mesh;
     const ud = mesh.userData as InstanceExtras;
@@ -923,10 +986,17 @@
       im.userData = {
         ...(bucket.meshes[0].userData as InstanceExtras),
         instance_count: bucket.meshes.length,
+        full_instance_count: bucket.meshes.length,
       };
       if (bucket.minQualityLevel != null) im.userData.min_quality_level = bucket.minQualityLevel;
-      for (let i = 0; i < bucket.meshes.length; i++) {
-        tmp.copy(rootInv).multiply(bucket.meshes[i].matrixWorld);
+      const ordered = bucket.meshes
+        .map((mesh, index) => ({
+          mesh,
+          key: vegetationSortKey(mesh.matrixWorld, index),
+        }))
+        .sort((a, b) => a.key - b.key);
+      for (let i = 0; i < ordered.length; i++) {
+        tmp.copy(rootInv).multiply(ordered[i].mesh.matrixWorld);
         im.setMatrixAt(i, tmp);
       }
       im.instanceMatrix.needsUpdate = true;
@@ -951,6 +1021,7 @@
       item.mesh.matrixWorldNeedsUpdate = true;
       if (item.minQualityLevel != null) item.mesh.userData.min_quality_level = item.minQualityLevel;
       item.mesh.userData.instance_count = item.mesh.count;
+      item.mesh.userData.full_instance_count = item.mesh.count;
       group.add(item.mesh);
       speciesKeys.add(item.bucketKey);
       totalInstances += item.mesh.count;
@@ -1459,6 +1530,9 @@
           gridDivisions: 20,
           axesSize: 100,
           background: 0x8aa4b8,
+          antialias: false,
+          pixelRatio: mapRenderScale,
+          postprocess: mapPostprocess,
         });
         env.controls.target.set(0, 0, 0);
         env.controls.update();
@@ -1494,7 +1568,7 @@
           }
           mapParticleScene?.tick();
           env.render();
-        });
+        }, { maxFps: 30 });
 
         const loader = new GLTFLoader();
         const gltf = await loader.loadAsync(mapGlbUrl(sn));
@@ -1559,6 +1633,7 @@
         // ~5K draw calls down to ~5 on a typical map.
         const veg = collapseVegetation(loadedRoot);
         vegetationGroup = veg.group;
+        const vegetationBudget = applyVegetationDrawBudget(vegetationGroup, mapVegetationDrawRatio);
         if (vegetationGroup) vegetationGroup.visible = showVegetation;
 
         // Pre-collect LOD-cullable instances so the per-frame pass doesn't
@@ -1582,6 +1657,7 @@
           showLights,
           dynamicLightingRuntimeRaw,
         );
+        freezeStaticTransforms(loadedRoot);
 
         viewerStats = {
           nodes: meshCount,
@@ -1595,6 +1671,7 @@
           qualityHiddenLights: lightQualityStats.hidden,
           vegetationSpecies: veg.speciesCount,
           vegetationInstances: veg.instanceCount,
+          vegetationDrawnInstances: vegetationBudget.drawn,
           mapParticleAnchors: mapParticleAnchors.length,
           mapParticleResolved: usableMapParticleAnchors(mapParticleAnchors).length,
           collisionModels: 0,
@@ -1707,6 +1784,20 @@
     if (vegetationGroup) vegetationGroup.visible = show;
   });
 
+  $effect(() => {
+    const group = vegetationGroup;
+    const ratio = mapVegetationDrawRatio;
+    if (!group) return;
+    const budget = applyVegetationDrawBudget(group, ratio);
+    const stats = untrack(() => viewerStats);
+    if (stats && stats.vegetationDrawnInstances !== budget.drawn) {
+      viewerStats = {
+        ...stats,
+        vegetationDrawnInstances: budget.drawn,
+      };
+    }
+  });
+
   // Live toggle for map-authored particles. The layer is lazy because it
   // joins map anchors to shared particle records and DDS textures on demand.
   $effect(() => {
@@ -1714,6 +1805,20 @@
     const env = activeEnv;
     const anchors = mapParticleAnchors;
     syncMapParticleLayer(show, env, anchors);
+  });
+
+  // Live map render-quality controls. Keep this map-only: ship/accessory
+  // viewers still use the shared high-fidelity scene defaults.
+  $effect(() => {
+    const env = activeEnv;
+    if (!env) return;
+    env.setPixelRatio(mapRenderScale);
+  });
+
+  $effect(() => {
+    const env = activeEnv;
+    if (!env) return;
+    env.setPostprocessEnabled(mapPostprocess);
   });
 
   // Live collision proxy overlay. Lazily fetches the manifest only when
@@ -1922,6 +2027,27 @@
                 <span>LOD cull ({viewerStats.lodCullableCount} eligible)</span>
               </label>
             {/if}
+            <label
+              class="flex items-center gap-1.5"
+              title="Canvas backing-store scale. Lower values reduce fill-rate cost on large maps."
+            >
+              <span>Render</span>
+              <select
+                bind:value={mapRenderScale}
+                class="bg-input border-border rounded border px-1 py-0.5 text-xs"
+              >
+                {#each MAP_RENDER_SCALE_OPTIONS as q}
+                  <option value={q.value}>{q.label}</option>
+                {/each}
+              </select>
+            </label>
+            <label
+              class="flex items-center gap-1.5"
+              title="Use the shared GT tonemap postprocess composer. Off is faster and is the map-viewer default."
+            >
+              <input type="checkbox" bind:checked={mapPostprocess} />
+              <span>PostFX</span>
+            </label>
             {#if viewerStats.qualityTaggedInstances > 0}
               <label
                 class="flex items-center gap-1.5"
@@ -1979,9 +2105,23 @@
                 title="Toggle vegetation (trees + foliage). Collapsed into one InstancedMesh per species at load — far fewer draw calls than the per-instance scene nodes the toolkit emits."
               >
                 <input type="checkbox" bind:checked={showVegetation} />
-                <span
-                  >Vegetation ({viewerStats.vegetationSpecies}sp × {viewerStats.vegetationInstances})</span
+                <span>
+                  Vegetation ({viewerStats.vegetationSpecies}sp × {viewerStats.vegetationDrawnInstances.toLocaleString()}/{viewerStats.vegetationInstances.toLocaleString()})
+                </span>
+              </label>
+              <label
+                class="flex items-center gap-1.5"
+                title="Active vegetation instance budget. The full map stays loaded; lower values reduce submitted instanced tree triangles for interactive inspection."
+              >
+                <span>Veg draw</span>
+                <select
+                  bind:value={mapVegetationDrawRatio}
+                  class="bg-input border-border rounded border px-1 py-0.5 text-xs"
                 >
+                  {#each MAP_VEGETATION_DRAW_OPTIONS as q}
+                    <option value={q.value}>{q.label}</option>
+                  {/each}
+                </select>
               </label>
             {/if}
             {#if viewerStats.mapParticleAnchors > 0}
