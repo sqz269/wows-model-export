@@ -450,8 +450,8 @@
       if (r.lightingType === 'lightmapping4Way' || r.lightingType === 'lightmappingHL2') {
         anyLightmap = true;
       }
-      // `_MVEA` motion-vector blend IS now applied; the one residual is the
-      // emission-from-MV path (engine replaces colour, we add — see below).
+      // `_MVEA` motion-vector blend is applied; emission-from-MV now follows
+      // the native non-gradient substitution rule.
       if (s.animation?.useEmissionAlphaFromMV) anyMvEmission = true;
     }
     if (placeholderBlends.size > 0) {
@@ -474,8 +474,8 @@
     }
     if (anyMvEmission) {
       gaps.push(
-        '_MVEA emission (useEmissionAlphaFromMV) added on top of the lit ' +
-          'colour rather than replacing it — keeps the lightmap, not bit-exact',
+        '_MVEA emission (useEmissionAlphaFromMV) substitutes the non-gradient ' +
+          'particle body; gradient-map permutations use the authored ramp glow',
       );
     }
     return gaps;

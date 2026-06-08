@@ -3158,6 +3158,16 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             }
             base = texture2D(map, puv);
           }
+          // M4 (RE doc 63, ps4.txt:595-606): when MVEA.R is selected as
+          // the emission source, native substitutes it into the non-gradient
+          // body before lighting/tinting. It is not an extra additive glow, and
+          // gradient-map permutations take the ramp/glow branch instead.
+          if (useEmissionAlphaFromMV > 0.5) {
+            if (useLut <= 0.5) {
+              base.rgb = vec3(mvEmissive);
+            }
+            mvEmissive = 0.0;
+          }
           // M3 (RE doc 63, ps4.txt:614-628): the GRADIENT_MAP+lightmapping glow
           // samples the ramp at U = 1 - glow, where glow is the particle
           // texture's value at the sprite UV BEFORE the LM relight overwrites
