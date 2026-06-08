@@ -50,6 +50,10 @@ const SEA_LEVEL_Y = 0;
 
 function systemUsesDetachedCoordinateFrame(system: ParticleSystem): boolean {
   const coord = system.general?.coordinateStyle ?? 2;
+  return coordinateStyleUsesDetachedFrame(coord);
+}
+
+function coordinateStyleUsesDetachedFrame(coord: number): boolean {
   return coord < 2 || coord === 3;
 }
 
@@ -229,6 +233,8 @@ interface SystemRendererOptions {
   loopOneShot?: boolean;
   /** Attachment/group frame WG uses while sampling spawn authoring data. */
   sourceGroup?: THREE.Object3D;
+  /** Scene-level particle root used as the alternate stream vector frame. */
+  rootGroup?: THREE.Object3D;
 }
 
 function rampHasNonZeroValue(ramp: ParticleRamp | undefined): boolean {
@@ -618,6 +624,8 @@ class SystemRenderer {
   private readonly spawnEffect?: ParticleEffectSpawnCallback;
   private readonly loopOneShot: boolean;
   private readonly sourceGroup?: THREE.Object3D;
+  private readonly rootGroup?: THREE.Object3D;
+  private readonly coordinateStyle: number;
   private readonly detachedCoordinateFrame: boolean;
   private barrierScaleMultiplier = 1;
   private barrierAlphaMultiplier = 1;
@@ -686,7 +694,9 @@ class SystemRenderer {
     this.loopOneShot = options.loopOneShot ?? true;
     const gen = system.general;
     this.sourceGroup = options.sourceGroup;
-    this.detachedCoordinateFrame = systemUsesDetachedCoordinateFrame(system);
+    this.rootGroup = options.rootGroup;
+    this.coordinateStyle = gen?.coordinateStyle ?? 2;
+    this.detachedCoordinateFrame = coordinateStyleUsesDetachedFrame(this.coordinateStyle);
     this.maxAge = Math.max(0.05, gen?.maxParticleAge ?? DEFAULT_PARTICLE_LIFETIME);
     const desiredCap = Math.max(1, gen?.capacity ?? 32);
     this.capacity = Math.min(desiredCap, ABSOLUTE_MAX_CAPACITY);
@@ -728,10 +738,8 @@ class SystemRenderer {
             vector: new THREE.Vector3(v[0], v[1], v[2]),
             halfLife: typeof body.halfLife === 'number' ? body.halfLife : -1,
             delay: typeof body.delay === 'number' ? body.delay : 0,
-            // Parsed and preserved. Native stream.switchCoordinateStyle
-            // interacts with the same coordinateStyle frame selection audited
-            // in 2026-06-08; the webview's stream vector is still applied in
-            // the active simulation frame.
+            // Native switchCoordinateStyle uses the alternate frame from the
+            // system coordinateStyle audit; convert before applying velocity.
             switchCoordinateStyle: !!body.switchCoordinateStyle,
           });
         }
@@ -1333,6 +1341,26 @@ class SystemRenderer {
     source.worldToLocal(pos);
   }
 
+  private streamVectorForSimulationFrame(action: StreamAction, out: THREE.Vector3): THREE.Vector3 {
+    out.copy(action.vector);
+    if (!action.switchCoordinateStyle) return out;
+    const source = this.streamSwitchSourceFrame();
+    const target = this.points.parent;
+    if (!source || !target || source === target) return out;
+    source.updateWorldMatrix(true, false);
+    target.updateWorldMatrix(true, false);
+    source.getWorldQuaternion(SystemRenderer.TMP_QUAT);
+    out.applyQuaternion(SystemRenderer.TMP_QUAT);
+    target.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
+    out.applyQuaternion(SystemRenderer.TMP_QUAT);
+    return out;
+  }
+
+  private streamSwitchSourceFrame(): THREE.Object3D | null {
+    if (this.coordinateStyle === 2) return this.rootGroup ?? this.points.parent;
+    return this.sourceFrame();
+  }
+
   private applyStreamActions(slot: number, age: number, dt: number): void {
     if (this.streamActions.length === 0) return;
     const ix = slot * 3;
@@ -1341,20 +1369,21 @@ class SystemRenderer {
     let vz = this.vel[ix + 2];
     for (const action of this.streamActions) {
       if (age < action.delay) continue;
+      const vector = this.streamVectorForSimulationFrame(action, SystemRenderer.TMP_VEL2);
       if (action.halfLife < 0) continue;
       if (action.halfLife <= 1e-6) {
-        vx = action.vector.x;
-        vy = action.vector.y;
-        vz = action.vector.z;
+        vx = vector.x;
+        vy = vector.y;
+        vz = vector.z;
         continue;
       }
       // BigWorld StreamPSA: velocity moves halfway toward the stream velocity
       // every halfLife seconds. Equivalent continuous update:
       // v += (target - v) * (1 - 0.5 ** (dt / halfLife)).
       const k = 1 - Math.pow(0.5, dt / action.halfLife);
-      vx += (action.vector.x - vx) * k;
-      vy += (action.vector.y - vy) * k;
-      vz += (action.vector.z - vz) * k;
+      vx += (vector.x - vx) * k;
+      vy += (vector.y - vy) * k;
+      vz += (vector.z - vz) * k;
     }
     this.vel[ix + 0] = vx;
     this.vel[ix + 1] = vy;
@@ -2705,6 +2734,7 @@ export class ParticleScene {
         spawnEffect,
         loopOneShot,
         sourceGroup: group,
+        rootGroup: this.root,
       });
       renderer.setActive(active);
       systemParent.add(renderer.points);
