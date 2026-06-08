@@ -575,6 +575,7 @@ class SystemRenderer {
   // Particle attribute arrays.
   private pos: Float32Array;
   private vel: Float32Array;
+  private velGpu: Float32Array;
   private age: Float32Array; // age in seconds; -1 = empty slot
   private lifetime: Float32Array;
   private colorRGBA: Float32Array;
@@ -589,6 +590,7 @@ class SystemRenderer {
   // Reusable scratch buffers for the geometry attributes (we update
   // each frame in-place).
   private posAttr: THREE.BufferAttribute;
+  private velocityAttr: THREE.BufferAttribute;
   private colorAttr: THREE.BufferAttribute;
   private sizeAttr: THREE.BufferAttribute;
   /** Packed (compacted to the front, matching pos/color/size) age values
@@ -916,6 +918,7 @@ class SystemRenderer {
 
     this.pos = new Float32Array(this.capacity * 3);
     this.vel = new Float32Array(this.capacity * 3);
+    this.velGpu = new Float32Array(this.capacity * 3);
     this.age = new Float32Array(this.capacity);
     this.lifetime = new Float32Array(this.capacity);
     this.colorRGBA = new Float32Array(this.capacity * 4);
@@ -935,6 +938,8 @@ class SystemRenderer {
     const geom = new THREE.BufferGeometry();
     this.posAttr = new THREE.BufferAttribute(this.pos, 3);
     this.posAttr.setUsage(THREE.DynamicDrawUsage);
+    this.velocityAttr = new THREE.BufferAttribute(this.velGpu, 3);
+    this.velocityAttr.setUsage(THREE.DynamicDrawUsage);
     this.colorAttr = new THREE.BufferAttribute(this.colorRGBA, 4);
     this.colorAttr.setUsage(THREE.DynamicDrawUsage);
     this.sizeAttr = new THREE.BufferAttribute(this.sizeArr, 1);
@@ -948,6 +953,7 @@ class SystemRenderer {
     this.rotationPhaseAttr = new THREE.BufferAttribute(this.rotationPhase, 1);
     this.rotationPhaseAttr.setUsage(THREE.DynamicDrawUsage);
     geom.setAttribute('position', this.posAttr);
+    geom.setAttribute('velocity', this.velocityAttr);
     geom.setAttribute('color', this.colorAttr);
     geom.setAttribute('size', this.sizeAttr);
     geom.setAttribute('age', this.ageAttr);
@@ -1184,11 +1190,15 @@ class SystemRenderer {
         this.rotationPhase[writeIdx] = this.rotationPhase[i];
         this.spinRate[writeIdx] = this.spinRate[i];
       }
+      this.velGpu[writeIdx * 3 + 0] = this.vel[i * 3 + 0];
+      this.velGpu[writeIdx * 3 + 1] = this.vel[i * 3 + 1];
+      this.velGpu[writeIdx * 3 + 2] = this.vel[i * 3 + 2];
       this.ageGpu[writeIdx] = this.age[i];
       writeIdx++;
     }
     this.points.geometry.setDrawRange(0, writeIdx);
     this.posAttr.needsUpdate = true;
+    this.velocityAttr.needsUpdate = true;
     this.colorAttr.needsUpdate = true;
     this.sizeAttr.needsUpdate = true;
     this.ageAttr.needsUpdate = true;
@@ -2047,6 +2057,8 @@ interface ParticleMaterialOptions {
   /** Renderer.flipTexcoordU/V (+0x9c/+0x9d): mirror local sprite UVs. */
   flipTexcoordU?: boolean;
   flipTexcoordV?: boolean;
+  /** Renderer.velocityOriented (+0x9a): rotate sprite toward screen-space velocity. */
+  velocityOriented?: boolean;
 }
 
 /**
@@ -2252,6 +2264,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uUvFlip: {
         value: new THREE.Vector2(opts.flipTexcoordU ? 1 : 0, opts.flipTexcoordV ? 1 : 0),
       },
+      uVelocityOriented: { value: opts.velocityOriented ? 1 : 0 },
       // Corpus default is 0.0 on most systems; native treats that as neutral
       // rather than invisible. Positive values are authored boosts/cuts.
       uOpacityMultiplier: { value: opacityMultiplier },
@@ -2316,18 +2329,21 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
     },
     vertexShader: /* glsl */ `
       attribute vec4 color;
+      attribute vec3 velocity;
       attribute float size;
       attribute float age;
       attribute float frameSeed;
       attribute float framePhase;
       attribute float rotationPhase;
       uniform float uUseSpriteRotation;
+      uniform float uVelocityOriented;
       uniform float uPointExtent;
       varying vec4 vColor;
       varying float vAge;
       varying float vFrameSeed;
       varying float vFramePhase;
       varying float vRotationPhase;
+      varying float vVelocityAngle;
 
       void main() {
         vColor = color;
@@ -2335,6 +2351,10 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         vFrameSeed = frameSeed;
         vFramePhase = framePhase;
         vRotationPhase = rotationPhase;
+        vec3 viewVel = (modelViewMatrix * vec4(velocity, 0.0)).xyz;
+        vVelocityAngle = (uVelocityOriented > 0.5 && length(viewVel.xy) > 0.00001)
+          ? atan(viewVel.y, viewVel.x)
+          : 0.0;
         vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * mvPosition;
         // size is metres (world space); divide by distance for perspective.
@@ -2361,6 +2381,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float uRandomFrame;
       uniform float uUseSpriteRotation;
       uniform vec2 uRotationPivot;
+      uniform float uVelocityOriented;
       uniform float uSpriteAspectX;
       uniform float uPointExtent;
       uniform vec2 uUvTiling;
@@ -2381,6 +2402,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       varying float vFrameSeed;
       varying float vFramePhase;
       varying float vRotationPhase;
+      varying float vVelocityAngle;
 
       void main() {
         vec4 base;
@@ -2401,8 +2423,9 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             // the vertex shader, rotate source geometry by the inverse angle,
             // then sample the unrotated sprite UVs.
             vec2 rel = pointGeom - pivotGeom;
-            float s = sin(vRotationPhase);
-            float c = cos(vRotationPhase);
+            float spriteAngle = vRotationPhase + (uVelocityOriented > 0.5 ? vVelocityAngle : 0.0);
+            float s = sin(spriteAngle);
+            float c = cos(spriteAngle);
             spriteGeom = pivotGeom + vec2(c * rel.x + s * rel.y, -s * rel.x + c * rel.y);
           }
           vec2 local = vec2(spriteGeom.x / uSpriteAspectX + 0.5, spriteGeom.y + 0.5);
@@ -2796,7 +2819,8 @@ export class ParticleScene {
         hasNonZeroNumber(r?.spinRateBase) ||
         hasNonZeroNumber(r?.spinRateRange) ||
         hasNonZeroNumber(r?.initialOrientationBase) ||
-        hasNonZeroNumber(r?.initialOrientationRange);
+        hasNonZeroNumber(r?.initialOrientationRange) ||
+        !!r?.velocityOriented;
       const useSpriteRotation = (!!r?.textureUrl0 || useAtlas) && hasAuthoredRotation;
       const mat = buildParticleMaterial({
         blendType: r?.blendType,
@@ -2822,6 +2846,7 @@ export class ParticleScene {
         tilingV: r?.tilingV,
         flipTexcoordU: r?.flipTexcoordU,
         flipTexcoordV: r?.flipTexcoordV,
+        velocityOriented: r?.velocityOriented,
       });
       const renderer = new SystemRenderer(sys, mat, rec.maxEmittingDuration, {
         spawnEffect,
