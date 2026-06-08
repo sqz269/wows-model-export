@@ -52,9 +52,12 @@ const DEFAULT_PARTICLE_SUN_DIR = new THREE.Vector3(50, 80, 50).normalize();
 const DEFAULT_PARTICLE_SUN_COLOR_NORM = new THREE.Color(0.5, 0.5, 0.5);
 
 const PS_IC_PARTICLE_TILING_U = 0;
+const PS_IC_LIGHT_TINT_R = 1;
 const PS_IC_PARTICLE_STREAMER_X = 2;
 const PS_IC_PARTICLE_SCALE_X = 3;
 const PS_IC_PARTICLE_VEL_Z = 4;
+const PS_IC_LIGHT_RADIUS = 5;
+const PS_IC_LIGHT_TINT_B = 6;
 const PS_IC_PARTICLE_COLOR_R = 7;
 const PS_IC_AGE_SCALE = 8;
 const PS_IC_PARTICLE_COLOR_B = 9;
@@ -73,6 +76,7 @@ const PS_IC_PARTICLE_STREAMER_Z = 21;
 const PS_IC_PARTICLE_COLOR_G = 22;
 const PS_IC_PARTICLE_SIZE = 23;
 const PS_IC_PARTICLE_TINT_A = 24;
+const PS_IC_LIGHT_TINT_G = 25;
 
 function finiteNumber(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -2106,8 +2110,17 @@ class LightRenderer {
   private elapsed = 0;
   private active = true;
   private readonly material: THREE.SpriteMaterial;
+  private intensityValues: number[] = [];
+  private lightRadiusMultiplier = 1;
+  private lightTintRMultiplier = 1;
+  private lightTintGMultiplier = 1;
+  private lightTintBMultiplier = 1;
 
-  constructor(private readonly body: ParticleComponentBody) {
+  constructor(
+    private readonly body: ParticleComponentBody,
+    private readonly intensityChannels: ParticleSystemIntensityChannel[] = [],
+    private readonly intensityDefaults: readonly number[] = [],
+  ) {
     this.group = new THREE.Group();
     this.group.name = 'particle-light';
     const pos = body.localPosition;
@@ -2124,6 +2137,7 @@ class LightRenderer {
     });
     this.sprite = new THREE.Sprite(this.material);
     this.group.add(this.sprite);
+    this.setIntensityValues(intensityDefaults);
     this.score = this.estimateScore();
     this.applySample(0);
   }
@@ -2140,6 +2154,18 @@ class LightRenderer {
     this.group.visible = active;
   }
 
+  setIntensityValues(values: readonly number[] | undefined): void {
+    const count = Math.max(this.intensityChannels.length, this.intensityDefaults.length);
+    this.intensityValues = [];
+    for (let i = 0; i < count; i++) {
+      const authored = values?.[i];
+      const fallback = this.intensityDefaults[i] ?? 1;
+      this.intensityValues[i] = Number.isFinite(authored) ? Number(authored) : fallback;
+    }
+    this.applyIntensityState();
+    this.applySample(this.elapsed);
+  }
+
   tick(dt: number): void {
     if (!this.active) return;
     this.elapsed += dt;
@@ -2153,28 +2179,73 @@ class LightRenderer {
 
   private estimateScore(): number {
     const fixed = this.body.color ?? [1, 1, 1, 1];
-    let peak = Math.max(0, fixed[0], fixed[1], fixed[2]);
+    let peak = Math.max(
+      0,
+      fixed[0] * this.lightTintRMultiplier,
+      fixed[1] * this.lightTintGMultiplier,
+      fixed[2] * this.lightTintBMultiplier,
+    );
     for (const p of this.body.colorAnimation?.points ?? []) {
-      peak = Math.max(peak, p.r, p.g, p.b);
+      peak = Math.max(
+        peak,
+        p.r * this.lightTintRMultiplier,
+        p.g * this.lightTintGMultiplier,
+        p.b * this.lightTintBMultiplier,
+      );
     }
-    let radius = Math.max(0, this.body.radius ?? 0);
+    let radius = Math.max(0, (this.body.radius ?? 0) * this.lightRadiusMultiplier);
     for (const p of this.body.radiusAnimation?.points ?? []) {
-      radius = Math.max(radius, p.value);
+      radius = Math.max(radius, p.value * this.lightRadiusMultiplier);
     }
     return peak * Math.max(0.1, radius);
   }
 
+  private applyIntensityState(): void {
+    this.lightRadiusMultiplier = 1;
+    this.lightTintRMultiplier = 1;
+    this.lightTintGMultiplier = 1;
+    this.lightTintBMultiplier = 1;
+    for (let channelIndex = 0; channelIndex < this.intensityChannels.length; channelIndex++) {
+      const channel = this.intensityChannels[channelIndex];
+      const value = this.intensityValues[channelIndex] ?? this.intensityDefaults[channelIndex] ?? 1;
+      for (const config of channel.configs ?? []) {
+        const factor = sampleRamp(config.ramp, value, 1);
+        if (!Number.isFinite(factor)) continue;
+        for (const flag of config.flags ?? []) {
+          switch (flag) {
+            case PS_IC_LIGHT_RADIUS:
+              this.lightRadiusMultiplier *= factor;
+              break;
+            case PS_IC_LIGHT_TINT_R:
+              this.lightTintRMultiplier *= factor;
+              break;
+            case PS_IC_LIGHT_TINT_G:
+              this.lightTintGMultiplier *= factor;
+              break;
+            case PS_IC_LIGHT_TINT_B:
+              this.lightTintBMultiplier *= factor;
+              break;
+          }
+        }
+      }
+    }
+  }
+
   private applySample(t: number): void {
     const color = this.sampleColorAt(t);
-    const radius = Math.max(0.01, this.sampleRadiusAt(t));
-    this.material.color.setRGB(color[0], color[1], color[2]);
+    const radius = Math.max(0.01, this.sampleRadiusAt(t) * this.lightRadiusMultiplier);
+    this.material.color.setRGB(
+      color[0] * this.lightTintRMultiplier,
+      color[1] * this.lightTintGMultiplier,
+      color[2] * this.lightTintBMultiplier,
+    );
     this.material.opacity = Math.max(0, Math.min(1, color[3]));
     const spriteSize = Math.max(0.1, radius * 2);
     this.sprite.scale.set(spriteSize, spriteSize, spriteSize);
     if (!this.pointLight) return;
-    const r = Math.max(0, color[0]);
-    const g = Math.max(0, color[1]);
-    const b = Math.max(0, color[2]);
+    const r = Math.max(0, color[0] * this.lightTintRMultiplier);
+    const g = Math.max(0, color[1] * this.lightTintGMultiplier);
+    const b = Math.max(0, color[2] * this.lightTintBMultiplier);
     const peak = Math.max(r, g, b);
     if (peak > 0) {
       this.pointLight.color.setRGB(r / peak, g / peak, b / peak);
@@ -3174,7 +3245,12 @@ export class ParticleScene {
       systems.push(renderer);
       for (const c of sys.components ?? []) {
         if (c.kind !== 'light' || !c.body) continue;
-        const light = new LightRenderer(c.body);
+        const light = new LightRenderer(
+          c.body,
+          sys.intensities?.channels ?? [],
+          intensityDefaults,
+        );
+        if (intensityValues) light.setIntensityValues(intensityValues);
         light.setActive(active);
         if (systemParent !== group) {
           group.updateWorldMatrix(true, false);
@@ -3405,9 +3481,11 @@ export class ParticleScene {
   ): void {
     handle.intensityValues = values ? Array.from(values) : undefined;
     for (const s of handle.systems) s.setIntensityValues(values);
+    for (const l of handle.lights) l.setIntensityValues(values);
     for (const effect of this.spawnedEffects) {
       if (effect.parent !== handle) continue;
       for (const s of effect.systems) s.setIntensityValues(values);
+      for (const l of effect.lights) l.setIntensityValues(values);
     }
   }
 
