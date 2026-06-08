@@ -90,6 +90,11 @@ function finiteNumber(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
+function particleByteStepCount(value: unknown): number {
+  const raw = Math.trunc(finiteNumber(value, 0));
+  return raw < 2 ? 0 : Math.min(raw - 1, 255);
+}
+
 function hasNonZeroNumber(value: unknown, eps = 1e-6): boolean {
   return Math.abs(finiteNumber(value, 0)) > eps;
 }
@@ -2602,6 +2607,9 @@ interface ParticleMaterialOptions {
   lightingDiffuse?: number;
   lightingTransmission?: number;
   lightWrapAmount?: number;
+  /** Renderer.shadowsStrength (+0x70): native packs int(value)-1 as the
+   *  GRADIENT_MAP lightmapping glow posterize step count. */
+  shadowsStrength?: number;
   /** Renderer.explicitOrientation (+0x30) and hide-angle fade controls. */
   explicitOrientation?: [number, number, number];
   explicitOrientationLocal?: boolean;
@@ -2782,6 +2790,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
   const lightingDiffuse = Math.max(0, finiteNumber(opts.lightingDiffuse, 1));
   const lightingTransmission = Math.max(0, finiteNumber(opts.lightingTransmission, 0));
   const lightWrapAmount = Math.max(0, finiteNumber(opts.lightWrapAmount, 0));
+  const glowPosterizeSteps = particleByteStepCount(opts.shadowsStrength);
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       map: { value: null as THREE.Texture | null },
@@ -2927,6 +2936,11 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       // constant approximates that missing scale. 0.15 keeps the puff a grey
       // occluding smoke body with a warm core.
       uGlowStrength: { value: 0.15 },
+      // Native FUN_140716f00 packs Renderer.shadowsStrength as
+      // int(value) < 2 ? 0 : int(value) - 1 into the shader's byte payload.
+      // The GRADIENT_MAP + lightmapping pixel path uses it to posterize the
+      // glow-ramp coordinate before sampling g_particleGlowTexture.
+      uGlowPosterizeSteps: { value: glowPosterizeSteps },
     },
     vertexShader: /* glsl */ `
       attribute vec4 color;
@@ -3028,6 +3042,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform sampler2D uDistortionSceneTexture;
       uniform vec2 uDistortionSceneSize;
       uniform float uGlowStrength;
+      uniform float uGlowPosterizeSteps;
       varying vec4 vColor;
       varying float vAge;
       varying float vFrameSeed;
@@ -3227,12 +3242,17 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
               // sprite UV, captured as gmag before the LM relight). The warm
               // ramp colour is added as an emissive "detonation" glow on top of
               // the relit smoke body, OUTSIDE the per-particle tint (engine:
-              // rgb = base*lit + emis*v10.x). The posterize step-count (bits
-              // 16..23) isn't carried by the parser, so we use the unposterized
-              // U. uGlowStrength stays as the v10.x intensity approximation.
+              // rgb = base*lit + emis*v10.x). Native packs renderer
+              // shadowsStrength as the byte step count that quantizes glow
+              // before U = 1 - glow. uGlowStrength stays as the v10.x
+              // intensity approximation.
               // Now varies per-texel → a warm GRADIENT across the sprite, not
               // one flat tan colour.
-              vec4 g = texture2D(lut, vec2(1.0 - gmag, 0.5));
+              float glowKey = gmag;
+              if (uGlowPosterizeSteps > 0.5) {
+                glowKey = floor(glowKey * uGlowPosterizeSteps + 0.5) / uGlowPosterizeSteps;
+              }
+              vec4 g = texture2D(lut, vec2(1.0 - glowKey, 0.5));
               glow = g.rgb * g.a * uGlowStrength;
             } else {
               // Lambert GRADIENT_MAP: luminance-keyed recolor (engine lambert
@@ -3574,6 +3594,7 @@ export class ParticleScene {
         lightingDiffuse: r?.lightingDiffuse,
         lightingTransmission: r?.lightingTransmission,
         lightWrapAmount: r?.lightWrapAmount,
+        shadowsStrength: r?.shadowsStrength,
         explicitOrientation: r?.explicitOrientation,
         explicitOrientationLocal: r?.explicitOrientationLocal,
         hideStartCos: r?.hideStartCos,
