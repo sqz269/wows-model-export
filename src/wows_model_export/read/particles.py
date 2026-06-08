@@ -791,23 +791,24 @@ def _decode_renderer(
 ) -> dict:
     """Decode the Renderer block at System +0x000 (0xa0 bytes).
 
-    Field offsets confirmed against the WoWS binary (build 12267945,
-    FUN_1406f2150) — supersedes the 2026-05-22 statistical probe.
+    Field offsets confirmed against the WoWS binary (build 12506899,
+    FUN_1406f0c30) — supersedes the 2026-05-22 statistical probe.
 
     Surfaced fields:
       +0x00 ``textureName0`` (16 B ResourceRef)
       +0x10 ``textureName1`` (16 B ResourceRef)
       +0x20 ``yawRateRamp``  (16 B Ramp)
+      +0x3c ``customCenterOffset`` (2-float Vec2)
       +0x80 ``rotationCenter`` i32 -> PS_RRC label
       +0x84 ``lightingType``  i32 -> PS_RLT label
       +0x88 ``blendType``     i32 -> PS_RBT label
       +0x8c ``sortType``      i32 (raw; enum fx::RendererSortType, labels TBD)
       +0x90 ``tilingU`` f32, +0x94 ``tilingV`` f32
 
-    The +0x30..+0x7f float cluster (explicitOrientation/customCenterOffset
-    + 13 lighting/spin/scale floats) and the +0x98/+0x9c bool quartets
-    (billboard/velocityOriented/flipTexcoordU-V …) are byte-mapped in the
-    binary but not surfaced here.
+    The remaining +0x30..+0x7f float cluster (explicitOrientation plus
+    lighting/spin/scale floats) and the +0x98/+0x9c bool quartets
+    (billboard/velocityOriented/flipTexcoordU-V …) are byte-mapped in
+    the binary but not surfaced here.
     """
     base = sys_off  # Renderer is the first sub-struct
     out: dict[str, Any] = {}
@@ -818,6 +819,9 @@ def _decode_renderer(
     if t1:
         out["textureName1"] = t1
     out["yawRateRamp"] = _decode_ramp(buf, base + 0x20, file_end)
+    out["customCenterOffset"] = [
+        float(v) for v in struct.unpack_from("<2f", buf, base + 0x3c)
+    ]
     rotation_center, lighting_type, blend_type, sort_type = struct.unpack_from(
         "<4i", buf, base + 0x80,
     )

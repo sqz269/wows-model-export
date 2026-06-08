@@ -2009,6 +2009,8 @@ interface ParticleMaterialOptions {
   spriteRotation?: boolean;
   /** PS_RRC pivot label: bottom / corner / center / custom. */
   rotationCenter?: string;
+  /** Renderer.customCenterOffset (+0x3c Vec2), used for custom pivots. */
+  customCenterOffset?: [number, number];
 }
 
 /**
@@ -2085,14 +2087,21 @@ const PS_RBT_LUT_MODES = new Set(['GRADIENT_MAP', 'UNDERWATER_GRADIENT_MAP']);
  *  `project-particle-lm-lightmap`. */
 const PS_RLT_LIGHTMAP_MODES = new Set(['lightmapping4Way', 'lightmappingHL2']);
 
-function rotationPivotForCenter(label: string | undefined): THREE.Vector2 {
+function rotationPivotForCenter(
+  label: string | undefined,
+  customOffset: [number, number] | undefined,
+): THREE.Vector2 {
   switch (label) {
     case 'bottom':
       return new THREE.Vector2(0.5, 0.0);
     case 'corner':
       return new THREE.Vector2(0.0, 0.0);
-    case 'center':
     case 'custom':
+      return new THREE.Vector2(
+        0.5 + (customOffset?.[0] ?? 0),
+        0.5 + (customOffset?.[1] ?? 0),
+      );
+    case 'center':
     default:
       return new THREE.Vector2(0.5, 0.5);
   }
@@ -2142,7 +2151,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
   const framesBegin = opts.framesRangeBegin ?? 0;
   const framesEnd = opts.framesRangeEnd ?? 0;
   const spriteRotation = opts.spriteRotation ? 1 : 0;
-  const rotationPivot = rotationPivotForCenter(opts.rotationCenter);
+  const rotationPivot = rotationPivotForCenter(opts.rotationCenter, opts.customCenterOffset);
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       map: { value: null as THREE.Texture | null },
@@ -2729,6 +2738,7 @@ export class ParticleScene {
         frameRateRamp: anim?.frameRateRamp,
         spriteRotation: useSpriteRotation,
         rotationCenter: r?.rotationCenter,
+        customCenterOffset: r?.customCenterOffset,
       });
       const renderer = new SystemRenderer(sys, mat, rec.maxEmittingDuration, {
         spawnEffect,

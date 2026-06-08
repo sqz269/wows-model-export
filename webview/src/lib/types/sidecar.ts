@@ -430,15 +430,15 @@ export interface ParticleGeneralSection {
 
 /**
  * Renderer block surfaced from the Effect blob. Field offsets confirmed
- * against the WoWS binary (build 12267945, FUN_1406f2150), superseding
+ * against the WoWS binary (build 12506899, FUN_1406f0c30), superseding
  * the 2026-05-23 statistical probe: texture refs
  * (`textureName0`/`textureName1`) + `yawRateRamp` at +0x00/+0x10/+0x20,
- * and the tail enums/floats (`rotationCenter`/`lightingType`/`blendType`/
- * `sortType`/`tilingU`/`tilingV`) at +0x80..+0x94 within the 0xa0-byte
- * struct.
+ * `customCenterOffset` at +0x3c, and the tail enums/floats
+ * (`rotationCenter`/`lightingType`/`blendType`/`sortType`/`tilingU`/
+ * `tilingV`) at +0x80..+0x94 within the 0xa0-byte struct.
  *
- * The +0x30..+0x7f float cluster and the +0x98/+0x9c bool quartets are
- * byte-mapped in the binary but not surfaced here.
+ * The rest of the +0x30..+0x7f float cluster and the +0x98/+0x9c bool
+ * quartets are byte-mapped in the binary but not surfaced here.
  *
  * `textureUrl0` / `textureUrl1` are stamped by the library builder
  * (`compose/library_particles.py`) and carry a workspace-relative
@@ -456,6 +456,8 @@ export interface ParticleRenderer {
   textureAtlas0?: ParticleAtlasRect;
   textureAtlas1?: ParticleAtlasRect;
   yawRateRamp?: ParticleRamp;
+  /** Renderer +0x3c Vec2. Used when `rotationCenter` is `custom`. */
+  customCenterOffset?: [number, number];
   /** PS_RRC label (4 values: bottom / corner / center / custom).
    *  Recovered from the binary enum table @ 0x1420bf0d0. */
   rotationCenter?: string;
