@@ -1145,6 +1145,12 @@
     mapParticleScene.root.visible = false;
   }
 
+  function syncMapParticleSunLighting(env: SceneEnvironment | null = activeEnv): void {
+    if (!mapParticleScene || !env) return;
+    const sun = env.getSunLight();
+    mapParticleScene.setSunLighting(sun.direction, sun.color);
+  }
+
   async function loadMapParticleScene(
     env: SceneEnvironment,
     anchors: MapParticleAnchor[],
@@ -1570,6 +1576,7 @@
           if (lodInstances.length > 0) {
             updateLodVisibility(env.camera.position);
           }
+          syncMapParticleSunLighting(env);
           mapParticleScene?.tick();
           env.render();
         }, { maxFps: 30 });
