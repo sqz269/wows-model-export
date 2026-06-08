@@ -798,19 +798,27 @@ def _decode_renderer(
       +0x00 ``textureName0`` (16 B ResourceRef)
       +0x10 ``textureName1`` (16 B ResourceRef)
       +0x20 ``yawRateRamp``  (16 B Ramp)
+      +0x30 ``explicitOrientation`` (3-float Vec3)
       +0x3c ``customCenterOffset`` (2-float Vec2)
+      +0x44 ``spinRateRange`` f32, +0x48 ``spinRateBase`` f32
+      +0x4c ``lightingShineness`` f32
+      +0x50 ``initialOrientationRange`` f32
+      +0x54 ``lightingAmbient`` f32
+      +0x58 ``initialOrientationBase`` f32
+      +0x5c ``hideStartCos`` f32
       +0x60 ``scaleX`` f32
+      +0x64 ``lightingDiffuse`` f32, +0x68 ``lightingTransmission`` f32
+      +0x6c ``lightWrapAmount`` f32, +0x70 ``shadowsStrength`` f32
       +0x74 ``opacityMultiplier`` f32
+      +0x78 ``hideSpeed`` f32, +0x7c ``softParticleDepthScale`` f32
       +0x80 ``rotationCenter`` i32 -> PS_RRC label
       +0x84 ``lightingType``  i32 -> PS_RLT label
       +0x88 ``blendType``     i32 -> PS_RBT label
       +0x8c ``sortType``      i32 (raw; enum fx::RendererSortType, labels TBD)
       +0x90 ``tilingU`` f32, +0x94 ``tilingV`` f32
+      +0x98..+0x9b ``explicitOrientationLocal`` / ``billboard`` /
+             ``velocityOriented`` / ``background`` bools
       +0x9c ``flipTexcoordU`` bool, +0x9d ``flipTexcoordV`` bool
-
-    The remaining +0x30..+0x7f float cluster (explicitOrientation plus
-    lighting/spin floats) and the +0x98/+0x9b orientation/background bools
-    are byte-mapped in the binary but not surfaced here.
     """
     base = sys_off  # Renderer is the first sub-struct
     out: dict[str, Any] = {}
@@ -821,15 +829,52 @@ def _decode_renderer(
     if t1:
         out["textureName1"] = t1
     out["yawRateRamp"] = _decode_ramp(buf, base + 0x20, file_end)
+    out["explicitOrientation"] = [
+        float(v) for v in struct.unpack_from("<3f", buf, base + 0x30)
+    ]
     out["customCenterOffset"] = [
         float(v) for v in struct.unpack_from("<2f", buf, base + 0x3c)
     ]
-    out["scaleX"] = float(struct.unpack_from("<f", buf, base + 0x60)[0])
-    out["opacityMultiplier"] = float(struct.unpack_from("<f", buf, base + 0x74)[0])
+    (
+        spin_rate_range,
+        spin_rate_base,
+        lighting_shineness,
+        initial_orientation_range,
+        lighting_ambient,
+        initial_orientation_base,
+        hide_start_cos,
+        scale_x,
+        lighting_diffuse,
+        lighting_transmission,
+        light_wrap_amount,
+        shadows_strength,
+        opacity_multiplier,
+        hide_speed,
+        soft_particle_depth_scale,
+    ) = struct.unpack_from("<15f", buf, base + 0x44)
+    out["spinRateRange"] = float(spin_rate_range)
+    out["spinRateBase"] = float(spin_rate_base)
+    out["lightingShineness"] = float(lighting_shineness)
+    out["initialOrientationRange"] = float(initial_orientation_range)
+    out["lightingAmbient"] = float(lighting_ambient)
+    out["initialOrientationBase"] = float(initial_orientation_base)
+    out["hideStartCos"] = float(hide_start_cos)
+    out["scaleX"] = float(scale_x)
+    out["lightingDiffuse"] = float(lighting_diffuse)
+    out["lightingTransmission"] = float(lighting_transmission)
+    out["lightWrapAmount"] = float(light_wrap_amount)
+    out["shadowsStrength"] = float(shadows_strength)
+    out["opacityMultiplier"] = float(opacity_multiplier)
+    out["hideSpeed"] = float(hide_speed)
+    out["softParticleDepthScale"] = float(soft_particle_depth_scale)
     rotation_center, lighting_type, blend_type, sort_type = struct.unpack_from(
         "<4i", buf, base + 0x80,
     )
     tiling_u, tiling_v = struct.unpack_from("<2f", buf, base + 0x90)
+    explicit_orientation_local = bool(buf[base + 0x98])
+    billboard = bool(buf[base + 0x99])
+    velocity_oriented = bool(buf[base + 0x9a])
+    background = bool(buf[base + 0x9b])
     flip_u = bool(buf[base + 0x9c])
     flip_v = bool(buf[base + 0x9d])
     out["rotationCenter"] = PS_RRC.get(int(rotation_center), str(rotation_center))
@@ -841,6 +886,10 @@ def _decode_renderer(
     out["sortType"] = int(sort_type)
     out["tilingU"] = float(tiling_u)
     out["tilingV"] = float(tiling_v)
+    out["explicitOrientationLocal"] = explicit_orientation_local
+    out["billboard"] = billboard
+    out["velocityOriented"] = velocity_oriented
+    out["background"] = background
     out["flipTexcoordU"] = flip_u
     out["flipTexcoordV"] = flip_v
     return out

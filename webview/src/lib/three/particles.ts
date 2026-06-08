@@ -48,6 +48,14 @@ const CHILD_EFFECT_BUDGET = 256;
 const CHILD_EFFECT_SPAWNS_PER_SYSTEM_TICK = 8;
 const SEA_LEVEL_Y = 0;
 
+function finiteNumber(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function hasNonZeroNumber(value: unknown, eps = 1e-6): boolean {
+  return Math.abs(finiteNumber(value, 0)) > eps;
+}
+
 function systemUsesDetachedCoordinateFrame(system: ParticleSystem): boolean {
   const coord = system.general?.coordinateStyle ?? 2;
   return coordinateStyleUsesDetachedFrame(coord);
@@ -559,6 +567,10 @@ class SystemRenderer {
   private velocityFieldActions: VelocityFieldAction[] = [];
   private frameRateRamp: ParticleRamp | undefined;
   private yawRateRamp: ParticleRamp | undefined;
+  private spinRateBase = 0;
+  private spinRateRange = 0;
+  private initialOrientationBase = 0;
+  private initialOrientationRange = 0;
 
   // Particle attribute arrays.
   private pos: Float32Array;
@@ -597,9 +609,13 @@ class SystemRenderer {
   private framePhaseAttr: THREE.BufferAttribute;
   /** Integrated sprite yaw, in radians. Renderer.yawRateRamp values are small
    *  signed angular rates in the corpus (typically +/-0.5), matching radians/s
-   *  rather than degrees/s. */
+   *  rather than degrees/s. Renderer spinRateBase/Range contributes a per-
+   *  particle constant angular rate on top of the yaw ramp. */
   private rotationPhase: Float32Array;
   private rotationPhaseAttr: THREE.BufferAttribute;
+  /** Per-particle authored spin rate, sampled at spawn from
+   *  spinRateBase + random[0,1) * spinRateRange. */
+  private spinRate: Float32Array;
   /** Number of cells a randomFrameOnly particle can land on (framesRangeEnd,
    *  falling back to framesPerX*framesPerY). 0 ⇒ feature inert. */
   private framesRangeEnd = 0;
@@ -876,10 +892,13 @@ class SystemRenderer {
     // land on. Engine seeds the frame byte in [0, framesRangeEnd); fall back
     // to the full grid when the range wasn't authored.
     const anim = system.animation;
+    const renderer = system.renderer;
     this.frameRateRamp = anim?.frameRateRamp;
-    this.yawRateRamp = rampHasNonZeroValue(system.renderer?.yawRateRamp)
-      ? system.renderer?.yawRateRamp
-      : undefined;
+    this.yawRateRamp = rampHasNonZeroValue(renderer?.yawRateRamp) ? renderer?.yawRateRamp : undefined;
+    this.spinRateBase = finiteNumber(renderer?.spinRateBase, 0);
+    this.spinRateRange = finiteNumber(renderer?.spinRateRange, 0);
+    this.initialOrientationBase = finiteNumber(renderer?.initialOrientationBase, 0);
+    this.initialOrientationRange = finiteNumber(renderer?.initialOrientationRange, 0);
     const fx = anim?.framesPerX ?? 1;
     const fy = anim?.framesPerY ?? 1;
     this.framesRangeEnd = Math.max(0, anim?.framesRangeEnd ?? fx * fy);
@@ -905,6 +924,7 @@ class SystemRenderer {
     this.frameSeed = new Float32Array(this.capacity);
     this.framePhase = new Float32Array(this.capacity);
     this.rotationPhase = new Float32Array(this.capacity);
+    this.spinRate = new Float32Array(this.capacity);
     this.psize = new Float32Array(this.capacity);
     this.pidx = new Float32Array(this.capacity);
     for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
@@ -1041,6 +1061,9 @@ class SystemRenderer {
         const yaw1 = sampleRamp(this.yawRateRamp, age, 0);
         this.rotationPhase[i] += 0.5 * (yaw0 + yaw1) * dt;
       }
+      if (this.spinRate[i] !== 0) {
+        this.rotationPhase[i] += this.spinRate[i] * dt;
+      }
       // Per-particle clocks for the parameterType axis (RE 2026-06-04): ramps
       // are sampled on their own clock in SECONDS (or m/s, or the u8 index) —
       // NOT a normalized [0,1] age.
@@ -1159,6 +1182,7 @@ class SystemRenderer {
         this.frameSeed[writeIdx] = this.frameSeed[i];
         this.framePhase[writeIdx] = this.framePhase[i];
         this.rotationPhase[writeIdx] = this.rotationPhase[i];
+        this.spinRate[writeIdx] = this.spinRate[i];
       }
       this.ageGpu[writeIdx] = this.age[i];
       writeIdx++;
@@ -1274,7 +1298,9 @@ class SystemRenderer {
     this.frameSeed[slot] =
       this.framesRangeEnd > 0 ? Math.floor(Math.random() * this.framesRangeEnd) : 0;
     this.framePhase[slot] = 0;
-    this.rotationPhase[slot] = 0;
+    this.rotationPhase[slot] =
+      this.initialOrientationBase + Math.random() * this.initialOrientationRange;
+    this.spinRate[slot] = this.spinRateBase + Math.random() * this.spinRateRange;
     const sc = SystemRenderer.TMP_CLOCKS;
     sc.particleAge = 0;
     sc.systemAge = this.elapsed;
@@ -2765,7 +2791,13 @@ export class ParticleScene {
       const useAtlas = !r?.textureUrl0 && !!r?.textureAtlas0;
       const useLut = !!r?.blendType && PS_RBT_LUT_MODES.has(r.blendType) && !!r?.textureUrl1;
       const useMv = anim?.animationType === 'motionVectors' && !!anim?.motionVectorsTextureUrl;
-      const useSpriteRotation = (!!r?.textureUrl0 || useAtlas) && rampHasNonZeroValue(r?.yawRateRamp);
+      const hasAuthoredRotation =
+        rampHasNonZeroValue(r?.yawRateRamp) ||
+        hasNonZeroNumber(r?.spinRateBase) ||
+        hasNonZeroNumber(r?.spinRateRange) ||
+        hasNonZeroNumber(r?.initialOrientationBase) ||
+        hasNonZeroNumber(r?.initialOrientationRange);
+      const useSpriteRotation = (!!r?.textureUrl0 || useAtlas) && hasAuthoredRotation;
       const mat = buildParticleMaterial({
         blendType: r?.blendType,
         lightingType: r?.lightingType,

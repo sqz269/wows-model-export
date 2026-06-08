@@ -433,14 +433,11 @@ export interface ParticleGeneralSection {
  * against the WoWS binary (build 12506899, FUN_1406f0c30), superseding
  * the 2026-05-23 statistical probe: texture refs
  * (`textureName0`/`textureName1`) + `yawRateRamp` at +0x00/+0x10/+0x20,
- * `customCenterOffset` at +0x3c, material scalars (`scaleX` at +0x60,
- * `opacityMultiplier` at +0x74), the tail enums/floats
- * (`rotationCenter`/`lightingType`/`blendType`/`sortType`/`tilingU`/
- * `tilingV`) at +0x80..+0x94, and UV flip bools at +0x9c/+0x9d within
- * the 0xa0-byte struct.
- *
- * The rest of the +0x30..+0x7f float cluster and the +0x98/+0x9c bool
- * quartets are byte-mapped in the binary but not surfaced here.
+ * `explicitOrientation` at +0x30, `customCenterOffset` at +0x3c,
+ * spin/orientation/lighting/material scalars through +0x7c, the tail
+ * enums/floats (`rotationCenter`/`lightingType`/`blendType`/`sortType`/
+ * `tilingU`/`tilingV`) at +0x80..+0x94, and bool flags at +0x98..+0x9d
+ * within the 0xa0-byte struct.
  *
  * `textureUrl0` / `textureUrl1` are stamped by the library builder
  * (`compose/library_particles.py`) and carry a workspace-relative
@@ -458,8 +455,28 @@ export interface ParticleRenderer {
   textureAtlas0?: ParticleAtlasRect;
   textureAtlas1?: ParticleAtlasRect;
   yawRateRamp?: ParticleRamp;
+  /** Renderer +0x30 Vec3. Native explicit-orientation vector. */
+  explicitOrientation?: [number, number, number];
   /** Renderer +0x3c Vec2. Used when `rotationCenter` is `custom`. */
   customCenterOffset?: [number, number];
+  /** Renderer +0x44/+0x48 random spin-rate range/base, radians/sec in webview. */
+  spinRateRange?: number;
+  spinRateBase?: number;
+  /** Renderer +0x4c lighting scalar. WG field spelling is `Shineness`. */
+  lightingShineness?: number;
+  /** Renderer +0x50/+0x58 random initial sprite orientation range/base. */
+  initialOrientationRange?: number;
+  initialOrientationBase?: number;
+  /** Renderer lighting scalars at +0x54, +0x64..+0x70. */
+  lightingAmbient?: number;
+  lightingDiffuse?: number;
+  lightingTransmission?: number;
+  lightWrapAmount?: number;
+  shadowsStrength?: number;
+  /** Renderer +0x5c/+0x78/+0x7c view/depth fade scalars. */
+  hideStartCos?: number;
+  hideSpeed?: number;
+  softParticleDepthScale?: number;
   /** Renderer +0x60 width multiplier for sprite aspect. */
   scaleX?: number;
   /** Renderer +0x74 alpha multiplier. */
@@ -482,6 +499,11 @@ export interface ParticleRenderer {
   /** Per-system UV tiling factors; default 1.0/1.0. */
   tilingU?: number;
   tilingV?: number;
+  /** Renderer +0x98..+0x9b orientation/background flags. */
+  explicitOrientationLocal?: boolean;
+  billboard?: boolean;
+  velocityOriented?: boolean;
+  background?: boolean;
   /** Renderer +0x9c/+0x9d UV flip flags. */
   flipTexcoordU?: boolean;
   flipTexcoordV?: boolean;
