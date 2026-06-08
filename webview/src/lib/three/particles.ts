@@ -223,6 +223,10 @@ interface SystemRendererOptions {
   loopOneShot?: boolean;
 }
 
+function rampHasNonZeroValue(ramp: ParticleRamp | undefined): boolean {
+  return !!ramp?.points?.some((p) => Math.abs(p.value) > 1e-6);
+}
+
 interface VelocityFieldData {
   sizeX: number;
   sizeY: number;
@@ -538,6 +542,7 @@ class SystemRenderer {
   private spawnerActions: SpawnerAction[] = [];
   private velocityFieldActions: VelocityFieldAction[] = [];
   private frameRateRamp: ParticleRamp | undefined;
+  private yawRateRamp: ParticleRamp | undefined;
 
   // Particle attribute arrays.
   private pos: Float32Array;
@@ -574,6 +579,11 @@ class SystemRenderer {
    *  playback. WG advances flipbooks by integrating FPS over particle age. */
   private framePhase: Float32Array;
   private framePhaseAttr: THREE.BufferAttribute;
+  /** Integrated sprite yaw, in radians. Renderer.yawRateRamp values are small
+   *  signed angular rates in the corpus (typically +/-0.5), matching radians/s
+   *  rather than degrees/s. */
+  private rotationPhase: Float32Array;
+  private rotationPhaseAttr: THREE.BufferAttribute;
   /** Number of cells a randomFrameOnly particle can land on (framesRangeEnd,
    *  falling back to framesPerX*framesPerY). 0 ⇒ feature inert. */
   private framesRangeEnd = 0;
@@ -839,6 +849,9 @@ class SystemRenderer {
     // to the full grid when the range wasn't authored.
     const anim = system.animation;
     this.frameRateRamp = anim?.frameRateRamp;
+    this.yawRateRamp = rampHasNonZeroValue(system.renderer?.yawRateRamp)
+      ? system.renderer?.yawRateRamp
+      : undefined;
     const fx = anim?.framesPerX ?? 1;
     const fy = anim?.framesPerY ?? 1;
     this.framesRangeEnd = Math.max(0, anim?.framesRangeEnd ?? fx * fy);
@@ -863,6 +876,7 @@ class SystemRenderer {
     this.ageGpu = new Float32Array(this.capacity);
     this.frameSeed = new Float32Array(this.capacity);
     this.framePhase = new Float32Array(this.capacity);
+    this.rotationPhase = new Float32Array(this.capacity);
     this.psize = new Float32Array(this.capacity);
     this.pidx = new Float32Array(this.capacity);
     for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
@@ -883,12 +897,15 @@ class SystemRenderer {
     this.frameSeedAttr.setUsage(THREE.DynamicDrawUsage);
     this.framePhaseAttr = new THREE.BufferAttribute(this.framePhase, 1);
     this.framePhaseAttr.setUsage(THREE.DynamicDrawUsage);
+    this.rotationPhaseAttr = new THREE.BufferAttribute(this.rotationPhase, 1);
+    this.rotationPhaseAttr.setUsage(THREE.DynamicDrawUsage);
     geom.setAttribute('position', this.posAttr);
     geom.setAttribute('color', this.colorAttr);
     geom.setAttribute('size', this.sizeAttr);
     geom.setAttribute('age', this.ageAttr);
     geom.setAttribute('frameSeed', this.frameSeedAttr);
     geom.setAttribute('framePhase', this.framePhaseAttr);
+    geom.setAttribute('rotationPhase', this.rotationPhaseAttr);
     geom.setDrawRange(0, 0);
     this.points = new THREE.Points(geom, material);
     this.points.frustumCulled = false;
@@ -973,6 +990,11 @@ class SystemRenderer {
         const fps0 = sampleRamp(this.frameRateRamp, prevAge, 0);
         const fps1 = sampleRamp(this.frameRateRamp, age, 0);
         this.framePhase[i] += Math.max(0, 0.5 * (fps0 + fps1) * dt);
+      }
+      if (this.yawRateRamp) {
+        const yaw0 = sampleRamp(this.yawRateRamp, prevAge, 0);
+        const yaw1 = sampleRamp(this.yawRateRamp, age, 0);
+        this.rotationPhase[i] += 0.5 * (yaw0 + yaw1) * dt;
       }
       // Per-particle clocks for the parameterType axis (RE 2026-06-04): ramps
       // are sampled on their own clock in SECONDS (or m/s, or the u8 index) —
@@ -1091,6 +1113,7 @@ class SystemRenderer {
         this.sizeArr[writeIdx] = this.sizeArr[i];
         this.frameSeed[writeIdx] = this.frameSeed[i];
         this.framePhase[writeIdx] = this.framePhase[i];
+        this.rotationPhase[writeIdx] = this.rotationPhase[i];
       }
       this.ageGpu[writeIdx] = this.age[i];
       writeIdx++;
@@ -1102,6 +1125,7 @@ class SystemRenderer {
     this.ageAttr.needsUpdate = true;
     this.frameSeedAttr.needsUpdate = true;
     this.framePhaseAttr.needsUpdate = true;
+    this.rotationPhaseAttr.needsUpdate = true;
   }
 
   /** Pre-fill the ring buffer to the engine's frame-1 density: run STEPS
@@ -1200,6 +1224,7 @@ class SystemRenderer {
     this.frameSeed[slot] =
       this.framesRangeEnd > 0 ? Math.floor(Math.random() * this.framesRangeEnd) : 0;
     this.framePhase[slot] = 0;
+    this.rotationPhase[slot] = 0;
     const sc = SystemRenderer.TMP_CLOCKS;
     sc.particleAge = 0;
     sc.systemAge = this.elapsed;
@@ -1857,6 +1882,11 @@ interface ParticleMaterialOptions {
    *  passes the accumulated frame position through the `framePhase`
    *  attribute. */
   frameRateRamp?: ParticleRamp;
+  /** Renderer.yawRateRamp support. When enabled, the fragment shader rotates
+   *  textured sprite UVs by the per-particle `rotationPhase` attribute. */
+  spriteRotation?: boolean;
+  /** PS_RRC pivot label: bottom / corner / center / custom. */
+  rotationCenter?: string;
 }
 
 /**
@@ -1933,6 +1963,19 @@ const PS_RBT_LUT_MODES = new Set(['GRADIENT_MAP', 'UNDERWATER_GRADIENT_MAP']);
  *  `project-particle-lm-lightmap`. */
 const PS_RLT_LIGHTMAP_MODES = new Set(['lightmapping4Way', 'lightmappingHL2']);
 
+function rotationPivotForCenter(label: string | undefined): THREE.Vector2 {
+  switch (label) {
+    case 'bottom':
+      return new THREE.Vector2(0.5, 0.0);
+    case 'corner':
+      return new THREE.Vector2(0.0, 0.0);
+    case 'center':
+    case 'custom':
+    default:
+      return new THREE.Vector2(0.5, 0.5);
+  }
+}
+
 /**
  * Build a per-system point-sprite material. Each SystemRenderer owns
  * its own copy so per-system uniforms (atlas rect, frame grid, texture
@@ -1976,6 +2019,8 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
   // (end - begin) modulus was wrong.
   const framesBegin = opts.framesRangeBegin ?? 0;
   const framesEnd = opts.framesRangeEnd ?? 0;
+  const spriteRotation = opts.spriteRotation ? 1 : 0;
+  const rotationPivot = rotationPivotForCenter(opts.rotationCenter);
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       map: { value: null as THREE.Texture | null },
@@ -2023,6 +2068,11 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       // random cell (selected from the per-particle `frameSeed` attribute),
       // no time advance. Takes precedence over the animated flipbook.
       uRandomFrame: { value: opts.randomFrameOnly ? 1 : 0 },
+      // Renderer.yawRateRamp: per-particle sprite UV rotation. The point size
+      // expands by sqrt(2) in the vertex shader so a rotated square sprite does
+      // not clip inside the fixed GL_POINT bounds.
+      uUseSpriteRotation: { value: spriteRotation },
+      uRotationPivot: { value: rotationPivot },
       // Directional-lightmap (PS_RLT) reconstruction. uLightingMode=1 when
       // the texture is an `_LM` lightmap (lightmapping4Way/HL2); the
       // fragment shader then treats `map` RGB as a 3-direction HL2-basis
@@ -2088,20 +2138,25 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       attribute float age;
       attribute float frameSeed;
       attribute float framePhase;
+      attribute float rotationPhase;
+      uniform float uUseSpriteRotation;
       varying vec4 vColor;
       varying float vAge;
       varying float vFrameSeed;
       varying float vFramePhase;
+      varying float vRotationPhase;
 
       void main() {
         vColor = color;
         vAge = age;
         vFrameSeed = frameSeed;
         vFramePhase = framePhase;
+        vRotationPhase = rotationPhase;
         vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * mvPosition;
         // size is metres (world space); divide by distance for perspective.
-        gl_PointSize = max(1.0, size * 200.0 / -mvPosition.z);
+        float rotationExpansion = (uUseSpriteRotation > 0.5) ? 1.41421356237 : 1.0;
+        gl_PointSize = max(1.0, size * rotationExpansion * 200.0 / -mvPosition.z);
       }
     `,
     fragmentShader: /* glsl */ `
@@ -2120,6 +2175,8 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float animationPeriod;
       uniform float useFrameGrid;
       uniform float uRandomFrame;
+      uniform float uUseSpriteRotation;
+      uniform vec2 uRotationPivot;
       uniform float uLightingMode;
       uniform vec3 uSunDirWorld;
       uniform sampler2D mvMap;
@@ -2134,12 +2191,25 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       varying float vAge;
       varying float vFrameSeed;
       varying float vFramePhase;
+      varying float vRotationPhase;
 
       void main() {
         vec4 base;
         vec3 glow = vec3(0.0);   // additive warm glow (gradient+lightmapping)
         if (useMap > 0.5) {
           vec2 local = gl_PointCoord;
+          if (uUseSpriteRotation > 0.5) {
+            // GL_POINTS cannot rotate the quad geometry. Enlarge the point in
+            // the vertex shader, map the larger point back to a unit sprite
+            // square, then rotate source UVs by the inverse angle so the
+            // visible sprite turns by +vRotationPhase around PS_RRC.
+            local = (local - vec2(0.5)) * 1.41421356237 + vec2(0.5);
+            vec2 rel = local - uRotationPivot;
+            float s = sin(vRotationPhase);
+            float c = cos(vRotationPhase);
+            local = uRotationPivot + vec2(c * rel.x + s * rel.y, -s * rel.x + c * rel.y);
+            if (local.x < 0.0 || local.x > 1.0 || local.y < 0.0 || local.y > 1.0) discard;
+          }
           float fx = framesPerXY.x;
           float fy = framesPerXY.y;
           // L4 (RE doc 63): the engine never reads animationPeriod. Gate the
@@ -2518,6 +2588,7 @@ export class ParticleScene {
       const useAtlas = !r?.textureUrl0 && !!r?.textureAtlas0;
       const useLut = !!r?.blendType && PS_RBT_LUT_MODES.has(r.blendType) && !!r?.textureUrl1;
       const useMv = anim?.animationType === 'motionVectors' && !!anim?.motionVectorsTextureUrl;
+      const useSpriteRotation = (!!r?.textureUrl0 || useAtlas) && rampHasNonZeroValue(r?.yawRateRamp);
       const mat = buildParticleMaterial({
         blendType: r?.blendType,
         lightingType: r?.lightingType,
@@ -2533,6 +2604,8 @@ export class ParticleScene {
         useEmissionAlphaFromMV: useMv ? anim?.useEmissionAlphaFromMV : undefined,
         randomFrameOnly: anim?.randomFrameOnly,
         frameRateRamp: anim?.frameRateRamp,
+        spriteRotation: useSpriteRotation,
+        rotationCenter: r?.rotationCenter,
       });
       const renderer = new SystemRenderer(sys, mat, rec.maxEmittingDuration, {
         spawnEffect,
