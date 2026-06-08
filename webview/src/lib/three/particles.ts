@@ -46,6 +46,7 @@ const PARTICLE_POINT_LIGHT_BUDGET = 24;
 const CHILD_EFFECT_DEPTH_LIMIT = 3;
 const CHILD_EFFECT_BUDGET = 256;
 const CHILD_EFFECT_SPAWNS_PER_SYSTEM_TICK = 8;
+const SEA_LEVEL_Y = 0;
 
 /** Sample a 1D ``Ramp`` curve at parameter ``t ∈ [0, 1]``. */
 function sampleRamp(ramp: ParticleRamp | undefined, t: number, fallback = 1): number {
@@ -528,6 +529,7 @@ class SystemRenderer {
   private emitterPosVg: ParticleVariantVg | undefined;
   private emitterVelVg: ParticleVariantVg | undefined;
   private emitterActivePeriod: number;
+  private snapToSeaLevel = false;
   // Per-action driver fields.
   private tintColor: ParticleColor | undefined;
   private alphaRamp: ParticleRamp | undefined;
@@ -621,6 +623,8 @@ class SystemRenderer {
   private static readonly TMP_AXIS = new THREE.Vector3();
   private static readonly TMP_REL = new THREE.Vector3();
   private static readonly TMP_REL2 = new THREE.Vector3();
+  private static readonly TMP_WORLD = new THREE.Vector3();
+  private static readonly TMP_QUAT = new THREE.Quaternion();
   private static readonly TMP_COL = new Float32Array(4);
   // Reused per-particle clock scratch (mutated in tick/spawn; the per-particle
   // update loop and the emit/spawn phase run sequentially, never concurrently).
@@ -837,6 +841,7 @@ class SystemRenderer {
     this.emitterPosVg = system.emitter?.initialPositionGenerator;
     this.emitterVelVg = system.emitter?.initialVelocityGenerator;
     this.emitterActivePeriod = Math.max(0, system.emitter?.activePeriod ?? 0);
+    this.snapToSeaLevel = !!system.emitter?.snapToSeaLevel;
     // SIZE base (RE 2026-06-04): the emitter's sizeGenerator is the per-particle
     // BASE size in METRES; ageScaleGenerator is a per-particle life multiplier.
     // Both are typically linear (random) → sampled once at spawn into psize[].
@@ -1197,6 +1202,7 @@ class SystemRenderer {
     }
     if (slot < 0) return;
     samplePosFromVariantVg(posVg, SystemRenderer.TMP_POS);
+    this.applySeaLevelBaseOffset(SystemRenderer.TMP_POS);
     samplePosFromVariantVg(velVg, SystemRenderer.TMP_VEL);
     this.pos[slot * 3 + 0] = SystemRenderer.TMP_POS.x;
     this.pos[slot * 3 + 1] = SystemRenderer.TMP_POS.y;
@@ -1242,6 +1248,23 @@ class SystemRenderer {
     }
     this.sizeArr[slot] = Math.max(0, sz0);
     this.alive++;
+  }
+
+  private applySeaLevelBaseOffset(pos: THREE.Vector3): void {
+    if (!this.snapToSeaLevel) return;
+    const parent = this.points.parent;
+    if (!parent) return;
+    // Native `snapToSeaLevel` snaps the emitter base, not every particle's
+    // authored local height. Preserve local Y offsets and velocity by applying
+    // only the parent-translation delta at spawn.
+    parent.updateWorldMatrix(true, false);
+    parent.getWorldPosition(SystemRenderer.TMP_WORLD);
+    const dy = SEA_LEVEL_Y - SystemRenderer.TMP_WORLD.y;
+    if (Math.abs(dy) <= 1e-6) return;
+    const offset = SystemRenderer.TMP_POS2.set(0, dy, 0);
+    parent.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
+    offset.applyQuaternion(SystemRenderer.TMP_QUAT);
+    pos.add(offset);
   }
 
   private applyStreamActions(slot: number, age: number, dt: number): void {
