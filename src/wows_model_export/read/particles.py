@@ -910,9 +910,9 @@ def _decode_general(buf: bytes | mmap.mmap, sys_off: int) -> dict:
     base = sys_off + 0x170
     capacity, max_instances = struct.unpack_from("<II", buf, base)
     max_age, camera_attach = struct.unpack_from("<2f", buf, base + 0x08)
-    coord_style = buf[base + 0x10]
-    refl = bool(buf[base + 0x11])
-    prewarm = bool(buf[base + 0x12])
+    coord_style = struct.unpack_from("<i", buf, base + 0x10)[0]
+    refl = bool(buf[base + 0x14])
+    prewarm = bool(buf[base + 0x15])
     return {
         "capacity": int(capacity),
         "maxInstancesCount": int(max_instances),

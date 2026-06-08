@@ -15,10 +15,10 @@
 // recent laptop. Heavier scenes (idle wakes + 4 fires) should switch to
 // a GPU-driven backend; that's a future iteration.
 //
-// Coordinates: emitter positions/velocities are simulated in the local
-// frame of the attachment group. ShipViewer copies the live WG anchor
-// position/quaternion onto that group so node-attached systems inherit
-// mount/muzzle orientation before Three.js carries them into world space.
+// Coordinates: most systems (coordinateStyle=2) simulate in the attachment
+// group's local frame. WG's detached coordinate styles (0/1/3) sample their
+// spawn data in the source attachment frame, then run in the particle-root
+// frame so older particles do not keep inheriting future parent motion.
 
 import * as THREE from 'three';
 import type {
@@ -47,6 +47,11 @@ const CHILD_EFFECT_DEPTH_LIMIT = 3;
 const CHILD_EFFECT_BUDGET = 256;
 const CHILD_EFFECT_SPAWNS_PER_SYSTEM_TICK = 8;
 const SEA_LEVEL_Y = 0;
+
+function systemUsesDetachedCoordinateFrame(system: ParticleSystem): boolean {
+  const coord = system.general?.coordinateStyle ?? 2;
+  return coord < 2 || coord === 3;
+}
 
 /** Sample a 1D ``Ramp`` curve at parameter ``t ∈ [0, 1]``. */
 function sampleRamp(ramp: ParticleRamp | undefined, t: number, fallback = 1): number {
@@ -222,6 +227,8 @@ type ParticleEffectSpawnCallback = (request: ParticleEffectSpawnRequest) => void
 interface SystemRendererOptions {
   spawnEffect?: ParticleEffectSpawnCallback;
   loopOneShot?: boolean;
+  /** Attachment/group frame WG uses while sampling spawn authoring data. */
+  sourceGroup?: THREE.Object3D;
 }
 
 function rampHasNonZeroValue(ramp: ParticleRamp | undefined): boolean {
@@ -610,6 +617,8 @@ class SystemRenderer {
   private finished = false;
   private readonly spawnEffect?: ParticleEffectSpawnCallback;
   private readonly loopOneShot: boolean;
+  private readonly sourceGroup?: THREE.Object3D;
+  private readonly detachedCoordinateFrame: boolean;
   private barrierScaleMultiplier = 1;
   private barrierAlphaMultiplier = 1;
   private barrierInsideNow = false;
@@ -676,6 +685,8 @@ class SystemRenderer {
     this.spawnEffect = options.spawnEffect;
     this.loopOneShot = options.loopOneShot ?? true;
     const gen = system.general;
+    this.sourceGroup = options.sourceGroup;
+    this.detachedCoordinateFrame = systemUsesDetachedCoordinateFrame(system);
     this.maxAge = Math.max(0.05, gen?.maxParticleAge ?? DEFAULT_PARTICLE_LIFETIME);
     const desiredCap = Math.max(1, gen?.capacity ?? 32);
     this.capacity = Math.min(desiredCap, ABSOLUTE_MAX_CAPACITY);
@@ -717,9 +728,10 @@ class SystemRenderer {
             vector: new THREE.Vector3(v[0], v[1], v[2]),
             halfLife: typeof body.halfLife === 'number' ? body.halfLife : -1,
             delay: typeof body.delay === 'number' ? body.delay : 0,
-            // Parsed but not yet frame-switched. The simulator now runs in the
-            // attachment group's local frame; exact WG semantics for this flag
-            // still need a focused coordinateStyle RE pass.
+            // Parsed and preserved. Native stream.switchCoordinateStyle
+            // interacts with the same coordinateStyle frame selection audited
+            // in 2026-06-08; the webview's stream vector is still applied in
+            // the active simulation frame.
             switchCoordinateStyle: !!body.switchCoordinateStyle,
           });
         }
@@ -921,6 +933,7 @@ class SystemRenderer {
 
   setActive(active: boolean): void {
     this.active = active;
+    this.points.visible = active;
     if (active && this.loopOneShot) this.finished = false;
   }
 
@@ -933,10 +946,10 @@ class SystemRenderer {
       return;
     }
     this.parentVelocityLocal.copy(velocity);
-    const parent = this.points.parent;
-    if (!parent) return;
-    parent.updateWorldMatrix(true, false);
-    parent.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
+    const source = this.sourceFrame();
+    if (!source) return;
+    source.updateWorldMatrix(true, false);
+    source.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
     this.parentVelocityLocal.applyQuaternion(SystemRenderer.TMP_QUAT);
   }
 
@@ -1226,6 +1239,7 @@ class SystemRenderer {
     if (this.inheritVelocityFactor !== 0) {
       SystemRenderer.TMP_VEL.addScaledVector(this.parentVelocityLocal, this.inheritVelocityFactor);
     }
+    this.convertSpawnToSimulationFrame(SystemRenderer.TMP_POS, SystemRenderer.TMP_VEL);
     this.pos[slot * 3 + 0] = SystemRenderer.TMP_POS.x;
     this.pos[slot * 3 + 1] = SystemRenderer.TMP_POS.y;
     this.pos[slot * 3 + 2] = SystemRenderer.TMP_POS.z;
@@ -1274,19 +1288,49 @@ class SystemRenderer {
 
   private applySeaLevelBaseOffset(pos: THREE.Vector3): void {
     if (!this.snapToSeaLevel) return;
-    const parent = this.points.parent;
-    if (!parent) return;
+    const source = this.sourceFrame();
+    if (!source) return;
     // Native `snapToSeaLevel` snaps the emitter base, not every particle's
     // authored local height. Preserve local Y offsets and velocity by applying
     // only the parent-translation delta at spawn.
-    parent.updateWorldMatrix(true, false);
-    parent.getWorldPosition(SystemRenderer.TMP_WORLD);
+    source.updateWorldMatrix(true, false);
+    source.getWorldPosition(SystemRenderer.TMP_WORLD);
     const dy = SEA_LEVEL_Y - SystemRenderer.TMP_WORLD.y;
     if (Math.abs(dy) <= 1e-6) return;
     const offset = SystemRenderer.TMP_POS2.set(0, dy, 0);
-    parent.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
+    source.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
     offset.applyQuaternion(SystemRenderer.TMP_QUAT);
     pos.add(offset);
+  }
+
+  private sourceFrame(): THREE.Object3D | null {
+    return this.sourceGroup ?? this.points.parent;
+  }
+
+  private convertSpawnToSimulationFrame(pos: THREE.Vector3, vel: THREE.Vector3): void {
+    if (!this.detachedCoordinateFrame) return;
+    const source = this.sourceFrame();
+    const target = this.points.parent;
+    if (!source || !target || source === target) return;
+    source.updateWorldMatrix(true, false);
+    target.updateWorldMatrix(true, false);
+    source.localToWorld(pos);
+    target.worldToLocal(pos);
+    source.getWorldQuaternion(SystemRenderer.TMP_QUAT);
+    vel.applyQuaternion(SystemRenderer.TMP_QUAT);
+    target.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
+    vel.applyQuaternion(SystemRenderer.TMP_QUAT);
+  }
+
+  private convertSimulationPositionToSourceFrame(pos: THREE.Vector3): void {
+    if (!this.detachedCoordinateFrame) return;
+    const source = this.sourceFrame();
+    const simulation = this.points.parent;
+    if (!source || !simulation || source === simulation) return;
+    simulation.updateWorldMatrix(true, false);
+    source.updateWorldMatrix(true, false);
+    simulation.localToWorld(pos);
+    source.worldToLocal(pos);
   }
 
   private applyStreamActions(slot: number, age: number, dt: number): void {
@@ -1522,9 +1566,11 @@ class SystemRenderer {
           break;
         case BARRIER_REACTION_SPAWN:
           if (allowChildSpawns && crossed && action.effectName && this.spawnEffect) {
+            const spawnPos = SystemRenderer.TMP_WORLD.copy(current);
+            this.convertSimulationPositionToSourceFrame(spawnPos);
             this.spawnEffect({
               effectName: action.effectName,
-              position: [current.x, current.y, current.z],
+              position: [spawnPos.x, spawnPos.y, spawnPos.z],
             });
           }
           break;
@@ -1743,6 +1789,7 @@ class SystemRenderer {
   }
 
   dispose(): void {
+    this.points.parent?.remove(this.points);
     this.points.geometry.dispose();
     this.material.dispose();
     // Texture lifetime is managed by the ParticleScene's texture cache
@@ -1800,6 +1847,7 @@ class LightRenderer {
   }
 
   dispose(): void {
+    this.group.parent?.remove(this.group);
     this.material.dispose();
   }
 
@@ -2627,6 +2675,7 @@ export class ParticleScene {
     for (const sys of rec.systems) {
       const r = sys.renderer;
       const anim = sys.animation;
+      const systemParent = systemUsesDetachedCoordinateFrame(sys) ? this.root : group;
       // Texture source: prefer the direct DDS URL when present (the
       // texture was extracted as its own file); otherwise route through the
       // manifest atlas mapping. Both paths compose with the animation grid.
@@ -2655,15 +2704,22 @@ export class ParticleScene {
       const renderer = new SystemRenderer(sys, mat, rec.maxEmittingDuration, {
         spawnEffect,
         loopOneShot,
+        sourceGroup: group,
       });
       renderer.setActive(active);
-      group.add(renderer.points);
+      systemParent.add(renderer.points);
       systems.push(renderer);
       for (const c of sys.components ?? []) {
         if (c.kind !== 'light' || !c.body) continue;
         const light = new LightRenderer(c.body);
         light.setActive(active);
-        group.add(light.group);
+        if (systemParent !== group) {
+          group.updateWorldMatrix(true, false);
+          systemParent.updateWorldMatrix(true, false);
+          group.localToWorld(light.group.position);
+          systemParent.worldToLocal(light.group.position);
+        }
+        systemParent.add(light.group);
         lights.push(light);
       }
       const texPath = r?.textureUrl0 ?? (useAtlas ? r!.textureAtlas0!.page : undefined);
