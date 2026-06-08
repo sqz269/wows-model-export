@@ -28,6 +28,7 @@
     LodPolicy,
     NodeCategory,
     ShipViewer,
+    ShipParticleMode,
     ShipParticleStats,
     WgEnvironmentInfo,
   } from '$lib/ship';
@@ -110,8 +111,13 @@
   );
   let hasParticles = $state(false);
   let particlesView = $state(false);
+  let particleMode = $state<ShipParticleMode>('ambient');
   let particlesLoading = $state(false);
   let particleStats = $state<Readonly<ShipParticleStats> | null>(null);
+  const PARTICLE_MODES: Array<{ value: ShipParticleMode; label: string }> = [
+    { value: 'ambient', label: 'Ambient' },
+    { value: 'all', label: 'All' },
+  ];
   // Color swatch CSS for the legend (hex int -> #rrggbb).
   function catSwatch(cat: NodeCategory): string {
     return '#' + NODE_CATEGORY_COLOR[cat].toString(16).padStart(6, '0');
@@ -269,6 +275,7 @@
       nodeCats = nc;
       hasParticles = viewer.hasShipParticleData();
       particlesView = viewer.getShipParticlesVisible();
+      particleMode = viewer.getShipParticleMode();
       particleStats = viewer.getShipParticleStats();
 
       // Honor the persisted Show-textures choice. Each ship's viewer
@@ -412,6 +419,19 @@
       particlesView = viewer.getShipParticlesVisible();
       const msg = err instanceof Error ? err.message : String(err);
       toast.error('Particle layer failed', { description: msg, duration: 8000 });
+    } finally {
+      particlesLoading = false;
+    }
+  }
+  async function setParticleMode(mode: ShipParticleMode) {
+    particleMode = mode;
+    particlesLoading = true;
+    try {
+      particleStats = await viewer.setShipParticleMode(mode);
+    } catch (err) {
+      particleMode = viewer.getShipParticleMode();
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error('Particle mode failed', { description: msg, duration: 8000 });
     } finally {
       particlesLoading = false;
     }
@@ -837,10 +857,29 @@
             <span class="text-muted-foreground/70 text-[10px]">loading</span>
           {/if}
         </label>
+        <div class="ml-5 flex w-fit overflow-hidden rounded border border-border text-[10px]">
+          {#each PARTICLE_MODES as mode}
+            <button
+              type="button"
+              class="px-2 py-0.5 transition-colors disabled:opacity-50 {particleMode === mode.value
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-background text-muted-foreground hover:bg-muted hover:text-foreground'}"
+              aria-pressed={particleMode === mode.value}
+              disabled={particlesLoading}
+              onclick={() => void setParticleMode(mode.value)}
+            >
+              {mode.label}
+            </button>
+          {/each}
+        </div>
         {#if particleStats}
           <div class="grid grid-cols-2 gap-x-3 gap-y-0.5 pl-5 text-[10px]">
             <span class="text-muted-foreground">active</span>
             <span class="tabular-nums">{particleStats.activeAttachments}</span>
+            <span class="text-muted-foreground">ambient</span>
+            <span class="tabular-nums">{particleStats.ambientAttachments}</span>
+            <span class="text-muted-foreground">events</span>
+            <span class="tabular-nums">{particleStats.eventAttachments}</span>
             <span class="text-muted-foreground">rows</span>
             <span class="tabular-nums">{particleStats.renderableAttachments}</span>
             <span class="text-muted-foreground">anchors</span>
@@ -851,9 +890,9 @@
             >
             <span class="text-muted-foreground">systems</span>
             <span class="tabular-nums">{particleStats.systems}</span>
-            {#if particleStats.eventOnlyAttachments > 0}
-              <span class="text-muted-foreground">event-only</span>
-              <span class="tabular-nums">{particleStats.eventOnlyAttachments}</span>
+            {#if particleStats.unanchoredAttachments > 0}
+              <span class="text-muted-foreground">unanchored</span>
+              <span class="tabular-nums">{particleStats.unanchoredAttachments}</span>
             {/if}
             {#if particleStats.missingRecords > 0}
               <span class="text-muted-foreground">missing</span>

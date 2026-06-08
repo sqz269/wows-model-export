@@ -256,6 +256,13 @@ function muzzleIndex(name: string): number {
   return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
 }
 
+const SHIP_AMBIENT_PARTICLE_GROUPS = new Set(['idleport', 'smoke']);
+
+function isWakeParticleGroup(group: string): boolean {
+  const g = group.toLowerCase();
+  return g.startsWith('waketrace') || g.startsWith('propeller');
+}
+
 export interface ShipLoadStats {
   ship: ShipSummary;
   hullMeshCount: number;
@@ -270,12 +277,17 @@ export interface ShipLoadStats {
   skinCount: number;
 }
 
+export type ShipParticleMode = 'ambient' | 'all';
+
 export interface ShipParticleStats {
   attachmentRows: number;
   renderableAttachments: number;
   anchorInstances: number;
   activeAttachments: number;
+  ambientAttachments: number;
+  eventAttachments: number;
   eventOnlyAttachments: number;
+  unanchoredAttachments: number;
   unresolvedAnchors: number;
   uniquePaths: number;
   recordsLoaded: number;
@@ -289,7 +301,10 @@ function emptyShipParticleStats(): ShipParticleStats {
     renderableAttachments: 0,
     anchorInstances: 0,
     activeAttachments: 0,
+    ambientAttachments: 0,
+    eventAttachments: 0,
     eventOnlyAttachments: 0,
+    unanchoredAttachments: 0,
     unresolvedAnchors: 0,
     uniquePaths: 0,
     recordsLoaded: 0,
@@ -415,6 +430,7 @@ export class ShipViewer {
   private particleAnchorMotion = new Map<ParticleAttachmentHandle, ParticleAnchorMotion>();
   private particleAttachmentAnchors = new WeakMap<ParticleAttachment, THREE.Object3D>();
   private particleLayerEnabled = false;
+  private particleMode: ShipParticleMode = 'ambient';
   private particleBuildPromise: Promise<ShipParticleStats> | null = null;
   private particleBuildToken = 0;
   private particleStats: ShipParticleStats = emptyShipParticleStats();
@@ -1174,7 +1190,20 @@ export class ShipViewer {
     return this.particleLayerEnabled;
   }
 
+  getShipParticleMode(): ShipParticleMode {
+    return this.particleMode;
+  }
+
   getShipParticleStats(): Readonly<ShipParticleStats> {
+    return this.particleStats;
+  }
+
+  async setShipParticleMode(mode: ShipParticleMode): Promise<ShipParticleStats> {
+    this.particleMode = mode;
+    if (!this.particleLayerEnabled) return this.particleStats;
+    if (this.particleBuildPromise) return this.particleBuildPromise;
+    if (!this.particleScene) return this.setShipParticlesVisible(true);
+    this.applyShipParticleActivation();
     return this.particleStats;
   }
 
@@ -1193,11 +1222,7 @@ export class ShipViewer {
     }
     if (this.particleScene) {
       this.particleScene.root.visible = true;
-      this.particleScene.setAllActive(true);
-      this.particleStats = {
-        ...this.particleStats,
-        activeAttachments: this.particleHandles.length,
-      };
+      this.applyShipParticleActivation();
       return this.particleStats;
     }
     if (this.particleBuildPromise) return this.particleBuildPromise;
@@ -1712,7 +1737,7 @@ export class ShipViewer {
   private async buildShipParticleLayer(token: number): Promise<ShipParticleStats> {
     const attachments = this.sidecar?.effects?.attachments ?? [];
     const renderable = attachments.filter((a) => this.canAnchorParticleAttachment(a));
-    const eventOnly = attachments.length - renderable.length;
+    const unanchored = attachments.length - renderable.length;
     const paths = [...new Set(renderable.map((a) => a.particle_path).filter(Boolean))].sort();
     const result = await fetchParticleRecords(paths, { concurrency: 8 });
     if (token !== this.particleBuildToken) return this.particleStats;
@@ -1735,18 +1760,23 @@ export class ShipViewer {
         this.particleAnchorObjects.set(h, obj);
         this.copyParticleAnchorTransform(h, obj);
       }
-      scene.setAttachmentActive(h, this.particleLayerEnabled);
+      scene.setAttachmentActive(h, false);
     }
     scene.root.visible = this.particleLayerEnabled;
 
     let systems = 0;
     for (const h of handles) systems += h.systems.length;
+    const ambient = handles.filter((h) => this.isAmbientParticleAttachment(h.attachment)).length;
+    const events = handles.length - ambient;
     const stats: ShipParticleStats = {
       attachmentRows: attachments.length,
       renderableAttachments: renderable.length,
       anchorInstances: expanded.length,
-      activeAttachments: this.particleLayerEnabled ? handles.length : 0,
-      eventOnlyAttachments: eventOnly,
+      activeAttachments: 0,
+      ambientAttachments: ambient,
+      eventAttachments: events,
+      eventOnlyAttachments: events,
+      unanchoredAttachments: unanchored,
       unresolvedAnchors: Math.max(0, expanded.length - handles.length),
       uniquePaths: paths.length,
       recordsLoaded: Object.keys(result.records).length,
@@ -1754,10 +1784,11 @@ export class ShipViewer {
       systems,
     };
     this.particleStats = stats;
+    this.applyShipParticleActivation();
     if (result.errors.length > 0) {
       console.warn('[ship particles] some particle records failed to load', result.errors);
     }
-    return stats;
+    return this.particleStats;
   }
 
   private syncParticleSunLighting(scene = this.particleScene): void {
@@ -1788,6 +1819,29 @@ export class ShipViewer {
     if (!a.particle_path) return false;
     if (a.position?.length === 3) return true;
     return !!this.resolveParticleAnchorObject(a);
+  }
+
+  private isAmbientParticleAttachment(a: ParticleAttachment): boolean {
+    const source = a.source ?? 'hull';
+    if (source === 'map') return true;
+    if (source !== 'hull') return false;
+    const group = (a.group ?? '').toLowerCase();
+    return SHIP_AMBIENT_PARTICLE_GROUPS.has(group) || isWakeParticleGroup(group);
+  }
+
+  private applyShipParticleActivation(): number {
+    if (!this.particleScene) return 0;
+    let active = 0;
+    for (const h of this.particleHandles) {
+      const on =
+        this.particleLayerEnabled &&
+        (this.particleMode === 'all' || this.isAmbientParticleAttachment(h.attachment));
+      this.particleScene.setAttachmentActive(h, on);
+      if (on) active++;
+    }
+    this.particleScene.root.visible = this.particleLayerEnabled;
+    this.particleStats = { ...this.particleStats, activeAttachments: active };
+    return active;
   }
 
   private expandParticleAttachments(attachments: ParticleAttachment[]): ParticleAttachment[] {
