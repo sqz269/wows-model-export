@@ -364,6 +364,19 @@ export interface ParticleComponentBody {
   forceZGenerator?: ParticleValueGenerator;
   // generic
   delay?: number;
+  reaction?: number;
+  strength?: number;
+  stopAge?: number;
+  position?: [number, number, number];
+  radius?: number;
+  corner?: [number, number, number];
+  opposite?: [number, number, number];
+  planeEquation?: [number, number, number, number];
+  useWorldSpace?: boolean;
+  topLeftFront?: [number, number, number];
+  bottomRightBack?: [number, number, number];
+  velocityScale?: number;
+  influence?: number;
   // stream
   vector?: [number, number, number];
   halfLife?: number;
@@ -375,7 +388,6 @@ export interface ParticleComponentBody {
   radiusAnimation?: ParticleRamp;
   color?: [number, number, number, number];
   localPosition?: [number, number, number];
-  radius?: number;
   minQuality?: number;
   animatedColor?: boolean;
   animatedRadius?: boolean;

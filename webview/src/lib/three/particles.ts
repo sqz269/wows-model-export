@@ -175,6 +175,135 @@ interface MagnetAction {
   strength: number;
 }
 
+type BarrierShape = 'sphere' | 'cylinder' | 'box' | 'plane';
+
+const BARRIER_REACTION_SCALE = 0;
+const BARRIER_REACTION_BOUNCE = 1;
+const BARRIER_REACTION_REMOVE = 2;
+const BARRIER_REACTION_SPAWN = 3;
+const BARRIER_REACTION_WRAP = 4;
+const BARRIER_REACTION_ALPHA = 5;
+const BARRIER_REACTION_DAMP = 6;
+const BARRIER_REACTION_FORCE = 7;
+
+interface BarrierAction {
+  shape: BarrierShape;
+  reaction: number;
+  strength: number;
+  stopAge: number;
+  delay: number;
+  position: THREE.Vector3;
+  radius: number;
+  corner: THREE.Vector3;
+  opposite: THREE.Vector3;
+  planeNormal: THREE.Vector3;
+  planeConstant: number;
+  useWorldSpace: boolean;
+  effectName: string;
+}
+
+interface VelocityFieldData {
+  sizeX: number;
+  sizeY: number;
+  sizeZ: number;
+  vectors: Float32Array;
+}
+
+interface VelocityFieldAction {
+  topLeftFront: THREE.Vector3;
+  bottomRightBack: THREE.Vector3;
+  stopAge: number;
+  delay: number;
+  velocityScale: number;
+  influence: number;
+  fieldSourceName: string;
+  field: VelocityFieldData | null;
+}
+
+const velocityFieldCache = new Map<string, Promise<VelocityFieldData | null>>();
+
+function fetchVelocityField(path: string): Promise<VelocityFieldData | null> {
+  let pending = velocityFieldCache.get(path);
+  if (!pending) {
+    pending = fetch(repoUrl(path))
+      .then(async (res) => {
+        if (!res.ok) return null;
+        const field = decodeVelocityField(await res.arrayBuffer());
+        if (!field) console.warn('[particles] velocity field decode failed', path);
+        return field;
+      })
+      .catch((err) => {
+        console.warn('[particles] velocity field load failed', path, err);
+        return null;
+      });
+    velocityFieldCache.set(path, pending);
+  }
+  return pending;
+}
+
+function decodeVelocityField(buffer: ArrayBuffer): VelocityFieldData | null {
+  if (buffer.byteLength < 24) return null;
+  const view = new DataView(buffer);
+  const production = decodeProductionVelocityField(view, buffer.byteLength);
+  if (production) return production;
+  return decodeLegacyVelocityField(view, buffer.byteLength);
+}
+
+function decodeProductionVelocityField(view: DataView, byteLength: number): VelocityFieldData | null {
+  const sizeX = view.getUint32(0, true);
+  const sizeY = view.getUint32(4, true);
+  const sizeZ = view.getUint32(8, true);
+  const scalarCount = view.getUint32(12, true);
+  const dataOffset = view.getUint32(16, true) + view.getUint32(20, true) * 0x100000000;
+  const expectedCount = sizeX * sizeY * sizeZ * 3;
+  if (
+    sizeX <= 0 ||
+    sizeY <= 0 ||
+    sizeZ <= 0 ||
+    sizeX > 256 ||
+    sizeY > 256 ||
+    sizeZ > 256 ||
+    scalarCount !== expectedCount ||
+    dataOffset < 24 ||
+    dataOffset + scalarCount * 2 > byteLength
+  ) {
+    return null;
+  }
+  const vectors = new Float32Array(expectedCount);
+  for (let i = 0; i < expectedCount; i++) {
+    vectors[i] = halfToFloat(view.getUint16(dataOffset + i * 2, true));
+  }
+  return { sizeX, sizeY, sizeZ, vectors };
+}
+
+function decodeLegacyVelocityField(view: DataView, byteLength: number): VelocityFieldData | null {
+  if (byteLength < 8 || view.getUint32(0, true) !== 0x444c4656) return null; // "VFLD"
+  if (view.getUint8(4) !== 1) return null;
+  const sizeX = view.getUint8(5);
+  const sizeY = view.getUint8(6);
+  const sizeZ = view.getUint8(7);
+  const count = sizeX * sizeY * sizeZ * 3;
+  if (sizeX <= 0 || sizeY <= 0 || sizeZ <= 0 || byteLength < 8 + count * 2) return null;
+  const vectors = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    vectors[i] = Math.max(-1, view.getInt16(8 + i * 2, true) / 32767);
+  }
+  return { sizeX, sizeY, sizeZ, vectors };
+}
+
+function halfToFloat(bits: number): number {
+  const sign = bits & 0x8000 ? -1 : 1;
+  const exponent = (bits >> 10) & 0x1f;
+  const mantissa = bits & 0x03ff;
+  if (exponent === 0) {
+    return mantissa === 0 ? sign * 0 : sign * Math.pow(2, -14) * (mantissa / 1024);
+  }
+  if (exponent === 0x1f) {
+    return mantissa === 0 ? sign * Infinity : NaN;
+  }
+  return sign * Math.pow(2, exponent - 15) * (1 + mantissa / 1024);
+}
+
 /** PS_VALG_RAMP_PARAMETER → the ramp X axis. The shipped order is
  *  {0:systemAge,1:particleAge,2:systemVelocity,3:particleVelocity,
  *  4:systemActiveTime,5:particleIndex}; standalone/unkeyed ramps default to
@@ -384,6 +513,8 @@ class SystemRenderer {
   private jitterActions: JitterAction[] = [];
   private orbitorActions: OrbitorAction[] = [];
   private magnetActions: MagnetAction[] = [];
+  private barrierActions: BarrierAction[] = [];
+  private velocityFieldActions: VelocityFieldAction[] = [];
   private frameRateRamp: ParticleRamp | undefined;
 
   // Particle attribute arrays.
@@ -441,6 +572,11 @@ class SystemRenderer {
    *  is significantly > maxAge we drive the ramp by `elapsed` instead. */
   private alphaSetterIsSystemAge = false;
   private active = true;
+  private barrierScaleMultiplier = 1;
+  private barrierAlphaMultiplier = 1;
+  private barrierInsideNow = false;
+  private barrierInsideNext = false;
+  private barrierDistanceRatio = 1;
 
   // Tmp scratch — avoids per-frame Vector3 allocations.
   private static readonly TMP_POS = new THREE.Vector3();
@@ -449,6 +585,7 @@ class SystemRenderer {
   private static readonly TMP_VEL2 = new THREE.Vector3();
   private static readonly TMP_AXIS = new THREE.Vector3();
   private static readonly TMP_REL = new THREE.Vector3();
+  private static readonly TMP_REL2 = new THREE.Vector3();
   private static readonly TMP_COL = new Float32Array(4);
   // Reused per-particle clock scratch (mutated in tick/spawn; the per-particle
   // update loop and the emit/spawn phase run sequentially, never concurrently).
@@ -559,6 +696,75 @@ class SystemRenderer {
             minimalDistance:
               typeof body.minimalDistance === 'number' ? Math.max(0, body.minimalDistance) : 0,
             strength: typeof body.strength === 'number' ? body.strength : 0,
+          });
+        }
+      } else if (
+        c.action === 'sphere' ||
+        c.action === 'cylinder' ||
+        c.action === 'box' ||
+        c.action === 'plane'
+      ) {
+        const p = body.position;
+        const corner = body.corner;
+        const opposite = body.opposite;
+        const plane = body.planeEquation;
+        const planeNormal =
+          Array.isArray(plane) && plane.length >= 3
+            ? new THREE.Vector3(plane[0], plane[1], plane[2])
+            : new THREE.Vector3(0, 1, 0);
+        if (planeNormal.lengthSq() <= 1e-10) planeNormal.set(0, 1, 0);
+        planeNormal.normalize();
+        this.barrierActions.push({
+          shape: c.action,
+          reaction: typeof body.reaction === 'number' ? body.reaction : BARRIER_REACTION_BOUNCE,
+          strength: typeof body.strength === 'number' ? body.strength : 1,
+          stopAge: typeof body.stopAge === 'number' ? body.stopAge : 0,
+          delay: typeof body.delay === 'number' ? body.delay : 0,
+          position:
+            Array.isArray(p) && p.length === 3
+              ? new THREE.Vector3(p[0], p[1], p[2])
+              : new THREE.Vector3(),
+          radius: typeof body.radius === 'number' ? Math.max(0, body.radius) : 0,
+          corner:
+            Array.isArray(corner) && corner.length === 3
+              ? new THREE.Vector3(corner[0], corner[1], corner[2])
+              : new THREE.Vector3(),
+          opposite:
+            Array.isArray(opposite) && opposite.length === 3
+              ? new THREE.Vector3(opposite[0], opposite[1], opposite[2])
+              : new THREE.Vector3(),
+          planeNormal,
+          planeConstant: Array.isArray(plane) && plane.length >= 4 ? plane[3] : 0,
+          // Parsed but still simulated in attachment-local coordinates. Native
+          // supports world-space planes; resolving that exactly needs scene-level
+          // transform context instead of this per-system local renderer.
+          useWorldSpace: !!body.useWorldSpace,
+          effectName: typeof body.effectName === 'string' ? body.effectName : '',
+        });
+      } else if (c.action === 'velocityField') {
+        const top = body.topLeftFront;
+        const bottom = body.bottomRightBack;
+        const fieldSourceName = typeof body.fieldSourceName === 'string' ? body.fieldSourceName : '';
+        const action: VelocityFieldAction = {
+          topLeftFront:
+            Array.isArray(top) && top.length === 3
+              ? new THREE.Vector3(top[0], top[1], top[2])
+              : new THREE.Vector3(),
+          bottomRightBack:
+            Array.isArray(bottom) && bottom.length === 3
+              ? new THREE.Vector3(bottom[0], bottom[1], bottom[2])
+              : new THREE.Vector3(),
+          stopAge: typeof body.stopAge === 'number' ? body.stopAge : 0,
+          delay: typeof body.delay === 'number' ? body.delay : 0,
+          velocityScale: typeof body.velocityScale === 'number' ? body.velocityScale : 1,
+          influence: typeof body.influence === 'number' ? body.influence : 1,
+          fieldSourceName,
+          field: null,
+        };
+        this.velocityFieldActions.push(action);
+        if (fieldSourceName) {
+          void fetchVelocityField(fieldSourceName).then((field) => {
+            action.field = field;
           });
         }
       } else if (c.action === 'force') {
@@ -735,8 +941,10 @@ class SystemRenderer {
       this.applyMagnetActions(i, age, dt);
       this.applyStreamActions(i, age, dt);
       this.applyJitterActions(i, age, dt);
+      this.applyVelocityFieldActions(i, age);
       // dampfer: a per-frame drag multiplier on the velocity's displacement.
       const damp = this.dampGen ? sampleGenAxis(this.dampGen, clocks, 1) : 1;
+      if (this.applyBarrierActions(i, age, dt * damp)) continue;
       this.pos[i * 3 + 0] += this.vel[i * 3 + 0] * dt * damp;
       this.pos[i * 3 + 1] += this.vel[i * 3 + 1] * dt * damp;
       this.pos[i * 3 + 2] += this.vel[i * 3 + 2] * dt * damp;
@@ -751,7 +959,10 @@ class SystemRenderer {
       // — at worst a slight over-bright vs engine.)
       sampleColor(this.tintColor, age, SystemRenderer.TMP_COL);
       const alphaT = this.alphaSetterIsSystemAge ? this.elapsed : age;
-      const alpha = sampleRamp(this.alphaRamp, alphaT, 1) * SystemRenderer.TMP_COL[3];
+      const alpha =
+        sampleRamp(this.alphaRamp, alphaT, 1) *
+        SystemRenderer.TMP_COL[3] *
+        this.barrierAlphaMultiplier;
       this.colorRGBA[i * 4 + 0] = SystemRenderer.TMP_COL[0];
       this.colorRGBA[i * 4 + 1] = SystemRenderer.TMP_COL[1];
       this.colorRGBA[i * 4 + 2] = SystemRenderer.TMP_COL[2];
@@ -762,6 +973,7 @@ class SystemRenderer {
       for (let s = 0; s < this.scalerGens.length; s++) {
         sz *= sampleGenAxis(this.scalerGens[s], clocks, 1);
       }
+      sz *= this.barrierScaleMultiplier;
       this.sizeArr[i] = Math.max(0, sz);
     }
 
@@ -1037,6 +1249,346 @@ class SystemRenderer {
       this.vel[ix + 1] += dir.y * action.strength * dt;
       this.vel[ix + 2] += dir.z * action.strength * dt;
     }
+  }
+
+  private applyVelocityFieldActions(slot: number, age: number): void {
+    if (this.velocityFieldActions.length === 0) return;
+    const ix = slot * 3;
+    const pos = SystemRenderer.TMP_POS.set(this.pos[ix + 0], this.pos[ix + 1], this.pos[ix + 2]);
+    const sample = SystemRenderer.TMP_VEL2;
+    for (const action of this.velocityFieldActions) {
+      if (age < action.delay) continue;
+      if (action.stopAge > 0 && age > action.stopAge) continue;
+      if (!action.field) continue;
+      const u = this.fieldAxisT(pos.x, action.topLeftFront.x, action.bottomRightBack.x);
+      const v = this.fieldAxisT(pos.y, action.topLeftFront.y, action.bottomRightBack.y);
+      const w = this.fieldAxisT(pos.z, action.topLeftFront.z, action.bottomRightBack.z);
+      if (u < 0 || u > 1 || v < 0 || v > 1 || w < 0 || w > 1) continue;
+      this.sampleVelocityField(action.field, u, v, w, sample);
+      sample.multiplyScalar(action.velocityScale);
+      const blend = THREE.MathUtils.clamp(action.influence, 0, 1);
+      this.vel[ix + 0] += (sample.x - this.vel[ix + 0]) * blend;
+      this.vel[ix + 1] += (sample.y - this.vel[ix + 1]) * blend;
+      this.vel[ix + 2] += (sample.z - this.vel[ix + 2]) * blend;
+    }
+  }
+
+  private fieldAxisT(value: number, a: number, b: number): number {
+    const span = b - a;
+    if (Math.abs(span) <= 1e-6) return 0.5;
+    return (value - a) / span;
+  }
+
+  private sampleVelocityField(
+    field: VelocityFieldData,
+    u: number,
+    v: number,
+    w: number,
+    out: THREE.Vector3,
+  ): void {
+    const x = THREE.MathUtils.clamp(u, 0, 1) * (field.sizeX - 1);
+    const y = THREE.MathUtils.clamp(v, 0, 1) * (field.sizeY - 1);
+    const z = THREE.MathUtils.clamp(w, 0, 1) * (field.sizeZ - 1);
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
+    const z0 = Math.floor(z);
+    const x1 = Math.min(field.sizeX - 1, x0 + 1);
+    const y1 = Math.min(field.sizeY - 1, y0 + 1);
+    const z1 = Math.min(field.sizeZ - 1, z0 + 1);
+    const tx = x - x0;
+    const ty = y - y0;
+    const tz = z - z0;
+    out.set(0, 0, 0);
+    this.accumulateVelocityFieldCorner(field, x0, y0, z0, (1 - tx) * (1 - ty) * (1 - tz), out);
+    this.accumulateVelocityFieldCorner(field, x1, y0, z0, tx * (1 - ty) * (1 - tz), out);
+    this.accumulateVelocityFieldCorner(field, x0, y1, z0, (1 - tx) * ty * (1 - tz), out);
+    this.accumulateVelocityFieldCorner(field, x1, y1, z0, tx * ty * (1 - tz), out);
+    this.accumulateVelocityFieldCorner(field, x0, y0, z1, (1 - tx) * (1 - ty) * tz, out);
+    this.accumulateVelocityFieldCorner(field, x1, y0, z1, tx * (1 - ty) * tz, out);
+    this.accumulateVelocityFieldCorner(field, x0, y1, z1, (1 - tx) * ty * tz, out);
+    this.accumulateVelocityFieldCorner(field, x1, y1, z1, tx * ty * tz, out);
+  }
+
+  private accumulateVelocityFieldCorner(
+    field: VelocityFieldData,
+    x: number,
+    y: number,
+    z: number,
+    weight: number,
+    out: THREE.Vector3,
+  ): void {
+    if (weight <= 0) return;
+    const idx = ((z * field.sizeY + y) * field.sizeX + x) * 3;
+    out.x += field.vectors[idx + 0] * weight;
+    out.y += field.vectors[idx + 1] * weight;
+    out.z += field.vectors[idx + 2] * weight;
+  }
+
+  private applyBarrierActions(slot: number, age: number, displacementDt: number): boolean {
+    this.barrierScaleMultiplier = 1;
+    this.barrierAlphaMultiplier = 1;
+    if (this.barrierActions.length === 0) return false;
+    const ix = slot * 3;
+    for (const action of this.barrierActions) {
+      if (age < action.delay) continue;
+      if (action.stopAge > 0 && age > action.stopAge) continue;
+
+      const current = SystemRenderer.TMP_POS.set(
+        this.pos[ix + 0],
+        this.pos[ix + 1],
+        this.pos[ix + 2],
+      );
+      const predicted = SystemRenderer.TMP_POS2.set(
+        current.x + this.vel[ix + 0] * displacementDt,
+        current.y + this.vel[ix + 1] * displacementDt,
+        current.z + this.vel[ix + 2] * displacementDt,
+      );
+      const normal = SystemRenderer.TMP_AXIS;
+      this.sampleBarrierState(action, current, predicted, normal);
+      const insideNow = this.barrierInsideNow;
+      const insideNext = this.barrierInsideNext;
+      const crossed = insideNow !== insideNext;
+
+      switch (action.reaction) {
+        case BARRIER_REACTION_SCALE:
+          if (insideNow) {
+            const ratio = THREE.MathUtils.clamp(this.barrierDistanceRatio, 0, 1);
+            const targetScale = Math.max(0, action.strength);
+            this.barrierScaleMultiplier *= targetScale + (1 - targetScale) * ratio;
+          }
+          break;
+        case BARRIER_REACTION_BOUNCE:
+          if (crossed) {
+            if (action.shape === 'plane' || action.shape === 'box') {
+              this.reflectVelocity(ix, normal);
+            } else {
+              this.cancelVelocityAlongNormal(ix, normal);
+            }
+          }
+          break;
+        case BARRIER_REACTION_REMOVE:
+          if (insideNow || insideNext || crossed) {
+            this.killParticle(slot);
+            return true;
+          }
+          break;
+        case BARRIER_REACTION_SPAWN:
+          // Native queues `effectName` when the particle crosses the barrier.
+          // Recursive child-effect instancing belongs at ParticleScene level,
+          // not in this per-system renderer, so this is intentionally inert.
+          break;
+        case BARRIER_REACTION_WRAP:
+          this.applyBarrierWrap(action, ix, predicted);
+          break;
+        case BARRIER_REACTION_ALPHA:
+          if (insideNow) {
+            let factor = THREE.MathUtils.clamp(this.barrierDistanceRatio, 0, 1);
+            const power = Math.abs(action.strength);
+            if (action.strength < 0) factor = 1 - factor;
+            this.barrierAlphaMultiplier *= Math.pow(Math.max(0, factor), power);
+          }
+          break;
+        case BARRIER_REACTION_DAMP:
+          if (insideNow) {
+            const k = action.strength * displacementDt;
+            this.vel[ix + 0] -= this.vel[ix + 0] * k;
+            this.vel[ix + 1] -= this.vel[ix + 1] * k;
+            this.vel[ix + 2] -= this.vel[ix + 2] * k;
+          }
+          break;
+        case BARRIER_REACTION_FORCE:
+          if (insideNow) {
+            this.vel[ix + 0] += normal.x * action.strength * displacementDt;
+            this.vel[ix + 1] += normal.y * action.strength * displacementDt;
+            this.vel[ix + 2] += normal.z * action.strength * displacementDt;
+          }
+          break;
+        default:
+          break;
+      }
+    }
+    return false;
+  }
+
+  private sampleBarrierState(
+    action: BarrierAction,
+    current: THREE.Vector3,
+    predicted: THREE.Vector3,
+    normalOut: THREE.Vector3,
+  ): void {
+    this.barrierInsideNow = false;
+    this.barrierInsideNext = false;
+    this.barrierDistanceRatio = 1;
+    normalOut.set(0, 1, 0);
+    switch (action.shape) {
+      case 'sphere': {
+        const r = Math.max(action.radius, 1e-6);
+        const r2 = r * r;
+        const currRel = SystemRenderer.TMP_REL.copy(action.position).sub(current);
+        const nextRel = SystemRenderer.TMP_REL2.copy(action.position).sub(predicted);
+        const currDistSq = currRel.lengthSq();
+        this.barrierInsideNow = currDistSq <= r2;
+        this.barrierInsideNext = nextRel.lengthSq() <= r2;
+        this.barrierDistanceRatio = Math.sqrt(currDistSq) / r;
+        if (currRel.lengthSq() > 1e-10) normalOut.copy(currRel).normalize();
+        else if (nextRel.lengthSq() > 1e-10) normalOut.copy(nextRel).normalize();
+        return;
+      }
+      case 'cylinder': {
+        const r = Math.max(action.radius, 1e-6);
+        const r2 = r * r;
+        const dx = action.position.x - current.x;
+        const dz = action.position.z - current.z;
+        const ndx = action.position.x - predicted.x;
+        const ndz = action.position.z - predicted.z;
+        const currDistSq = dx * dx + dz * dz;
+        this.barrierInsideNow = currDistSq <= r2;
+        this.barrierInsideNext = ndx * ndx + ndz * ndz <= r2;
+        this.barrierDistanceRatio = Math.sqrt(currDistSq) / r;
+        normalOut.set(dx, 0, dz);
+        if (normalOut.lengthSq() > 1e-10) normalOut.normalize();
+        return;
+      }
+      case 'box': {
+        const minX = Math.min(action.corner.x, action.opposite.x);
+        const minY = Math.min(action.corner.y, action.opposite.y);
+        const minZ = Math.min(action.corner.z, action.opposite.z);
+        const maxX = Math.max(action.corner.x, action.opposite.x);
+        const maxY = Math.max(action.corner.y, action.opposite.y);
+        const maxZ = Math.max(action.corner.z, action.opposite.z);
+        this.barrierInsideNow =
+          current.x >= minX &&
+          current.x <= maxX &&
+          current.y >= minY &&
+          current.y <= maxY &&
+          current.z >= minZ &&
+          current.z <= maxZ;
+        this.barrierInsideNext =
+          predicted.x >= minX &&
+          predicted.x <= maxX &&
+          predicted.y >= minY &&
+          predicted.y <= maxY &&
+          predicted.z >= minZ &&
+          predicted.z <= maxZ;
+        const cx = (minX + maxX) * 0.5;
+        const cy = (minY + maxY) * 0.5;
+        const cz = (minZ + maxZ) * 0.5;
+        const hx = Math.max(1e-6, (maxX - minX) * 0.5);
+        const hy = Math.max(1e-6, (maxY - minY) * 0.5);
+        const hz = Math.max(1e-6, (maxZ - minZ) * 0.5);
+        const rx = Math.abs(current.x - cx) / hx;
+        const ry = Math.abs(current.y - cy) / hy;
+        const rz = Math.abs(current.z - cz) / hz;
+        this.barrierDistanceRatio = Math.max(rx, ry, rz);
+        normalOut.set(cx - current.x, cy - current.y, cz - current.z);
+        if (normalOut.lengthSq() <= 1e-10) {
+          if (rx >= ry && rx >= rz) normalOut.set(current.x < cx ? 1 : -1, 0, 0);
+          else if (ry >= rz) normalOut.set(0, current.y < cy ? 1 : -1, 0);
+          else normalOut.set(0, 0, current.z < cz ? 1 : -1);
+        } else {
+          normalOut.normalize();
+        }
+        return;
+      }
+      case 'plane': {
+        const sideNow = action.planeNormal.dot(current) - action.planeConstant;
+        const sideNext = action.planeNormal.dot(predicted) - action.planeConstant;
+        this.barrierInsideNow = sideNow < 0;
+        this.barrierInsideNext = sideNext < 0;
+        this.barrierDistanceRatio = sideNow < 0 ? 0 : 1;
+        normalOut.copy(action.planeNormal);
+        return;
+      }
+    }
+  }
+
+  private reflectVelocity(ix: number, normal: THREE.Vector3): void {
+    if (normal.lengthSq() <= 1e-10) return;
+    const dot = this.vel[ix + 0] * normal.x + this.vel[ix + 1] * normal.y + this.vel[ix + 2] * normal.z;
+    this.vel[ix + 0] -= 2 * dot * normal.x;
+    this.vel[ix + 1] -= 2 * dot * normal.y;
+    this.vel[ix + 2] -= 2 * dot * normal.z;
+  }
+
+  private cancelVelocityAlongNormal(ix: number, normal: THREE.Vector3): void {
+    if (normal.lengthSq() <= 1e-10) return;
+    const dot = this.vel[ix + 0] * normal.x + this.vel[ix + 1] * normal.y + this.vel[ix + 2] * normal.z;
+    this.vel[ix + 0] -= dot * normal.x;
+    this.vel[ix + 1] -= dot * normal.y;
+    this.vel[ix + 2] -= dot * normal.z;
+  }
+
+  private applyBarrierWrap(action: BarrierAction, ix: number, predicted: THREE.Vector3): void {
+    if (action.shape === 'sphere') {
+      if (!this.barrierInsideNext && action.radius > 0) {
+        const inward = SystemRenderer.TMP_REL.copy(action.position).sub(predicted);
+        if (inward.lengthSq() > 1e-10) {
+          inward.normalize().multiplyScalar(action.radius * 2);
+          this.pos[ix + 0] += inward.x;
+          this.pos[ix + 1] += inward.y;
+          this.pos[ix + 2] += inward.z;
+        }
+      }
+      return;
+    }
+    if (action.shape === 'cylinder') {
+      if (!this.barrierInsideNext && action.radius > 0) {
+        const inward = SystemRenderer.TMP_REL.set(
+          action.position.x - predicted.x,
+          0,
+          action.position.z - predicted.z,
+        );
+        if (inward.lengthSq() > 1e-10) {
+          inward.normalize().multiplyScalar(action.radius * 2);
+          this.pos[ix + 0] += inward.x;
+          this.pos[ix + 2] += inward.z;
+        }
+      }
+      return;
+    }
+    if (action.shape === 'box') {
+      if (this.barrierInsideNext) return;
+      const minX = Math.min(action.corner.x, action.opposite.x);
+      const minY = Math.min(action.corner.y, action.opposite.y);
+      const minZ = Math.min(action.corner.z, action.opposite.z);
+      const maxX = Math.max(action.corner.x, action.opposite.x);
+      const maxY = Math.max(action.corner.y, action.opposite.y);
+      const maxZ = Math.max(action.corner.z, action.opposite.z);
+      this.pos[ix + 0] = this.wrapAxis(predicted.x, minX, maxX, this.pos[ix + 0]);
+      this.pos[ix + 1] = this.wrapAxis(predicted.y, minY, maxY, this.pos[ix + 1]);
+      this.pos[ix + 2] = this.wrapAxis(predicted.z, minZ, maxZ, this.pos[ix + 2]);
+      return;
+    }
+    if (action.shape === 'plane' && this.barrierInsideNext) {
+      const side = action.planeNormal.dot(SystemRenderer.TMP_POS.set(
+        this.pos[ix + 0],
+        this.pos[ix + 1],
+        this.pos[ix + 2],
+      )) - action.planeConstant;
+      this.pos[ix + 0] -= action.planeNormal.x * side;
+      this.pos[ix + 1] -= action.planeNormal.y * side;
+      this.pos[ix + 2] -= action.planeNormal.z * side;
+    }
+  }
+
+  private wrapAxis(predicted: number, min: number, max: number, current: number): number {
+    const width = max - min;
+    if (!(width > 1e-6)) return current;
+    if (predicted < min) {
+      const off = (min - predicted) % width;
+      return max - off;
+    }
+    if (predicted > max) {
+      const off = (predicted - max) % width;
+      return min + off;
+    }
+    return current;
+  }
+
+  private killParticle(slot: number): void {
+    if (this.age[slot] < 0) return;
+    this.age[slot] = -1;
+    this.alive--;
   }
 
   dispose(): void {

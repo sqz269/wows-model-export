@@ -392,6 +392,16 @@
     'resizer',
     'force',
     'dampfer',
+    'stream',
+    'jitter',
+    'orbitor',
+    'magnet',
+    'sphere',
+    'cylinder',
+    'box',
+    'plane',
+    'velocityField',
+    'light',
   ]);
 
   /** PS_RBT blend modes the renderer can only approximate with a faint

@@ -48,6 +48,7 @@ MIME: dict[str, str] = {
     ".gltf": "model/gltf+json",
     ".dds": "image/vnd.ms-dds",
     ".dd0": "application/octet-stream",
+    ".vfd": "application/octet-stream",
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -59,7 +60,19 @@ MIME: dict[str, str] = {
 # in the browser. JSON artifacts fall through to the conservative default
 # because the accessory library index is rewritten when new ships land.
 _CACHEABLE_SUFFIXES = frozenset(
-    {".dds", ".dd0", ".dd1", ".dd2", ".glb", ".gltf", ".bin", ".png", ".jpg", ".jpeg"}
+    {
+        ".dds",
+        ".dd0",
+        ".dd1",
+        ".dd2",
+        ".vfd",
+        ".glb",
+        ".gltf",
+        ".bin",
+        ".png",
+        ".jpg",
+        ".jpeg",
+    }
 )
 
 

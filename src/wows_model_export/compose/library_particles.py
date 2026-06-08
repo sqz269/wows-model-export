@@ -12,7 +12,10 @@ join against it by ``attachment.particle_path``. Texture refs in each
 record's renderer / animation blocks are extracted into the existing
 ``content/effects_textures/`` cache and stamped with
 ``textureUrl0`` / ``textureUrl1`` / ``motionVectorsTextureUrl`` so
-consumers don't repeat the lookup.
+consumers don't repeat the lookup. Velocity-field ``.vfd`` resources
+referenced by ``velocityField.fieldSourceName`` are extracted to their
+original ``content/particles/velocity_fields`` paths so the webview can
+fetch them directly through ``repoUrl(fieldSourceName)``.
 
 Idempotent + mtime-gated: :func:`ensure_built` re-decodes only when the
 records artefact is missing or older than the cached ``assets.bin``.
@@ -98,6 +101,8 @@ def build(
 
     textures_extracted = 0
     textures_missing: set[str] = set()
+    velocity_fields_extracted = 0
+    velocity_fields_missing: set[str] = set()
     atlas_stamped = 0
     atlas_entries = 0
     if extract_textures and records:
@@ -108,6 +113,16 @@ def build(
             )
             _eff_tex.stamp_texture_urls(records, resolved_urls)
             textures_extracted = len(resolved_urls)
+
+        velocity_field_paths = _eff_tex.collect_velocity_field_paths(records)
+        if velocity_field_paths:
+            resolved_vfd, velocity_fields_missing = (
+                _eff_tex.ensure_velocity_fields_on_disk(
+                    velocity_field_paths,
+                    config=cfg,
+                )
+            )
+            velocity_fields_extracted = len(resolved_vfd)
 
         # Atlas-mapped textures: the 117 ``.tga`` refs that don't ship
         # individually but live as named UV regions inside the 6
@@ -135,6 +150,8 @@ def build(
                 "unresolved_count": len(unresolved),
                 "textures_extracted": textures_extracted,
                 "textures_missing": len(textures_missing),
+                "velocity_fields_extracted": velocity_fields_extracted,
+                "velocity_fields_missing": len(velocity_fields_missing),
                 "atlas_entries": atlas_entries,
                 "atlas_stamped": atlas_stamped,
                 "paths": sorted(records.keys()),
@@ -150,6 +167,8 @@ def build(
         "paths_unresolved": len(unresolved),
         "textures_extracted": textures_extracted,
         "textures_missing": len(textures_missing),
+        "velocity_fields_extracted": velocity_fields_extracted,
+        "velocity_fields_missing": len(velocity_fields_missing),
         "atlas_entries": atlas_entries,
         "atlas_stamped": atlas_stamped,
         "records_path": str(paths["records"]),
