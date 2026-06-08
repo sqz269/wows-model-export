@@ -2931,13 +2931,11 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uDistortionSceneTexture: { value: null as THREE.Texture | null },
       uDistortionSceneSize: { value: new THREE.Vector2(1, 1) },
       // Warm "detonation glow" strength for the lightmapping + GRADIENT_MAP
-      // path. RE doc 63 corrected the old pinned-U=0 theory: lightmapping
-      // samples the ramp at U = 1 - glow, where glow comes from the sprite
-      // texture before relight. The engine also scales this emissive term by
-      // a per-particle intensity (v10.x) the parser does not carry, so this
-      // constant approximates that missing scale. 0.15 keeps the puff a grey
-      // occluding smoke body with a warm core.
-      uGlowStrength: { value: 0.15 },
+      // path. Native multiplies the ramp term by particle payload v10.x; the
+      // spawn path initializes that instance slot to 1.0. Dynamic component
+      // overrides for v10.x are still not mapped, but the default should not
+      // be the old hand-tuned 0.15 approximation.
+      uGlowStrength: { value: 1.0 },
       // Native FUN_140716f00 packs Renderer.shadowsStrength as
       // int(value) < 2 ? 0 : int(value) - 1 into the shader's byte payload.
       // The GRADIENT_MAP + lightmapping pixel path uses it to posterize the
@@ -3253,8 +3251,8 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
               // the relit smoke body, OUTSIDE the per-particle tint (engine:
               // rgb = base*lit + emis*v10.x). Native packs renderer
               // shadowsStrength as the byte step count that quantizes glow
-              // before U = 1 - glow. uGlowStrength stays as the v10.x
-              // intensity approximation.
+              // before U = 1 - glow. uGlowStrength is the native v10.x
+              // default; dynamic v10.x overrides are still unmapped.
               // Now varies per-texel → a warm GRADIENT across the sprite, not
               // one flat tan colour.
               float glowKey = gmag;
