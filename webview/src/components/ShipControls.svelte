@@ -28,6 +28,7 @@
     LodPolicy,
     NodeCategory,
     ShipViewer,
+    ShipParticleStats,
     WgEnvironmentInfo,
   } from '$lib/ship';
   import {
@@ -107,6 +108,10 @@
   let nodeCounts = $state<Record<NodeCategory, number>>(
     Object.fromEntries(NODE_CATEGORIES.map((c) => [c, 0])) as Record<NodeCategory, number>,
   );
+  let hasParticles = $state(false);
+  let particlesView = $state(false);
+  let particlesLoading = $state(false);
+  let particleStats = $state<Readonly<ShipParticleStats> | null>(null);
   // Color swatch CSS for the legend (hex int -> #rrggbb).
   function catSwatch(cat: NodeCategory): string {
     return '#' + NODE_CATEGORY_COLOR[cat].toString(16).padStart(6, '0');
@@ -262,6 +267,9 @@
       const nc = {} as Record<NodeCategory, boolean>;
       for (const c of NODE_CATEGORIES) nc[c] = viewer.getNodeCategoryVisible(c);
       nodeCats = nc;
+      hasParticles = viewer.hasShipParticleData();
+      particlesView = viewer.getShipParticlesVisible();
+      particleStats = viewer.getShipParticleStats();
 
       // Honor the persisted Show-textures choice. Each ship's viewer
       // starts with textures off (TextureManager.clearShip()); kick off
@@ -394,6 +402,19 @@
     nodeCats[cat] = v;
     nodeCats = { ...nodeCats };
     viewer.setNodeCategoryVisible(cat, v);
+  }
+  async function toggleParticlesView(v: boolean) {
+    particlesView = v;
+    particlesLoading = true;
+    try {
+      particleStats = await viewer.setShipParticlesVisible(v);
+    } catch (err) {
+      particlesView = viewer.getShipParticlesVisible();
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error('Particle layer failed', { description: msg, duration: 8000 });
+    } finally {
+      particlesLoading = false;
+    }
   }
   function toggleDamageVariants(v: boolean) {
     damageVariants = v;
@@ -792,6 +813,54 @@
             {/if}
           {/each}
         </div>
+      </div>
+    </details>
+  {/if}
+
+  {#if hasParticles}
+    <details
+      open={panelOpen.particles}
+      ontoggle={(e) => togglePanel('particles', e.currentTarget.open)}
+      class="group {detailsCls}"
+    >
+      <summary class={summaryCls}>Particles</summary>
+      <div class={bodyCls}>
+        <label class={rowCls}>
+          <input
+            type="checkbox"
+            checked={particlesView}
+            disabled={particlesLoading}
+            onchange={(e) => void toggleParticlesView(e.currentTarget.checked)}
+          />
+          Ship particles
+          {#if particlesLoading}
+            <span class="text-muted-foreground/70 text-[10px]">loading</span>
+          {/if}
+        </label>
+        {#if particleStats}
+          <div class="grid grid-cols-2 gap-x-3 gap-y-0.5 pl-5 text-[10px]">
+            <span class="text-muted-foreground">active</span>
+            <span class="tabular-nums">{particleStats.activeAttachments}</span>
+            <span class="text-muted-foreground">rows</span>
+            <span class="tabular-nums">{particleStats.renderableAttachments}</span>
+            <span class="text-muted-foreground">anchors</span>
+            <span class="tabular-nums">{particleStats.anchorInstances}</span>
+            <span class="text-muted-foreground">records</span>
+            <span class="tabular-nums"
+              >{particleStats.recordsLoaded}/{particleStats.uniquePaths}</span
+            >
+            <span class="text-muted-foreground">systems</span>
+            <span class="tabular-nums">{particleStats.systems}</span>
+            {#if particleStats.eventOnlyAttachments > 0}
+              <span class="text-muted-foreground">event-only</span>
+              <span class="tabular-nums">{particleStats.eventOnlyAttachments}</span>
+            {/if}
+            {#if particleStats.missingRecords > 0}
+              <span class="text-muted-foreground">missing</span>
+              <span class="text-destructive tabular-nums">{particleStats.missingRecords}</span>
+            {/if}
+          </div>
+        {/if}
       </div>
     </details>
   {/if}

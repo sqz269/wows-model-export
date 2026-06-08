@@ -4,6 +4,7 @@
 export { ShipViewer } from './viewer';
 export type {
   ShipLoadStats,
+  ShipParticleStats,
   PickedAssetInfo,
   PickResult,
   ArmorPickResult,

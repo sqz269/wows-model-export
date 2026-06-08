@@ -346,6 +346,7 @@ class SystemRenderer {
   private forceX: ParticleValueGenerator | undefined;
   private forceY: ParticleValueGenerator | undefined;
   private forceZ: ParticleValueGenerator | undefined;
+  private frameRateRamp: ParticleRamp | undefined;
 
   // Particle attribute arrays.
   private pos: Float32Array;
@@ -378,6 +379,10 @@ class SystemRenderer {
    *  particle on one cell. Packed to the front like ``ageGpu``. */
   private frameSeed: Float32Array;
   private frameSeedAttr: THREE.BufferAttribute;
+  /** Integrated frame position, in frames, for native-style frameRateRamp
+   *  playback. WG advances flipbooks by integrating FPS over particle age. */
+  private framePhase: Float32Array;
+  private framePhaseAttr: THREE.BufferAttribute;
   /** Number of cells a randomFrameOnly particle can land on (framesRangeEnd,
    *  falling back to framesPerX*framesPerY). 0 ⇒ feature inert. */
   private framesRangeEnd = 0;
@@ -491,6 +496,7 @@ class SystemRenderer {
     // land on. Engine seeds the frame byte in [0, framesRangeEnd); fall back
     // to the full grid when the range wasn't authored.
     const anim = system.animation;
+    this.frameRateRamp = anim?.frameRateRamp;
     const fx = anim?.framesPerX ?? 1;
     const fy = anim?.framesPerY ?? 1;
     this.framesRangeEnd = Math.max(0, anim?.framesRangeEnd ?? fx * fy);
@@ -514,6 +520,7 @@ class SystemRenderer {
     this.sizeArr = new Float32Array(this.capacity);
     this.ageGpu = new Float32Array(this.capacity);
     this.frameSeed = new Float32Array(this.capacity);
+    this.framePhase = new Float32Array(this.capacity);
     this.psize = new Float32Array(this.capacity);
     this.pidx = new Float32Array(this.capacity);
     for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
@@ -532,11 +539,14 @@ class SystemRenderer {
     this.ageAttr.setUsage(THREE.DynamicDrawUsage);
     this.frameSeedAttr = new THREE.BufferAttribute(this.frameSeed, 1);
     this.frameSeedAttr.setUsage(THREE.DynamicDrawUsage);
+    this.framePhaseAttr = new THREE.BufferAttribute(this.framePhase, 1);
+    this.framePhaseAttr.setUsage(THREE.DynamicDrawUsage);
     geom.setAttribute('position', this.posAttr);
     geom.setAttribute('color', this.colorAttr);
     geom.setAttribute('size', this.sizeAttr);
     geom.setAttribute('age', this.ageAttr);
     geom.setAttribute('frameSeed', this.frameSeedAttr);
+    geom.setAttribute('framePhase', this.framePhaseAttr);
     geom.setDrawRange(0, 0);
     this.points = new THREE.Points(geom, material);
     this.points.frustumCulled = false;
@@ -600,6 +610,7 @@ class SystemRenderer {
     // approximation.
     for (let i = 0; i < this.capacity; i++) {
       if (this.age[i] < 0) continue;
+      const prevAge = this.age[i];
       this.age[i] += dt;
       if (this.age[i] >= this.lifetime[i]) {
         this.age[i] = -1;
@@ -607,6 +618,11 @@ class SystemRenderer {
         continue;
       }
       const age = this.age[i];
+      if (this.frameRateRamp) {
+        const fps0 = sampleRamp(this.frameRateRamp, prevAge, 0);
+        const fps1 = sampleRamp(this.frameRateRamp, age, 0);
+        this.framePhase[i] += Math.max(0, 0.5 * (fps0 + fps1) * dt);
+      }
       // Per-particle clocks for the parameterType axis (RE 2026-06-04): ramps
       // are sampled on their own clock in SECONDS (or m/s, or the u8 index) —
       // NOT a normalized [0,1] age.
@@ -676,12 +692,10 @@ class SystemRenderer {
         );
       }
       if (this.rateRamp) {
-        // Creator rate on the legacy normalised systemAge axis (an
-        // approximation flagged in the RE notes — creator.rateRamp is really
-        // in seconds — but visually negligible for the short corpus ramps).
-        const period = Math.max(0.01, this.maxAge);
-        const tNorm = (this.elapsed % period) / period;
-        const cRate = sampleRamp(this.rateRamp, tNorm, 0);
+        // Creator rate is authored in seconds against system active time. The
+        // old normalized-age path under-emitted short bursts and over-looped
+        // impact effects.
+        const cRate = sampleRamp(this.rateRamp, this.elapsed, 0);
         this.creatorAccum = this.emitFromSource(
           cRate,
           dt,
@@ -715,6 +729,7 @@ class SystemRenderer {
         this.colorRGBA[writeIdx * 4 + 3] = this.colorRGBA[i * 4 + 3];
         this.sizeArr[writeIdx] = this.sizeArr[i];
         this.frameSeed[writeIdx] = this.frameSeed[i];
+        this.framePhase[writeIdx] = this.framePhase[i];
       }
       this.ageGpu[writeIdx] = this.age[i];
       writeIdx++;
@@ -725,6 +740,7 @@ class SystemRenderer {
     this.sizeAttr.needsUpdate = true;
     this.ageAttr.needsUpdate = true;
     this.frameSeedAttr.needsUpdate = true;
+    this.framePhaseAttr.needsUpdate = true;
   }
 
   /** Pre-fill the ring buffer to the engine's frame-1 density: run STEPS
@@ -803,6 +819,7 @@ class SystemRenderer {
     // when uRandomFrame is set; harmless to assign unconditionally.
     this.frameSeed[slot] =
       this.framesRangeEnd > 0 ? Math.floor(Math.random() * this.framesRangeEnd) : 0;
+    this.framePhase[slot] = 0;
     const sc = SystemRenderer.TMP_CLOCKS;
     sc.particleAge = 0;
     sc.systemAge = this.elapsed;
@@ -890,10 +907,9 @@ interface ParticleMaterialOptions {
    *  per-particle at spawn via the `frameSeed` vertex attribute. */
   randomFrameOnly?: boolean;
   /** animation.frameRateRamp — a ramp of frames-per-second over particle
-   *  age (RE doc 63 L1). The GPU only has `vAge`, so buildParticleMaterial
-   *  collapses the ramp to a representative constant `frameRate` (mean of
-   *  the point values) and the shader uses `frame = floor(vAge*frameRate)`.
-   *  Full per-particle integration is out of scope. */
+   *  age (RE doc 63 L1). SystemRenderer integrates this per particle and
+   *  passes the accumulated frame position through the `framePhase`
+   *  attribute. */
   frameRateRamp?: ParticleRamp;
 }
 
@@ -998,11 +1014,9 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
   const gridEnabled = at !== 'noAnimation' && at !== 'type_0';
   // L1 (RE doc 63): the engine drives the flipbook from `frameRateRamp`
   // (fps over particle age, trapezoid-integrated), NOT `animationPeriod`.
-  // The GPU only has vAge, so collapse the ramp to a representative
-  // constant rate (mean of its point values; fall back to the first value)
-  // and use `frame = floor(vAge * frameRate)` in the shader. A non-ramp /
-  // missing curve leaves frameRate=0 → the `animated` gate stays off, so a
-  // static grid still shows cell 0 (H4) rather than freezing on frame 0.
+  // SystemRenderer supplies the integrated frame position through the
+  // framePhase attribute. Keep the representative frameRate as a fallback for
+  // callers that build a material without runtime-integrated particles.
   let frameRate = 0;
   const rrPts = opts.frameRateRamp?.points;
   if (rrPts && rrPts.length > 0) {
@@ -1045,11 +1059,12 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       },
       // L1/L2/L4 (RE doc 63): authored frame rate (fps, collapsed from
       // frameRateRamp) + the raw range bounds. The shader uses
-      // `cell = mod(floor(vAge*uFrameRate), uFramesEnd) + uFramesBegin`,
-      // cross-fading by fract(vAge*uFrameRate). `animationPeriod` is never
-      // read by the engine; the uniform is kept (unused) so the option type
-      // stays stable.
+      // `cell = mod(floor(framePhase), uFramesEnd) + uFramesBegin`,
+      // cross-fading by fract(framePhase). `animationPeriod` is never read by
+      // the engine; the uniform is kept (unused) so the option type stays
+      // stable.
       uFrameRate: { value: frameRate },
+      uUseFramePhase: { value: opts.frameRateRamp?.points?.length ? 1 : 0 },
       uFramesBegin: { value: framesBegin },
       uFramesEnd: { value: framesEnd },
       // L4: now-unused (engine never loads animationPeriod). Retained so the
@@ -1126,14 +1141,17 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       attribute float size;
       attribute float age;
       attribute float frameSeed;
+      attribute float framePhase;
       varying vec4 vColor;
       varying float vAge;
       varying float vFrameSeed;
+      varying float vFramePhase;
 
       void main() {
         vColor = color;
         vAge = age;
         vFrameSeed = frameSeed;
+        vFramePhase = framePhase;
         vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * mvPosition;
         // size is metres (world space); divide by distance for perspective.
@@ -1150,6 +1168,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform vec2 framesPerXY;
       uniform vec2 frameRange;
       uniform float uFrameRate;
+      uniform float uUseFramePhase;
       uniform float uFramesBegin;
       uniform float uFramesEnd;
       uniform float animationPeriod;
@@ -1168,6 +1187,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       varying vec4 vColor;
       varying float vAge;
       varying float vFrameSeed;
+      varying float vFramePhase;
 
       void main() {
         vec4 base;
@@ -1179,7 +1199,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           // L4 (RE doc 63): the engine never reads animationPeriod. Gate the
           // flipbook on a real authored frame rate + range end instead.
           bool hasGrid = (useFrameGrid > 0.5 && fx * fy > 1.0);
-          bool animated = (hasGrid && uFramesEnd > 0.0 && uFrameRate > 0.0);
+          bool animated = (hasGrid && uFramesEnd > 0.0 && (uUseFramePhase > 0.5 || uFrameRate > 0.0));
           // H5 (RE doc 63): a randomFrameOnly system is NOT animated — each
           // particle freezes on its spawn-seeded cell. Takes precedence.
           bool randomCell = (hasGrid && uRandomFrame > 0.5);
@@ -1204,7 +1224,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             // L1/L2: frame law is now frameRate-driven and wrapped by
             // framesRangeEnd + framesRangeBegin (was period-driven, wrapped by
             // end-begin). The MV warp/cross-fade is unchanged.
-            float idxF = vAge * uFrameRate;
+            float idxF = (uUseFramePhase > 0.5) ? vFramePhase : vAge * uFrameRate;
             float f = fract(idxF);
             float fl = floor(idxF);
             float n0 = mod(fl, uFramesEnd) + uFramesBegin;
@@ -1231,11 +1251,11 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           } else if (animated) {
             // Age-driven flipbook (framesPlayback / no MV texture), composed
             // with the manifest atlas-rect mapping when present. L1/L2: frame
-            // = floor(vAge*frameRate) mod framesRangeEnd + framesRangeBegin.
-            // L3: cross-fade the floored cell into the next by fract(vAge*rate)
+            // = floor(framePhase) mod framesRangeEnd + framesRangeBegin.
+            // L3: cross-fade the floored cell into the next by fract(framePhase)
             // (the engine writes blend byte +0x7d = frac*255 for any nonzero
-            // animationType — the prior non-MV branch hard-popped).
-            float idxF = vAge * uFrameRate;
+            // animationType; the older non-MV branch hard-popped).
+            float idxF = (uUseFramePhase > 0.5) ? vFramePhase : vAge * uFrameRate;
             float f = fract(idxF);
             float fl = floor(idxF);
             float n0 = mod(fl, uFramesEnd) + uFramesBegin;

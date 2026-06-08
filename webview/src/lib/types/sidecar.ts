@@ -461,11 +461,12 @@ export interface ParticleRenderer {
  *
  * For systems with `framesPerX > 1 || framesPerY > 1`, the renderer
  * samples the texture at cell `(currentFrame % framesPerX, currentFrame
- * / framesPerX)` where `currentFrame` is driven by the particle age +
- * `animationPeriod` + `framesRangeBegin/End`. `animationType` (PS_PAT)
- * selects the animation mode (noAnimation / framesPlayback /
- * motionVectors) — NOT a loop/once/pingPong wrap mode (that is the
- * separate ramp-sampling enum).
+ * / framesPerX)`. Native playback advances `currentFrame` by integrating
+ * `frameRateRamp` over particle age and then applying
+ * `framesRangeBegin/End`; `animationPeriod` is carried for inspection only.
+ * `animationType` (PS_PAT) selects the animation mode (noAnimation /
+ * framesPlayback / motionVectors) — NOT a loop/once/pingPong wrap mode
+ * (that is the separate ramp-sampling enum).
  */
 export interface ParticleAnimation {
   frameRateRamp?: ParticleRamp;
@@ -556,6 +557,8 @@ export interface ParticleAttachment {
    * WG-side bone / node name.
    *  - hull: typically `EP_*`.
    *  - gun-type sources: the mount's hardpoint (`HP_AGM_1`, `HP_AGA_10`, …).
+   *    Consumers that render muzzle flashes expand `shotEffect` rows to
+   *    the mounted asset's `HP_gunFire<N>` child markers.
    *  - aa_aura / munition: empty — the effect spawns at altitude or hit
    *    location, with no fixed bone on the ship.
    */

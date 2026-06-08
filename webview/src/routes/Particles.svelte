@@ -381,7 +381,7 @@
    *  the inspector flags these so the user knows render fidelity is
    *  limited there.
    *
-   *  Source: `webview/src/lib/three/particles.ts:262-290` — the
+   *  Source: `webview/src/lib/three/particles.ts` — the
    *  `SystemRenderer` constructor's switch on `c.action`.
    */
   const RENDERED_ACTIONS = new Set([
@@ -391,10 +391,11 @@
     'scaler',
     'resizer',
     'force',
+    'dampfer',
   ]);
 
-  /** PS_RBT blend modes the renderer can only approximate with an additive
-   *  placeholder — no bespoke water-deform / refraction shader yet. Mirror
+  /** PS_RBT blend modes the renderer can only approximate with a faint
+   *  alpha-over hint — no bespoke water-deform / refraction shader yet. Mirror
    *  of the placeholder branch in `three/particles.ts` `blendConfigForPsRbt`. */
   const PLACEHOLDER_BLEND_MODES = new Set(['SHIMMER', 'DEFORM_WATER_SURFACE']);
 
@@ -408,7 +409,7 @@
    *  math) since the 2026-05-23 gap-closing pass — they are no longer gaps.
    *  What remains:
    *    - a few PS_RBT modes (SHIMMER / DEFORM_WATER_SURFACE) fall back to an
-   *      additive placeholder pending a bespoke shader;
+   *      alpha-over placeholder pending a bespoke shader;
    *    - a texture ref that resolved to neither a direct extract
    *      (`textureUrl0`) nor an atlas region (`textureAtlas0`) renders as a
    *      procedural soft disc. */
