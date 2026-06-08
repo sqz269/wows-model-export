@@ -38,6 +38,14 @@ from ._makers import (
 
 # ---------------------------------------------------------------------------
 
+def _warn_stderr(message: str) -> None:
+    """Best-effort warning output for in-process webview jobs."""
+    try:
+        print(message, file=sys.stderr, flush=True)
+    except OSError:
+        pass
+
+
 def absorb_placements_json(
     doc: dict[str, Any],
     placements: str | Path | dict[str, Any],
@@ -244,14 +252,13 @@ def apply_variant_asset_swaps(
             for aid in (source_aid, target_aid):
                 if aid in missing_glb_aids and aid not in warned_missing_glb_aids:
                     warned_missing_glb_aids.add(aid)
-                    print(
+                    _warn_stderr(
                         f"  warn: bone-mismatch check skipped for "
                         f"{aid!r} (swap {source_aid!r} → {target_aid!r}) "
                         f"— library GLB not on disk. Re-run scaffold "
                         f"after build_accessory_library so the Ry(180°) "
                         f"correction can be applied; otherwise the "
-                        f"variant turret/mount will render 180° off.",
-                        file=sys.stderr,
+                        f"variant turret/mount will render 180° off."
                     )
             return False
         return s_sign != t_sign
@@ -923,10 +930,9 @@ def absorb_gameparams_mounts(
     if stale:
         preview = ", ".join(stale[:5])
         tail = f" (+{len(stale) - 5} more)" if len(stale) > 5 else ""
-        print(
+        _warn_stderr(
             f"  warn: absorb_gameparams_mounts: {len(stale)} autofill "
-            f"key(s) didn't match any placement: {preview}{tail}",
-            file=sys.stderr,
+            f"key(s) didn't match any placement: {preview}{tail}"
         )
     if not update:
         return doc

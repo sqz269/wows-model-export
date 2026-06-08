@@ -4,13 +4,55 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from wows_model_export.compose.scaffold_ship import _merged_path_a_b_categories
 from wows_model_export.resolve import camo as wg_camo
+from wows_model_export.resolve.sidecar._absorb import apply_variant_asset_swaps
 from wows_model_export.resolve.sidecar._materials import _apply_material_mappings_json
 
 
 class WgConcreteExtractionTests(unittest.TestCase):
+    def test_variant_swap_missing_glb_warning_does_not_abort_when_stderr_fails(self) -> None:
+        class BrokenStderr:
+            def write(self, _text: str) -> int:
+                raise OSError(22, "Invalid argument")
+
+            def flush(self) -> None:
+                raise OSError(22, "Invalid argument")
+
+        doc = {
+            "turrets": [
+                {
+                    "instance_id": "HP_AGM_1",
+                    "hp_name": "HP_AGM_1",
+                    "asset_id": "AGM019",
+                    "scope": "ship",
+                    "category": "gun",
+                    "subcategory": "main",
+                    "transform": {"matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]},
+                }
+            ]
+        }
+        swaps = {
+            "by_asset_id": {"AGM019": "AGM622"},
+            "by_hp_name": {},
+            "dead_by_hp_name": {},
+            "misc_filter_by_hp": {},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stderr", BrokenStderr()):
+            swapped, n_swapped, unused = apply_variant_asset_swaps(
+                doc,
+                swaps,
+                library_root=Path(tmp),
+            )
+
+        self.assertEqual(n_swapped, 1)
+        self.assertEqual(unused, set())
+        self.assertEqual(swapped["turrets"][0]["asset_id"], "AGM622")
+        self.assertNotIn("attached_y_flip", swapped["turrets"][0])
+
     def test_material_mapping_replaces_png_guess_with_exact_mfm_dds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
