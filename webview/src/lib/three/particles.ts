@@ -2445,10 +2445,8 @@ interface ParticleMaterialOptions {
  * direct equivalents; GRADIENT_MAP / UNDERWATER_GRADIENT_MAP additionally
  * trigger LUT remap (driven by ``useLut`` in the material options, where
  * the renderer's ``textureName1`` is bound as the color ramp). SHIMMER
- * and DEFORM_WATER_SURFACE still lack bespoke shaders; they use
- * AdditiveBlending as a visually-louder placeholder than the previous
- * NormalBlending one (most shimmer/foam authoring is bright-on-water,
- * so additive at least makes them visible).
+ * and DEFORM_WATER_SURFACE are rendered alpha-over while their fragment path
+ * samples the scene-color snapshot as a screen-space distortion source.
  */
 function blendConfigForPsRbt(label: string | undefined): {
   blending: THREE.Blending;
@@ -2602,6 +2600,9 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
     opts.softParticleDepthScale > 0
       ? opts.softParticleDepthScale
       : 0;
+  const distortionMode =
+    opts.blendType === 'DEFORM_WATER_SURFACE' ? 1 : opts.blendType === 'SHIMMER' ? 2 : 0;
+  const distortionStrength = distortionMode === 1 ? 0.018 : distortionMode === 2 ? 0.012 : 0;
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       map: { value: null as THREE.Texture | null },
@@ -2725,13 +2726,16 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           PS_RBT_LUT_MODES.has(opts.blendType ?? '') || opts.blendType === 'BLENDED_GLOW' ? 1 : 0,
       },
       // DEFORM_WATER_SURFACE / SHIMMER are screen-space distortion passes whose
-      // tex0 is a normal/deform map (not albedo) — we can't do the refraction,
-      // so render a faint white foam/haze hint rather than the raw blue deform
-      // texture as colour (RE doc 63 H3/M1; see the fragment shader).
+      // tex0 is a normal/deform map (not albedo). The scene environment binds
+      // a pre-particle scene-color snapshot so the fragment shader can warp the
+      // background instead of showing the normal map as colour.
       uDistortion: {
-        value:
-          opts.blendType === 'DEFORM_WATER_SURFACE' || opts.blendType === 'SHIMMER' ? 1 : 0,
+        value: distortionMode > 0 ? 1 : 0,
       },
+      uDistortionMode: { value: distortionMode },
+      uDistortionStrength: { value: distortionStrength },
+      uDistortionSceneTexture: { value: null as THREE.Texture | null },
+      uDistortionSceneSize: { value: new THREE.Vector2(1, 1) },
       // Warm "detonation glow" strength for the lightmapping + GRADIENT_MAP
       // path. RE doc 63 corrected the old pinned-U=0 theory: lightmapping
       // samples the ramp at U = 1 - glow, where glow comes from the sprite
@@ -2832,6 +2836,10 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float useEmissionAlphaFromMV;
       uniform float uPremultiply;
       uniform float uDistortion;
+      uniform float uDistortionMode;
+      uniform float uDistortionStrength;
+      uniform sampler2D uDistortionSceneTexture;
+      uniform vec2 uDistortionSceneSize;
       uniform float uGlowStrength;
       varying vec4 vColor;
       varying float vAge;
@@ -3039,10 +3047,26 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         float outA = vColor.a * base.a * vHideFade;
         vec3 outRgb = vColor.rgb * base.rgb + glow;
         if (uDistortion > 0.5) {
-          // No refraction pass: show a faint white foam/haze hint instead of the
-          // raw blue normal/deform texture as opaque colour (RE doc 63 H3/M1).
-          outRgb = vec3(1.0);
-          outA = vColor.a * base.a * 0.15;
+          vec2 screenUv = gl_FragCoord.xy / uDistortionSceneSize;
+          vec2 normalOffset = base.rg * 2.0 - 1.0;
+          if (dot(normalOffset, normalOffset) < 0.0001) {
+            normalOffset = (gl_PointCoord - vec2(0.5)) * 2.0;
+          }
+          if (uDistortionSceneSize.x > 1.0 && uDistortionSceneSize.y > 1.0) {
+            vec2 warpedUv = clamp(
+              screenUv + normalOffset * uDistortionStrength * clamp(outA, 0.0, 1.0),
+              vec2(0.001),
+              vec2(0.999)
+            );
+            vec3 refracted = texture2D(uDistortionSceneTexture, warpedUv).rgb;
+            float foam = uDistortionMode < 1.5 ? 0.10 * clamp(outA, 0.0, 1.0) : 0.0;
+            outRgb = refracted + vec3(foam);
+            outA *= (uDistortionMode < 1.5) ? 0.45 : 0.55;
+          } else {
+            // Fallback when the scene-color copy is unavailable.
+            outRgb = vec3(1.0);
+            outA *= 0.15;
+          }
         }
         outA *= uOpacityMultiplier;
         if (

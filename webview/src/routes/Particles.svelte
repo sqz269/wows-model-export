@@ -408,9 +408,9 @@
     'light',
   ]);
 
-  /** PS_RBT blend modes the renderer can only approximate with a faint
-   *  alpha-over hint — no bespoke water-deform / refraction shader yet. Mirror
-   *  of the placeholder branch in `three/particles.ts` `blendConfigForPsRbt`. */
+  /** PS_RBT blend modes rendered through the webview's screen-space
+   *  distortion approximation. Still not the full native water/heat-haze
+   *  technique, but no longer a plain alpha-over placeholder. */
   const PLACEHOLDER_BLEND_MODES = new Set(['SHIMMER', 'DEFORM_WATER_SURFACE']);
 
   /** Render-fidelity caveats that actually apply to THIS record, keyed off
@@ -422,8 +422,9 @@
    *  (`three/particles.ts` `blendConfigForPsRbt` + the flipbook-UV shader
    *  math) since the 2026-05-23 gap-closing pass — they are no longer gaps.
    *  What remains:
-   *    - a few PS_RBT modes (SHIMMER / DEFORM_WATER_SURFACE) fall back to an
-   *      alpha-over placeholder pending a bespoke shader;
+   *    - a few PS_RBT modes (SHIMMER / DEFORM_WATER_SURFACE) use a
+   *      screen-space refraction approximation instead of the full native
+   *      water/heat-haze technique;
    *    - a texture ref that resolved to neither a direct extract
    *      (`textureUrl0`) nor an atlas region (`textureAtlas0`) renders as a
    *      procedural soft disc. */
@@ -456,7 +457,7 @@
     if (placeholderBlends.size > 0) {
       gaps.push(
         `blend mode ${[...placeholderBlends].join(' / ')} approximated as ` +
-          'plain alpha-over (occluding) — no bespoke water-deform/refraction pass yet',
+          'screen-space refraction from a scene-color copy; native water/heat-haze pass not exact',
       );
     }
     if (anyUnresolvedTexture) {
