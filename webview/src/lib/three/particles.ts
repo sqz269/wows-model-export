@@ -77,6 +77,13 @@ const PS_IC_PARTICLE_COLOR_G = 22;
 const PS_IC_PARTICLE_SIZE = 23;
 const PS_IC_PARTICLE_TINT_A = 24;
 const PS_IC_LIGHT_TINT_G = 25;
+const PS_RBT_DEPTH_SORT_MODES = new Set([
+  'BLENDED_UNDERWATER',
+  'UNDERWATER_GRADIENT_MAP',
+  'BLENDED_GLOW',
+  'GRADIENT_MAP',
+  'BLENDED',
+]);
 
 function finiteNumber(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -618,6 +625,8 @@ class SystemRenderer {
   private spinRateRange = 0;
   private initialOrientationBase = 0;
   private initialOrientationRange = 0;
+  private readonly depthSortParticles: boolean;
+  private sortCamera: THREE.Camera | null = null;
   private intensityChannels: ParticleSystemIntensityChannel[] = [];
   private intensityDefaults: number[] = [];
   private intensityValues: number[] = [];
@@ -651,6 +660,12 @@ class SystemRenderer {
   private lifetime: Float32Array;
   private colorRGBA: Float32Array;
   private sizeArr: Float32Array;
+  private drawPos: Float32Array;
+  private drawColorRGBA: Float32Array;
+  private drawSizeArr: Float32Array;
+  private drawFrameSeed: Float32Array;
+  private drawFramePhase: Float32Array;
+  private drawRotationPhase: Float32Array;
   // Per-slot (CPU-only) size base (emitter × ageScale, metres) + the u8
   // particleIndex counter, both assigned at spawn. Consumed to produce
   // sizeArr each frame; not packed for the GPU.
@@ -733,6 +748,7 @@ class SystemRenderer {
   private static readonly TMP_REL2 = new THREE.Vector3();
   private static readonly TMP_WORLD = new THREE.Vector3();
   private static readonly TMP_SCALE = new THREE.Vector3();
+  private static readonly TMP_VIEW_SORT = new THREE.Matrix4();
   private static readonly TMP_QUAT = new THREE.Quaternion();
   private static readonly TMP_COL = new Float32Array(4);
   // Reused per-particle clock scratch (mutated in tick/spawn; the per-particle
@@ -967,6 +983,9 @@ class SystemRenderer {
     // to the full grid when the range wasn't authored.
     const anim = system.animation;
     const renderer = system.renderer;
+    this.depthSortParticles =
+      PS_RBT_DEPTH_SORT_MODES.has(renderer?.blendType ?? '') &&
+      finiteNumber(renderer?.sortType, 2) < 2;
     this.frameRateRamp = anim?.frameRateRamp;
     this.yawRateRamp = rampHasNonZeroValue(renderer?.yawRateRamp) ? renderer?.yawRateRamp : undefined;
     this.spinRateBase = finiteNumber(renderer?.spinRateBase, 0);
@@ -995,6 +1014,12 @@ class SystemRenderer {
     this.lifetime = new Float32Array(this.capacity);
     this.colorRGBA = new Float32Array(this.capacity * 4);
     this.sizeArr = new Float32Array(this.capacity);
+    this.drawPos = new Float32Array(this.capacity * 3);
+    this.drawColorRGBA = new Float32Array(this.capacity * 4);
+    this.drawSizeArr = new Float32Array(this.capacity);
+    this.drawFrameSeed = new Float32Array(this.capacity);
+    this.drawFramePhase = new Float32Array(this.capacity);
+    this.drawRotationPhase = new Float32Array(this.capacity);
     this.ageGpu = new Float32Array(this.capacity);
     this.frameSeed = new Float32Array(this.capacity);
     this.framePhase = new Float32Array(this.capacity);
@@ -1008,21 +1033,21 @@ class SystemRenderer {
     // every vertex as a quad facing the camera (when the material is a
     // PointsMaterial).
     const geom = new THREE.BufferGeometry();
-    this.posAttr = new THREE.BufferAttribute(this.pos, 3);
+    this.posAttr = new THREE.BufferAttribute(this.drawPos, 3);
     this.posAttr.setUsage(THREE.DynamicDrawUsage);
     this.velocityAttr = new THREE.BufferAttribute(this.velGpu, 3);
     this.velocityAttr.setUsage(THREE.DynamicDrawUsage);
-    this.colorAttr = new THREE.BufferAttribute(this.colorRGBA, 4);
+    this.colorAttr = new THREE.BufferAttribute(this.drawColorRGBA, 4);
     this.colorAttr.setUsage(THREE.DynamicDrawUsage);
-    this.sizeAttr = new THREE.BufferAttribute(this.sizeArr, 1);
+    this.sizeAttr = new THREE.BufferAttribute(this.drawSizeArr, 1);
     this.sizeAttr.setUsage(THREE.DynamicDrawUsage);
     this.ageAttr = new THREE.BufferAttribute(this.ageGpu, 1);
     this.ageAttr.setUsage(THREE.DynamicDrawUsage);
-    this.frameSeedAttr = new THREE.BufferAttribute(this.frameSeed, 1);
+    this.frameSeedAttr = new THREE.BufferAttribute(this.drawFrameSeed, 1);
     this.frameSeedAttr.setUsage(THREE.DynamicDrawUsage);
-    this.framePhaseAttr = new THREE.BufferAttribute(this.framePhase, 1);
+    this.framePhaseAttr = new THREE.BufferAttribute(this.drawFramePhase, 1);
     this.framePhaseAttr.setUsage(THREE.DynamicDrawUsage);
-    this.rotationPhaseAttr = new THREE.BufferAttribute(this.rotationPhase, 1);
+    this.rotationPhaseAttr = new THREE.BufferAttribute(this.drawRotationPhase, 1);
     this.rotationPhaseAttr.setUsage(THREE.DynamicDrawUsage);
     geom.setAttribute('position', this.posAttr);
     geom.setAttribute('velocity', this.velocityAttr);
@@ -1050,6 +1075,10 @@ class SystemRenderer {
     this.active = active;
     this.points.visible = active;
     if (active && this.loopOneShot) this.finished = false;
+  }
+
+  setSortCamera(camera: THREE.Camera | null): void {
+    this.sortCamera = camera;
   }
 
   setIntensityValues(values: readonly number[] | undefined): void {
@@ -1386,35 +1415,33 @@ class SystemRenderer {
    *  GPU buffers. Called once per visible frame (after advance()), never during
    *  prewarm. */
   private writeBuffers(): void {
-    // Update geometry attribute buffers + draw range. We pack the live
-    // particles to the front; saves GPU vertex count vs. always drawing
-    // `capacity` slots. ``ageGpu`` is always packed (unlike ``age[]``,
-    // which stays slot-indexed as the CPU truth source — see field
-    // comment) so the fragment shader's grid math reads the right value.
-    let writeIdx = 0;
+    // Update geometry attribute buffers + draw range. The simulation arrays
+    // remain slot-indexed; the draw arrays are packed/sorted copies so
+    // transparent order-dependent modes can render back-to-front without
+    // corrupting live particle state.
+    const order: number[] = [];
     for (let i = 0; i < this.capacity; i++) {
       if (this.age[i] < 0) continue;
-      if (writeIdx !== i) {
-        this.pos[writeIdx * 3 + 0] = this.pos[i * 3 + 0];
-        this.pos[writeIdx * 3 + 1] = this.pos[i * 3 + 1];
-        this.pos[writeIdx * 3 + 2] = this.pos[i * 3 + 2];
-        this.colorRGBA[writeIdx * 4 + 0] = this.colorRGBA[i * 4 + 0];
-        this.colorRGBA[writeIdx * 4 + 1] = this.colorRGBA[i * 4 + 1];
-        this.colorRGBA[writeIdx * 4 + 2] = this.colorRGBA[i * 4 + 2];
-        this.colorRGBA[writeIdx * 4 + 3] = this.colorRGBA[i * 4 + 3];
-        this.sizeArr[writeIdx] = this.sizeArr[i];
-        this.frameSeed[writeIdx] = this.frameSeed[i];
-        this.framePhase[writeIdx] = this.framePhase[i];
-        this.rotationPhase[writeIdx] = this.rotationPhase[i];
-        this.spinRate[writeIdx] = this.spinRate[i];
-      }
-      this.velGpu[writeIdx * 3 + 0] = this.vel[i * 3 + 0];
-      this.velGpu[writeIdx * 3 + 1] = this.vel[i * 3 + 1];
-      this.velGpu[writeIdx * 3 + 2] = this.vel[i * 3 + 2];
-      this.ageGpu[writeIdx] = this.age[i];
-      writeIdx++;
+      order.push(i);
     }
-    this.points.geometry.setDrawRange(0, writeIdx);
+    if (this.depthSortParticles && this.sortCamera && order.length > 1) {
+      this.sortCamera.updateMatrixWorld(true);
+      this.points.updateWorldMatrix(true, false);
+      const viewSort = SystemRenderer.TMP_VIEW_SORT.multiplyMatrices(
+        this.sortCamera.matrixWorldInverse,
+        this.points.matrixWorld,
+      );
+      const m = viewSort.elements;
+      order.sort((a, b) => {
+        const az = this.cameraSpaceZ(a, m);
+        const bz = this.cameraSpaceZ(b, m);
+        return az - bz; // farther particles have more-negative view-space Z
+      });
+    }
+    for (let writeIdx = 0; writeIdx < order.length; writeIdx++) {
+      this.writeDrawSlot(order[writeIdx], writeIdx);
+    }
+    this.points.geometry.setDrawRange(0, order.length);
     this.posAttr.needsUpdate = true;
     this.velocityAttr.needsUpdate = true;
     this.colorAttr.needsUpdate = true;
@@ -1423,6 +1450,41 @@ class SystemRenderer {
     this.frameSeedAttr.needsUpdate = true;
     this.framePhaseAttr.needsUpdate = true;
     this.rotationPhaseAttr.needsUpdate = true;
+  }
+
+  private cameraSpaceZ(slot: number, matrixElements: ArrayLike<number>): number {
+    const ix = slot * 3;
+    const x = this.pos[ix + 0];
+    const y = this.pos[ix + 1];
+    const z = this.pos[ix + 2];
+    return (
+      matrixElements[2] * x +
+      matrixElements[6] * y +
+      matrixElements[10] * z +
+      matrixElements[14]
+    );
+  }
+
+  private writeDrawSlot(sourceSlot: number, drawSlot: number): void {
+    const src3 = sourceSlot * 3;
+    const dst3 = drawSlot * 3;
+    const src4 = sourceSlot * 4;
+    const dst4 = drawSlot * 4;
+    this.drawPos[dst3 + 0] = this.pos[src3 + 0];
+    this.drawPos[dst3 + 1] = this.pos[src3 + 1];
+    this.drawPos[dst3 + 2] = this.pos[src3 + 2];
+    this.velGpu[dst3 + 0] = this.vel[src3 + 0];
+    this.velGpu[dst3 + 1] = this.vel[src3 + 1];
+    this.velGpu[dst3 + 2] = this.vel[src3 + 2];
+    this.drawColorRGBA[dst4 + 0] = this.colorRGBA[src4 + 0];
+    this.drawColorRGBA[dst4 + 1] = this.colorRGBA[src4 + 1];
+    this.drawColorRGBA[dst4 + 2] = this.colorRGBA[src4 + 2];
+    this.drawColorRGBA[dst4 + 3] = this.colorRGBA[src4 + 3];
+    this.drawSizeArr[drawSlot] = this.sizeArr[sourceSlot];
+    this.ageGpu[drawSlot] = this.age[sourceSlot];
+    this.drawFrameSeed[drawSlot] = this.frameSeed[sourceSlot];
+    this.drawFramePhase[drawSlot] = this.framePhase[sourceSlot];
+    this.drawRotationPhase[drawSlot] = this.rotationPhase[sourceSlot];
   }
 
   /** Pre-fill the ring buffer to the engine's frame-1 density: run STEPS
@@ -2400,11 +2462,13 @@ function blendConfigForPsRbt(label: string | undefined): {
     case 'BLENDED_WATER_SURFACE':
       return { blending: THREE.NormalBlending };
     case 'BLENDED_GLOW':
-      // Premultiplied-additive: dst stays, src adds scaled by its alpha.
+      // RE doc 63 L5: BLENDED_GLOW is in the same order-dependent sorted
+      // alpha-over bucket as GRADIENT_MAP. The earlier SrcAlpha/One path was
+      // too additive and bypassed the premultiplied output convention.
       return {
         blending: THREE.CustomBlending,
-        blendSrc: THREE.SrcAlphaFactor,
-        blendDst: THREE.OneFactor,
+        blendSrc: THREE.OneFactor,
+        blendDst: THREE.OneMinusSrcAlphaFactor,
       };
     case 'GRADIENT_MAP':
     case 'UNDERWATER_GRADIENT_MAP':
@@ -2641,7 +2705,8 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       // (non-premultiplied) colour as before. Keyed off blendType — the two
       // gradient modes are exactly PS_RBT_LUT_MODES.
       uPremultiply: {
-        value: PS_RBT_LUT_MODES.has(opts.blendType ?? '') ? 1 : 0,
+        value:
+          PS_RBT_LUT_MODES.has(opts.blendType ?? '') || opts.blendType === 'BLENDED_GLOW' ? 1 : 0,
       },
       // DEFORM_WATER_SURFACE / SHIMMER are screen-space distortion passes whose
       // tex0 is a normal/deform map (not albedo) — we can't do the refraction,
@@ -3064,6 +3129,7 @@ export class ParticleScene {
   private particleRecords = new Map<string, ParticleRecord>();
   private particleRecordFetches = new Map<string, Promise<ParticleRecord | null>>();
   private spawnedEffects: SpawnedParticleEffect[] = [];
+  private sortCamera: THREE.Camera | null = null;
 
   constructor(renderer?: THREE.WebGLRenderer) {
     this.root = new THREE.Group();
@@ -3077,6 +3143,17 @@ export class ParticleScene {
    *  bind to the GL context not a specific renderer instance). */
   setRenderer(renderer: THREE.WebGLRenderer): void {
     this.renderer = renderer;
+  }
+
+  /** Camera used for WG's order-dependent particle draw sorting. */
+  setSortCamera(camera: THREE.Camera | null): void {
+    this.sortCamera = camera;
+    for (const handle of this.attachments.values()) {
+      for (const system of handle.systems) system.setSortCamera(camera);
+    }
+    for (const effect of this.spawnedEffects) {
+      for (const system of effect.systems) system.setSortCamera(camera);
+    }
   }
 
   /** Keep particle lightmap reconstruction synced to the scene's key sun.
@@ -3239,6 +3316,7 @@ export class ParticleScene {
         sourceGroup: group,
         rootGroup: this.root,
       });
+      renderer.setSortCamera(this.sortCamera);
       if (intensityValues) renderer.setIntensityValues(intensityValues);
       renderer.setActive(active);
       systemParent.add(renderer.points);

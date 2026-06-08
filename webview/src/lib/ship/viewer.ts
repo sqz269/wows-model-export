@@ -1721,6 +1721,7 @@ export class ShipViewer {
     const expanded = this.expandParticleAttachments(renderable);
     const scene = new ParticleScene(this.env.renderer);
     scene.root.name = 'ShipParticleEffects';
+    scene.setSortCamera(this.env.camera);
     this.syncParticleSunLighting(scene);
     this.env.scene.add(scene.root);
 

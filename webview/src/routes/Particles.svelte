@@ -227,6 +227,7 @@
     env.axes.visible = false;
 
     scene = new ParticleScene(env.renderer);
+    scene.setSortCamera(env.camera);
     const sun = env.getSunLight();
     scene.setSunLighting(sun.direction, sun.color);
     env.scene.add(scene.root);
