@@ -58,6 +58,14 @@ function hasNonZeroNumber(value: unknown, eps = 1e-6): boolean {
   return Math.abs(finiteNumber(value, 0)) > eps;
 }
 
+function vectorHasLength(value: unknown, eps = 1e-6): value is [number, number, number] {
+  if (!Array.isArray(value) || value.length !== 3) return false;
+  const x = finiteNumber(value[0], 0);
+  const y = finiteNumber(value[1], 0);
+  const z = finiteNumber(value[2], 0);
+  return x * x + y * y + z * z > eps * eps;
+}
+
 function normalizedParticleSunColor(color: THREE.Color): THREE.Color {
   // Native particle lightmapping applies colored Reinhard normalization:
   // sunColor / (luma(sunColor) + 1). This keeps white-sun smoke at the old
@@ -2069,6 +2077,11 @@ interface ParticleMaterialOptions {
   flipTexcoordV?: boolean;
   /** Renderer.velocityOriented (+0x9a): rotate sprite toward screen-space velocity. */
   velocityOriented?: boolean;
+  /** Renderer.explicitOrientation (+0x30) and hide-angle fade controls. */
+  explicitOrientation?: [number, number, number];
+  explicitOrientationLocal?: boolean;
+  hideStartCos?: number;
+  hideSpeed?: number;
   /** Live key-light direction, world-space, pointing toward the sun. */
   sunDirection?: THREE.Vector3;
   /** Colored Reinhard-normalized key-light color for particle lightmaps. */
@@ -2220,6 +2233,15 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
     : Math.max(spriteAspectX, 1);
   const opacityMultiplier =
     opts.opacityMultiplier !== undefined && opts.opacityMultiplier > 0 ? opts.opacityMultiplier : 1;
+  const explicitOrientation =
+    vectorHasLength(opts.explicitOrientation) && (opts.hideStartCos ?? 1) < 0.999
+      ? opts.explicitOrientation
+      : undefined;
+  const useHideAngle = explicitOrientation ? 1 : 0;
+  const hideSpeed =
+    opts.hideSpeed !== undefined && Number.isFinite(opts.hideSpeed) && opts.hideSpeed > 0
+      ? opts.hideSpeed
+      : 1;
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       map: { value: null as THREE.Texture | null },
@@ -2279,6 +2301,22 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         value: new THREE.Vector2(opts.flipTexcoordU ? 1 : 0, opts.flipTexcoordV ? 1 : 0),
       },
       uVelocityOriented: { value: opts.velocityOriented ? 1 : 0 },
+      // Renderer hide-angle fade. Native FUN_1406d31f0 multiplies alpha by a
+      // clamped `(abs(dot(viewDir, explicitOrientation)) - start) * speed`
+      // term and flips it for one lightmapping path. Gate to non-default
+      // hideStartCos so default-authored explicit orientations stay neutral.
+      uUseHideAngle: { value: useHideAngle },
+      uExplicitOrientation: {
+        value: new THREE.Vector3(
+          explicitOrientation?.[0] ?? 0,
+          explicitOrientation?.[1] ?? 0,
+          explicitOrientation?.[2] ?? 1,
+        ).normalize(),
+      },
+      uExplicitOrientationLocal: { value: opts.explicitOrientationLocal ? 1 : 0 },
+      uHideStartCos: { value: opts.hideStartCos ?? 1 },
+      uHideSpeed: { value: hideSpeed },
+      uHideInvert: { value: opts.lightingType === 'lightmapping4Way' ? 1 : 0 },
       // Corpus default is 0.0 on most systems; native treats that as neutral
       // rather than invisible. Positive values are authored boosts/cuts.
       uOpacityMultiplier: { value: opacityMultiplier },
@@ -2345,12 +2383,19 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float uUseSpriteRotation;
       uniform float uVelocityOriented;
       uniform float uPointExtent;
+      uniform float uUseHideAngle;
+      uniform vec3 uExplicitOrientation;
+      uniform float uExplicitOrientationLocal;
+      uniform float uHideStartCos;
+      uniform float uHideSpeed;
+      uniform float uHideInvert;
       varying vec4 vColor;
       varying float vAge;
       varying float vFrameSeed;
       varying float vFramePhase;
       varying float vRotationPhase;
       varying float vVelocityAngle;
+      varying float vHideFade;
 
       void main() {
         vColor = color;
@@ -2362,6 +2407,16 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         vVelocityAngle = (uVelocityOriented > 0.5 && length(viewVel.xy) > 0.00001)
           ? atan(viewVel.y, viewVel.x)
           : 0.0;
+        vec3 worldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+        vHideFade = 1.0;
+        if (uUseHideAngle > 0.5) {
+          vec3 orientW = uExplicitOrientationLocal > 0.5
+            ? normalize(mat3(modelMatrix) * uExplicitOrientation)
+            : normalize(uExplicitOrientation);
+          vec3 viewDirW = normalize(worldPos - cameraPosition);
+          float h = clamp((abs(dot(viewDirW, orientW)) - uHideStartCos) * uHideSpeed, 0.0, 1.0);
+          vHideFade = (uHideInvert > 0.5) ? (1.0 - h) : h;
+        }
         vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * mvPosition;
         // size is metres (world space); divide by distance for perspective.
@@ -2410,6 +2465,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       varying float vFramePhase;
       varying float vRotationPhase;
       varying float vVelocityAngle;
+      varying float vHideFade;
 
       void main() {
         vec4 base;
@@ -2602,7 +2658,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           float a = (1.0 - r * r);
           base = vec4(1.0, 1.0, 1.0, a);
         }
-        float outA = vColor.a * base.a;
+        float outA = vColor.a * base.a * vHideFade;
         vec3 outRgb = vColor.rgb * base.rgb + glow;
         if (uDistortion > 0.5) {
           // No refraction pass: show a faint white foam/haze hint instead of the
@@ -2871,6 +2927,10 @@ export class ParticleScene {
         flipTexcoordU: r?.flipTexcoordU,
         flipTexcoordV: r?.flipTexcoordV,
         velocityOriented: r?.velocityOriented,
+        explicitOrientation: r?.explicitOrientation,
+        explicitOrientationLocal: r?.explicitOrientationLocal,
+        hideStartCos: r?.hideStartCos,
+        hideSpeed: r?.hideSpeed,
         sunDirection: this.sunDirection,
         sunColorNorm: this.sunColorNorm,
       });
