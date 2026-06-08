@@ -23,7 +23,13 @@
   import { Button } from '$lib/components/ui/button';
   import { SHIP_SECTIONS, SEAMS } from '$lib/types';
   import type { SeamKey, SeamState, ShipSectionKey } from '$lib/types';
-  import type { ColorMode, LodPolicy, NodeCategory, ShipViewer } from '$lib/ship';
+  import type {
+    ColorMode,
+    LodPolicy,
+    NodeCategory,
+    ShipViewer,
+    WgEnvironmentInfo,
+  } from '$lib/ship';
   import {
     DEFAULT_BLOOM_PARAMS,
     ARMOR_THICKNESS_STOPS,
@@ -49,6 +55,8 @@
     /** Notify the parent when textures toggle (so the header pill +
      *  any other surface mirroring this state stays in sync). */
     onShowTexturesChange?: (v: boolean) => void;
+    /** Notify parent inspector surfaces when the WG sky/weather changes. */
+    onEnvironmentChange?: (info: WgEnvironmentInfo | null) => void;
     /** Notify when seam states change so the bottom-panel Damage tab
      *  can refresh its snapshot without polling. */
     onSeamStatesChange?: (states: Readonly<Record<SeamKey, SeamState>>) => void;
@@ -60,6 +68,7 @@
     lodLevels,
     revision,
     onShowTexturesChange,
+    onEnvironmentChange,
     onSeamStatesChange,
   }: Props = $props();
 
@@ -217,6 +226,7 @@
       aimArcs = viewer.getTurretRigManager().isFiringArcsVisible();
       arcCount = viewer.getTurretRigManager().countWithLimits();
       onShowTexturesChange?.(newShowTextures);
+      onEnvironmentChange?.(viewer.getWgEnvironment());
       onSeamStatesChange?.(newSeamStates);
 
       // Hull groups: defaults match the classifier (Armor + Hitboxes hidden).
@@ -306,15 +316,20 @@
     if (v === '') {
       viewer.clearWgEnvironment();
       envWeather = '';
+      onEnvironmentChange?.(null);
       return;
     }
     const weathers = envWeathersFor(v);
     envWeather = weathers.includes('Default') ? 'Default' : (weathers[0] ?? '');
     await viewer.applyWgEnvironment({ space: v, weather: envWeather });
+    onEnvironmentChange?.(viewer.getWgEnvironment());
   }
   async function onEnvWeather(v: string) {
     envWeather = v;
-    if (envSpace) await viewer.applyWgEnvironment({ space: envSpace, weather: v });
+    if (envSpace) {
+      await viewer.applyWgEnvironment({ space: envSpace, weather: v });
+      onEnvironmentChange?.(viewer.getWgEnvironment());
+    }
   }
 
   function toggleHelpers(v: boolean) {

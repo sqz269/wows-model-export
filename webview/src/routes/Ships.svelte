@@ -24,7 +24,7 @@
   import { navState } from '$lib/nav_state.svelte';
   import { hasModifier, isTypingContext } from '$lib/shortcuts';
   import type { LibraryIndex, SeamKey, SeamState, ShipSummary, Skin } from '$lib/types';
-  import type { PickResult, ShipLoadStats, ShipViewer } from '$lib/ship';
+  import type { PickResult, ShipLoadStats, ShipViewer, WgEnvironmentInfo } from '$lib/ship';
   import ShipPicker from '$components/ShipPicker.svelte';
   import ShipViewerCmp from '$components/ShipViewer.svelte';
   import ShipControls from '$components/ShipControls.svelte';
@@ -77,6 +77,7 @@
   let showTextures = $state(false);
   let skins = $state<readonly Skin[]>([]);
   let activeSkin = $state<string | null>(null);
+  let envInfo = $state<WgEnvironmentInfo | null>(null);
   let seamStates = $state<Readonly<Record<SeamKey, SeamState>>>({
     'Bow-MidFront': 'Intact',
     'MidFront-MidBack': 'Intact',
@@ -243,7 +244,23 @@
 
   function selectShip(ship: ShipSummary) {
     loadStats = null;
+    envInfo = null;
     navigate(`#/ship/${encodeURIComponent(ship.name)}`);
+  }
+
+  function refreshEnvInfo() {
+    envInfo = viewer?.getWgEnvironment() ?? null;
+  }
+
+  function refreshEnvInfoSoon() {
+    refreshEnvInfo();
+    const expectedViewer = viewer;
+    window.setTimeout(() => {
+      if (viewer === expectedViewer) refreshEnvInfo();
+    }, 250);
+    window.setTimeout(() => {
+      if (viewer === expectedViewer) refreshEnvInfo();
+    }, 1000);
   }
 
   function onShipProgress(msg: string) {
@@ -275,6 +292,7 @@
       seamStates = { ...viewer.getSeamStates() };
       hullGroups = viewer.getHullGroups();
       lodLevels = viewer.getAvailableLodLevels();
+      refreshEnvInfoSoon();
     }
     controlsRevision++;
     const unresolved = stats.unresolvedAssets.size;
@@ -370,6 +388,7 @@
         revision={controlsRevision}
         {skins}
         {activeSkin}
+        {envInfo}
         onPickSkin={pickSkin}
         {seamStates}
         {selectedPick}
@@ -388,6 +407,7 @@
       {lodLevels}
       revision={controlsRevision}
       onShowTexturesChange={(v) => (showTextures = v)}
+      onEnvironmentChange={(info) => (envInfo = info)}
       onSeamStatesChange={(s) => (seamStates = { ...s })}
     />
   {/if}

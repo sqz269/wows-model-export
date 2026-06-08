@@ -35,7 +35,14 @@
     SidecarDoc,
     Skin,
   } from '$lib/types';
-  import type { NodeCategory, NodeEntry, PickResult, ShipLoadStats, ShipViewer } from '$lib/ship';
+  import type {
+    NodeCategory,
+    NodeEntry,
+    PickResult,
+    ShipLoadStats,
+    ShipViewer,
+    WgEnvironmentInfo,
+  } from '$lib/ship';
   import {
     thicknessToColorHex,
     hitboxStyleFor,
@@ -90,6 +97,8 @@
      *  changed (ship load, skin pick, etc.) — drives a re-read of the
      *  hull stats so the Hull tab reflects the current ship. */
     revision: number;
+    /** Active WG environment snapshot from the viewer, or null for procedural studio lighting. */
+    envInfo: WgEnvironmentInfo | null;
     skins: readonly Skin[];
     activeSkin: string | null;
     /** Async skin-activate handler (lives in the parent so the side
@@ -114,6 +123,7 @@
     loadStats,
     library,
     revision,
+    envInfo,
     skins,
     activeSkin,
     onPickSkin,
@@ -445,6 +455,14 @@
   function fmtCoord(n: number): string {
     return (n >= 0 ? '+' : '') + n.toFixed(2);
   }
+  function fmtEnvScalar(n: number): string {
+    if (!Number.isFinite(n)) return '—';
+    if (Math.abs(n) > 0 && Math.abs(n) < 0.001) return n.toExponential(2);
+    return n
+      .toFixed(3)
+      .replace(/0+$/, '')
+      .replace(/\.$/, '');
+  }
 
   const tabs: Array<{ id: ShipBottomTab; label: string; hide?: boolean; badge?: number }> =
     $derived([
@@ -557,6 +575,29 @@
           {/if}
           <dt>hull glb</dt>
           <dd><code class="font-mono text-[11px]">{ship.hull_glb}</code></dd>
+          <dt>environment</dt>
+          <dd>
+            {#if envInfo}
+              <code class="font-mono text-[11px]">{envInfo.space}</code>
+              <span class="text-muted-foreground"> / </span>{envInfo.weather}
+            {:else}
+              Procedural (studio)
+            {/if}
+          </dd>
+          {#if envInfo}
+            <dt>wetness</dt>
+            <dd class="tabular-nums">
+              overall {fmtEnvScalar(envInfo.wetness.overallWetness)}
+              <span class="text-muted-foreground"> · </span>puddles {fmtEnvScalar(
+                envInfo.wetness.puddlesIntensity,
+              )}
+              <span class="text-muted-foreground"> · </span>ripples {fmtEnvScalar(
+                envInfo.wetness.ripplesIntensity,
+              )}
+            </dd>
+            <dt>env avg lum</dt>
+            <dd class="tabular-nums">{fmtEnvScalar(envInfo.avgLum)}</dd>
+          {/if}
           {#if loadStats}
             <dt>load time</dt>
             <dd class="tabular-nums">{(loadStats.loadMs / 1000).toFixed(2)}s</dd>

@@ -452,8 +452,7 @@ roughnessFactor *= mix( 1.0, 0.35, wetBandF );
         // Reconstruct Z from the unit-vector identity when wgPackN=1.0.
         .replace(
           '#include <normal_fragment_maps>',
-          `vec3 wetGeoNormal = normal; // geometric normal (pre-normal-map) for the Layer-3 up-gate
-#ifdef USE_NORMALMAP_OBJECTSPACE
+          `#ifdef USE_NORMALMAP_OBJECTSPACE
   normal = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;
   #ifdef FLIP_SIDED
     normal = - normal;
@@ -522,14 +521,16 @@ roughnessFactor *= mix( 1.0, 0.35, wetBandF );
 // diffuseColor / roughnessFactor / metalnessFactor are still in scope (consumed
 // later in lights_*). Composes after camo + Layers 1-2; emissive untouched.
 if ( wetPuddles > 0.001 ) {
-  vec3 worldUpView = normalize( mat3( viewMatrix ) * vec3( 0.0, 1.0, 0.0 ) );
   // Up-facing gate is the real selector (engine smoothstep(0.6,0.85, N.y)) — it
-  // catches decks/turret-tops at ANY height. Gate on the GEOMETRIC normal
-  // (pre-normal-map), not the perturbed shading normal: the planked-deck normal
-  // map otherwise tilts per-pixel normals past the cutoff and kills the pools.
+  // catches decks/turret-tops at ANY height. Gate on the actual triangle plane
+  // from world-position derivatives, not the smoothed/artist-authored vertex
+  // normal: side hull/superstructure normals can be smoothed upward enough to
+  // pass a normal.y gate even though the rendered face is vertical. abs() makes
+  // the gate robust to winding/backface sign.
   // (An earlier height band keyed to the waterline wrongly zeroed the ~10m-high
   // main deck — removed.)
-  float upGate = smoothstep( 0.6, 0.85, dot( normalize( wetGeoNormal ), worldUpView ) );
+  vec3 wetFaceNormal = normalize( cross( dFdx( vWetWorldPos ), dFdy( vWetWorldPos ) ) );
+  float upGate = smoothstep( 0.6, 0.85, abs( wetFaceNormal.y ) );
   // Patchy coverage (the engine PuddlesMap is sparse, not a full wash).
   float puddleCov = wetPuddleCoverage( vWetWorldPos.xz * 0.18 );
   float pud = clamp( wetPuddles * puddleCov * upGate, 0.0, 1.0 );
@@ -539,6 +540,7 @@ if ( wetPuddles > 0.001 ) {
     metalnessFactor   = mix( metalnessFactor, 0.0, pud );  // water is dielectric
     // Flatten the shading normal toward world-up, then tilt by a ripple in the
     // deck (world-XZ) plane.
+    vec3 worldUpView = normalize( mat3( viewMatrix ) * vec3( 0.0, 1.0, 0.0 ) );
     vec3 rip = wetRippleNormal( vWetWorldPos.xz * 1.6 );
     vec3 ripView = mat3( viewMatrix ) * vec3( rip.x, 0.0, rip.y );
     normal = normalize( mix( normal, worldUpView, min( 1.0, pud * 0.85 ) ) + ripView * pud * pud * 0.4 );

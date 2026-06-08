@@ -24,7 +24,7 @@ import {
 import { observeResize } from '$lib/three/resize';
 import { startRenderLoop } from '$lib/three/render_loop';
 import { disposeTree } from '$lib/three/dispose';
-import { loadWgEnvironment, type WgEnvironment } from '$lib/three/env_ibl';
+import { loadWgEnvironment, type WetnessParams, type WgEnvironment } from '$lib/three/env_ibl';
 import { repoUrl } from '$lib/api';
 import { SHIP_SECTIONS } from '$lib/types';
 import type {
@@ -142,6 +142,13 @@ export interface ArmorPickResult {
   section: string | null;
   /** World-space hit point. */
   point: THREE.Vector3;
+}
+
+export interface WgEnvironmentInfo {
+  space: string;
+  weather: string;
+  wetness: WetnessParams;
+  avgLum: number;
 }
 
 const pickRaycaster = new THREE.Raycaster();
@@ -1545,8 +1552,20 @@ export class ShipViewer {
   }
 
   /** The active WG environment selection, or null when procedural. */
-  getWgEnvironment(): { space: string; weather: string } | null {
-    return this.wgEnv ? { space: this.wgEnv.space, weather: this.wgEnv.weather } : null;
+  getWgEnvironment(): WgEnvironmentInfo | null {
+    if (!this.wgEnv) return null;
+    const wet = this.wgEnv.wetness;
+    return {
+      space: this.wgEnv.space,
+      weather: this.wgEnv.weather,
+      avgLum: this.wgEnv.avgLum,
+      wetness: {
+        overallWetness: wet.overallWetness,
+        wetnessColor: wet.wetnessColor ? [...wet.wetnessColor] : null,
+        puddlesIntensity: wet.puddlesIntensity,
+        ripplesIntensity: wet.ripplesIntensity,
+      },
+    };
   }
 
   async dispose(): Promise<void> {
