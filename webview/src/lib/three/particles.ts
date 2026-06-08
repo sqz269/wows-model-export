@@ -2576,6 +2576,11 @@ interface ParticleMaterialOptions {
   flipTexcoordV?: boolean;
   /** Renderer.velocityOriented (+0x9a): rotate sprite toward screen-space velocity. */
   velocityOriented?: boolean;
+  /** Renderer lighting scalars (+0x54, +0x64..+0x6c). */
+  lightingAmbient?: number;
+  lightingDiffuse?: number;
+  lightingTransmission?: number;
+  lightWrapAmount?: number;
   /** Renderer.explicitOrientation (+0x30) and hide-angle fade controls. */
   explicitOrientation?: [number, number, number];
   explicitOrientationLocal?: boolean;
@@ -2752,6 +2757,10 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
   const distortionMode =
     opts.blendType === 'DEFORM_WATER_SURFACE' ? 1 : opts.blendType === 'SHIMMER' ? 2 : 0;
   const distortionStrength = distortionMode === 1 ? 0.018 : distortionMode === 2 ? 0.012 : 0;
+  const lightingAmbient = Math.max(0, finiteNumber(opts.lightingAmbient, 0.06));
+  const lightingDiffuse = Math.max(0, finiteNumber(opts.lightingDiffuse, 1));
+  const lightingTransmission = Math.max(0, finiteNumber(opts.lightingTransmission, 0));
+  const lightWrapAmount = Math.max(0, finiteNumber(opts.lightWrapAmount, 0));
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       map: { value: null as THREE.Texture | null },
@@ -2855,6 +2864,10 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uSunColorNorm: {
         value: opts.sunColorNorm?.clone() ?? DEFAULT_PARTICLE_SUN_COLOR_NORM.clone(),
       },
+      uLightingAmbient: { value: lightingAmbient },
+      uLightingDiffuse: { value: lightingDiffuse },
+      uLightingTransmission: { value: lightingTransmission },
+      uLightWrapAmount: { value: lightWrapAmount },
       // Motion-vector flipbook blending (`_MVEA`). useMv is flipped to 1 by
       // bindMvTexture once the MV DDS loads; the shader then samples two
       // adjacent frames, warps each along the MV (G,B) optical-flow field,
@@ -2979,6 +2992,10 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float uLightingMode;
       uniform vec3 uSunDirWorld;
       uniform vec3 uSunColorNorm;
+      uniform float uLightingAmbient;
+      uniform float uLightingDiffuse;
+      uniform float uLightingTransmission;
+      uniform float uLightWrapAmount;
       uniform sampler2D mvMap;
       uniform float useMv;
       uniform float mvDistortion;
@@ -3144,22 +3161,32 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             const vec3 B0 = vec3(-0.40824829, -0.70710678, 0.57735027);
             const vec3 B1 = vec3(-0.40824829,  0.70710678, 0.57735027);
             const vec3 B2 = vec3( 0.81649658,  0.0,        0.57735027);
-            vec3 w = vec3(max(0.0, dot(B0, sunV)),
-                          max(0.0, dot(B1, sunV)),
-                          max(0.0, dot(B2, sunV)));
+            float wrap = max(0.0, uLightWrapAmount);
+            float wrapDenom = max(0.0001, 1.0 + wrap);
+            vec3 basisDot = vec3(dot(B0, sunV), dot(B1, sunV), dot(B2, sunV));
+            vec3 w = max(vec3(0.0), (basisDot + vec3(wrap)) / wrapDenom);
             w *= w;                       // HL2 weighting is dot^2
+            vec3 tw = max(vec3(0.0), (-basisDot + vec3(wrap)) / wrapDenom);
+            tw *= tw;
             float flatLum = (base.r + base.g + base.b) / 3.0;
             // RE doc 63 H6: the engine does NOT energy-normalize (no /wsum) and
             // has no 30% flat mix — lit = saturate(Σ LMi·(axisi·sun)²) via
             // mad_sat (ps4.txt:789-794). The old /wsum cancelled the directional
             // magnitude (constant flat shade) and the 0.30 mix washed it out.
-            // Keep only a small additive ambient floor so fully back-lit sprites
-            // are not crushed to black.
-            float lit = clamp(dot(w, base.rgb), 0.0, 1.0) + 0.06 * flatLum;
+            // Renderer carries authored ambient/diffuse/transmission/wrap
+            // scalars in the same 0xa0-byte native struct. Apply them here to
+            // avoid the old hardcoded ambient-only approximation while keeping
+            // the unknown per-particle glow scalar separate below.
+            float ambient = uLightingAmbient * flatLum;
+            float direct = uLightingDiffuse * dot(w, base.rgb);
+            float transmitted = uLightingTransmission * dot(tw, base.rgb);
             // Colored Reinhard-normalized sun term (RE doc 63 M2). A white sun
             // produces the historical 0.5 attenuation; weather-tinted suns now
             // tint the relit smoke/explosion body instead of staying grayscale.
-            base = vec4(vec3(lit) * uSunColorNorm, base.a);
+            base = vec4(
+              clamp(vec3(ambient) + (direct + transmitted) * uSunColorNorm, 0.0, 1.0),
+              base.a
+            );
           }
           if (useLut > 0.5) {
             if (uLightingMode > 0.5) {
@@ -3512,6 +3539,10 @@ export class ParticleScene {
         flipTexcoordU: r?.flipTexcoordU,
         flipTexcoordV: r?.flipTexcoordV,
         velocityOriented: r?.velocityOriented,
+        lightingAmbient: r?.lightingAmbient,
+        lightingDiffuse: r?.lightingDiffuse,
+        lightingTransmission: r?.lightingTransmission,
+        lightWrapAmount: r?.lightWrapAmount,
         explicitOrientation: r?.explicitOrientation,
         explicitOrientationLocal: r?.explicitOrientationLocal,
         hideStartCos: r?.hideStartCos,
