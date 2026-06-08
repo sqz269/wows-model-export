@@ -1183,6 +1183,7 @@
         handles[i].group.matrixAutoUpdate = false;
         handles[i].group.matrixWorldNeedsUpdate = true;
         scene.setAttachmentActive(handles[i], true);
+        scene.setAttachmentIntensityValues(handles[i], anchor.intensity_values);
         systems += handles[i].systems.length;
       }
 
@@ -2129,7 +2130,7 @@
             {#if viewerStats.mapParticleAnchors > 0}
               <label
                 class="flex items-center gap-1.5"
-                title="Map-authored space.bin.particles[] anchors. Preview uses the shared particle renderer; authored six-channel intensities are preserved in metadata but not yet bound to EffectManager channel semantics."
+                title="Map-authored space.bin.particles[] anchors. Preview uses the shared particle renderer and applies authored EffectManager channel intensities."
               >
                 <input type="checkbox" bind:checked={showMapParticles} />
                 <span>

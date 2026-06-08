@@ -558,13 +558,43 @@ export interface ParticleSystem {
   animation?: ParticleAnimation;
   emitter?: ParticleEmitter;
   general?: ParticleGeneralSection;
+  intensities?: ParticleSystemIntensities;
   components: ParticleComponent[];
+}
+
+export interface ParticleSystemIntensityConfig {
+  ramp?: ParticleRamp;
+  flagsCount?: number;
+  flags?: number[];
+  flagNames?: string[];
+}
+
+export interface ParticleSystemIntensityChannel {
+  configsCount: number;
+  configs: ParticleSystemIntensityConfig[];
+}
+
+export interface ParticleSystemIntensities {
+  channelCount: number;
+  channels: ParticleSystemIntensityChannel[];
+}
+
+export interface ParticleIntensityChannel {
+  index: number;
+  name: string;
+  nameLength?: number;
+  minIntensity?: number;
+  maxIntensity?: number;
+  defaultIntensity?: number;
+  channelKind?: number;
 }
 
 export interface ParticleRecord {
   name?: string;
   record_index: number;
   maxEmittingDuration: number;
+  intensityChannelCount?: number;
+  intensityChannels?: ParticleIntensityChannel[];
   systemsCount: number;
   systems: ParticleSystem[];
 }

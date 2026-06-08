@@ -28,6 +28,7 @@ import type {
   ParticleRamp,
   ParticleRecord,
   ParticleSystem,
+  ParticleSystemIntensityChannel,
   ParticleValueGenerator,
   ParticleVariantVg,
   ParticleVgtPrototype,
@@ -49,6 +50,29 @@ const CHILD_EFFECT_SPAWNS_PER_SYSTEM_TICK = 8;
 const SEA_LEVEL_Y = 0;
 const DEFAULT_PARTICLE_SUN_DIR = new THREE.Vector3(50, 80, 50).normalize();
 const DEFAULT_PARTICLE_SUN_COLOR_NORM = new THREE.Color(0.5, 0.5, 0.5);
+
+const PS_IC_PARTICLE_TILING_U = 0;
+const PS_IC_PARTICLE_STREAMER_X = 2;
+const PS_IC_PARTICLE_SCALE_X = 3;
+const PS_IC_PARTICLE_VEL_Z = 4;
+const PS_IC_PARTICLE_COLOR_R = 7;
+const PS_IC_AGE_SCALE = 8;
+const PS_IC_PARTICLE_COLOR_B = 9;
+const PS_IC_PARTICLE_VEL_Y = 10;
+const PS_IC_PARTICLE_TILING_V = 11;
+const PS_IC_PARTICLE_COLOR_A = 12;
+const PS_IC_PARTICLE_TINT_G = 13;
+const PS_IC_AGE_AUX_SCALE = 14;
+const PS_IC_PARTICLE_TINT_B = 15;
+const PS_IC_PARTICLE_SCALE_Y = 16;
+const PS_IC_PARTICLE_STREAMER_Y = 17;
+const PS_IC_PARTICLE_TINT_R = 18;
+const PS_IC_EMITTER_RATE = 19;
+const PS_IC_PARTICLE_VEL_X = 20;
+const PS_IC_PARTICLE_STREAMER_Z = 21;
+const PS_IC_PARTICLE_COLOR_G = 22;
+const PS_IC_PARTICLE_SIZE = 23;
+const PS_IC_PARTICLE_TINT_A = 24;
 
 function finiteNumber(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -257,6 +281,7 @@ type ParticleEffectSpawnCallback = (request: ParticleEffectSpawnRequest) => void
 interface SystemRendererOptions {
   spawnEffect?: ParticleEffectSpawnCallback;
   loopOneShot?: boolean;
+  intensityDefaults?: readonly number[];
   /** Attachment/group frame WG uses while sampling spawn authoring data. */
   sourceGroup?: THREE.Object3D;
   /** Scene-level particle root used as the alternate stream vector frame. */
@@ -589,6 +614,30 @@ class SystemRenderer {
   private spinRateRange = 0;
   private initialOrientationBase = 0;
   private initialOrientationRange = 0;
+  private intensityChannels: ParticleSystemIntensityChannel[] = [];
+  private intensityDefaults: number[] = [];
+  private intensityValues: number[] = [];
+  private intensityRateMultiplier = 1;
+  private intensitySizeMultiplier = 1;
+  private intensityScaleXMultiplier = 1;
+  private intensityScaleYMultiplier = 1;
+  private intensityAgeScaleMultiplier = 1;
+  private intensityAgeAuxScaleMultiplier = 1;
+  private intensityColorRMultiplier = 1;
+  private intensityColorGMultiplier = 1;
+  private intensityColorBMultiplier = 1;
+  private intensityAlphaMultiplier = 1;
+  private intensityTilingUMultiplier = 1;
+  private intensityTilingVMultiplier = 1;
+  private intensityVelXMultiplier = 1;
+  private intensityVelYMultiplier = 1;
+  private intensityVelZMultiplier = 1;
+  private intensityStreamerXMultiplier = 1;
+  private intensityStreamerYMultiplier = 1;
+  private intensityStreamerZMultiplier = 1;
+  private baseSpriteAspectX = 1;
+  private baseTilingU = 1;
+  private baseTilingV = 1;
 
   // Particle attribute arrays.
   private pos: Float32Array;
@@ -679,6 +728,7 @@ class SystemRenderer {
   private static readonly TMP_REL = new THREE.Vector3();
   private static readonly TMP_REL2 = new THREE.Vector3();
   private static readonly TMP_WORLD = new THREE.Vector3();
+  private static readonly TMP_SCALE = new THREE.Vector3();
   private static readonly TMP_QUAT = new THREE.Quaternion();
   private static readonly TMP_COL = new Float32Array(4);
   // Reused per-particle clock scratch (mutated in tick/spawn; the per-particle
@@ -981,12 +1031,152 @@ class SystemRenderer {
     geom.setDrawRange(0, 0);
     this.points = new THREE.Points(geom, material);
     this.points.frustumCulled = false;
+    this.intensityChannels = system.intensities?.channels ?? [];
+    this.intensityDefaults = Array.from(options.intensityDefaults ?? []);
+    this.baseSpriteAspectX = finiteNumber(this.material.uniforms.uSpriteAspectX?.value, 1);
+    const tiling = this.material.uniforms.uUvTiling?.value;
+    if (tiling instanceof THREE.Vector2) {
+      this.baseTilingU = tiling.x;
+      this.baseTilingV = tiling.y;
+    }
+    this.setIntensityValues(this.intensityDefaults);
   }
 
   setActive(active: boolean): void {
     this.active = active;
     this.points.visible = active;
     if (active && this.loopOneShot) this.finished = false;
+  }
+
+  setIntensityValues(values: readonly number[] | undefined): void {
+    const count = Math.max(this.intensityChannels.length, this.intensityDefaults.length);
+    this.intensityValues = [];
+    for (let i = 0; i < count; i++) {
+      const authored = values?.[i];
+      const fallback = this.intensityDefaults[i] ?? 1;
+      this.intensityValues[i] = Number.isFinite(authored) ? Number(authored) : fallback;
+    }
+    this.applyIntensityState();
+  }
+
+  private applyIntensityState(): void {
+    this.intensityRateMultiplier = 1;
+    this.intensitySizeMultiplier = 1;
+    this.intensityScaleXMultiplier = 1;
+    this.intensityScaleYMultiplier = 1;
+    this.intensityAgeScaleMultiplier = 1;
+    this.intensityAgeAuxScaleMultiplier = 1;
+    this.intensityColorRMultiplier = 1;
+    this.intensityColorGMultiplier = 1;
+    this.intensityColorBMultiplier = 1;
+    this.intensityAlphaMultiplier = 1;
+    this.intensityTilingUMultiplier = 1;
+    this.intensityTilingVMultiplier = 1;
+    this.intensityVelXMultiplier = 1;
+    this.intensityVelYMultiplier = 1;
+    this.intensityVelZMultiplier = 1;
+    this.intensityStreamerXMultiplier = 1;
+    this.intensityStreamerYMultiplier = 1;
+    this.intensityStreamerZMultiplier = 1;
+
+    for (let channelIndex = 0; channelIndex < this.intensityChannels.length; channelIndex++) {
+      const channel = this.intensityChannels[channelIndex];
+      const value = this.intensityValues[channelIndex] ?? this.intensityDefaults[channelIndex] ?? 1;
+      for (const config of channel.configs ?? []) {
+        const factor = sampleRamp(config.ramp, value, 1);
+        if (!Number.isFinite(factor)) continue;
+        for (const flag of config.flags ?? []) {
+          this.applyIntensityTarget(flag, factor);
+        }
+      }
+    }
+    this.updateIntensityMaterialUniforms();
+  }
+
+  private applyIntensityTarget(flag: number, factor: number): void {
+    switch (flag) {
+      case PS_IC_EMITTER_RATE:
+        this.intensityRateMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_SIZE:
+        this.intensitySizeMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_SCALE_X:
+        this.intensityScaleXMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_SCALE_Y:
+        this.intensityScaleYMultiplier *= factor;
+        break;
+      case PS_IC_AGE_SCALE:
+        this.intensityAgeScaleMultiplier *= factor;
+        break;
+      case PS_IC_AGE_AUX_SCALE:
+        this.intensityAgeAuxScaleMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_COLOR_R:
+      case PS_IC_PARTICLE_TINT_R:
+        this.intensityColorRMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_COLOR_G:
+      case PS_IC_PARTICLE_TINT_G:
+        this.intensityColorGMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_COLOR_B:
+      case PS_IC_PARTICLE_TINT_B:
+        this.intensityColorBMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_COLOR_A:
+      case PS_IC_PARTICLE_TINT_A:
+        this.intensityAlphaMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_TILING_U:
+        this.intensityTilingUMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_TILING_V:
+        this.intensityTilingVMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_VEL_X:
+        this.intensityVelXMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_VEL_Y:
+        this.intensityVelYMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_VEL_Z:
+        this.intensityVelZMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_STREAMER_X:
+        this.intensityStreamerXMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_STREAMER_Y:
+        this.intensityStreamerYMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_STREAMER_Z:
+        this.intensityStreamerZMultiplier *= factor;
+        break;
+    }
+  }
+
+  private updateIntensityMaterialUniforms(): void {
+    const scaleY = Math.max(0.001, Math.abs(this.intensityScaleYMultiplier));
+    const aspect = Math.max(
+      0.001,
+      Math.abs((this.baseSpriteAspectX * this.intensityScaleXMultiplier) / scaleY),
+    );
+    const aspectUniform = this.material.uniforms.uSpriteAspectX?.value;
+    if (typeof aspectUniform === 'number') this.material.uniforms.uSpriteAspectX.value = aspect;
+    const pointExtent = this.material.uniforms.uPointExtent?.value;
+    if (typeof pointExtent === 'number') {
+      this.material.uniforms.uPointExtent.value = this.material.uniforms.uUseSpriteRotation?.value
+        ? Math.sqrt(aspect * aspect + 1)
+        : Math.max(aspect, 1);
+    }
+    const tiling = this.material.uniforms.uUvTiling?.value;
+    if (tiling instanceof THREE.Vector2) {
+      tiling.set(
+        this.baseTilingU * this.intensityTilingUMultiplier,
+        this.baseTilingV * this.intensityTilingVMultiplier,
+      );
+    }
   }
 
   /** Parent velocity is sampled in world space by ShipViewer and converted
@@ -1130,10 +1320,11 @@ class SystemRenderer {
       const alpha =
         sampleRamp(this.alphaRamp, alphaT, 1) *
         SystemRenderer.TMP_COL[3] *
+        this.intensityAlphaMultiplier *
         this.barrierAlphaMultiplier;
-      this.colorRGBA[i * 4 + 0] = SystemRenderer.TMP_COL[0];
-      this.colorRGBA[i * 4 + 1] = SystemRenderer.TMP_COL[1];
-      this.colorRGBA[i * 4 + 2] = SystemRenderer.TMP_COL[2];
+      this.colorRGBA[i * 4 + 0] = SystemRenderer.TMP_COL[0] * this.intensityColorRMultiplier;
+      this.colorRGBA[i * 4 + 1] = SystemRenderer.TMP_COL[1] * this.intensityColorGMultiplier;
+      this.colorRGBA[i * 4 + 2] = SystemRenderer.TMP_COL[2] * this.intensityColorBMultiplier;
       this.colorRGBA[i * 4 + 3] = alpha;
       // SIZE (RE 2026-06-04): per-particle base (emitter × ageScale, cached in
       // psize at spawn) × Π scaler multipliers, each on its own axis. Metres.
@@ -1141,7 +1332,12 @@ class SystemRenderer {
       for (let s = 0; s < this.scalerGens.length; s++) {
         sz *= sampleGenAxis(this.scalerGens[s], clocks, 1);
       }
-      sz *= this.barrierScaleMultiplier;
+      sz *=
+        this.intensitySizeMultiplier *
+        this.intensityScaleYMultiplier *
+        this.intensityAgeScaleMultiplier *
+        this.intensityAgeAuxScaleMultiplier *
+        this.barrierScaleMultiplier;
       this.sizeArr[i] = Math.max(0, sz);
     }
 
@@ -1157,7 +1353,7 @@ class SystemRenderer {
         // hold their last value past the tail; activePeriod==0 ⇒ raw elapsed).
         const t =
           this.emitterActivePeriod > 0 ? this.elapsed % this.emitterActivePeriod : this.elapsed;
-        const eRate = sampleScalarVg(this.emitterRateVg, t, 0);
+        const eRate = sampleScalarVg(this.emitterRateVg, t, 0) * this.intensityRateMultiplier;
         this.emitAccum = this.emitFromSource(
           eRate,
           dt,
@@ -1170,7 +1366,7 @@ class SystemRenderer {
         // Creator rate is authored in seconds against system active time. The
         // old normalized-age path under-emitted short bursts and over-looped
         // impact effects.
-        const cRate = sampleRamp(this.rateRamp, this.elapsed, 0);
+        const cRate = sampleRamp(this.rateRamp, this.elapsed, 0) * this.intensityRateMultiplier;
         this.creatorAccum = this.emitFromSource(
           cRate,
           dt,
@@ -1300,6 +1496,11 @@ class SystemRenderer {
       SystemRenderer.TMP_VEL.addScaledVector(this.parentVelocityLocal, this.inheritVelocityFactor);
     }
     this.convertSpawnToSimulationFrame(SystemRenderer.TMP_POS, SystemRenderer.TMP_VEL);
+    SystemRenderer.TMP_VEL.set(
+      SystemRenderer.TMP_VEL.x * this.intensityVelXMultiplier,
+      SystemRenderer.TMP_VEL.y * this.intensityVelYMultiplier,
+      SystemRenderer.TMP_VEL.z * this.intensityVelZMultiplier,
+    );
     this.pos[slot * 3 + 0] = SystemRenderer.TMP_POS.x;
     this.pos[slot * 3 + 1] = SystemRenderer.TMP_POS.y;
     this.pos[slot * 3 + 2] = SystemRenderer.TMP_POS.z;
@@ -1310,10 +1511,13 @@ class SystemRenderer {
     this.lifetime[slot] = this.maxAge;
     sampleColor(this.tintColor, 0, SystemRenderer.TMP_COL);
     const alphaT0 = this.alphaSetterIsSystemAge ? this.elapsed : 0;
-    const alpha = sampleRamp(this.alphaRamp, alphaT0, 1) * SystemRenderer.TMP_COL[3];
-    this.colorRGBA[slot * 4 + 0] = SystemRenderer.TMP_COL[0];
-    this.colorRGBA[slot * 4 + 1] = SystemRenderer.TMP_COL[1];
-    this.colorRGBA[slot * 4 + 2] = SystemRenderer.TMP_COL[2];
+    const alpha =
+      sampleRamp(this.alphaRamp, alphaT0, 1) *
+      SystemRenderer.TMP_COL[3] *
+      this.intensityAlphaMultiplier;
+    this.colorRGBA[slot * 4 + 0] = SystemRenderer.TMP_COL[0] * this.intensityColorRMultiplier;
+    this.colorRGBA[slot * 4 + 1] = SystemRenderer.TMP_COL[1] * this.intensityColorGMultiplier;
+    this.colorRGBA[slot * 4 + 2] = SystemRenderer.TMP_COL[2] * this.intensityColorBMultiplier;
     this.colorRGBA[slot * 4 + 3] = alpha;
     // Per-particle u8 spawn index (the particleIndex ramp axis) + the cached
     // size base = emitter.sizeGenerator (METRES) × ageScale, sampled ONCE here
@@ -1344,6 +1548,11 @@ class SystemRenderer {
     for (let s = 0; s < this.scalerGens.length; s++) {
       sz0 *= sampleGenAxis(this.scalerGens[s], sc, 1);
     }
+    sz0 *=
+      this.intensitySizeMultiplier *
+      this.intensityScaleYMultiplier *
+      this.intensityAgeScaleMultiplier *
+      this.intensityAgeAuxScaleMultiplier;
     this.sizeArr[slot] = Math.max(0, sz0);
     this.alive++;
   }
@@ -1396,7 +1605,15 @@ class SystemRenderer {
   }
 
   private streamVectorForSimulationFrame(action: StreamAction, out: THREE.Vector3): THREE.Vector3 {
-    out.copy(action.vector);
+    out
+      .copy(action.vector)
+      .multiply(
+        SystemRenderer.TMP_SCALE.set(
+          this.intensityStreamerXMultiplier,
+          this.intensityStreamerYMultiplier,
+          this.intensityStreamerZMultiplier,
+        ),
+      );
     if (!action.switchCoordinateStyle) return out;
     const source = this.streamSwitchSourceFrame();
     const target = this.points.parent;
@@ -2705,6 +2922,7 @@ export interface ParticleAttachmentHandle {
    *  general.capacity, components[].action, …) without poking through
    *  SystemRenderer internals. */
   record: ParticleRecord;
+  intensityValues?: number[];
   active: boolean;
 }
 
@@ -2741,6 +2959,12 @@ function parseParticleEffectRef(path: string): ParticleEffectRef {
 
 function particleRecordCacheKey(path: string, quality: ParticleQuality): string {
   return `${path}#${quality}`;
+}
+
+function intensityDefaultsForRecord(record: ParticleRecord): number[] {
+  return (record.intensityChannels ?? []).map((channel) =>
+    finiteNumber(channel.defaultIntensity, 1),
+  );
 }
 
 /**
@@ -2881,9 +3105,11 @@ export class ParticleScene {
     active: boolean,
     loopOneShot: boolean,
     spawnEffect?: ParticleEffectSpawnCallback,
+    intensityValues?: readonly number[],
   ): { systems: SystemRenderer[]; lights: LightRenderer[] } {
     const systems: SystemRenderer[] = [];
     const lights: LightRenderer[] = [];
+    const intensityDefaults = intensityDefaultsForRecord(rec);
     for (const sys of rec.systems) {
       const r = sys.renderer;
       const anim = sys.animation;
@@ -2938,9 +3164,11 @@ export class ParticleScene {
       const renderer = new SystemRenderer(sys, mat, rec.maxEmittingDuration, {
         spawnEffect,
         loopOneShot,
+        intensityDefaults,
         sourceGroup: group,
         rootGroup: this.root,
       });
+      if (intensityValues) renderer.setIntensityValues(intensityValues);
       renderer.setActive(active);
       systemParent.add(renderer.points);
       systems.push(renderer);
@@ -3037,6 +3265,7 @@ export class ParticleScene {
       (nextRequest) => {
         void this.spawnChildEffect(parent, group, nextRequest, spawned.depth);
       },
+      parent.intensityValues,
     );
     spawned.systems = instantiated.systems;
     spawned.lights = instantiated.lights;
@@ -3168,6 +3397,18 @@ export class ParticleScene {
       effect.group.visible = active;
     }
     handle.group.visible = active;
+  }
+
+  setAttachmentIntensityValues(
+    handle: ParticleAttachmentHandle,
+    values: readonly number[] | undefined,
+  ): void {
+    handle.intensityValues = values ? Array.from(values) : undefined;
+    for (const s of handle.systems) s.setIntensityValues(values);
+    for (const effect of this.spawnedEffects) {
+      if (effect.parent !== handle) continue;
+      for (const s of effect.systems) s.setIntensityValues(values);
+    }
   }
 
   setAttachmentParentVelocity(handle: ParticleAttachmentHandle, velocityWorld: THREE.Vector3): void {

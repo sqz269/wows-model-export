@@ -44,10 +44,15 @@ ASSETS_BIN_VERSION = 0x01010000
 
 # Particle data lives in the Effect blob (magic = murmur3_32("EffectPrototype")).
 EFFECT_BLOB_MAGIC = 0xEB23E0AF
+EFFECT_PRESET_BLOB_MAGIC = 0x42E15336
+EFFECT_METADATA_BLOB_MAGIC = 0xDFC8F8E0
 
 # Fixed struct sizes inside the Effect blob.
 SYSTEM_SIZE = 0x1c8
 COMPONENT_SIZE = 0x10
+SYSTEM_INTENSITY_CHANNEL_SIZE = 0x10
+SYSTEM_INTENSITY_CONFIG_SIZE = 0x20
+EFFECT_METADATA_CHANNEL_SIZE = 0x20
 
 # Item sizes per database blob (index 0..9 in PrototypeDatabase.databases).
 # Sourced from the toolkit's `assets_bin` subcommand. Not all are used here.
@@ -130,6 +135,38 @@ PS_RRC = {0: "bottom", 1: "corner", 2: "center", 3: "custom"}
 # Labels recovered from the binary enum table @ 0x1420bf430 (WoWS build
 # 12267945, value-ordered).
 PS_PAT = {0: "noAnimation", 1: "framesPlayback", 2: "motionVectors"}
+
+# PS_IC — runtime intensity-channel target IDs. Recovered from the build
+# 12506899 sorted enum table at 0x1420bf640; system intensity configs store
+# these integer IDs in their `flags[]` array.
+PS_IC = {
+    0: "PARTICLE_TILING_U",
+    1: "LIGHT_TINT_R",
+    2: "PARTICLE_STREAMER_X",
+    3: "PARTICLE_SCALE_X",
+    4: "PARTICLE_VEL_Z",
+    5: "LIGHT_RADIUS",
+    6: "LIGHT_TINT_B",
+    7: "PARTICLE_COLOR_R",
+    8: "AGE_SCALE",
+    9: "PARTICLE_COLOR_B",
+    10: "PARTICLE_VEL_Y",
+    11: "PARTICLE_TILING_V",
+    12: "PARTICLE_COLOR_A",
+    13: "PARTICLE_TINT_G",
+    14: "AGE_AUX_SCALE",
+    15: "PARTICLE_TINT_B",
+    16: "PARTICLE_SCALE_Y",
+    17: "PARTICLE_STREAMER_Y",
+    18: "PARTICLE_TINT_R",
+    19: "EMITTER_RATE",
+    20: "PARTICLE_VEL_X",
+    21: "PARTICLE_STREAMER_Z",
+    22: "PARTICLE_COLOR_G",
+    23: "PARTICLE_SIZE",
+    24: "PARTICLE_TINT_A",
+    25: "LIGHT_TINT_G",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -985,6 +1022,95 @@ def _decode_general(buf: bytes | mmap.mmap, sys_off: int) -> dict:
     }
 
 
+def _decode_system_intensities(
+    buf: bytes | mmap.mmap, sys_off: int, file_end: int,
+) -> dict:
+    """Decode System.Intensities (+0x1a8).
+
+    Each channel owns zero or more configs. A config is a scalar ramp sampled
+    by the live EffectManager channel value (usually 0..10), plus a compact
+    `flags[]` array of PS_IC target IDs. The flags relptr is relative to the
+    config start (`config + flags_relptr`), not the nested count field.
+    """
+    base = sys_off + 0x1a8
+    channel_count, _pad, channels_rp = struct.unpack_from("<IIq", buf, base)
+    out: dict[str, Any] = {
+        "channelCount": int(channel_count),
+        "channels": [],
+    }
+    if channel_count == 0:
+        return out
+    if channel_count > 32 or channels_rp == 0:
+        out["_err"] = "channels_invalid"
+        return out
+    channels_addr = base + channels_rp
+    if (
+        channels_addr < 0
+        or channels_addr + channel_count * SYSTEM_INTENSITY_CHANNEL_SIZE > file_end
+    ):
+        out["_err"] = "channels_oob"
+        return out
+
+    channels: list[dict[str, Any]] = []
+    for c in range(int(channel_count)):
+        ch_off = channels_addr + c * SYSTEM_INTENSITY_CHANNEL_SIZE
+        configs_count, _pad, configs_rp = struct.unpack_from("<IIq", buf, ch_off)
+        ch: dict[str, Any] = {
+            "configsCount": int(configs_count),
+            "configs": [],
+        }
+        if configs_count == 0:
+            channels.append(ch)
+            continue
+        if configs_count > 32 or configs_rp == 0:
+            ch["_err"] = "configs_invalid"
+            channels.append(ch)
+            continue
+        configs_addr = ch_off + configs_rp
+        if (
+            configs_addr < 0
+            or configs_addr + configs_count * SYSTEM_INTENSITY_CONFIG_SIZE > file_end
+        ):
+            ch["_err"] = "configs_oob"
+            channels.append(ch)
+            continue
+
+        configs: list[dict[str, Any]] = []
+        for i in range(int(configs_count)):
+            cfg_off = configs_addr + i * SYSTEM_INTENSITY_CONFIG_SIZE
+            flags_count = struct.unpack_from("<I", buf, cfg_off + 0x10)[0]
+            flags_rp = struct.unpack_from("<q", buf, cfg_off + 0x18)[0]
+            cfg: dict[str, Any] = {
+                "ramp": _decode_ramp(buf, cfg_off, file_end),
+                "flagsCount": int(flags_count),
+                "flags": [],
+            }
+            if flags_count == 0:
+                configs.append(cfg)
+                continue
+            if flags_count > 32 or flags_rp == 0:
+                cfg["_err"] = "flags_invalid"
+                configs.append(cfg)
+                continue
+            flags_addr = cfg_off + flags_rp
+            if flags_addr < 0 or flags_addr + flags_count * 4 > file_end:
+                cfg["_err"] = "flags_oob"
+                configs.append(cfg)
+                continue
+            flags = [
+                int(struct.unpack_from("<I", buf, flags_addr + j * 4)[0])
+                for j in range(int(flags_count))
+            ]
+            cfg["flags"] = flags
+            cfg["flagNames"] = [PS_IC.get(flag, f"unk_{flag}") for flag in flags]
+            configs.append(cfg)
+        ch["configs"] = configs
+        channels.append(ch)
+
+    out["channels"] = channels
+    return out
+
+
 def _decode_system(
     buf: bytes | mmap.mmap, sys_off: int, file_end: int,
 ) -> dict:
@@ -1024,6 +1150,7 @@ def _decode_system(
         "animation": _decode_animation(buf, sys_off, file_end),
         "emitter": _decode_emitter(buf, sys_off, file_end),
         "general": _decode_general(buf, sys_off),
+        "intensities": _decode_system_intensities(buf, sys_off, file_end),
         "components": components,
     }
 
@@ -1058,6 +1185,89 @@ def _decode_effect_record(
     return out
 
 
+def _read_null_terminated(
+    buf: bytes | mmap.mmap,
+    start: int,
+    file_end: int,
+    *,
+    max_len: int = 256,
+) -> str | None:
+    if start < 0 or start >= file_end:
+        return None
+    stop = min(file_end, start + max_len)
+    end = start
+    while end < stop and buf[end] != 0:
+        end += 1
+    if end == start:
+        return ""
+    try:
+        return bytes(buf[start:end]).decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def _decode_effect_metadata_record(
+    buf: bytes | mmap.mmap,
+    blob_data_off: int,
+    record_index: int,
+    file_end: int,
+) -> dict:
+    """Decode blob-8 EffectMetadata intensity channel metadata.
+
+    Blob 8 is parallel to blob 7 EffectPreset, so callers pass the preset
+    record index. Each 32-byte channel entry carries a name string and the
+    per-channel min/max/default scalar authored for EffectManager.
+    """
+    rec_off = blob_data_off + 0x10 + record_index * 16
+    if rec_off < 0 or rec_off + 16 > file_end:
+        return {"_err": "metadata_record_oob", "intensityChannels": []}
+    count, channels_rp = struct.unpack_from("<Qq", buf, rec_off)
+    out: dict[str, Any] = {
+        "intensityChannelCount": int(count),
+        "intensityChannels": [],
+    }
+    if count == 0:
+        return out
+    if count > 64 or channels_rp == 0:
+        out["_err"] = "metadata_channels_invalid"
+        return out
+    channels_addr = rec_off + channels_rp
+    if (
+        channels_addr < 0
+        or channels_addr + count * EFFECT_METADATA_CHANNEL_SIZE > file_end
+    ):
+        out["_err"] = "metadata_channels_oob"
+        return out
+
+    channels: list[dict[str, Any]] = []
+    for i in range(int(count)):
+        entry = channels_addr + i * EFFECT_METADATA_CHANNEL_SIZE
+        name_len = struct.unpack_from("<I", buf, entry)[0]
+        name_rp = struct.unpack_from("<q", buf, entry + 0x08)[0]
+        min_i, max_i, default_i = struct.unpack_from("<3f", buf, entry + 0x10)
+        kind = struct.unpack_from("<I", buf, entry + 0x1c)[0]
+        name_addr = entry + name_rp
+        name = _read_null_terminated(
+            buf,
+            name_addr,
+            file_end,
+            max_len=max(1, min(int(name_len), 256)),
+        )
+        channels.append(
+            {
+                "index": i,
+                "name": name if name is not None else f"Intensity {i}",
+                "nameLength": int(name_len),
+                "minIntensity": float(min_i),
+                "maxIntensity": float(max_i),
+                "defaultIntensity": float(default_i),
+                "channelKind": int(kind),
+            },
+        )
+    out["intensityChannels"] = channels
+    return out
+
+
 # ---------------------------------------------------------------------------
 # High-level reader
 # ---------------------------------------------------------------------------
@@ -1079,11 +1289,15 @@ class ParticleStore:
     _buf: mmap.mmap | bytes
     _hdr: _AssetsBinHeader
     _effect_blob: BlobInfo
+    _effect_metadata_blob: BlobInfo | None = None
     _name_index: dict[str, int] = field(default_factory=dict)
     """Full per-quality path → record_index map (`.../Fire_small.xml/high`)."""
     _base_index: dict[str, dict[str, int]] = field(default_factory=dict)
     """Base-path → {quality: record_index} map (`.../Fire_small.xml`)."""
+    _base_metadata_index: dict[str, int] = field(default_factory=dict)
+    """Base-path → EffectMetadata record_index map from blob 7/8."""
     _decoded_cache: dict[int, dict] = field(default_factory=dict)
+    _metadata_cache: dict[int, dict] = field(default_factory=dict)
     _mmap_close: Any = None
     _file_end: int = 0
 
@@ -1113,6 +1327,14 @@ class ParticleStore:
             )
             if effect is None:
                 raise ValueError("assets.bin has no Effect blob (magic 0xEB23E0AF)")
+            preset = next(
+                (b for b in hdr.blobs if b.prototype_magic == EFFECT_PRESET_BLOB_MAGIC),
+                None,
+            )
+            metadata = next(
+                (b for b in hdr.blobs if b.prototype_magic == EFFECT_METADATA_BLOB_MAGIC),
+                None,
+            )
 
             # Build name index. Walk every PathEntry; for those that
             # resolve to the Effect blob index, reconstruct the full path
@@ -1124,9 +1346,11 @@ class ParticleStore:
             # (`base_index`) so callers can say ``"particles/vehicles/
             # Fire_small.xml"`` and get the highest-quality variant.
             effect_blob_index = hdr.blobs.index(effect)
+            preset_blob_index = hdr.blobs.index(preset) if preset is not None else None
             paths_by_self_id = _build_paths_by_self_id(hdr.paths)
             name_index: dict[str, int] = {}
             base_index: dict[str, dict[str, int]] = {}
+            base_metadata_index: dict[str, int] = {}
             for entry in hdr.paths:
                 if entry.self_id == 0 or not entry.name:
                     continue
@@ -1134,18 +1358,23 @@ class ParticleStore:
                 if loc is None:
                     continue
                 blob_index, record_index = loc
-                if blob_index != effect_blob_index:
-                    continue
                 full = _reconstruct_full_path(paths_by_self_id, entry)
                 if not full:
                     continue
-                name_index[full] = record_index
-                # Strip the trailing quality suffix ("/high", "/low",
-                # "/shared") to derive the .xml base path.
-                if "/" in full:
-                    base, _, quality = full.rpartition("/")
-                    if base.endswith(".xml") and quality in ("high", "low", "shared"):
-                        base_index.setdefault(base, {})[quality] = record_index
+                if blob_index == effect_blob_index:
+                    name_index[full] = record_index
+                    # Strip the trailing quality suffix ("/high", "/low",
+                    # "/shared") to derive the .xml base path.
+                    if "/" in full:
+                        base, _, quality = full.rpartition("/")
+                        if base.endswith(".xml") and quality in ("high", "low", "shared"):
+                            base_index.setdefault(base, {})[quality] = record_index
+                elif (
+                    preset_blob_index is not None
+                    and blob_index == preset_blob_index
+                    and full.endswith(".xml")
+                ):
+                    base_metadata_index[full] = record_index
         except Exception:
             mm.close()
             f.close()
@@ -1155,8 +1384,10 @@ class ParticleStore:
             _buf=mm,
             _hdr=hdr,
             _effect_blob=effect,
+            _effect_metadata_blob=metadata,
             _name_index=name_index,
             _base_index=base_index,
+            _base_metadata_index=base_metadata_index,
             _mmap_close=(mm, f),
             _file_end=len(mm),
         )
@@ -1210,6 +1441,34 @@ class ParticleStore:
         """Total Effect records in the blob (including unreachable)."""
         return self._effect_blob.record_count
 
+    def _metadata_for_base(self, base: str) -> dict | None:
+        if self._effect_metadata_blob is None:
+            return None
+        meta_idx = self._base_metadata_index.get(base)
+        if meta_idx is None:
+            return None
+        if meta_idx in self._metadata_cache:
+            return self._metadata_cache[meta_idx]
+        if meta_idx < 0 or meta_idx >= self._effect_metadata_blob.record_count:
+            return None
+        decoded = _decode_effect_metadata_record(
+            self._buf,
+            self._effect_metadata_blob.data_offset,
+            meta_idx,
+            self._file_end,
+        )
+        self._metadata_cache[meta_idx] = decoded
+        return decoded
+
+    def _attach_metadata(self, decoded: dict, base: str | None) -> None:
+        if not base:
+            return
+        metadata = self._metadata_for_base(base)
+        if not metadata:
+            return
+        decoded["intensityChannelCount"] = metadata.get("intensityChannelCount", 0)
+        decoded["intensityChannels"] = metadata.get("intensityChannels", [])
+
     def get(self, name: str, *, quality: str | None = None) -> dict | None:
         """Decode the Effect for ``name``. Returns ``None`` if not in the
         index.
@@ -1232,6 +1491,7 @@ class ParticleStore:
         # Direct fully-qualified lookup wins (preserves backwards-compat
         # for callers that pass the WG-form path verbatim).
         idx = self._name_index.get(key)
+        metadata_base: str | None = None
         if idx is None:
             # Try the base-path lookup with quality preference. The "high"
             # variant is the canonical authoring artefact; "low" is the
@@ -1247,12 +1507,20 @@ class ParticleStore:
                     break
             if idx is None:
                 return None
+            metadata_base = key
+        elif "/" in key:
+            base, _, suffix = key.rpartition("/")
+            if base.endswith(".xml") and suffix in ("high", "low", "shared"):
+                metadata_base = base
         if idx in self._decoded_cache:
-            return self._decoded_cache[idx]
+            decoded = self._decoded_cache[idx]
+            self._attach_metadata(decoded, metadata_base)
+            return decoded
         decoded = _decode_effect_record(
             self._buf, self._effect_blob.data_offset, idx, self._file_end,
         )
         decoded["name"] = key
+        self._attach_metadata(decoded, metadata_base)
         self._decoded_cache[idx] = decoded
         return decoded
 
@@ -1295,8 +1563,11 @@ def _canonicalize_name(name: str) -> str:
 __all__ = [
     "ASSETS_BIN_MAGIC",
     "EFFECT_BLOB_MAGIC",
+    "EFFECT_PRESET_BLOB_MAGIC",
+    "EFFECT_METADATA_BLOB_MAGIC",
     "PCAT",
     "PSAT",
+    "PS_IC",
     "PS_VGT",
     "PS_VALG_RAMP_PARAMETER",
     "PS_VALG_RAMP_SAMPLING",
