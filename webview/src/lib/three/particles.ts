@@ -2793,6 +2793,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
   const lightingTransmission = Math.max(0, finiteNumber(opts.lightingTransmission, 0));
   const lightWrapAmount = Math.max(0, finiteNumber(opts.lightWrapAmount, 0));
   const glowPosterizeSteps = particleByteStepCount(opts.shadowsStrength);
+  const opacityLightingSteps = particleByteStepCount(opts.opacityMultiplier);
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       map: { value: null as THREE.Texture | null },
@@ -2941,6 +2942,10 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       // The GRADIENT_MAP + lightmapping pixel path uses it to posterize the
       // glow-ramp coordinate before sampling g_particleGlowTexture.
       uGlowPosterizeSteps: { value: glowPosterizeSteps },
+      // Renderer.opacityMultiplier is another packed byte in native
+      // FUN_140716f00. Despite the sidecar name, the pixel shader uses it to
+      // quantize scalar lighting/body factors, not final alpha.
+      uOpacityLightingSteps: { value: opacityLightingSteps },
     },
     vertexShader: /* glsl */ `
       attribute vec4 color;
@@ -3043,6 +3048,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform vec2 uDistortionSceneSize;
       uniform float uGlowStrength;
       uniform float uGlowPosterizeSteps;
+      uniform float uOpacityLightingSteps;
       varying vec4 vColor;
       varying float vAge;
       varying float vFrameSeed;
@@ -3053,6 +3059,11 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
 
       float perspectiveDepthToViewZ(const in float invClipZ, const in float near, const in float far) {
         return (near * far) / ((far - near) * invClipZ - far);
+      }
+
+      float quantizeLightingScalar(float value, float steps) {
+        if (steps <= 0.5) return value;
+        return floor(value * steps + 0.5) / steps;
       }
 
       void main() {
@@ -3269,6 +3280,17 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           }
           // _MVEA emission (when useEmissionAlphaFromMV): additive glow on
           // top of the lit/remapped colour. Zero when not enabled.
+          if (uDistortion <= 0.5 && uOpacityLightingSteps > 0.5) {
+            // Native extracts Renderer.opacityMultiplier as an 8-bit step
+            // count and quantizes lighting factors before composing the body
+            // with the additive glow. The webview has a collapsed lighting
+            // body, so preserve hue while posterizing its luminance.
+            float bodyLum = max(max(base.r, base.g), base.b);
+            if (bodyLum > 0.000001) {
+              float qLum = quantizeLightingScalar(bodyLum, uOpacityLightingSteps);
+              base.rgb *= qLum / bodyLum;
+            }
+          }
           base.rgb += vec3(mvEmissive);
         } else {
           vec2 c = gl_PointCoord - vec2(0.5);
