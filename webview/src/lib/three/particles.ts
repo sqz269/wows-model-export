@@ -529,6 +529,7 @@ class SystemRenderer {
   private emitterPosVg: ParticleVariantVg | undefined;
   private emitterVelVg: ParticleVariantVg | undefined;
   private emitterActivePeriod: number;
+  private inheritVelocityFactor = 0;
   private snapToSeaLevel = false;
   // Per-action driver fields.
   private tintColor: ParticleColor | undefined;
@@ -614,6 +615,7 @@ class SystemRenderer {
   private barrierInsideNow = false;
   private barrierInsideNext = false;
   private barrierDistanceRatio = 1;
+  private parentVelocityLocal = new THREE.Vector3();
 
   // Tmp scratch — avoids per-frame Vector3 allocations.
   private static readonly TMP_POS = new THREE.Vector3();
@@ -841,6 +843,7 @@ class SystemRenderer {
     this.emitterPosVg = system.emitter?.initialPositionGenerator;
     this.emitterVelVg = system.emitter?.initialVelocityGenerator;
     this.emitterActivePeriod = Math.max(0, system.emitter?.activePeriod ?? 0);
+    this.inheritVelocityFactor = system.emitter?.inheritVelocityFactor ?? 0;
     this.snapToSeaLevel = !!system.emitter?.snapToSeaLevel;
     // SIZE base (RE 2026-06-04): the emitter's sizeGenerator is the per-particle
     // BASE size in METRES; ageScaleGenerator is a per-particle life multiplier.
@@ -919,6 +922,22 @@ class SystemRenderer {
   setActive(active: boolean): void {
     this.active = active;
     if (active && this.loopOneShot) this.finished = false;
+  }
+
+  /** Parent velocity is sampled in world space by ShipViewer and converted
+   *  into this system's local frame. It is applied only to newly spawned
+   *  particles through emitter.inheritVelocityFactor. */
+  setParentVelocityWorld(velocity: THREE.Vector3): void {
+    if (this.inheritVelocityFactor === 0) {
+      this.parentVelocityLocal.set(0, 0, 0);
+      return;
+    }
+    this.parentVelocityLocal.copy(velocity);
+    const parent = this.points.parent;
+    if (!parent) return;
+    parent.updateWorldMatrix(true, false);
+    parent.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
+    this.parentVelocityLocal.applyQuaternion(SystemRenderer.TMP_QUAT);
   }
 
   /** Step the simulation by `dt` seconds. Updates the GPU buffers. */
@@ -1204,6 +1223,9 @@ class SystemRenderer {
     samplePosFromVariantVg(posVg, SystemRenderer.TMP_POS);
     this.applySeaLevelBaseOffset(SystemRenderer.TMP_POS);
     samplePosFromVariantVg(velVg, SystemRenderer.TMP_VEL);
+    if (this.inheritVelocityFactor !== 0) {
+      SystemRenderer.TMP_VEL.addScaledVector(this.parentVelocityLocal, this.inheritVelocityFactor);
+    }
     this.pos[slot * 3 + 0] = SystemRenderer.TMP_POS.x;
     this.pos[slot * 3 + 1] = SystemRenderer.TMP_POS.y;
     this.pos[slot * 3 + 2] = SystemRenderer.TMP_POS.z;
@@ -2848,6 +2870,14 @@ export class ParticleScene {
       effect.group.visible = active;
     }
     handle.group.visible = active;
+  }
+
+  setAttachmentParentVelocity(handle: ParticleAttachmentHandle, velocityWorld: THREE.Vector3): void {
+    for (const s of handle.systems) s.setParentVelocityWorld(velocityWorld);
+    for (const effect of this.spawnedEffects) {
+      if (effect.parent !== handle) continue;
+      for (const s of effect.systems) s.setParentVelocityWorld(velocityWorld);
+    }
   }
 
   /** Toggle every attachment on/off. */

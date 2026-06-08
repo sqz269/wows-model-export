@@ -146,6 +146,12 @@ export interface ArmorPickResult {
   point: THREE.Vector3;
 }
 
+interface ParticleAnchorMotion {
+  lastPosition: THREE.Vector3;
+  velocity: THREE.Vector3;
+  lastTimeMs: number;
+}
+
 export interface WgEnvironmentInfo {
   space: string;
   weather: string;
@@ -406,6 +412,7 @@ export class ShipViewer {
   private particleScene: ParticleScene | null = null;
   private particleHandles: ParticleAttachmentHandle[] = [];
   private particleAnchorObjects = new Map<ParticleAttachmentHandle, THREE.Object3D>();
+  private particleAnchorMotion = new Map<ParticleAttachmentHandle, ParticleAnchorMotion>();
   private particleAttachmentAnchors = new WeakMap<ParticleAttachment, THREE.Object3D>();
   private particleLayerEnabled = false;
   private particleBuildPromise: Promise<ShipParticleStats> | null = null;
@@ -1761,6 +1768,7 @@ export class ShipViewer {
     this.particleScene = null;
     this.particleHandles = [];
     this.particleAnchorObjects.clear();
+    this.particleAnchorMotion.clear();
     this.particleAttachmentAnchors = new WeakMap<ParticleAttachment, THREE.Object3D>();
     this.particleBuildPromise = null;
     this.particleStats = emptyShipParticleStats();
@@ -1833,17 +1841,51 @@ export class ShipViewer {
   private updateParticleAttachmentTransforms(): void {
     if (!this.particleLayerEnabled || this.particleAnchorObjects.size === 0) return;
     this.shipRoot.updateMatrixWorld(false);
+    const nowMs = performance.now();
     for (const [handle, obj] of this.particleAnchorObjects) {
-      this.copyParticleAnchorTransform(handle, obj);
+      this.copyParticleAnchorTransform(handle, obj, nowMs);
     }
   }
 
   private copyParticleAnchorTransform(
     handle: ParticleAttachmentHandle,
     obj: THREE.Object3D,
+    nowMs = performance.now(),
   ): void {
-    handle.group.position.copy(obj.getWorldPosition(particleWorldPos));
+    obj.getWorldPosition(particleWorldPos);
+    this.updateParticleAnchorMotion(handle, particleWorldPos, nowMs);
+    handle.group.position.copy(particleWorldPos);
     handle.group.quaternion.copy(obj.getWorldQuaternion(particleWorldQuat));
+  }
+
+  private updateParticleAnchorMotion(
+    handle: ParticleAttachmentHandle,
+    worldPosition: THREE.Vector3,
+    nowMs: number,
+  ): void {
+    // WG inheritVelocityFactor is a spawn-time velocity term. Sample the
+    // anchor's world-space derivative here, then ParticleScene converts it to
+    // each system's local frame before the next spawn.
+    let motion = this.particleAnchorMotion.get(handle);
+    if (!motion) {
+      motion = {
+        lastPosition: worldPosition.clone(),
+        velocity: new THREE.Vector3(),
+        lastTimeMs: nowMs,
+      };
+      this.particleAnchorMotion.set(handle, motion);
+      this.particleScene?.setAttachmentParentVelocity(handle, motion.velocity);
+      return;
+    }
+    const dt = (nowMs - motion.lastTimeMs) * 0.001;
+    if (dt > 1e-5 && dt < 0.5) {
+      motion.velocity.copy(worldPosition).sub(motion.lastPosition).multiplyScalar(1 / dt);
+    } else {
+      motion.velocity.set(0, 0, 0);
+    }
+    motion.lastPosition.copy(worldPosition);
+    motion.lastTimeMs = nowMs;
+    this.particleScene?.setAttachmentParentVelocity(handle, motion.velocity);
   }
 
   /**
