@@ -1622,6 +1622,7 @@ export class ShipViewer {
     } else {
       this.env.setSunLight({ intensity: 0.35 });
     }
+    this.syncParticleSunLighting();
 
     // Layer-1 rain wetness: tint albedo toward `wetnessColor` + drop roughness,
     // scaled by the per-weather `overallWetness` (dry in clear weather). The WG
@@ -1658,6 +1659,7 @@ export class ShipViewer {
     });
     this.env.setFillLights(PROCEDURAL_FILL_HEMI, PROCEDURAL_FILL_DIR);
     this.env.setSunLight({ direction: PROCEDURAL_SUN_DIR.clone(), color: 0xffffff });
+    this.syncParticleSunLighting();
     // Procedural sky has no weather → dry hull.
     this.textures.setWetness({ overallWetness: 0, wetnessColor: null, puddlesIntensity: 0 });
   }
@@ -1719,6 +1721,7 @@ export class ShipViewer {
     const expanded = this.expandParticleAttachments(renderable);
     const scene = new ParticleScene(this.env.renderer);
     scene.root.name = 'ShipParticleEffects';
+    this.syncParticleSunLighting(scene);
     this.env.scene.add(scene.root);
 
     const handles = scene.build(expanded, result.records, (a) => this.resolveParticleAnchor(a));
@@ -1754,6 +1757,12 @@ export class ShipViewer {
       console.warn('[ship particles] some particle records failed to load', result.errors);
     }
     return stats;
+  }
+
+  private syncParticleSunLighting(scene = this.particleScene): void {
+    if (!scene) return;
+    const sun = this.env.getSunLight();
+    scene.setSunLighting(sun.direction, sun.color);
   }
 
   private disposeParticleLayer(

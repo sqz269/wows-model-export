@@ -47,6 +47,8 @@ const CHILD_EFFECT_DEPTH_LIMIT = 3;
 const CHILD_EFFECT_BUDGET = 256;
 const CHILD_EFFECT_SPAWNS_PER_SYSTEM_TICK = 8;
 const SEA_LEVEL_Y = 0;
+const DEFAULT_PARTICLE_SUN_DIR = new THREE.Vector3(50, 80, 50).normalize();
+const DEFAULT_PARTICLE_SUN_COLOR_NORM = new THREE.Color(0.5, 0.5, 0.5);
 
 function finiteNumber(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -54,6 +56,14 @@ function finiteNumber(value: unknown, fallback = 0): number {
 
 function hasNonZeroNumber(value: unknown, eps = 1e-6): boolean {
   return Math.abs(finiteNumber(value, 0)) > eps;
+}
+
+function normalizedParticleSunColor(color: THREE.Color): THREE.Color {
+  // Native particle lightmapping applies colored Reinhard normalization:
+  // sunColor / (luma(sunColor) + 1). This keeps white-sun smoke at the old
+  // 0.5 attenuation while preserving weather sun hue.
+  const luma = color.r * 0.2126 + color.g * 0.7152 + color.b * 0.0722;
+  return color.clone().multiplyScalar(1 / (luma + 1));
 }
 
 function systemUsesDetachedCoordinateFrame(system: ParticleSystem): boolean {
@@ -2059,6 +2069,10 @@ interface ParticleMaterialOptions {
   flipTexcoordV?: boolean;
   /** Renderer.velocityOriented (+0x9a): rotate sprite toward screen-space velocity. */
   velocityOriented?: boolean;
+  /** Live key-light direction, world-space, pointing toward the sun. */
+  sunDirection?: THREE.Vector3;
+  /** Colored Reinhard-normalized key-light color for particle lightmaps. */
+  sunColorNorm?: THREE.Color;
 }
 
 /**
@@ -2277,12 +2291,14 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uLightingMode: {
         value: PS_RLT_LIGHTMAP_MODES.has(opts.lightingType ?? '') ? 1 : 0,
       },
-      // TODO M2/H7 (RE doc 63): replace the hard-coded sun dir/scalar with the
-      // live scene DirectionalLight (scene.ts:125-126) world direction + a
-      // sunColor/(luma+1) vec3 in place of uSmokeLightScale. No-op today: the
-      // scene sun is exactly (50,80,50), white — so this constant IS correct.
-      // Wiring a live per-frame uniform across scene.ts isn't worth it yet.
-      uSunDirWorld: { value: new THREE.Vector3(50, 80, 50).normalize() },
+      // Live key-light direction/color. RE doc 63 H7/M2: particle lightmaps
+      // should track the same world sun as the scene, and the native shader
+      // applies colored Reinhard normalization, sunColor/(luma+1), rather than
+      // a fixed grayscale scale.
+      uSunDirWorld: { value: opts.sunDirection?.clone() ?? DEFAULT_PARTICLE_SUN_DIR.clone() },
+      uSunColorNorm: {
+        value: opts.sunColorNorm?.clone() ?? DEFAULT_PARTICLE_SUN_COLOR_NORM.clone(),
+      },
       // Motion-vector flipbook blending (`_MVEA`). useMv is flipped to 1 by
       // bindMvTexture once the MV DDS loads; the shader then samples two
       // adjacent frames, warps each along the MV (G,B) optical-flow field,
@@ -2292,15 +2308,6 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       useMv: { value: 0 },
       mvDistortion: { value: opts.motionVectorsDistortion ?? 0 },
       useEmissionAlphaFromMV: { value: opts.useEmissionAlphaFromMV ? 1 : 0 },
-      // Relit-smoke brightness scale (RE 2026-05-29). The engine multiplies
-      // the relit lightmap luminance by sunColor/(luma(sunColor)+1) (a Reinhard
-      // normalization ≈ 0.5 for a white sun) × g_particleLightingFactor before
-      // the per-particle tint. The webview's scene sun is white and we don't
-      // carry the lighting factor, so 0.5 approximates that attenuation — it's
-      // what keeps the relit smoke DARK (occluding) rather than ~2× too bright
-      // once the authored HDR tint (e.g. (2,2,2)) is applied. Lightmapping
-      // path only.
-      uSmokeLightScale: { value: 0.5 },
       // Premultiplied-alpha output (RE 2026-05-29). GRADIENT_MAP /
       // UNDERWATER_GRADIENT_MAP blend premultiplied alpha-over in the engine
       // (Src=ONE, Dst=INV_SRC_ALPHA), so the fragment shader must premultiply
@@ -2389,6 +2396,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float uOpacityMultiplier;
       uniform float uLightingMode;
       uniform vec3 uSunDirWorld;
+      uniform vec3 uSunColorNorm;
       uniform sampler2D mvMap;
       uniform float useMv;
       uniform float mvDistortion;
@@ -2396,7 +2404,6 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float uPremultiply;
       uniform float uDistortion;
       uniform float uGlowStrength;
-      uniform float uSmokeLightScale;
       varying vec4 vColor;
       varying float vAge;
       varying float vFrameSeed;
@@ -2558,11 +2565,10 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             // Keep only a small additive ambient floor so fully back-lit sprites
             // are not crushed to black.
             float lit = clamp(dot(w, base.rgb), 0.0, 1.0) + 0.06 * flatLum;
-            // Sun-color Reinhard normalization × lighting factor (RE): keeps
-            // the relit smoke DARK so it occludes, rather than ~2x too bright
-            // once the authored HDR tint multiplies in.
-            lit *= uSmokeLightScale;
-            base = vec4(vec3(lit), base.a);
+            // Colored Reinhard-normalized sun term (RE doc 63 M2). A white sun
+            // produces the historical 0.5 attenuation; weather-tinted suns now
+            // tint the relit smoke/explosion body instead of staying grayscale.
+            base = vec4(vec3(lit) * uSunColorNorm, base.a);
           }
           if (useLut > 0.5) {
             if (uLightingMode > 0.5) {
@@ -2695,6 +2701,8 @@ export class ParticleScene {
   readonly root: THREE.Group;
   private attachments = new Map<string, ParticleAttachmentHandle>();
   private lastTickMs = -1;
+  private sunDirection = DEFAULT_PARTICLE_SUN_DIR.clone();
+  private sunColorNorm = DEFAULT_PARTICLE_SUN_COLOR_NORM.clone();
   /** WebGL renderer used to issue DDS compressed-texture uploads.
    *  Provided once via `setRenderer`. Until set, particle systems load
    *  with the procedural-disc fallback. */
@@ -2718,6 +2726,22 @@ export class ParticleScene {
    *  bind to the GL context not a specific renderer instance). */
   setRenderer(renderer: THREE.WebGLRenderer): void {
     this.renderer = renderer;
+  }
+
+  /** Keep particle lightmap reconstruction synced to the scene's key sun.
+   *  `direction` points toward the sun, matching `createSceneEnvironment`.
+   *  `color` is normalized with WG's colored Reinhard term. */
+  setSunLighting(direction: THREE.Vector3, color: THREE.Color): void {
+    if (direction.lengthSq() > 1e-10) {
+      this.sunDirection.copy(direction).normalize();
+    }
+    this.sunColorNorm.copy(normalizedParticleSunColor(color));
+    for (const handle of this.attachments.values()) {
+      for (const system of handle.systems) this.applySunLighting(system.material);
+    }
+    for (const effect of this.spawnedEffects) {
+      for (const system of effect.systems) this.applySunLighting(system.material);
+    }
   }
 
   /** Build the scene from a sidecar's `effects` block. Returns the
@@ -2847,7 +2871,10 @@ export class ParticleScene {
         flipTexcoordU: r?.flipTexcoordU,
         flipTexcoordV: r?.flipTexcoordV,
         velocityOriented: r?.velocityOriented,
+        sunDirection: this.sunDirection,
+        sunColorNorm: this.sunColorNorm,
       });
+      this.applySunLighting(mat);
       const renderer = new SystemRenderer(sys, mat, rec.maxEmittingDuration, {
         spawnEffect,
         loopOneShot,
@@ -2908,6 +2935,13 @@ export class ParticleScene {
       if (quality === 'high') this.particleRecords.set(normalized, record);
     }
     return record;
+  }
+
+  private applySunLighting(material: THREE.ShaderMaterial): void {
+    const dir = material.uniforms.uSunDirWorld?.value;
+    if (dir instanceof THREE.Vector3) dir.copy(this.sunDirection);
+    const color = material.uniforms.uSunColorNorm?.value;
+    if (color instanceof THREE.Color) color.copy(this.sunColorNorm);
   }
 
   private async spawnChildEffect(

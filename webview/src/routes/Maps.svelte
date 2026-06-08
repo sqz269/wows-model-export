@@ -1162,6 +1162,8 @@
       disposeMapParticleScene(env);
       const scene = new ParticleScene(env.renderer);
       scene.root.name = 'MapParticleEffects';
+      const sun = env.getSunLight();
+      scene.setSunLighting(sun.direction, sun.color);
       env.scene.add(scene.root);
 
       const renderable = usable.filter((a) => records[a.resource_path as string]);

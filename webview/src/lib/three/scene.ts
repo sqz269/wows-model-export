@@ -167,6 +167,9 @@ export interface SceneEnvironment {
     color?: THREE.ColorRepresentation;
     intensity?: number;
   }): void;
+  /** Current key-light direction/color. Direction points TOWARD the sun,
+   *  matching `setSunLight`. Returned objects are clones. */
+  getSunLight(): { direction: THREE.Vector3; color: THREE.Color; intensity: number };
   /** Forwarded by the resize observer so the composer stays in sync. */
   setSize(width: number, height: number): void;
   /** Replace the scene background color (e.g. to switch a particle
@@ -260,6 +263,7 @@ export function createSceneEnvironment(
   const hemi = new THREE.HemisphereLight(0xbcd3ff, 0x222833, 0.85);
   const dir = new THREE.DirectionalLight(0xffffff, 0.85);
   dir.position.set(50, 80, 50);
+  const sunDirectionState = dir.position.clone().normalize();
   scene.add(hemi, dir);
 
   // Helpers — the ship is huge (~300 m) so the default grid scale
@@ -405,9 +409,21 @@ export function createSceneEnvironment(
       // DirectionalLight travels from `position` toward its target (origin),
       // so position along the to-sun direction makes the light shine "down"
       // from the sun. Magnitude is irrelevant (directional), so push it out.
-      if (opts.direction) dir.position.copy(opts.direction).multiplyScalar(100);
+      if (opts.direction) {
+        sunDirectionState.copy(opts.direction);
+        if (sunDirectionState.lengthSq() <= 1e-10) sunDirectionState.set(50, 80, 50);
+        sunDirectionState.normalize();
+        dir.position.copy(sunDirectionState).multiplyScalar(100);
+      }
       if (opts.color !== undefined) dir.color.set(opts.color);
       if (opts.intensity !== undefined) dir.intensity = opts.intensity;
+    },
+    getSunLight() {
+      return {
+        direction: sunDirectionState.clone(),
+        color: dir.color.clone(),
+        intensity: dir.intensity,
+      };
     },
     setBackground(color: number) {
       if (scene.background instanceof THREE.Color) {

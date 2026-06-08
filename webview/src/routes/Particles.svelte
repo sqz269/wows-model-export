@@ -227,6 +227,8 @@
     env.axes.visible = false;
 
     scene = new ParticleScene(env.renderer);
+    const sun = env.getSunLight();
+    scene.setSunLighting(sun.direction, sun.color);
     env.scene.add(scene.root);
 
     stopResize = observeResize({
