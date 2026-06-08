@@ -2592,7 +2592,8 @@ interface ParticleMaterialOptions {
   customCenterOffset?: [number, number];
   /** Renderer.scaleX (+0x60): sprite width multiplier relative to height. */
   scaleX?: number;
-  /** Renderer.opacityMultiplier (+0x74): final alpha multiplier. */
+  /** Renderer.opacityMultiplier (+0x74): native packs this as a lighting
+   *  posterize byte, not a final alpha multiplier. */
   opacityMultiplier?: number;
   /** Renderer.tilingU/V (+0x90/+0x94): repeat local sprite UVs. */
   tilingU?: number;
@@ -2768,8 +2769,6 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
   const pointExtent = spriteRotation
     ? Math.sqrt(spriteAspectX * spriteAspectX + 1)
     : Math.max(spriteAspectX, 1);
-  const opacityMultiplier =
-    opts.opacityMultiplier !== undefined && opts.opacityMultiplier > 0 ? opts.opacityMultiplier : 1;
   const explicitOrientation =
     vectorHasLength(opts.explicitOrientation) && (opts.hideStartCos ?? 1) < 0.999
       ? opts.explicitOrientation
@@ -2869,9 +2868,6 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uHideStartCos: { value: opts.hideStartCos ?? 1 },
       uHideSpeed: { value: hideSpeed },
       uHideInvert: { value: opts.lightingType === 'lightmapping4Way' ? 1 : 0 },
-      // Corpus default is 0.0 on most systems; native treats that as neutral
-      // rather than invisible. Positive values are authored boosts/cuts.
-      uOpacityMultiplier: { value: opacityMultiplier },
       // Native uses an opaque-only depth copy for soft particles/fog. The
       // scene environment binds a WebGL DepthTexture here before each render;
       // when absent, uSoftDepthSize stays 1x1 and the shader skips the fade.
@@ -3024,7 +3020,6 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float uPointExtent;
       uniform vec2 uUvTiling;
       uniform vec2 uUvFlip;
-      uniform float uOpacityMultiplier;
       uniform sampler2D uSoftDepthTexture;
       uniform vec2 uSoftDepthSize;
       uniform float uSoftParticleDepthScale;
@@ -3309,7 +3304,6 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             outA *= 0.15;
           }
         }
-        outA *= uOpacityMultiplier;
         if (
           uSoftParticleDepthScale > 0.0 &&
           uSoftDepthSize.x > 1.0 &&
