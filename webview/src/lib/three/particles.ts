@@ -2432,6 +2432,8 @@ interface ParticleMaterialOptions {
   explicitOrientationLocal?: boolean;
   hideStartCos?: number;
   hideSpeed?: number;
+  /** Renderer.softParticleDepthScale (+0x7c): alpha fade against opaque scene depth. */
+  softParticleDepthScale?: number;
   /** Live key-light direction, world-space, pointing toward the sun. */
   sunDirection?: THREE.Vector3;
   /** Colored Reinhard-normalized key-light color for particle lightmaps. */
@@ -2594,6 +2596,12 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
     opts.hideSpeed !== undefined && Number.isFinite(opts.hideSpeed) && opts.hideSpeed > 0
       ? opts.hideSpeed
       : 1;
+  const softParticleDepthScale =
+    opts.softParticleDepthScale !== undefined &&
+    Number.isFinite(opts.softParticleDepthScale) &&
+    opts.softParticleDepthScale > 0
+      ? opts.softParticleDepthScale
+      : 0;
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       map: { value: null as THREE.Texture | null },
@@ -2672,6 +2680,14 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       // Corpus default is 0.0 on most systems; native treats that as neutral
       // rather than invisible. Positive values are authored boosts/cuts.
       uOpacityMultiplier: { value: opacityMultiplier },
+      // Native uses an opaque-only depth copy for soft particles/fog. The
+      // scene environment binds a WebGL DepthTexture here before each render;
+      // when absent, uSoftDepthSize stays 1x1 and the shader skips the fade.
+      uSoftParticleDepthScale: { value: softParticleDepthScale },
+      uSoftDepthTexture: { value: null as THREE.DepthTexture | null },
+      uSoftDepthSize: { value: new THREE.Vector2(1, 1) },
+      uSoftCameraNear: { value: 0.1 },
+      uSoftCameraFar: { value: 1000 },
       // Directional-lightmap (PS_RLT) reconstruction. uLightingMode=1 when
       // the texture is an `_LM` lightmap (lightmapping4Way/HL2); the
       // fragment shader then treats `map` RGB as a 3-direction HL2-basis
@@ -2802,6 +2818,11 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform vec2 uUvTiling;
       uniform vec2 uUvFlip;
       uniform float uOpacityMultiplier;
+      uniform sampler2D uSoftDepthTexture;
+      uniform vec2 uSoftDepthSize;
+      uniform float uSoftParticleDepthScale;
+      uniform float uSoftCameraNear;
+      uniform float uSoftCameraFar;
       uniform float uLightingMode;
       uniform vec3 uSunDirWorld;
       uniform vec3 uSunColorNorm;
@@ -2819,6 +2840,10 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       varying float vRotationPhase;
       varying float vVelocityAngle;
       varying float vHideFade;
+
+      float perspectiveDepthToViewZ(const in float invClipZ, const in float near, const in float far) {
+        return (near * far) / ((far - near) * invClipZ - far);
+      }
 
       void main() {
         vec4 base;
@@ -3020,6 +3045,19 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           outA = vColor.a * base.a * 0.15;
         }
         outA *= uOpacityMultiplier;
+        if (
+          uSoftParticleDepthScale > 0.0 &&
+          uSoftDepthSize.x > 1.0 &&
+          uSoftDepthSize.y > 1.0
+        ) {
+          vec2 screenUv = gl_FragCoord.xy / uSoftDepthSize;
+          float sceneDepth = texture2D(uSoftDepthTexture, screenUv).x;
+          if (sceneDepth < 0.999999) {
+            float sceneLinear = -perspectiveDepthToViewZ(sceneDepth, uSoftCameraNear, uSoftCameraFar);
+            float particleLinear = -perspectiveDepthToViewZ(gl_FragCoord.z, uSoftCameraNear, uSoftCameraFar);
+            outA *= clamp((sceneLinear - particleLinear) * uSoftParticleDepthScale, 0.0, 1.0);
+          }
+        }
         if (uPremultiply > 0.5) {
           // Premultiplied alpha-over (matches the engine's premultiplied PS
           // output + One/INV_SRC_ALPHA blend). The glow (outRgb may exceed 1)
@@ -3305,6 +3343,7 @@ export class ParticleScene {
         explicitOrientationLocal: r?.explicitOrientationLocal,
         hideStartCos: r?.hideStartCos,
         hideSpeed: r?.hideSpeed,
+        softParticleDepthScale: r?.softParticleDepthScale,
         sunDirection: this.sunDirection,
         sunColorNorm: this.sunColorNorm,
       });

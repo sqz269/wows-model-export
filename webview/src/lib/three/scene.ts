@@ -62,6 +62,34 @@ export const DEFAULT_TONEMAP_PARAMS: GTTonemapParams = {
   black: 1.21,
 };
 
+type RenderableDepthObject = THREE.Object3D & {
+  material?: THREE.Material | THREE.Material[];
+  isMesh?: boolean;
+  isInstancedMesh?: boolean;
+  isSkinnedMesh?: boolean;
+};
+
+function objectMaterials(object: THREE.Object3D): THREE.Material[] {
+  const material = (object as RenderableDepthObject).material;
+  if (!material) return [];
+  return Array.isArray(material) ? material : [material];
+}
+
+function materialHasSoftParticleUniform(material: THREE.Material): material is THREE.ShaderMaterial {
+  const uniforms = (material as THREE.ShaderMaterial).uniforms;
+  return !!uniforms?.uSoftParticleDepthScale;
+}
+
+function shouldHideForOpaqueDepth(object: THREE.Object3D): boolean {
+  if (!object.visible) return false;
+  const renderable = object as RenderableDepthObject;
+  const materials = objectMaterials(object);
+  if (materials.length === 0) return false;
+  if (materials.some(materialHasSoftParticleUniform)) return true;
+  if (!renderable.isMesh && !renderable.isInstancedMesh && !renderable.isSkinnedMesh) return true;
+  return materials.some((mat) => mat.transparent || mat.depthWrite === false);
+}
+
 // Uchimura GT tonemap (GDC 2017) + sRGB OETF as an EffectComposer ShaderPass.
 // Input is linear scene radiance (RenderPass renders into a linear HDR target
 // with Three's tonemapper disabled); output is display-encoded sRGB written
@@ -285,6 +313,13 @@ export function createSceneEnvironment(
   let composer: EffectComposer | null = null;
   let bloomPass: UnrealBloomPass | null = null;
   let gtPass: ShaderPass | null = null;
+  let opaqueDepthTarget: THREE.WebGLRenderTarget | null = null;
+  const opaqueDepthMaterial = new THREE.MeshDepthMaterial({
+    depthPacking: THREE.BasicDepthPacking,
+  });
+  opaqueDepthMaterial.blending = THREE.NoBlending;
+  const opaqueDepthSize = new THREE.Vector2(1, 1);
+  const softDepthUvSize = new THREE.Vector2(1, 1);
   let lastSize = { w: 1, h: 1 };
   let postprocessEnabled = postprocess;
 
@@ -328,6 +363,78 @@ export function createSceneEnvironment(
     applyTonemapParams();
   };
 
+  const collectSoftDepthConsumers = (): THREE.ShaderMaterial[] => {
+    const consumers = new Set<THREE.ShaderMaterial>();
+    scene.traverse((object) => {
+      if (!object.visible) return;
+      for (const mat of objectMaterials(object)) {
+        if (!materialHasSoftParticleUniform(mat)) continue;
+        const scale = Number(mat.uniforms.uSoftParticleDepthScale?.value ?? 0);
+        if (Number.isFinite(scale) && scale > 0) consumers.add(mat);
+      }
+    });
+    return [...consumers];
+  };
+
+  const ensureOpaqueDepthTarget = () => {
+    renderer.getDrawingBufferSize(opaqueDepthSize);
+    const width = Math.max(1, Math.floor(opaqueDepthSize.x));
+    const height = Math.max(1, Math.floor(opaqueDepthSize.y));
+    if (opaqueDepthTarget && opaqueDepthTarget.width === width && opaqueDepthTarget.height === height) {
+      return opaqueDepthTarget;
+    }
+    opaqueDepthTarget?.dispose();
+    opaqueDepthTarget = new THREE.WebGLRenderTarget(width, height, {
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      generateMipmaps: false,
+      stencilBuffer: false,
+      depthBuffer: true,
+    });
+    opaqueDepthTarget.texture.name = 'WowsOpaqueDepthColorDiscard';
+    opaqueDepthTarget.depthTexture = new THREE.DepthTexture(width, height, THREE.UnsignedIntType);
+    opaqueDepthTarget.depthTexture.name = 'WowsOpaqueDepthCopy';
+    opaqueDepthTarget.depthTexture.format = THREE.DepthFormat;
+    opaqueDepthTarget.depthTexture.minFilter = THREE.NearestFilter;
+    opaqueDepthTarget.depthTexture.magFilter = THREE.NearestFilter;
+    return opaqueDepthTarget;
+  };
+
+  const renderOpaqueDepthSnapshot = (consumers: THREE.ShaderMaterial[]) => {
+    if (consumers.length === 0) return;
+    const target = ensureOpaqueDepthTarget();
+    const hidden: THREE.Object3D[] = [];
+    scene.traverse((object) => {
+      if (shouldHideForOpaqueDepth(object)) {
+        hidden.push(object);
+        object.visible = false;
+      }
+    });
+    const previousTarget = renderer.getRenderTarget();
+    const previousOverride = scene.overrideMaterial;
+    try {
+      scene.overrideMaterial = opaqueDepthMaterial;
+      renderer.setRenderTarget(target);
+      renderer.clear(true, true, true);
+      renderer.render(scene, camera);
+    } finally {
+      renderer.setRenderTarget(previousTarget);
+      scene.overrideMaterial = previousOverride;
+      for (const object of hidden) object.visible = true;
+    }
+
+    softDepthUvSize.set(target.width, target.height);
+    for (const mat of consumers) {
+      const uniforms = mat.uniforms;
+      if (uniforms.uSoftDepthTexture) uniforms.uSoftDepthTexture.value = target.depthTexture;
+      if (uniforms.uSoftDepthSize?.value instanceof THREE.Vector2) {
+        uniforms.uSoftDepthSize.value.copy(softDepthUvSize);
+      }
+      if (uniforms.uSoftCameraNear) uniforms.uSoftCameraNear.value = camera.near;
+      if (uniforms.uSoftCameraFar) uniforms.uSoftCameraFar.value = camera.far;
+    }
+  };
+
   const applyBloomParams = () => {
     if (!bloomPass) return;
     bloomPass.strength = bloomParams.strength;
@@ -344,6 +451,7 @@ export function createSceneEnvironment(
     grid,
     axes,
     render() {
+      renderOpaqueDepthSnapshot(collectSoftDepthConsumers());
       if (!postprocessEnabled && !bloomEnabled) {
         renderer.render(scene, camera);
         return;
@@ -442,6 +550,9 @@ export function createSceneEnvironment(
       (axes.material as THREE.Material).dispose();
       envRT.dispose();
       pmrem.dispose();
+      opaqueDepthMaterial.dispose();
+      opaqueDepthTarget?.dispose();
+      opaqueDepthTarget = null;
       composer?.dispose();
       composer = null;
       bloomPass = null;
