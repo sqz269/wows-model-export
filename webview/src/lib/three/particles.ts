@@ -2602,6 +2602,8 @@ interface ParticleMaterialOptions {
   flipTexcoordV?: boolean;
   /** Renderer.velocityOriented (+0x9a): rotate sprite toward screen-space velocity. */
   velocityOriented?: boolean;
+  /** Renderer.lightingShineness (+0x4c): native texture RGB exponent. */
+  lightingShineness?: number;
   /** Renderer lighting scalars (+0x54, +0x64..+0x6c). */
   lightingAmbient?: number;
   lightingDiffuse?: number;
@@ -2786,6 +2788,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
   const distortionMode =
     opts.blendType === 'DEFORM_WATER_SURFACE' ? 1 : opts.blendType === 'SHIMMER' ? 2 : 0;
   const distortionStrength = distortionMode === 1 ? 0.018 : distortionMode === 2 ? 0.012 : 0;
+  const lightingShineness = Math.max(0, finiteNumber(opts.lightingShineness, 1));
   const lightingAmbient = Math.max(0, finiteNumber(opts.lightingAmbient, 0.06));
   const lightingDiffuse = Math.max(0, finiteNumber(opts.lightingDiffuse, 1));
   const lightingTransmission = Math.max(0, finiteNumber(opts.lightingTransmission, 0));
@@ -2894,6 +2897,9 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uSunColorNorm: {
         value: opts.sunColorNorm?.clone() ?? DEFAULT_PARTICLE_SUN_COLOR_NORM.clone(),
       },
+      // Native pixel shader applies pow(texture.rgb, lightingShineness) via
+      // log/mul/exp before lightmapping and gradient-ramp evaluation.
+      uLightingShineness: { value: lightingShineness },
       uLightingAmbient: { value: lightingAmbient },
       uLightingDiffuse: { value: lightingDiffuse },
       uLightingTransmission: { value: lightingTransmission },
@@ -3027,6 +3033,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float uLightingMode;
       uniform vec3 uSunDirWorld;
       uniform vec3 uSunColorNorm;
+      uniform float uLightingShineness;
       uniform float uLightingAmbient;
       uniform float uLightingDiffuse;
       uniform float uLightingTransmission;
@@ -3182,6 +3189,13 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
               base.rgb = vec3(mvEmissive);
             }
             mvEmissive = 0.0;
+          }
+          if (uDistortion <= 0.5) {
+            // Native uses log/mul/exp with renderer.lightingShineness before
+            // the lightmap/ramp branches. Keep distortion approximations out
+            // of this path because their texture RGB is treated as a normal
+            // vector in the webview, not color.
+            base.rgb = pow(max(base.rgb, vec3(0.000001)), vec3(uLightingShineness));
           }
           // M3 (RE doc 63, ps4.txt:614-628): the GRADIENT_MAP+lightmapping glow
           // samples the ramp at U = 1 - glow, where glow is the particle
@@ -3590,6 +3604,7 @@ export class ParticleScene {
         flipTexcoordU: r?.flipTexcoordU,
         flipTexcoordV: r?.flipTexcoordV,
         velocityOriented: r?.velocityOriented,
+        lightingShineness: r?.lightingShineness,
         lightingAmbient: r?.lightingAmbient,
         lightingDiffuse: r?.lightingDiffuse,
         lightingTransmission: r?.lightingTransmission,
