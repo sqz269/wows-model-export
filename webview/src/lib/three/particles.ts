@@ -590,6 +590,8 @@ class SystemRenderer {
   private emitterSizeGen: ParticleValueGenerator | undefined;
   private ageScaleGen: ParticleValueGenerator | undefined;
   private scalerGens: ParticleValueGenerator[] = [];
+  private scalerGlowGens: ParticleValueGenerator[] = [];
+  private scalerScaleXGens: ParticleValueGenerator[] = [];
   // dampfer.velocityGenerator — a per-frame drag MULTIPLIER on the velocity's
   // contribution to position (1.0 → ~0). Undefined = no damping.
   private dampGen: ParticleValueGenerator | undefined;
@@ -685,9 +687,13 @@ class SystemRenderer {
   private lifetime: Float32Array;
   private colorRGBA: Float32Array;
   private sizeArr: Float32Array;
+  private glowStrengthArr: Float32Array;
+  private spriteScaleXArr: Float32Array;
   private drawPos: Float32Array;
   private drawColorRGBA: Float32Array;
   private drawSizeArr: Float32Array;
+  private drawGlowStrength: Float32Array;
+  private drawSpriteScaleX: Float32Array;
   private drawFrameSeed: Float32Array;
   private drawFramePhase: Float32Array;
   private drawRotationPhase: Float32Array;
@@ -704,6 +710,8 @@ class SystemRenderer {
   private velocityAttr: THREE.BufferAttribute;
   private colorAttr: THREE.BufferAttribute;
   private sizeAttr: THREE.BufferAttribute;
+  private glowStrengthAttr: THREE.BufferAttribute;
+  private spriteScaleXAttr: THREE.BufferAttribute;
   /** Packed (compacted to the front, matching pos/color/size) age values
    *  for the GPU. Drives the fragment shader's atlas grid frame index.
    *  Kept separate from ``age[]`` (which is the per-slot CPU truth
@@ -857,7 +865,13 @@ class SystemRenderer {
         if (body.tint) this.tintColor = body.tint as ParticleColor;
       } else if (c.action === 'alphaSetter') {
         if (body.ramp) this.alphaRamp = body.ramp as ParticleRamp;
-      } else if (c.action === 'scaler' || c.action === 'resizer') {
+      } else if (c.action === 'scaler') {
+        if (body.sizeGenerator) this.scalerGens.push(body.sizeGenerator as ParticleValueGenerator);
+        if (body.sizeGenerator)
+          this.scalerGlowGens.push(body.sizeGenerator as ParticleValueGenerator);
+        if (body.scaleXGenerator)
+          this.scalerScaleXGens.push(body.scaleXGenerator as ParticleValueGenerator);
+      } else if (c.action === 'resizer') {
         if (body.sizeGenerator) this.scalerGens.push(body.sizeGenerator as ParticleValueGenerator);
       } else if (c.action === 'dampfer') {
         if (body.velocityGenerator)
@@ -1040,9 +1054,13 @@ class SystemRenderer {
     this.lifetime = new Float32Array(this.capacity);
     this.colorRGBA = new Float32Array(this.capacity * 4);
     this.sizeArr = new Float32Array(this.capacity);
+    this.glowStrengthArr = new Float32Array(this.capacity);
+    this.spriteScaleXArr = new Float32Array(this.capacity);
     this.drawPos = new Float32Array(this.capacity * 3);
     this.drawColorRGBA = new Float32Array(this.capacity * 4);
     this.drawSizeArr = new Float32Array(this.capacity);
+    this.drawGlowStrength = new Float32Array(this.capacity);
+    this.drawSpriteScaleX = new Float32Array(this.capacity);
     this.drawFrameSeed = new Float32Array(this.capacity);
     this.drawFramePhase = new Float32Array(this.capacity);
     this.drawRotationPhase = new Float32Array(this.capacity);
@@ -1067,6 +1085,10 @@ class SystemRenderer {
     this.colorAttr.setUsage(THREE.DynamicDrawUsage);
     this.sizeAttr = new THREE.BufferAttribute(this.drawSizeArr, 1);
     this.sizeAttr.setUsage(THREE.DynamicDrawUsage);
+    this.glowStrengthAttr = new THREE.BufferAttribute(this.drawGlowStrength, 1);
+    this.glowStrengthAttr.setUsage(THREE.DynamicDrawUsage);
+    this.spriteScaleXAttr = new THREE.BufferAttribute(this.drawSpriteScaleX, 1);
+    this.spriteScaleXAttr.setUsage(THREE.DynamicDrawUsage);
     this.ageAttr = new THREE.BufferAttribute(this.ageGpu, 1);
     this.ageAttr.setUsage(THREE.DynamicDrawUsage);
     this.frameSeedAttr = new THREE.BufferAttribute(this.drawFrameSeed, 1);
@@ -1079,6 +1101,8 @@ class SystemRenderer {
     geom.setAttribute('velocity', this.velocityAttr);
     geom.setAttribute('color', this.colorAttr);
     geom.setAttribute('size', this.sizeAttr);
+    geom.setAttribute('glowStrength', this.glowStrengthAttr);
+    geom.setAttribute('spriteScaleX', this.spriteScaleXAttr);
     geom.setAttribute('age', this.ageAttr);
     geom.setAttribute('frameSeed', this.frameSeedAttr);
     geom.setAttribute('framePhase', this.framePhaseAttr);
@@ -1511,10 +1535,22 @@ class SystemRenderer {
       this.colorRGBA[i * 4 + 3] = alpha;
       // SIZE (RE 2026-06-04): per-particle base (emitter × ageScale, cached in
       // psize at spawn) × Π scaler multipliers, each on its own axis. Metres.
-      let sz = this.psize[i];
+      // Native scaler callback FUN_140742280 also writes this first multiplier
+      // into the per-particle payload consumed by the GRADIENT_MAP glow path.
+      let sizeScale = 1;
       for (let s = 0; s < this.scalerGens.length; s++) {
-        sz *= sampleGenAxis(this.scalerGens[s], clocks, 1);
+        sizeScale *= sampleGenAxis(this.scalerGens[s], clocks, 1);
       }
+      let glowScale = 1;
+      for (let s = 0; s < this.scalerGlowGens.length; s++) {
+        glowScale *= sampleGenAxis(this.scalerGlowGens[s], clocks, 1);
+      }
+      let scalerScaleX = 1;
+      for (let s = 0; s < this.scalerScaleXGens.length; s++) {
+        scalerScaleX *= sampleGenAxis(this.scalerScaleXGens[s], clocks, 1);
+      }
+      let sz = this.psize[i];
+      sz *= sizeScale;
       sz *=
         this.intensitySizeMultiplier *
         this.distanceSizeMultiplier *
@@ -1526,6 +1562,9 @@ class SystemRenderer {
         this.distanceAgeAuxScaleMultiplier *
         this.barrierScaleMultiplier;
       this.sizeArr[i] = Math.max(0, sz);
+      this.glowStrengthArr[i] = Number.isFinite(glowScale) ? glowScale : 1;
+      this.spriteScaleXArr[i] =
+        Number.isFinite(scalerScaleX) ? Math.max(0.001, Math.abs(scalerScaleX)) : 1;
     }
 
     // Emit from BOTH sources (RE-aligned, 2026-05-29): the always-on emitter
@@ -1606,6 +1645,8 @@ class SystemRenderer {
     this.velocityAttr.needsUpdate = true;
     this.colorAttr.needsUpdate = true;
     this.sizeAttr.needsUpdate = true;
+    this.glowStrengthAttr.needsUpdate = true;
+    this.spriteScaleXAttr.needsUpdate = true;
     this.ageAttr.needsUpdate = true;
     this.frameSeedAttr.needsUpdate = true;
     this.framePhaseAttr.needsUpdate = true;
@@ -1641,6 +1682,8 @@ class SystemRenderer {
     this.drawColorRGBA[dst4 + 2] = this.colorRGBA[src4 + 2];
     this.drawColorRGBA[dst4 + 3] = this.colorRGBA[src4 + 3];
     this.drawSizeArr[drawSlot] = this.sizeArr[sourceSlot];
+    this.drawGlowStrength[drawSlot] = this.glowStrengthArr[sourceSlot];
+    this.drawSpriteScaleX[drawSlot] = this.spriteScaleXArr[sourceSlot];
     this.ageGpu[drawSlot] = this.age[sourceSlot];
     this.drawFrameSeed[drawSlot] = this.frameSeed[sourceSlot];
     this.drawFramePhase[drawSlot] = this.framePhase[sourceSlot];
@@ -1774,10 +1817,19 @@ class SystemRenderer {
     const base = sampleGenAxis(this.emitterSizeGen, sc, DEFAULT_SIZE_M);
     const ageScale = this.ageScaleGen ? sampleGenAxis(this.ageScaleGen, sc, 1) : 1;
     this.psize[slot] = base * ageScale;
-    let sz0 = this.psize[slot];
+    let sizeScale0 = 1;
     for (let s = 0; s < this.scalerGens.length; s++) {
-      sz0 *= sampleGenAxis(this.scalerGens[s], sc, 1);
+      sizeScale0 *= sampleGenAxis(this.scalerGens[s], sc, 1);
     }
+    let glowScale0 = 1;
+    for (let s = 0; s < this.scalerGlowGens.length; s++) {
+      glowScale0 *= sampleGenAxis(this.scalerGlowGens[s], sc, 1);
+    }
+    let scalerScaleX0 = 1;
+    for (let s = 0; s < this.scalerScaleXGens.length; s++) {
+      scalerScaleX0 *= sampleGenAxis(this.scalerScaleXGens[s], sc, 1);
+    }
+    let sz0 = this.psize[slot] * sizeScale0;
     sz0 *=
       this.intensitySizeMultiplier *
       this.distanceSizeMultiplier *
@@ -1788,6 +1840,9 @@ class SystemRenderer {
       this.intensityAgeAuxScaleMultiplier *
       this.distanceAgeAuxScaleMultiplier;
     this.sizeArr[slot] = Math.max(0, sz0);
+    this.glowStrengthArr[slot] = Number.isFinite(glowScale0) ? glowScale0 : 1;
+    this.spriteScaleXArr[slot] =
+      Number.isFinite(scalerScaleX0) ? Math.max(0.001, Math.abs(scalerScaleX0)) : 1;
     this.alive++;
   }
 
@@ -2932,10 +2987,8 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uDistortionSceneTexture: { value: null as THREE.Texture | null },
       uDistortionSceneSize: { value: new THREE.Vector2(1, 1) },
       // Warm "detonation glow" strength for the lightmapping + GRADIENT_MAP
-      // path. Native multiplies the ramp term by particle payload v10.x; the
-      // spawn path initializes that instance slot to 1.0. Dynamic component
-      // overrides for v10.x are still not mapped, but the default should not
-      // be the old hand-tuned 0.15 approximation.
+      // path. Native multiplies the ramp term by the scaler-driven
+      // per-particle payload; the uniform is the 1.0 default/fallback.
       uGlowStrength: { value: 1.0 },
       // Native FUN_140716f00 packs Renderer.shadowsStrength as
       // int(value) < 2 ? 0 : int(value) - 1 into the shader's byte payload.
@@ -2951,12 +3004,15 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       attribute vec4 color;
       attribute vec3 velocity;
       attribute float size;
+      attribute float glowStrength;
+      attribute float spriteScaleX;
       attribute float age;
       attribute float frameSeed;
       attribute float framePhase;
       attribute float rotationPhase;
       uniform float uUseSpriteRotation;
       uniform float uVelocityOriented;
+      uniform float uSpriteAspectX;
       uniform float uPointExtent;
       uniform float uUseHideAngle;
       uniform vec3 uExplicitOrientation;
@@ -2971,9 +3027,13 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       varying float vRotationPhase;
       varying float vVelocityAngle;
       varying float vHideFade;
+      varying float vGlowStrength;
+      varying float vSpriteAspectX;
+      varying float vPointExtent;
 
       void main() {
         vColor = color;
+        vGlowStrength = glowStrength;
         vAge = age;
         vFrameSeed = frameSeed;
         vFramePhase = framePhase;
@@ -2994,10 +3054,15 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         }
         vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * mvPosition;
+        float spriteAspectX = max(0.001, abs(uSpriteAspectX * spriteScaleX));
+        vSpriteAspectX = spriteAspectX;
+        vPointExtent = (uUseSpriteRotation > 0.5)
+          ? sqrt(spriteAspectX * spriteAspectX + 1.0)
+          : max(spriteAspectX, 1.0);
         // size is metres (world space); divide by distance for perspective.
-        // uPointExtent expands the square GL_POINT enough to contain scaleX
-        // and the worst-case rotated bounding square when sprite rotation is on.
-        gl_PointSize = max(1.0, size * uPointExtent * 200.0 / -mvPosition.z);
+        // vPointExtent expands the square GL_POINT enough to contain the
+        // per-particle scaleX and the worst-case rotated bounding square.
+        gl_PointSize = max(1.0, size * vPointExtent * 200.0 / -mvPosition.z);
       }
     `,
     fragmentShader: /* glsl */ `
@@ -3056,6 +3121,9 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       varying float vRotationPhase;
       varying float vVelocityAngle;
       varying float vHideFade;
+      varying float vGlowStrength;
+      varying float vSpriteAspectX;
+      varying float vPointExtent;
 
       float perspectiveDepthToViewZ(const in float invClipZ, const in float near, const in float far) {
         return (near * far) / ((far - near) * invClipZ - far);
@@ -3074,9 +3142,9 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           // Geometry is measured in sprite-height units: width=scaleX,
           // height=1. Rotation happens in that geometric space so rectangular
           // sprites and custom pivots stay coherent.
-          vec2 pointGeom = (gl_PointCoord - vec2(0.5)) * uPointExtent;
+          vec2 pointGeom = (gl_PointCoord - vec2(0.5)) * vPointExtent;
           vec2 pivotGeom = vec2(
-            (uRotationPivot.x - 0.5) * uSpriteAspectX,
+            (uRotationPivot.x - 0.5) * vSpriteAspectX,
             uRotationPivot.y - 0.5
           );
           vec2 spriteGeom = pointGeom;
@@ -3090,7 +3158,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             float c = cos(spriteAngle);
             spriteGeom = pivotGeom + vec2(c * rel.x + s * rel.y, -s * rel.x + c * rel.y);
           }
-          vec2 local = vec2(spriteGeom.x / uSpriteAspectX + 0.5, spriteGeom.y + 0.5);
+          vec2 local = vec2(spriteGeom.x / vSpriteAspectX + 0.5, spriteGeom.y + 0.5);
           if (local.x < 0.0 || local.x > 1.0 || local.y < 0.0 || local.y > 1.0) discard;
           local = mix(local, vec2(1.0) - local, uUvFlip);
           if (abs(uUvTiling.x - 1.0) > 0.0001 || abs(uUvTiling.y - 1.0) > 0.0001) {
@@ -3262,8 +3330,8 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
               // the relit smoke body, OUTSIDE the per-particle tint (engine:
               // rgb = base*lit + emis*v10.x). Native packs renderer
               // shadowsStrength as the byte step count that quantizes glow
-              // before U = 1 - glow. uGlowStrength is the native v10.x
-              // default; dynamic v10.x overrides are still unmapped.
+              // before U = 1 - glow. vGlowStrength carries the native
+              // scaler-driven per-particle payload (default 1.0).
               // Now varies per-texel → a warm GRADIENT across the sprite, not
               // one flat tan colour.
               float glowKey = gmag;
@@ -3271,7 +3339,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
                 glowKey = floor(glowKey * uGlowPosterizeSteps + 0.5) / uGlowPosterizeSteps;
               }
               vec4 g = texture2D(lut, vec2(1.0 - glowKey, 0.5));
-              glow = g.rgb * g.a * uGlowStrength;
+              glow = g.rgb * g.a * uGlowStrength * vGlowStrength;
             } else {
               // Lambert GRADIENT_MAP: luminance-keyed recolor (engine lambert
               // path) — sweep the ramp by the sprite luminance (base.r).
