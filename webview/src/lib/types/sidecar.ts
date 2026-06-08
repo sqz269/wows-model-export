@@ -428,6 +428,12 @@ export interface ParticleGeneralSection {
   prewarm: boolean;
 }
 
+export interface ParticleSystemDistance {
+  maxDistance: number;
+  configsCount: number;
+  configs: ParticleSystemIntensityConfig[];
+}
+
 /**
  * Renderer block surfaced from the Effect blob. Field offsets confirmed
  * against the WoWS binary (build 12506899, FUN_1406f0c30), superseding
@@ -558,6 +564,7 @@ export interface ParticleSystem {
   animation?: ParticleAnimation;
   emitter?: ParticleEmitter;
   general?: ParticleGeneralSection;
+  distance?: ParticleSystemDistance;
   intensities?: ParticleSystemIntensities;
   components: ParticleComponent[];
 }

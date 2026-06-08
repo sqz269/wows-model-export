@@ -50,6 +50,7 @@ EFFECT_METADATA_BLOB_MAGIC = 0xDFC8F8E0
 # Fixed struct sizes inside the Effect blob.
 SYSTEM_SIZE = 0x1c8
 COMPONENT_SIZE = 0x10
+SYSTEM_DISTANCE_CONFIG_SIZE = 0x20
 SYSTEM_INTENSITY_CHANNEL_SIZE = 0x10
 SYSTEM_INTENSITY_CONFIG_SIZE = 0x20
 EFFECT_METADATA_CHANNEL_SIZE = 0x20
@@ -1022,6 +1023,70 @@ def _decode_general(buf: bytes | mmap.mmap, sys_off: int) -> dict:
     }
 
 
+def _decode_system_distance(
+    buf: bytes | mmap.mmap, sys_off: int, file_end: int,
+) -> dict:
+    """Decode System.DistanceSection (+0x188).
+
+    Native distance application (`FUN_1406c9c40`) consumes the config array as
+    the same 0x20 `{Ramp, flags[]}` shape used by intensity configs, keyed by
+    camera distance and folded into the runtime PS_IC multiplier block.
+    """
+    base = sys_off + 0x188
+    max_distance = struct.unpack_from("<f", buf, base)[0]
+    configs_count = struct.unpack_from("<I", buf, base + 0x04)[0]
+    configs_rp = struct.unpack_from("<q", buf, base + 0x08)[0]
+    out: dict[str, Any] = {
+        "maxDistance": float(max_distance),
+        "configsCount": int(configs_count),
+        "configs": [],
+    }
+    if configs_count == 0:
+        return out
+    if configs_count > 32 or configs_rp == 0:
+        out["_err"] = "configs_invalid"
+        return out
+    configs_addr = base + configs_rp
+    if (
+        configs_addr < 0
+        or configs_addr + configs_count * SYSTEM_DISTANCE_CONFIG_SIZE > file_end
+    ):
+        out["_err"] = "configs_oob"
+        return out
+
+    configs: list[dict[str, Any]] = []
+    for i in range(int(configs_count)):
+        cfg_off = configs_addr + i * SYSTEM_DISTANCE_CONFIG_SIZE
+        flags_count = struct.unpack_from("<I", buf, cfg_off + 0x10)[0]
+        flags_rp = struct.unpack_from("<q", buf, cfg_off + 0x18)[0]
+        cfg: dict[str, Any] = {
+            "ramp": _decode_ramp(buf, cfg_off, file_end),
+            "flagsCount": int(flags_count),
+            "flags": [],
+        }
+        if flags_count == 0:
+            configs.append(cfg)
+            continue
+        if flags_count > 32 or flags_rp == 0:
+            cfg["_err"] = "flags_invalid"
+            configs.append(cfg)
+            continue
+        flags_addr = cfg_off + flags_rp
+        if flags_addr < 0 or flags_addr + flags_count * 4 > file_end:
+            cfg["_err"] = "flags_oob"
+            configs.append(cfg)
+            continue
+        flags = [
+            int(struct.unpack_from("<I", buf, flags_addr + j * 4)[0])
+            for j in range(int(flags_count))
+        ]
+        cfg["flags"] = flags
+        cfg["flagNames"] = [PS_IC.get(flag, f"unk_{flag}") for flag in flags]
+        configs.append(cfg)
+    out["configs"] = configs
+    return out
+
+
 def _decode_system_intensities(
     buf: bytes | mmap.mmap, sys_off: int, file_end: int,
 ) -> dict:
@@ -1150,6 +1215,7 @@ def _decode_system(
         "animation": _decode_animation(buf, sys_off, file_end),
         "emitter": _decode_emitter(buf, sys_off, file_end),
         "general": _decode_general(buf, sys_off),
+        "distance": _decode_system_distance(buf, sys_off, file_end),
         "intensities": _decode_system_intensities(buf, sys_off, file_end),
         "components": components,
     }

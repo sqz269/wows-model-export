@@ -28,6 +28,7 @@ import type {
   ParticleRamp,
   ParticleRecord,
   ParticleSystem,
+  ParticleSystemIntensityConfig,
   ParticleSystemIntensityChannel,
   ParticleValueGenerator,
   ParticleVariantVg,
@@ -627,6 +628,7 @@ class SystemRenderer {
   private initialOrientationRange = 0;
   private readonly depthSortParticles: boolean;
   private sortCamera: THREE.Camera | null = null;
+  private distanceConfigs: ParticleSystemIntensityConfig[] = [];
   private intensityChannels: ParticleSystemIntensityChannel[] = [];
   private intensityDefaults: number[] = [];
   private intensityValues: number[] = [];
@@ -640,6 +642,10 @@ class SystemRenderer {
   private intensityColorGMultiplier = 1;
   private intensityColorBMultiplier = 1;
   private intensityAlphaMultiplier = 1;
+  private distanceColorRMultiplier = 1;
+  private distanceColorGMultiplier = 1;
+  private distanceColorBMultiplier = 1;
+  private distanceAlphaMultiplier = 1;
   private intensityTilingUMultiplier = 1;
   private intensityTilingVMultiplier = 1;
   private intensityVelXMultiplier = 1;
@@ -648,6 +654,20 @@ class SystemRenderer {
   private intensityStreamerXMultiplier = 1;
   private intensityStreamerYMultiplier = 1;
   private intensityStreamerZMultiplier = 1;
+  private distanceRateMultiplier = 1;
+  private distanceSizeMultiplier = 1;
+  private distanceScaleXMultiplier = 1;
+  private distanceScaleYMultiplier = 1;
+  private distanceAgeScaleMultiplier = 1;
+  private distanceAgeAuxScaleMultiplier = 1;
+  private distanceTilingUMultiplier = 1;
+  private distanceTilingVMultiplier = 1;
+  private distanceVelXMultiplier = 1;
+  private distanceVelYMultiplier = 1;
+  private distanceVelZMultiplier = 1;
+  private distanceStreamerXMultiplier = 1;
+  private distanceStreamerYMultiplier = 1;
+  private distanceStreamerZMultiplier = 1;
   private baseSpriteAspectX = 1;
   private baseTilingU = 1;
   private baseTilingV = 1;
@@ -995,6 +1015,7 @@ class SystemRenderer {
     const fx = anim?.framesPerX ?? 1;
     const fy = anim?.framesPerY ?? 1;
     this.framesRangeEnd = Math.max(0, anim?.framesRangeEnd ?? fx * fy);
+    this.distanceConfigs = system.distance?.configs ?? [];
 
     // Decide whether the alphaSetter ramp is keyed by particle age or
     // system age. Heuristic: if the last keyframe is well past the
@@ -1190,10 +1211,14 @@ class SystemRenderer {
   }
 
   private updateIntensityMaterialUniforms(): void {
-    const scaleY = Math.max(0.001, Math.abs(this.intensityScaleYMultiplier));
+    const scaleX = this.intensityScaleXMultiplier * this.distanceScaleXMultiplier;
+    const scaleY = Math.max(
+      0.001,
+      Math.abs(this.intensityScaleYMultiplier * this.distanceScaleYMultiplier),
+    );
     const aspect = Math.max(
       0.001,
-      Math.abs((this.baseSpriteAspectX * this.intensityScaleXMultiplier) / scaleY),
+      Math.abs((this.baseSpriteAspectX * scaleX) / scaleY),
     );
     const aspectUniform = this.material.uniforms.uSpriteAspectX?.value;
     if (typeof aspectUniform === 'number') this.material.uniforms.uSpriteAspectX.value = aspect;
@@ -1206,8 +1231,8 @@ class SystemRenderer {
     const tiling = this.material.uniforms.uUvTiling?.value;
     if (tiling instanceof THREE.Vector2) {
       tiling.set(
-        this.baseTilingU * this.intensityTilingUMultiplier,
-        this.baseTilingV * this.intensityTilingVMultiplier,
+        this.baseTilingU * this.intensityTilingUMultiplier * this.distanceTilingUMultiplier,
+        this.baseTilingV * this.intensityTilingVMultiplier * this.distanceTilingVMultiplier,
       );
     }
   }
@@ -1244,8 +1269,110 @@ class SystemRenderer {
       this.runPrewarm();
       this.prewarmed = true;
     }
+    this.updateDistanceState();
     this.advance(dt, true);
     this.writeBuffers();
+  }
+
+  private updateDistanceState(): void {
+    this.distanceRateMultiplier = 1;
+    this.distanceSizeMultiplier = 1;
+    this.distanceScaleXMultiplier = 1;
+    this.distanceScaleYMultiplier = 1;
+    this.distanceAgeScaleMultiplier = 1;
+    this.distanceAgeAuxScaleMultiplier = 1;
+    this.distanceColorRMultiplier = 1;
+    this.distanceColorGMultiplier = 1;
+    this.distanceColorBMultiplier = 1;
+    this.distanceAlphaMultiplier = 1;
+    this.distanceTilingUMultiplier = 1;
+    this.distanceTilingVMultiplier = 1;
+    this.distanceVelXMultiplier = 1;
+    this.distanceVelYMultiplier = 1;
+    this.distanceVelZMultiplier = 1;
+    this.distanceStreamerXMultiplier = 1;
+    this.distanceStreamerYMultiplier = 1;
+    this.distanceStreamerZMultiplier = 1;
+    if (this.distanceConfigs.length === 0 || !this.sortCamera) {
+      this.updateIntensityMaterialUniforms();
+      return;
+    }
+    this.sortCamera.updateMatrixWorld(true);
+    this.points.updateWorldMatrix(true, false);
+    this.sortCamera.getWorldPosition(SystemRenderer.TMP_POS2);
+    this.points.getWorldPosition(SystemRenderer.TMP_WORLD);
+    const distance = SystemRenderer.TMP_WORLD.distanceTo(SystemRenderer.TMP_POS2);
+    for (const config of this.distanceConfigs) {
+      const factor = sampleRamp(config.ramp, distance, 1);
+      if (!Number.isFinite(factor)) continue;
+      for (const flag of config.flags ?? []) {
+        this.applyDistanceTarget(flag, factor);
+      }
+    }
+    this.updateIntensityMaterialUniforms();
+  }
+
+  private applyDistanceTarget(flag: number, factor: number): void {
+    switch (flag) {
+      case PS_IC_EMITTER_RATE:
+        this.distanceRateMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_SIZE:
+        this.distanceSizeMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_SCALE_X:
+        this.distanceScaleXMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_SCALE_Y:
+        this.distanceScaleYMultiplier *= factor;
+        break;
+      case PS_IC_AGE_SCALE:
+        this.distanceAgeScaleMultiplier *= factor;
+        break;
+      case PS_IC_AGE_AUX_SCALE:
+        this.distanceAgeAuxScaleMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_COLOR_R:
+      case PS_IC_PARTICLE_TINT_R:
+        this.distanceColorRMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_COLOR_G:
+      case PS_IC_PARTICLE_TINT_G:
+        this.distanceColorGMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_COLOR_B:
+      case PS_IC_PARTICLE_TINT_B:
+        this.distanceColorBMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_COLOR_A:
+      case PS_IC_PARTICLE_TINT_A:
+        this.distanceAlphaMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_TILING_U:
+        this.distanceTilingUMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_TILING_V:
+        this.distanceTilingVMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_VEL_X:
+        this.distanceVelXMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_VEL_Y:
+        this.distanceVelYMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_VEL_Z:
+        this.distanceVelZMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_STREAMER_X:
+        this.distanceStreamerXMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_STREAMER_Y:
+        this.distanceStreamerYMultiplier *= factor;
+        break;
+      case PS_IC_PARTICLE_STREAMER_Z:
+        this.distanceStreamerZMultiplier *= factor;
+        break;
+    }
   }
 
   /** Advance the CPU simulation by `dt` seconds (emission + per-particle
@@ -1354,10 +1481,14 @@ class SystemRenderer {
         sampleRamp(this.alphaRamp, alphaT, 1) *
         SystemRenderer.TMP_COL[3] *
         this.intensityAlphaMultiplier *
+        this.distanceAlphaMultiplier *
         this.barrierAlphaMultiplier;
-      this.colorRGBA[i * 4 + 0] = SystemRenderer.TMP_COL[0] * this.intensityColorRMultiplier;
-      this.colorRGBA[i * 4 + 1] = SystemRenderer.TMP_COL[1] * this.intensityColorGMultiplier;
-      this.colorRGBA[i * 4 + 2] = SystemRenderer.TMP_COL[2] * this.intensityColorBMultiplier;
+      this.colorRGBA[i * 4 + 0] =
+        SystemRenderer.TMP_COL[0] * this.intensityColorRMultiplier * this.distanceColorRMultiplier;
+      this.colorRGBA[i * 4 + 1] =
+        SystemRenderer.TMP_COL[1] * this.intensityColorGMultiplier * this.distanceColorGMultiplier;
+      this.colorRGBA[i * 4 + 2] =
+        SystemRenderer.TMP_COL[2] * this.intensityColorBMultiplier * this.distanceColorBMultiplier;
       this.colorRGBA[i * 4 + 3] = alpha;
       // SIZE (RE 2026-06-04): per-particle base (emitter × ageScale, cached in
       // psize at spawn) × Π scaler multipliers, each on its own axis. Metres.
@@ -1367,9 +1498,13 @@ class SystemRenderer {
       }
       sz *=
         this.intensitySizeMultiplier *
+        this.distanceSizeMultiplier *
         this.intensityScaleYMultiplier *
+        this.distanceScaleYMultiplier *
         this.intensityAgeScaleMultiplier *
+        this.distanceAgeScaleMultiplier *
         this.intensityAgeAuxScaleMultiplier *
+        this.distanceAgeAuxScaleMultiplier *
         this.barrierScaleMultiplier;
       this.sizeArr[i] = Math.max(0, sz);
     }
@@ -1386,7 +1521,10 @@ class SystemRenderer {
         // hold their last value past the tail; activePeriod==0 ⇒ raw elapsed).
         const t =
           this.emitterActivePeriod > 0 ? this.elapsed % this.emitterActivePeriod : this.elapsed;
-        const eRate = sampleScalarVg(this.emitterRateVg, t, 0) * this.intensityRateMultiplier;
+        const eRate =
+          sampleScalarVg(this.emitterRateVg, t, 0) *
+          this.intensityRateMultiplier *
+          this.distanceRateMultiplier;
         this.emitAccum = this.emitFromSource(
           eRate,
           dt,
@@ -1399,7 +1537,10 @@ class SystemRenderer {
         // Creator rate is authored in seconds against system active time. The
         // old normalized-age path under-emitted short bursts and over-looped
         // impact effects.
-        const cRate = sampleRamp(this.rateRamp, this.elapsed, 0) * this.intensityRateMultiplier;
+        const cRate =
+          sampleRamp(this.rateRamp, this.elapsed, 0) *
+          this.intensityRateMultiplier *
+          this.distanceRateMultiplier;
         this.creatorAccum = this.emitFromSource(
           cRate,
           dt,
@@ -1563,9 +1704,9 @@ class SystemRenderer {
     }
     this.convertSpawnToSimulationFrame(SystemRenderer.TMP_POS, SystemRenderer.TMP_VEL);
     SystemRenderer.TMP_VEL.set(
-      SystemRenderer.TMP_VEL.x * this.intensityVelXMultiplier,
-      SystemRenderer.TMP_VEL.y * this.intensityVelYMultiplier,
-      SystemRenderer.TMP_VEL.z * this.intensityVelZMultiplier,
+      SystemRenderer.TMP_VEL.x * this.intensityVelXMultiplier * this.distanceVelXMultiplier,
+      SystemRenderer.TMP_VEL.y * this.intensityVelYMultiplier * this.distanceVelYMultiplier,
+      SystemRenderer.TMP_VEL.z * this.intensityVelZMultiplier * this.distanceVelZMultiplier,
     );
     this.pos[slot * 3 + 0] = SystemRenderer.TMP_POS.x;
     this.pos[slot * 3 + 1] = SystemRenderer.TMP_POS.y;
@@ -1580,10 +1721,14 @@ class SystemRenderer {
     const alpha =
       sampleRamp(this.alphaRamp, alphaT0, 1) *
       SystemRenderer.TMP_COL[3] *
-      this.intensityAlphaMultiplier;
-    this.colorRGBA[slot * 4 + 0] = SystemRenderer.TMP_COL[0] * this.intensityColorRMultiplier;
-    this.colorRGBA[slot * 4 + 1] = SystemRenderer.TMP_COL[1] * this.intensityColorGMultiplier;
-    this.colorRGBA[slot * 4 + 2] = SystemRenderer.TMP_COL[2] * this.intensityColorBMultiplier;
+      this.intensityAlphaMultiplier *
+      this.distanceAlphaMultiplier;
+    this.colorRGBA[slot * 4 + 0] =
+      SystemRenderer.TMP_COL[0] * this.intensityColorRMultiplier * this.distanceColorRMultiplier;
+    this.colorRGBA[slot * 4 + 1] =
+      SystemRenderer.TMP_COL[1] * this.intensityColorGMultiplier * this.distanceColorGMultiplier;
+    this.colorRGBA[slot * 4 + 2] =
+      SystemRenderer.TMP_COL[2] * this.intensityColorBMultiplier * this.distanceColorBMultiplier;
     this.colorRGBA[slot * 4 + 3] = alpha;
     // Per-particle u8 spawn index (the particleIndex ramp axis) + the cached
     // size base = emitter.sizeGenerator (METRES) × ageScale, sampled ONCE here
@@ -1616,9 +1761,13 @@ class SystemRenderer {
     }
     sz0 *=
       this.intensitySizeMultiplier *
+      this.distanceSizeMultiplier *
       this.intensityScaleYMultiplier *
+      this.distanceScaleYMultiplier *
       this.intensityAgeScaleMultiplier *
-      this.intensityAgeAuxScaleMultiplier;
+      this.distanceAgeScaleMultiplier *
+      this.intensityAgeAuxScaleMultiplier *
+      this.distanceAgeAuxScaleMultiplier;
     this.sizeArr[slot] = Math.max(0, sz0);
     this.alive++;
   }
@@ -1675,9 +1824,9 @@ class SystemRenderer {
       .copy(action.vector)
       .multiply(
         SystemRenderer.TMP_SCALE.set(
-          this.intensityStreamerXMultiplier,
-          this.intensityStreamerYMultiplier,
-          this.intensityStreamerZMultiplier,
+          this.intensityStreamerXMultiplier * this.distanceStreamerXMultiplier,
+          this.intensityStreamerYMultiplier * this.distanceStreamerYMultiplier,
+          this.intensityStreamerZMultiplier * this.distanceStreamerZMultiplier,
         ),
       );
     if (!action.switchCoordinateStyle) return out;
