@@ -257,10 +257,24 @@ function muzzleIndex(name: string): number {
 }
 
 const SHIP_AMBIENT_PARTICLE_GROUPS = new Set(['idleport', 'smoke']);
+const SHIP_PARTICLE_EVENT_PREVIEW_MS = 3000;
+const SHIP_PARTICLE_SOURCE_ORDER = new Map<string, number>([
+  ['hull', 0],
+  ['artillery', 1],
+  ['atba', 2],
+  ['airDefense', 3],
+  ['aa_aura', 4],
+  ['munition', 5],
+  ['map', 6],
+]);
 
 function isWakeParticleGroup(group: string): boolean {
   const g = group.toLowerCase();
   return g.startsWith('waketrace') || g.startsWith('propeller');
+}
+
+function shipParticleEventKey(a: ParticleAttachment): string {
+  return `${a.source ?? 'hull'}:${a.group ?? ''}`;
 }
 
 export interface ShipLoadStats {
@@ -278,6 +292,15 @@ export interface ShipLoadStats {
 }
 
 export type ShipParticleMode = 'ambient' | 'all';
+
+export interface ShipParticleEventOption {
+  key: string;
+  source: string;
+  group: string;
+  label: string;
+  handles: number;
+  systems: number;
+}
 
 export interface ShipParticleStats {
   attachmentRows: number;
@@ -431,6 +454,9 @@ export class ShipViewer {
   private particleAttachmentAnchors = new WeakMap<ParticleAttachment, THREE.Object3D>();
   private particleLayerEnabled = false;
   private particleMode: ShipParticleMode = 'ambient';
+  private particleEventOptions: ShipParticleEventOption[] = [];
+  private particlePreviewKeys = new Set<string>();
+  private particlePreviewTimers = new Map<string, number>();
   private particleBuildPromise: Promise<ShipParticleStats> | null = null;
   private particleBuildToken = 0;
   private particleStats: ShipParticleStats = emptyShipParticleStats();
@@ -1198,6 +1224,10 @@ export class ShipViewer {
     return this.particleStats;
   }
 
+  getShipParticleEventOptions(): readonly ShipParticleEventOption[] {
+    return this.particleEventOptions;
+  }
+
   async setShipParticleMode(mode: ShipParticleMode): Promise<ShipParticleStats> {
     this.particleMode = mode;
     if (!this.particleLayerEnabled) return this.particleStats;
@@ -1207,9 +1237,46 @@ export class ShipViewer {
     return this.particleStats;
   }
 
+  async triggerShipParticleEvent(
+    key: string,
+    durationMs = SHIP_PARTICLE_EVENT_PREVIEW_MS,
+  ): Promise<ShipParticleStats> {
+    if (!key) return this.particleStats;
+    if (!this.particleLayerEnabled || !this.particleScene) {
+      await this.setShipParticlesVisible(true);
+    } else if (this.particleBuildPromise) {
+      await this.particleBuildPromise;
+    }
+    if (!this.particleScene) return this.particleStats;
+    const handles = this.particleHandles.filter((h) => shipParticleEventKey(h.attachment) === key);
+    if (handles.length === 0) return this.particleStats;
+
+    this.particlePreviewKeys.add(key);
+    const oldTimer = this.particlePreviewTimers.get(key);
+    if (oldTimer != null) window.clearTimeout(oldTimer);
+
+    for (const h of handles) this.particleScene.restartAttachment(h);
+    this.updateParticleAttachmentTransforms();
+    this.particleStats = {
+      ...this.particleStats,
+      activeAttachments: this.countActiveParticleHandles(),
+    };
+
+    if (durationMs > 0) {
+      const timer = window.setTimeout(() => {
+        this.particlePreviewTimers.delete(key);
+        this.particlePreviewKeys.delete(key);
+        this.applyShipParticleActivation();
+      }, durationMs);
+      this.particlePreviewTimers.set(key, timer);
+    }
+    return this.particleStats;
+  }
+
   async setShipParticlesVisible(on: boolean): Promise<ShipParticleStats> {
     this.particleLayerEnabled = on;
     if (!on) {
+      this.clearShipParticleEventPreviews();
       this.particleScene?.setAllActive(false);
       if (this.particleScene) this.particleScene.root.visible = false;
       this.particleStats = { ...this.particleStats, activeAttachments: 0 };
@@ -1768,6 +1835,7 @@ export class ShipViewer {
     for (const h of handles) systems += h.systems.length;
     const ambient = handles.filter((h) => this.isAmbientParticleAttachment(h.attachment)).length;
     const events = handles.length - ambient;
+    this.particleEventOptions = this.buildShipParticleEventOptions(handles);
     const stats: ShipParticleStats = {
       attachmentRows: attachments.length,
       renderableAttachments: renderable.length,
@@ -1802,6 +1870,7 @@ export class ShipViewer {
   ): void {
     if (!opts.preserveToken) this.particleBuildToken++;
     if (!opts.preserveEnabled) this.particleLayerEnabled = false;
+    this.clearShipParticleEventPreviews();
     if (this.particleScene) {
       this.env.scene.remove(this.particleScene.root);
       this.particleScene.dispose();
@@ -1811,6 +1880,7 @@ export class ShipViewer {
     this.particleAnchorObjects.clear();
     this.particleAnchorMotion.clear();
     this.particleAttachmentAnchors = new WeakMap<ParticleAttachment, THREE.Object3D>();
+    this.particleEventOptions = [];
     this.particleBuildPromise = null;
     this.particleStats = emptyShipParticleStats();
   }
@@ -1829,13 +1899,59 @@ export class ShipViewer {
     return SHIP_AMBIENT_PARTICLE_GROUPS.has(group) || isWakeParticleGroup(group);
   }
 
+  private buildShipParticleEventOptions(
+    handles: readonly ParticleAttachmentHandle[],
+  ): ShipParticleEventOption[] {
+    const byKey = new Map<string, ShipParticleEventOption>();
+    for (const h of handles) {
+      if (this.isAmbientParticleAttachment(h.attachment)) continue;
+      const source = h.attachment.source ?? 'hull';
+      const group = h.attachment.group ?? '';
+      const key = shipParticleEventKey(h.attachment);
+      const existing =
+        byKey.get(key) ??
+        ({
+          key,
+          source,
+          group,
+          label: `${source}:${group}`,
+          handles: 0,
+          systems: 0,
+        } satisfies ShipParticleEventOption);
+      existing.handles++;
+      existing.systems += h.systems.length;
+      byKey.set(key, existing);
+    }
+    return [...byKey.values()].sort((a, b) => {
+      const sourceA = SHIP_PARTICLE_SOURCE_ORDER.get(a.source) ?? 999;
+      const sourceB = SHIP_PARTICLE_SOURCE_ORDER.get(b.source) ?? 999;
+      if (sourceA !== sourceB) return sourceA - sourceB;
+      return a.group.localeCompare(b.group);
+    });
+  }
+
+  private countActiveParticleHandles(): number {
+    let active = 0;
+    for (const h of this.particleHandles) if (h.active) active++;
+    return active;
+  }
+
+  private clearShipParticleEventPreviews(): void {
+    for (const timer of this.particlePreviewTimers.values()) window.clearTimeout(timer);
+    this.particlePreviewTimers.clear();
+    this.particlePreviewKeys.clear();
+  }
+
   private applyShipParticleActivation(): number {
     if (!this.particleScene) return 0;
     let active = 0;
     for (const h of this.particleHandles) {
+      const key = shipParticleEventKey(h.attachment);
       const on =
         this.particleLayerEnabled &&
-        (this.particleMode === 'all' || this.isAmbientParticleAttachment(h.attachment));
+        (this.particleMode === 'all' ||
+          this.particlePreviewKeys.has(key) ||
+          this.isAmbientParticleAttachment(h.attachment));
       this.particleScene.setAttachmentActive(h, on);
       if (on) active++;
     }

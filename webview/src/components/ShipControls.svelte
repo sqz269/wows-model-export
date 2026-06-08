@@ -28,6 +28,7 @@
     LodPolicy,
     NodeCategory,
     ShipViewer,
+    ShipParticleEventOption,
     ShipParticleMode,
     ShipParticleStats,
     WgEnvironmentInfo,
@@ -114,6 +115,8 @@
   let particleMode = $state<ShipParticleMode>('ambient');
   let particlesLoading = $state(false);
   let particleStats = $state<Readonly<ShipParticleStats> | null>(null);
+  let particleEvents = $state<readonly ShipParticleEventOption[]>([]);
+  let selectedParticleEvent = $state('');
   const PARTICLE_MODES: Array<{ value: ShipParticleMode; label: string }> = [
     { value: 'ambient', label: 'Ambient' },
     { value: 'all', label: 'All' },
@@ -277,6 +280,7 @@
       particlesView = viewer.getShipParticlesVisible();
       particleMode = viewer.getShipParticleMode();
       particleStats = viewer.getShipParticleStats();
+      refreshParticleEvents();
 
       // Honor the persisted Show-textures choice. Each ship's viewer
       // starts with textures off (TextureManager.clearShip()); kick off
@@ -410,11 +414,18 @@
     nodeCats = { ...nodeCats };
     viewer.setNodeCategoryVisible(cat, v);
   }
+  function refreshParticleEvents() {
+    particleEvents = viewer.getShipParticleEventOptions();
+    if (!particleEvents.some((event) => event.key === selectedParticleEvent)) {
+      selectedParticleEvent = particleEvents[0]?.key ?? '';
+    }
+  }
   async function toggleParticlesView(v: boolean) {
     particlesView = v;
     particlesLoading = true;
     try {
       particleStats = await viewer.setShipParticlesVisible(v);
+      refreshParticleEvents();
     } catch (err) {
       particlesView = viewer.getShipParticlesVisible();
       const msg = err instanceof Error ? err.message : String(err);
@@ -428,10 +439,26 @@
     particlesLoading = true;
     try {
       particleStats = await viewer.setShipParticleMode(mode);
+      refreshParticleEvents();
     } catch (err) {
       particleMode = viewer.getShipParticleMode();
       const msg = err instanceof Error ? err.message : String(err);
       toast.error('Particle mode failed', { description: msg, duration: 8000 });
+    } finally {
+      particlesLoading = false;
+    }
+  }
+  async function triggerParticleEvent() {
+    if (!selectedParticleEvent) return;
+    particlesLoading = true;
+    try {
+      particleStats = await viewer.triggerShipParticleEvent(selectedParticleEvent);
+      particlesView = viewer.getShipParticlesVisible();
+      particleMode = viewer.getShipParticleMode();
+      refreshParticleEvents();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error('Particle event failed', { description: msg, duration: 8000 });
     } finally {
       particlesLoading = false;
     }
@@ -872,6 +899,29 @@
             </button>
           {/each}
         </div>
+        {#if particleEvents.length > 0}
+          <div class="ml-5 flex items-center gap-1 text-[10px]">
+            <select
+              class="h-6 min-w-0 max-w-[11rem] rounded border border-border bg-background px-1 text-[10px] text-foreground disabled:opacity-50"
+              value={selectedParticleEvent}
+              disabled={particlesLoading}
+              onchange={(e) => (selectedParticleEvent = e.currentTarget.value)}
+              aria-label="Particle event"
+            >
+              {#each particleEvents as event}
+                <option value={event.key}>{event.label} ({event.handles})</option>
+              {/each}
+            </select>
+            <button
+              type="button"
+              class="h-6 rounded border border-border px-2 text-[10px] text-foreground transition-colors hover:bg-muted disabled:opacity-50"
+              disabled={particlesLoading || !selectedParticleEvent}
+              onclick={() => void triggerParticleEvent()}
+            >
+              Trigger
+            </button>
+          </div>
+        {/if}
         {#if particleStats}
           <div class="grid grid-cols-2 gap-x-3 gap-y-0.5 pl-5 text-[10px]">
             <span class="text-muted-foreground">active</span>

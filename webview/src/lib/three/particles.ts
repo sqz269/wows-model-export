@@ -1098,6 +1098,20 @@ class SystemRenderer {
     if (active && this.loopOneShot) this.finished = false;
   }
 
+  restart(): void {
+    this.active = true;
+    this.finished = false;
+    this.points.visible = true;
+    this.elapsed = 0;
+    this.prewarmed = false;
+    this.alive = 0;
+    this.emitAccum = 0;
+    this.creatorAccum = 0;
+    for (const action of this.spawnerActions) action.accum = 0;
+    for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
+    this.points.geometry.setDrawRange(0, 0);
+  }
+
   setSortCamera(camera: THREE.Camera | null): void {
     this.sortCamera = camera;
   }
@@ -2363,6 +2377,13 @@ class LightRenderer {
   setActive(active: boolean): void {
     this.active = active;
     this.group.visible = active;
+  }
+
+  restart(): void {
+    this.active = true;
+    this.group.visible = true;
+    this.elapsed = 0;
+    this.applySample(0);
   }
 
   setIntensityValues(values: readonly number[] | undefined): void {
@@ -3794,6 +3815,19 @@ export class ParticleScene {
       effect.group.visible = active;
     }
     handle.group.visible = active;
+  }
+
+  restartAttachment(handle: ParticleAttachmentHandle): void {
+    for (let i = this.spawnedEffects.length - 1; i >= 0; i--) {
+      const effect = this.spawnedEffects[i];
+      if (effect.parent !== handle) continue;
+      this.disposeSpawnedEffect(effect);
+      this.spawnedEffects.splice(i, 1);
+    }
+    handle.active = true;
+    for (const s of handle.systems) s.restart();
+    for (const l of handle.lights) l.restart();
+    handle.group.visible = true;
   }
 
   setAttachmentIntensityValues(
