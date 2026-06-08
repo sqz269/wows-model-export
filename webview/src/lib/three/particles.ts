@@ -2011,6 +2011,16 @@ interface ParticleMaterialOptions {
   rotationCenter?: string;
   /** Renderer.customCenterOffset (+0x3c Vec2), used for custom pivots. */
   customCenterOffset?: [number, number];
+  /** Renderer.scaleX (+0x60): sprite width multiplier relative to height. */
+  scaleX?: number;
+  /** Renderer.opacityMultiplier (+0x74): final alpha multiplier. */
+  opacityMultiplier?: number;
+  /** Renderer.tilingU/V (+0x90/+0x94): repeat local sprite UVs. */
+  tilingU?: number;
+  tilingV?: number;
+  /** Renderer.flipTexcoordU/V (+0x9c/+0x9d): mirror local sprite UVs. */
+  flipTexcoordU?: boolean;
+  flipTexcoordV?: boolean;
 }
 
 /**
@@ -2152,6 +2162,12 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
   const framesEnd = opts.framesRangeEnd ?? 0;
   const spriteRotation = opts.spriteRotation ? 1 : 0;
   const rotationPivot = rotationPivotForCenter(opts.rotationCenter, opts.customCenterOffset);
+  const spriteAspectX = Math.max(0.001, Math.abs(opts.scaleX ?? 1));
+  const pointExtent = spriteRotation
+    ? Math.sqrt(spriteAspectX * spriteAspectX + 1)
+    : Math.max(spriteAspectX, 1);
+  const opacityMultiplier =
+    opts.opacityMultiplier !== undefined && opts.opacityMultiplier > 0 ? opts.opacityMultiplier : 1;
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       map: { value: null as THREE.Texture | null },
@@ -2204,6 +2220,15 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       // not clip inside the fixed GL_POINT bounds.
       uUseSpriteRotation: { value: spriteRotation },
       uRotationPivot: { value: rotationPivot },
+      uSpriteAspectX: { value: spriteAspectX },
+      uPointExtent: { value: pointExtent },
+      uUvTiling: { value: new THREE.Vector2(opts.tilingU ?? 1, opts.tilingV ?? 1) },
+      uUvFlip: {
+        value: new THREE.Vector2(opts.flipTexcoordU ? 1 : 0, opts.flipTexcoordV ? 1 : 0),
+      },
+      // Corpus default is 0.0 on most systems; native treats that as neutral
+      // rather than invisible. Positive values are authored boosts/cuts.
+      uOpacityMultiplier: { value: opacityMultiplier },
       // Directional-lightmap (PS_RLT) reconstruction. uLightingMode=1 when
       // the texture is an `_LM` lightmap (lightmapping4Way/HL2); the
       // fragment shader then treats `map` RGB as a 3-direction HL2-basis
@@ -2271,6 +2296,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       attribute float framePhase;
       attribute float rotationPhase;
       uniform float uUseSpriteRotation;
+      uniform float uPointExtent;
       varying vec4 vColor;
       varying float vAge;
       varying float vFrameSeed;
@@ -2286,8 +2312,9 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * mvPosition;
         // size is metres (world space); divide by distance for perspective.
-        float rotationExpansion = (uUseSpriteRotation > 0.5) ? 1.41421356237 : 1.0;
-        gl_PointSize = max(1.0, size * rotationExpansion * 200.0 / -mvPosition.z);
+        // uPointExtent expands the square GL_POINT enough to contain scaleX
+        // and the worst-case rotated bounding square when sprite rotation is on.
+        gl_PointSize = max(1.0, size * uPointExtent * 200.0 / -mvPosition.z);
       }
     `,
     fragmentShader: /* glsl */ `
@@ -2308,6 +2335,11 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float uRandomFrame;
       uniform float uUseSpriteRotation;
       uniform vec2 uRotationPivot;
+      uniform float uSpriteAspectX;
+      uniform float uPointExtent;
+      uniform vec2 uUvTiling;
+      uniform vec2 uUvFlip;
+      uniform float uOpacityMultiplier;
       uniform float uLightingMode;
       uniform vec3 uSunDirWorld;
       uniform sampler2D mvMap;
@@ -2328,18 +2360,30 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         vec4 base;
         vec3 glow = vec3(0.0);   // additive warm glow (gradient+lightmapping)
         if (useMap > 0.5) {
-          vec2 local = gl_PointCoord;
+          // Convert the square GL_POINT coordinate to authored sprite UVs.
+          // Geometry is measured in sprite-height units: width=scaleX,
+          // height=1. Rotation happens in that geometric space so rectangular
+          // sprites and custom pivots stay coherent.
+          vec2 pointGeom = (gl_PointCoord - vec2(0.5)) * uPointExtent;
+          vec2 pivotGeom = vec2(
+            (uRotationPivot.x - 0.5) * uSpriteAspectX,
+            uRotationPivot.y - 0.5
+          );
+          vec2 spriteGeom = pointGeom;
           if (uUseSpriteRotation > 0.5) {
             // GL_POINTS cannot rotate the quad geometry. Enlarge the point in
-            // the vertex shader, map the larger point back to a unit sprite
-            // square, then rotate source UVs by the inverse angle so the
-            // visible sprite turns by +vRotationPhase around PS_RRC.
-            local = (local - vec2(0.5)) * 1.41421356237 + vec2(0.5);
-            vec2 rel = local - uRotationPivot;
+            // the vertex shader, rotate source geometry by the inverse angle,
+            // then sample the unrotated sprite UVs.
+            vec2 rel = pointGeom - pivotGeom;
             float s = sin(vRotationPhase);
             float c = cos(vRotationPhase);
-            local = uRotationPivot + vec2(c * rel.x + s * rel.y, -s * rel.x + c * rel.y);
-            if (local.x < 0.0 || local.x > 1.0 || local.y < 0.0 || local.y > 1.0) discard;
+            spriteGeom = pivotGeom + vec2(c * rel.x + s * rel.y, -s * rel.x + c * rel.y);
+          }
+          vec2 local = vec2(spriteGeom.x / uSpriteAspectX + 0.5, spriteGeom.y + 0.5);
+          if (local.x < 0.0 || local.x > 1.0 || local.y < 0.0 || local.y > 1.0) discard;
+          local = mix(local, vec2(1.0) - local, uUvFlip);
+          if (abs(uUvTiling.x - 1.0) > 0.0001 || abs(uUvTiling.y - 1.0) > 0.0001) {
+            local = fract(local * uUvTiling);
           }
           float fx = framesPerXY.x;
           float fy = framesPerXY.y;
@@ -2509,8 +2553,9 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           // No refraction pass: show a faint white foam/haze hint instead of the
           // raw blue normal/deform texture as opaque colour (RE doc 63 H3/M1).
           outRgb = vec3(1.0);
-          outA = base.a * 0.15;
+          outA = vColor.a * base.a * 0.15;
         }
+        outA *= uOpacityMultiplier;
         if (uPremultiply > 0.5) {
           // Premultiplied alpha-over (matches the engine's premultiplied PS
           // output + One/INV_SRC_ALPHA blend). The glow (outRgb may exceed 1)
@@ -2739,6 +2784,12 @@ export class ParticleScene {
         spriteRotation: useSpriteRotation,
         rotationCenter: r?.rotationCenter,
         customCenterOffset: r?.customCenterOffset,
+        scaleX: r?.scaleX,
+        opacityMultiplier: r?.opacityMultiplier,
+        tilingU: r?.tilingU,
+        tilingV: r?.tilingV,
+        flipTexcoordU: r?.flipTexcoordU,
+        flipTexcoordV: r?.flipTexcoordV,
       });
       const renderer = new SystemRenderer(sys, mat, rec.maxEmittingDuration, {
         spawnEffect,

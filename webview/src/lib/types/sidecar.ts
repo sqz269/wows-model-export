@@ -433,9 +433,11 @@ export interface ParticleGeneralSection {
  * against the WoWS binary (build 12506899, FUN_1406f0c30), superseding
  * the 2026-05-23 statistical probe: texture refs
  * (`textureName0`/`textureName1`) + `yawRateRamp` at +0x00/+0x10/+0x20,
- * `customCenterOffset` at +0x3c, and the tail enums/floats
+ * `customCenterOffset` at +0x3c, material scalars (`scaleX` at +0x60,
+ * `opacityMultiplier` at +0x74), the tail enums/floats
  * (`rotationCenter`/`lightingType`/`blendType`/`sortType`/`tilingU`/
- * `tilingV`) at +0x80..+0x94 within the 0xa0-byte struct.
+ * `tilingV`) at +0x80..+0x94, and UV flip bools at +0x9c/+0x9d within
+ * the 0xa0-byte struct.
  *
  * The rest of the +0x30..+0x7f float cluster and the +0x98/+0x9c bool
  * quartets are byte-mapped in the binary but not surfaced here.
@@ -458,6 +460,10 @@ export interface ParticleRenderer {
   yawRateRamp?: ParticleRamp;
   /** Renderer +0x3c Vec2. Used when `rotationCenter` is `custom`. */
   customCenterOffset?: [number, number];
+  /** Renderer +0x60 width multiplier for sprite aspect. */
+  scaleX?: number;
+  /** Renderer +0x74 alpha multiplier. */
+  opacityMultiplier?: number;
   /** PS_RRC label (4 values: bottom / corner / center / custom).
    *  Recovered from the binary enum table @ 0x1420bf0d0. */
   rotationCenter?: string;
@@ -476,6 +482,9 @@ export interface ParticleRenderer {
   /** Per-system UV tiling factors; default 1.0/1.0. */
   tilingU?: number;
   tilingV?: number;
+  /** Renderer +0x9c/+0x9d UV flip flags. */
+  flipTexcoordU?: boolean;
+  flipTexcoordV?: boolean;
 }
 
 /**

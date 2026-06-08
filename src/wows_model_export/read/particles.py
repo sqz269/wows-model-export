@@ -799,16 +799,18 @@ def _decode_renderer(
       +0x10 ``textureName1`` (16 B ResourceRef)
       +0x20 ``yawRateRamp``  (16 B Ramp)
       +0x3c ``customCenterOffset`` (2-float Vec2)
+      +0x60 ``scaleX`` f32
+      +0x74 ``opacityMultiplier`` f32
       +0x80 ``rotationCenter`` i32 -> PS_RRC label
       +0x84 ``lightingType``  i32 -> PS_RLT label
       +0x88 ``blendType``     i32 -> PS_RBT label
       +0x8c ``sortType``      i32 (raw; enum fx::RendererSortType, labels TBD)
       +0x90 ``tilingU`` f32, +0x94 ``tilingV`` f32
+      +0x9c ``flipTexcoordU`` bool, +0x9d ``flipTexcoordV`` bool
 
     The remaining +0x30..+0x7f float cluster (explicitOrientation plus
-    lighting/spin/scale floats) and the +0x98/+0x9c bool quartets
-    (billboard/velocityOriented/flipTexcoordU-V …) are byte-mapped in
-    the binary but not surfaced here.
+    lighting/spin floats) and the +0x98/+0x9b orientation/background bools
+    are byte-mapped in the binary but not surfaced here.
     """
     base = sys_off  # Renderer is the first sub-struct
     out: dict[str, Any] = {}
@@ -822,10 +824,14 @@ def _decode_renderer(
     out["customCenterOffset"] = [
         float(v) for v in struct.unpack_from("<2f", buf, base + 0x3c)
     ]
+    out["scaleX"] = float(struct.unpack_from("<f", buf, base + 0x60)[0])
+    out["opacityMultiplier"] = float(struct.unpack_from("<f", buf, base + 0x74)[0])
     rotation_center, lighting_type, blend_type, sort_type = struct.unpack_from(
         "<4i", buf, base + 0x80,
     )
     tiling_u, tiling_v = struct.unpack_from("<2f", buf, base + 0x90)
+    flip_u = bool(buf[base + 0x9c])
+    flip_v = bool(buf[base + 0x9d])
     out["rotationCenter"] = PS_RRC.get(int(rotation_center), str(rotation_center))
     # +0x84 is fx::RendererLightingType (PS_RLT), NOT a blend sub-mode flag.
     # Confirmed via Ghidra (FUN_1406f2150, type_info 0x142a81bb8); the earlier
@@ -835,6 +841,8 @@ def _decode_renderer(
     out["sortType"] = int(sort_type)
     out["tilingU"] = float(tiling_u)
     out["tilingV"] = float(tiling_v)
+    out["flipTexcoordU"] = flip_u
+    out["flipTexcoordV"] = flip_v
     return out
 
 
