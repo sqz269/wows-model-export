@@ -420,6 +420,7 @@ export class ShipViewer {
 
     this.stopLoop = startRenderLoop(() => {
       this.env.controls.update();
+      this.textures.tickRipples(performance.now() / 1000); // advance L3.5 rain ripples
       this.env.render();
     });
 

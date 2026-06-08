@@ -9,13 +9,14 @@
 
 import type * as THREE from 'three';
 import { makeCamoUniforms, type CamoUniforms } from './uniforms';
-import { makeWetnessUniforms } from '../wetness';
+import { makeWetnessUniforms, sharedWetTime } from '../wetness';
 
 // Procedural deck-puddle helpers (Layer 3, wg_render_ship_water.md §5b.2). The
 // engine generates a `PuddlesMap` coverage mask + a `RipplesMap` tangent normal
 // at runtime; the consumer has neither, so we stand in with value-noise coverage
 // over world XZ + a finite-difference ripple normal. Declared at fragment global
-// scope (before main). Static (no time uniform) — animated ripples are a TODO.
+// scope (before main). The ripple normal is time-animated via the `wetTime`
+// uniform (engine phase g_time·1.6); see the Layer-3 deck-puddle block.
 const WET_PUDDLE_GLSL = `
 float wetHash( vec2 p ) {
   return fract( sin( dot( p, vec2( 127.1, 311.7 ) ) ) * 43758.5453123 );
@@ -97,6 +98,7 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.uniforms.wetWaveAmp = wetness.wetWaveAmp;
     shader.uniforms.wetBand = wetness.wetBand;
     shader.uniforms.wetPuddles = wetness.wetPuddles;
+    shader.uniforms.wetTime = sharedWetTime; // shared animated clock (L3.5 ripples)
 
     // Vertex: compute per-mesh camo UV. `camoUV` packs (scale.xy,
     // offset.xy); `vCamoUv` is what the fragment shader samples the
@@ -151,6 +153,7 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
       'uniform float wetWaveAmp;\n' +
       'uniform float wetBand;\n' +
       'uniform float wetPuddles;\n' +
+      'uniform float wetTime;\n' +
       'varying vec3 vWetWorldPos;\n' +
       'varying vec2 vCamoUv;\n' +
       WET_PUDDLE_GLSL +
@@ -538,11 +541,20 @@ if ( wetPuddles > 0.001 ) {
     diffuseColor.rgb *= ( 1.0 - 0.6 * pud );               // wet pools darken
     roughnessFactor   = mix( roughnessFactor, 0.05, pud ); // -> mirror sheen
     metalnessFactor   = mix( metalnessFactor, 0.0, pud );  // water is dielectric
-    // Flatten the shading normal toward world-up, then tilt by a ripple in the
-    // deck (world-XZ) plane.
+    // Flatten the shading normal toward world-up, then tilt by an ANIMATED ripple
+    // in the deck (world-XZ) plane — the engine (§5b.2) perturbs the pool normal by
+    // an animated RipplesMap (phase g_time·1.6) × coverage². We stand in with two
+    // counter-scrolling value-noise gradient layers driven by wetTime; mod() keeps
+    // the noise input bounded so long sessions stay smooth. Always-on with puddles:
+    // the engine's ship-deck shader ripples by coverage² and does NOT read
+    // ripplesIntensity (that scalar isn't consumed by the deck path). pud² carries
+    // the per-weather strength (storms author more puddles → more ripple).
     vec3 worldUpView = normalize( mat3( viewMatrix ) * vec3( 0.0, 1.0, 0.0 ) );
-    vec3 rip = wetRippleNormal( vWetWorldPos.xz * 1.6 );
-    vec3 ripView = mat3( viewMatrix ) * vec3( rip.x, 0.0, rip.y );
+    vec2 rp = vWetWorldPos.xz * 1.6;
+    float rt = mod( wetTime, 600.0 ) * 1.6;
+    vec2 ripG = ( wetRippleNormal( rp + vec2( rt * 0.6, rt * 0.45 ) ).xy
+                + wetRippleNormal( rp * 1.7 - vec2( rt * 0.5, rt * 0.7 ) ).xy ) * 0.5;
+    vec3 ripView = mat3( viewMatrix ) * vec3( ripG.x, 0.0, ripG.y );
     normal = normalize( mix( normal, worldUpView, min( 1.0, pud * 0.85 ) ) + ripView * pud * pud * 0.4 );
   }
 }

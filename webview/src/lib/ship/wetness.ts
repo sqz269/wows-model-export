@@ -66,3 +66,17 @@ export function wetnessUniformsOf(mat: THREE.Material | THREE.Material[]): Wetne
   else collect(mat);
   return list;
 }
+
+/**
+ * Shared animated-time uniform (seconds) for the Layer-3.5 rain ripples. ONE
+ * instance is referenced by every wetness material's `wetTime` (bound in
+ * `attachCamoChunk`), so the render loop animates ripples for the whole ship with
+ * a single write per frame (`setWetTime`) — no per-clone fan-out. Distinct from
+ * the per-clone intensity uniforms above (scene state, not per-frame).
+ */
+export const sharedWetTime: { value: number } = { value: 0 };
+
+/** Advance the shared ripple animation clock; call once per rendered frame. */
+export function setWetTime(seconds: number): void {
+  sharedWetTime.value = seconds;
+}

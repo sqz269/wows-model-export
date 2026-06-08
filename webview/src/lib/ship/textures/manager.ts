@@ -22,7 +22,7 @@ import { resolveDdsMipUrls } from '$lib/dds';
 import { classifyPartCategory, classifyPlacementCategory } from '$lib/types';
 import type { ShipPlacement, Skin, SidecarDoc, SidecarTextureScheme, SkinMatCategoryParams, TextureSet } from '$lib/types';
 import { dummyMaskTexture, dummyMatAlbedoTexture, uniformsOf } from '../camo';
-import { wetnessUniformsOf } from '../wetness';
+import { wetnessUniformsOf, setWetTime } from '../wetness';
 import {
   applyTexturesToMaterial,
   buildTextured,
@@ -686,6 +686,15 @@ export class TextureManager {
         }
       }
     }
+  }
+
+  /**
+   * Advance the shared rain-ripple animation clock (Layer 3.5). Call once per
+   * rendered frame; updates one shared uniform for every wetness material, so
+   * there is no per-clone fan-out (contrast `reapplyWetness`, on weather change).
+   */
+  tickRipples(seconds: number): void {
+    setWetTime(seconds);
   }
 
   /**
