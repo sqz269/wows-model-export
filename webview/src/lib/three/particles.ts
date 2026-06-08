@@ -15,9 +15,10 @@
 // recent laptop. Heavier scenes (idle wakes + 4 fires) should switch to
 // a GPU-driven backend; that's a future iteration.
 //
-// Coordinates: emitter origin is whatever transform the caller applies
-// to the returned `Points` object. Particles are simulated in world
-// space.
+// Coordinates: emitter positions/velocities are simulated in the local
+// frame of the attachment group. ShipViewer copies the live WG anchor
+// position/quaternion onto that group so node-attached systems inherit
+// mount/muzzle orientation before Three.js carries them into world space.
 
 import * as THREE from 'three';
 import type {
@@ -139,6 +140,37 @@ interface ParticleClocks {
   particleSpeed: number;
   systemSpeed: number;
   particleIndex: number;
+}
+
+interface StreamAction {
+  vector: THREE.Vector3;
+  halfLife: number;
+  delay: number;
+  switchCoordinateStyle: boolean;
+}
+
+interface JitterAction {
+  positionGenerator: ParticleVariantVg | undefined;
+  velocityGenerator: ParticleVariantVg | undefined;
+  delay: number;
+  affectPosition: boolean;
+  affectVelocity: boolean;
+}
+
+interface OrbitorAction {
+  angularVelocityGenerator: ParticleValueGenerator | undefined;
+  point: THREE.Vector3;
+  axis: THREE.Vector3;
+  delay: number;
+  affectPosition: boolean;
+  affectVelocity: boolean;
+}
+
+interface MagnetAction {
+  attractorPoint: THREE.Vector3;
+  delay: number;
+  minimalDistance: number;
+  strength: number;
 }
 
 /** PS_VALG_RAMP_PARAMETER → the ramp X axis. The shipped order is
@@ -346,6 +378,10 @@ class SystemRenderer {
   private forceX: ParticleValueGenerator | undefined;
   private forceY: ParticleValueGenerator | undefined;
   private forceZ: ParticleValueGenerator | undefined;
+  private streamActions: StreamAction[] = [];
+  private jitterActions: JitterAction[] = [];
+  private orbitorActions: OrbitorAction[] = [];
+  private magnetActions: MagnetAction[] = [];
   private frameRateRamp: ParticleRamp | undefined;
 
   // Particle attribute arrays.
@@ -407,6 +443,10 @@ class SystemRenderer {
   // Tmp scratch — avoids per-frame Vector3 allocations.
   private static readonly TMP_POS = new THREE.Vector3();
   private static readonly TMP_VEL = new THREE.Vector3();
+  private static readonly TMP_POS2 = new THREE.Vector3();
+  private static readonly TMP_VEL2 = new THREE.Vector3();
+  private static readonly TMP_AXIS = new THREE.Vector3();
+  private static readonly TMP_REL = new THREE.Vector3();
   private static readonly TMP_COL = new Float32Array(4);
   // Reused per-particle clock scratch (mutated in tick/spawn; the per-particle
   // update loop and the emit/spawn phase run sequentially, never concurrently).
@@ -470,6 +510,55 @@ class SystemRenderer {
       } else if (c.action === 'dampfer') {
         if (body.velocityGenerator)
           this.dampGen = body.velocityGenerator as ParticleValueGenerator;
+      } else if (c.action === 'stream') {
+        const v = body.vector;
+        if (Array.isArray(v) && v.length === 3) {
+          this.streamActions.push({
+            vector: new THREE.Vector3(v[0], v[1], v[2]),
+            halfLife: typeof body.halfLife === 'number' ? body.halfLife : -1,
+            delay: typeof body.delay === 'number' ? body.delay : 0,
+            // Parsed but not yet frame-switched. The simulator now runs in the
+            // attachment group's local frame; exact WG semantics for this flag
+            // still need a focused coordinateStyle RE pass.
+            switchCoordinateStyle: !!body.switchCoordinateStyle,
+          });
+        }
+      } else if (c.action === 'jitter') {
+        this.jitterActions.push({
+          positionGenerator: body.positionGenerator as ParticleVariantVg | undefined,
+          velocityGenerator: body.velocityGenerator as ParticleVariantVg | undefined,
+          delay: typeof body.delay === 'number' ? body.delay : 0,
+          affectPosition: !!body.affectPosition,
+          affectVelocity: !!body.affectVelocity,
+        });
+      } else if (c.action === 'orbitor') {
+        const p = body.point;
+        const axis = body.axis;
+        this.orbitorActions.push({
+          angularVelocityGenerator: body.angularVelocityGenerator as ParticleValueGenerator | undefined,
+          point:
+            Array.isArray(p) && p.length === 3
+              ? new THREE.Vector3(p[0], p[1], p[2])
+              : new THREE.Vector3(),
+          axis:
+            Array.isArray(axis) && axis.length === 3
+              ? new THREE.Vector3(axis[0], axis[1], axis[2])
+              : new THREE.Vector3(0, 1, 0),
+          delay: typeof body.delay === 'number' ? body.delay : 0,
+          affectPosition: !!body.affectPosition,
+          affectVelocity: !!body.affectVelocity,
+        });
+      } else if (c.action === 'magnet') {
+        const p = body.attractorPoint;
+        if (Array.isArray(p) && p.length === 3) {
+          this.magnetActions.push({
+            attractorPoint: new THREE.Vector3(p[0], p[1], p[2]),
+            delay: typeof body.delay === 'number' ? body.delay : 0,
+            minimalDistance:
+              typeof body.minimalDistance === 'number' ? Math.max(0, body.minimalDistance) : 0,
+            strength: typeof body.strength === 'number' ? body.strength : 0,
+          });
+        }
       } else if (c.action === 'force') {
         if (body.forceXGenerator) this.forceX = body.forceXGenerator as ParticleValueGenerator;
         if (body.forceYGenerator) this.forceY = body.forceYGenerator as ParticleValueGenerator;
@@ -641,11 +730,15 @@ class SystemRenderer {
       this.vel[i * 3 + 0] += sampleGenAxis(this.forceX, clocks, 0) * dt;
       this.vel[i * 3 + 1] += sampleGenAxis(this.forceY, clocks, 0) * dt;
       this.vel[i * 3 + 2] += sampleGenAxis(this.forceZ, clocks, 0) * dt;
+      this.applyMagnetActions(i, age, dt);
+      this.applyStreamActions(i, age, dt);
+      this.applyJitterActions(i, age, dt);
       // dampfer: a per-frame drag multiplier on the velocity's displacement.
       const damp = this.dampGen ? sampleGenAxis(this.dampGen, clocks, 1) : 1;
       this.pos[i * 3 + 0] += this.vel[i * 3 + 0] * dt * damp;
       this.pos[i * 3 + 1] += this.vel[i * 3 + 1] * dt * damp;
       this.pos[i * 3 + 2] += this.vel[i * 3 + 2] * dt * damp;
+      this.applyOrbitorActions(i, clocks, age, dt);
       // Final opacity = tint.alpha(age) × alphaSetter(t). RE-CONFIRMED on build
       // 12506899 (decompiled FUN_140742af0 + FUN_1407423c0, agent-cross-checked):
       // the tint action does renderRec[0x34..0x40] *= tint.RGBA (alpha @0x40
@@ -837,6 +930,111 @@ class SystemRenderer {
     }
     this.sizeArr[slot] = Math.max(0, sz0);
     this.alive++;
+  }
+
+  private applyStreamActions(slot: number, age: number, dt: number): void {
+    if (this.streamActions.length === 0) return;
+    const ix = slot * 3;
+    let vx = this.vel[ix + 0];
+    let vy = this.vel[ix + 1];
+    let vz = this.vel[ix + 2];
+    for (const action of this.streamActions) {
+      if (age < action.delay) continue;
+      if (action.halfLife < 0) continue;
+      if (action.halfLife <= 1e-6) {
+        vx = action.vector.x;
+        vy = action.vector.y;
+        vz = action.vector.z;
+        continue;
+      }
+      // BigWorld StreamPSA: velocity moves halfway toward the stream velocity
+      // every halfLife seconds. Equivalent continuous update:
+      // v += (target - v) * (1 - 0.5 ** (dt / halfLife)).
+      const k = 1 - Math.pow(0.5, dt / action.halfLife);
+      vx += (action.vector.x - vx) * k;
+      vy += (action.vector.y - vy) * k;
+      vz += (action.vector.z - vz) * k;
+    }
+    this.vel[ix + 0] = vx;
+    this.vel[ix + 1] = vy;
+    this.vel[ix + 2] = vz;
+  }
+
+  private applyJitterActions(slot: number, age: number, dt: number): void {
+    if (this.jitterActions.length === 0) return;
+    const ix = slot * 3;
+    for (const action of this.jitterActions) {
+      if (age < action.delay) continue;
+      if (action.affectPosition) {
+        samplePosFromVariantVg(action.positionGenerator, SystemRenderer.TMP_POS2);
+        this.pos[ix + 0] += SystemRenderer.TMP_POS2.x * dt;
+        this.pos[ix + 1] += SystemRenderer.TMP_POS2.y * dt;
+        this.pos[ix + 2] += SystemRenderer.TMP_POS2.z * dt;
+      }
+      if (action.affectVelocity) {
+        samplePosFromVariantVg(action.velocityGenerator, SystemRenderer.TMP_VEL2);
+        this.vel[ix + 0] += SystemRenderer.TMP_VEL2.x * dt;
+        this.vel[ix + 1] += SystemRenderer.TMP_VEL2.y * dt;
+        this.vel[ix + 2] += SystemRenderer.TMP_VEL2.z * dt;
+      }
+    }
+  }
+
+  private applyOrbitorActions(
+    slot: number,
+    clocks: ParticleClocks,
+    age: number,
+    dt: number,
+  ): void {
+    if (this.orbitorActions.length === 0) return;
+    const ix = slot * 3;
+    for (const action of this.orbitorActions) {
+      if (age < action.delay) continue;
+      const axis = SystemRenderer.TMP_AXIS.copy(action.axis);
+      if (axis.lengthSq() <= 1e-10) axis.set(0, 1, 0);
+      axis.normalize();
+      // BigWorld's Particle Editor labels this as degrees/second.
+      const angularVelocityDeg = sampleGenAxis(action.angularVelocityGenerator, clocks, 0);
+      const angle = THREE.MathUtils.degToRad(angularVelocityDeg) * dt;
+      if (Math.abs(angle) <= 1e-8) continue;
+      if (action.affectPosition) {
+        const rel = SystemRenderer.TMP_REL.set(
+          this.pos[ix + 0] - action.point.x,
+          this.pos[ix + 1] - action.point.y,
+          this.pos[ix + 2] - action.point.z,
+        );
+        rel.applyAxisAngle(axis, angle);
+        this.pos[ix + 0] = action.point.x + rel.x;
+        this.pos[ix + 1] = action.point.y + rel.y;
+        this.pos[ix + 2] = action.point.z + rel.z;
+      }
+      if (action.affectVelocity) {
+        SystemRenderer.TMP_VEL2.set(this.vel[ix + 0], this.vel[ix + 1], this.vel[ix + 2]);
+        SystemRenderer.TMP_VEL2.applyAxisAngle(axis, angle);
+        this.vel[ix + 0] = SystemRenderer.TMP_VEL2.x;
+        this.vel[ix + 1] = SystemRenderer.TMP_VEL2.y;
+        this.vel[ix + 2] = SystemRenderer.TMP_VEL2.z;
+      }
+    }
+  }
+
+  private applyMagnetActions(slot: number, age: number, dt: number): void {
+    if (this.magnetActions.length === 0) return;
+    const ix = slot * 3;
+    for (const action of this.magnetActions) {
+      if (age < action.delay || action.strength === 0) continue;
+      const dir = SystemRenderer.TMP_REL.set(
+        action.attractorPoint.x - this.pos[ix + 0],
+        action.attractorPoint.y - this.pos[ix + 1],
+        action.attractorPoint.z - this.pos[ix + 2],
+      );
+      const dist = dir.length();
+      if (dist <= action.minimalDistance || dist <= 1e-6) continue;
+      dir.multiplyScalar(1 / dist);
+      this.vel[ix + 0] += dir.x * action.strength * dt;
+      this.vel[ix + 1] += dir.y * action.strength * dt;
+      this.vel[ix + 2] += dir.z * action.strength * dt;
+    }
   }
 
   dispose(): void {

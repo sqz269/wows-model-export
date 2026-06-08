@@ -156,6 +156,7 @@ export interface WgEnvironmentInfo {
 const pickRaycaster = new THREE.Raycaster();
 const pickPointer = new THREE.Vector2();
 const particleWorldPos = new THREE.Vector3();
+const particleWorldQuat = new THREE.Quaternion();
 
 // Lighting when a WG IBL cube is active — the cube supplies ambient + specular,
 // so the hemisphere fill is killed and the key directional is driven from the
@@ -1719,7 +1720,10 @@ export class ShipViewer {
     this.particleAnchorObjects.clear();
     for (const h of handles) {
       const obj = this.resolveParticleAnchorObject(h.attachment);
-      if (obj) this.particleAnchorObjects.set(h, obj);
+      if (obj) {
+        this.particleAnchorObjects.set(h, obj);
+        this.copyParticleAnchorTransform(h, obj);
+      }
       scene.setAttachmentActive(h, this.particleLayerEnabled);
     }
     scene.root.visible = this.particleLayerEnabled;
@@ -1830,8 +1834,16 @@ export class ShipViewer {
     if (!this.particleLayerEnabled || this.particleAnchorObjects.size === 0) return;
     this.shipRoot.updateMatrixWorld(false);
     for (const [handle, obj] of this.particleAnchorObjects) {
-      handle.group.position.copy(obj.getWorldPosition(particleWorldPos));
+      this.copyParticleAnchorTransform(handle, obj);
     }
+  }
+
+  private copyParticleAnchorTransform(
+    handle: ParticleAttachmentHandle,
+    obj: THREE.Object3D,
+  ): void {
+    handle.group.position.copy(obj.getWorldPosition(particleWorldPos));
+    handle.group.quaternion.copy(obj.getWorldQuaternion(particleWorldQuat));
   }
 
   /**
