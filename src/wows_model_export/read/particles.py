@@ -563,6 +563,15 @@ def _read_resource_ref(
     """
     if addr + 16 > file_end:
         return None
+    # Most action effectName refs use the same length/pad/relptr shape as
+    # renderer texture refs. Inline refs also satisfy this form: the low u32 is
+    # the length, the high u32 is zero, and the inline tag at +0x08 is a
+    # relptr-like 0x10 to the bytes immediately after the 16-byte header.
+    length, len_pad, relptr = struct.unpack_from("<IIq", buf, addr)
+    if 0 < length < 2048 and len_pad == 0 and relptr != 0:
+        s = _read_cstr(buf, addr + relptr, file_end, max_len=length)
+        if s is not None and len(s.encode("ascii")) + 1 == length:
+            return s
     a, tag, pad = struct.unpack_from("<qII", buf, addr)
     if pad != 0:
         return None

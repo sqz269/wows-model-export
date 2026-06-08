@@ -12,6 +12,8 @@
 //     (bypasses three.js r0.165's broken RED_RGTC1 upload path)
 //   • BC6H (DXGI 95/96)             → software-decoded to Float32 RGBA
 //     DataTexture for HDR particle ramps
+//   • legacy G16R16F (fourCC 0x70)  → software-decoded to Float32 RGBA
+//     DataTexture for particle water-deformation sprites
 //   • DXT1 / DXT3 / DXT5 (classic)  → CompressedTexture, S3TC family
 //
 // BC5 / other unsupported DXGI codes are intentionally rejected — none appear
@@ -181,12 +183,11 @@ function makeRgba8DataTexture(
 }
 
 /**
- * Wrap a worker-decoded BC6H HDR mip (Float32 RGBA, R/G/B = decoded HDR value,
- * A = 1.0) into a Three.js FloatType ``DataTexture``. Used for HDR particle
- * colour ramps (e.g. ``particles/ramps/fire_yellow_3_HDR.dds``, DXGI 95). The
- * data is linear HDR — never display-referred — so NoColorSpace (no sRGB
- * decode). Clamp + Linear, same as the 8-bit ramp path: it's a 1D LUT sampled
- * at ``vec2(base.r, 0.5)``.
+ * Wrap a worker-decoded float RGBA mip into a Three.js FloatType
+ * ``DataTexture``. Used for HDR particle colour ramps (DXGI 95/96 BC6H) and
+ * legacy G16R16F water-deformation sprites (fourCC 0x70, expanded to RGBA).
+ * The data is linear — never display-referred — so NoColorSpace (no sRGB
+ * decode).
  */
 function makeRgbafDataTexture(
   mip: { data: Uint8Array | Float32Array; width: number; height: number },

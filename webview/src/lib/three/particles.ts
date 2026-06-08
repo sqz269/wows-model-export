@@ -32,7 +32,7 @@ import type {
   ParticleVariantVg,
   ParticleVgtPrototype,
 } from '$lib/types/sidecar';
-import { repoUrl } from '$lib/api';
+import { fetchParticleRecord, repoUrl } from '$lib/api';
 import { loadDdsMipChain } from '$lib/dds';
 
 const DEFAULT_PARTICLE_LIFETIME = 4.0; // seconds, when WG didn't author one
@@ -43,6 +43,9 @@ const DEFAULT_SIZE_M = 0.3; // metres — sane baseline if the
 const HARD_MAX_EMIT_RATE_HZ = 200; // safety clamp on the per-frame
 // particles-emitted count
 const PARTICLE_POINT_LIGHT_BUDGET = 24;
+const CHILD_EFFECT_DEPTH_LIMIT = 3;
+const CHILD_EFFECT_BUDGET = 256;
+const CHILD_EFFECT_SPAWNS_PER_SYSTEM_TICK = 8;
 
 /** Sample a 1D ``Ramp`` curve at parameter ``t ∈ [0, 1]``. */
 function sampleRamp(ramp: ParticleRamp | undefined, t: number, fallback = 1): number {
@@ -200,6 +203,24 @@ interface BarrierAction {
   planeConstant: number;
   useWorldSpace: boolean;
   effectName: string;
+}
+
+interface SpawnerAction {
+  spawnRamp?: ParticleRamp;
+  effectName: string;
+  accum: number;
+}
+
+interface ParticleEffectSpawnRequest {
+  effectName: string;
+  position: [number, number, number];
+}
+
+type ParticleEffectSpawnCallback = (request: ParticleEffectSpawnRequest) => void;
+
+interface SystemRendererOptions {
+  spawnEffect?: ParticleEffectSpawnCallback;
+  loopOneShot?: boolean;
 }
 
 interface VelocityFieldData {
@@ -514,6 +535,7 @@ class SystemRenderer {
   private orbitorActions: OrbitorAction[] = [];
   private magnetActions: MagnetAction[] = [];
   private barrierActions: BarrierAction[] = [];
+  private spawnerActions: SpawnerAction[] = [];
   private velocityFieldActions: VelocityFieldAction[] = [];
   private frameRateRamp: ParticleRamp | undefined;
 
@@ -572,6 +594,9 @@ class SystemRenderer {
    *  is significantly > maxAge we drive the ramp by `elapsed` instead. */
   private alphaSetterIsSystemAge = false;
   private active = true;
+  private finished = false;
+  private readonly spawnEffect?: ParticleEffectSpawnCallback;
+  private readonly loopOneShot: boolean;
   private barrierScaleMultiplier = 1;
   private barrierAlphaMultiplier = 1;
   private barrierInsideNow = false;
@@ -620,9 +645,20 @@ class SystemRenderer {
     return this.maxAge;
   }
 
-  constructor(system: ParticleSystem, material: THREE.ShaderMaterial, maxEmittingDuration = 0) {
+  get isFinished(): boolean {
+    return this.finished;
+  }
+
+  constructor(
+    system: ParticleSystem,
+    material: THREE.ShaderMaterial,
+    maxEmittingDuration = 0,
+    options: SystemRendererOptions = {},
+  ) {
     this.material = material;
     this.maxEmittingDuration = maxEmittingDuration;
+    this.spawnEffect = options.spawnEffect;
+    this.loopOneShot = options.loopOneShot ?? true;
     const gen = system.general;
     this.maxAge = Math.max(0.05, gen?.maxParticleAge ?? DEFAULT_PARTICLE_LIFETIME);
     const desiredCap = Math.max(1, gen?.capacity ?? 32);
@@ -640,6 +676,15 @@ class SystemRenderer {
           this.initialPosVg = body.initialPositionGenerator as ParticleVariantVg;
         if (body.initialVelocityGenerator)
           this.initialVelVg = body.initialVelocityGenerator as ParticleVariantVg;
+      } else if (c.action === 'spawner') {
+        const effectName = typeof body.effectName === 'string' ? body.effectName : '';
+        if (effectName) {
+          this.spawnerActions.push({
+            spawnRamp: body.spawnRamp as ParticleRamp | undefined,
+            effectName,
+            accum: 0,
+          });
+        }
       } else if (c.action === 'tint') {
         if (body.tint) this.tintColor = body.tint as ParticleColor;
       } else if (c.action === 'alphaSetter') {
@@ -851,6 +896,7 @@ class SystemRenderer {
 
   setActive(active: boolean): void {
     this.active = active;
+    if (active && this.loopOneShot) this.finished = false;
   }
 
   /** Step the simulation by `dt` seconds. Updates the GPU buffers. */
@@ -869,13 +915,13 @@ class SystemRenderer {
       this.runPrewarm();
       this.prewarmed = true;
     }
-    this.advance(dt);
+    this.advance(dt, true);
     this.writeBuffers();
   }
 
   /** Advance the CPU simulation by `dt` seconds (emission + per-particle
    *  update). Does NOT touch the GPU buffers — see writeBuffers(). */
-  private advance(dt: number): void {
+  private advance(dt: number, allowChildSpawns: boolean): void {
     this.elapsed += dt;
 
     // One-shot emission window + re-burst cycle (RE 2026-05-29). The record's
@@ -893,10 +939,18 @@ class SystemRenderer {
       this.alive = 0;
       this.emitAccum = 0;
       this.creatorAccum = 0;
+      for (const action of this.spawnerActions) action.accum = 0;
+      this.points.geometry.setDrawRange(0, 0);
+      if (!this.loopOneShot) {
+        this.finished = true;
+        this.active = false;
+        return;
+      }
       this.elapsed = 0;
       this.prewarmed = false; // re-warm the next burst (engine re-warms on re-activation)
     }
     const emitting = !oneShot || this.elapsed <= this.maxEmittingDuration;
+    if (emitting && allowChildSpawns) this.applySpawnerActions(dt);
 
     // Per-particle update. WG's authoring convention: ramp + color
     // curves are keyed by particle age in *seconds*, not normalised
@@ -944,7 +998,7 @@ class SystemRenderer {
       this.applyVelocityFieldActions(i, age);
       // dampfer: a per-frame drag multiplier on the velocity's displacement.
       const damp = this.dampGen ? sampleGenAxis(this.dampGen, clocks, 1) : 1;
-      if (this.applyBarrierActions(i, age, dt * damp)) continue;
+      if (this.applyBarrierActions(i, age, dt * damp, allowChildSpawns)) continue;
       this.pos[i * 3 + 0] += this.vel[i * 3 + 0] * dt * damp;
       this.pos[i * 3 + 1] += this.vel[i * 3 + 1] * dt * damp;
       this.pos[i * 3 + 2] += this.vel[i * 3 + 2] * dt * damp;
@@ -1059,7 +1113,7 @@ class SystemRenderer {
     if (!(window > 0)) return;
     const STEPS = 10;
     const dt = window / STEPS;
-    for (let s = 0; s < STEPS; s++) this.advance(dt);
+    for (let s = 0; s < STEPS; s++) this.advance(dt, false);
   }
 
   /** Spawn whole particles from one emission source at ``rate`` Hz, carrying
@@ -1084,6 +1138,25 @@ class SystemRenderer {
     // when slots free up).
     if (this.alive >= this.capacity) accum = Math.min(accum, 1);
     return accum;
+  }
+
+  private applySpawnerActions(dt: number): void {
+    if (!this.spawnEffect || this.spawnerActions.length === 0) return;
+    let spawnedThisTick = 0;
+    for (const action of this.spawnerActions) {
+      const rate = sampleRamp(action.spawnRamp, this.elapsed, 0);
+      if (rate <= 0) continue;
+      action.accum += Math.min(rate, HARD_MAX_EMIT_RATE_HZ) * dt;
+      while (action.accum >= 1 && spawnedThisTick < CHILD_EFFECT_SPAWNS_PER_SYSTEM_TICK) {
+        action.accum -= 1;
+        spawnedThisTick++;
+        this.spawnEffect({ effectName: action.effectName, position: [0, 0, 0] });
+      }
+      if (spawnedThisTick >= CHILD_EFFECT_SPAWNS_PER_SYSTEM_TICK) {
+        action.accum = Math.min(action.accum, 1);
+        break;
+      }
+    }
   }
 
   private spawnParticle(
@@ -1324,7 +1397,12 @@ class SystemRenderer {
     out.z += field.vectors[idx + 2] * weight;
   }
 
-  private applyBarrierActions(slot: number, age: number, displacementDt: number): boolean {
+  private applyBarrierActions(
+    slot: number,
+    age: number,
+    displacementDt: number,
+    allowChildSpawns: boolean,
+  ): boolean {
     this.barrierScaleMultiplier = 1;
     this.barrierAlphaMultiplier = 1;
     if (this.barrierActions.length === 0) return false;
@@ -1373,9 +1451,12 @@ class SystemRenderer {
           }
           break;
         case BARRIER_REACTION_SPAWN:
-          // Native queues `effectName` when the particle crosses the barrier.
-          // Recursive child-effect instancing belongs at ParticleScene level,
-          // not in this per-system renderer, so this is intentionally inert.
+          if (allowChildSpawns && crossed && action.effectName && this.spawnEffect) {
+            this.spawnEffect({
+              effectName: action.effectName,
+              position: [current.x, current.y, current.z],
+            });
+          }
           break;
         case BARRIER_REACTION_WRAP:
           this.applyBarrierWrap(action, ix, predicted);
@@ -2270,6 +2351,41 @@ export interface ParticleAttachmentHandle {
   active: boolean;
 }
 
+interface SpawnedParticleEffect {
+  parent: ParticleAttachmentHandle;
+  group: THREE.Group;
+  systems: SystemRenderer[];
+  lights: LightRenderer[];
+  depth: number;
+}
+
+type ParticleQuality = 'high' | 'low' | 'shared';
+
+interface ParticleEffectRef {
+  path: string;
+  quality: ParticleQuality;
+}
+
+function normalizeParticleEffectPath(path: string): string {
+  return parseParticleEffectRef(path).path;
+}
+
+function parseParticleEffectRef(path: string): ParticleEffectRef {
+  let p = path.replace(/\\/g, '/').trim().replace(/^\/+/, '');
+  if (p.startsWith('?')) p = p.slice(1);
+  let quality: ParticleQuality = 'high';
+  const suffix = p.slice(p.lastIndexOf('/') + 1);
+  if (suffix === 'high' || suffix === 'low' || suffix === 'shared') {
+    quality = suffix;
+    p = p.slice(0, p.lastIndexOf('/'));
+  }
+  return { path: p, quality };
+}
+
+function particleRecordCacheKey(path: string, quality: ParticleQuality): string {
+  return `${path}#${quality}`;
+}
+
 /**
  * Manages the scene-level particle layer for one ship: a root group +
  * one sub-group per attachment. Created when the sidecar is loaded;
@@ -2291,6 +2407,9 @@ export class ParticleScene {
   /** Cache: absolute URL → in-flight or resolved THREE.Texture. Shared
    *  across emitters so duplicate `Fire01.dds` refs upload once. */
   private textureCache = new Map<string, Promise<THREE.Texture | null>>();
+  private particleRecords = new Map<string, ParticleRecord>();
+  private particleRecordFetches = new Map<string, Promise<ParticleRecord | null>>();
+  private spawnedEffects: SpawnedParticleEffect[] = [];
 
   constructor(renderer?: THREE.WebGLRenderer) {
     this.root = new THREE.Group();
@@ -2314,10 +2433,18 @@ export class ParticleScene {
     resolveNodePosition: (attachment: ParticleAttachment) => THREE.Vector3 | null,
   ): ParticleAttachmentHandle[] {
     this.clear();
+    this.particleRecords.clear();
+    this.particleRecordFetches.clear();
+    for (const [path, record] of Object.entries(particles)) {
+      const effectRef = parseParticleEffectRef(path);
+      this.particleRecords.set(particleRecordCacheKey(effectRef.path, effectRef.quality), record);
+      if (effectRef.quality === 'high') this.particleRecords.set(effectRef.path, record);
+    }
     const handles: ParticleAttachmentHandle[] = [];
     for (let i = 0; i < attachments.length; i++) {
       const a = attachments[i];
-      const rec = particles[a.particle_path];
+      const particlePath = normalizeParticleEffectPath(a.particle_path);
+      const rec = particles[a.particle_path] ?? particles[particlePath];
       if (!rec) continue;
       const grp = new THREE.Group();
       grp.name = `effect:${a.group}:${a.node}`;
@@ -2343,68 +2470,21 @@ export class ParticleScene {
         grp.position.set(x, 60, z);
       }
       this.root.add(grp);
-      const systems: SystemRenderer[] = [];
-      const lights: LightRenderer[] = [];
-      for (const sys of rec.systems) {
-        const r = sys.renderer;
-        const anim = sys.animation;
-        // Texture source: prefer the direct DDS URL when present (the
-        // texture was extracted as its own file); otherwise route
-        // through the manifest atlas mapping (the .tga ref resolves to
-        // a named region inside a shared atlas page — the rect uniform
-        // narrows gl_PointCoord into that sub-region). Both paths
-        // compose with the animation grid if framesPerX*Y > 1.
-        const useAtlas = !r?.textureUrl0 && !!r?.textureAtlas0;
-        const useLut = !!r?.blendType && PS_RBT_LUT_MODES.has(r.blendType) && !!r?.textureUrl1;
-        // Motion-vector flipbook blend only when the engine authored it
-        // (animationType === 'motionVectors') AND the `_MVEA` DDS resolved.
-        const useMv = anim?.animationType === 'motionVectors' && !!anim?.motionVectorsTextureUrl;
-        const mat = buildParticleMaterial({
-          blendType: r?.blendType,
-          lightingType: r?.lightingType,
-          framesPerX: anim?.framesPerX,
-          framesPerY: anim?.framesPerY,
-          framesRangeBegin: anim?.framesRangeBegin,
-          framesRangeEnd: anim?.framesRangeEnd,
-          animationPeriod: anim?.animationPeriod,
-          animationType: anim?.animationType,
-          atlasRect: useAtlas ? r!.textureAtlas0!.rect : undefined,
-          useLut,
-          motionVectorsDistortion: useMv ? anim?.motionVectorsDistortion : undefined,
-          useEmissionAlphaFromMV: useMv ? anim?.useEmissionAlphaFromMV : undefined,
-          randomFrameOnly: anim?.randomFrameOnly,
-          frameRateRamp: anim?.frameRateRamp,
-        });
-        const renderer = new SystemRenderer(sys, mat, rec.maxEmittingDuration);
-        renderer.setActive(false); // start inactive — UI toggles on
-        grp.add(renderer.points);
-        systems.push(renderer);
-        for (const c of sys.components ?? []) {
-          if (c.kind !== 'light' || !c.body) continue;
-          const light = new LightRenderer(c.body);
-          light.setActive(false);
-          grp.add(light.group);
-          lights.push(light);
-        }
-        // Texture binding: direct URL takes precedence; otherwise load
-        // the manifest atlas page (the rect is already in the material's
-        // uniforms via buildParticleMaterial).
-        const texPath = r?.textureUrl0 ?? (useAtlas ? r!.textureAtlas0!.page : undefined);
-        if (texPath) {
-          void this.bindTexture(mat, texPath);
-        }
-        if (useLut && r?.textureUrl1) {
-          void this.bindLutTexture(mat, r.textureUrl1);
-        }
-        if (useMv && anim?.motionVectorsTextureUrl) {
-          void this.bindMvTexture(mat, anim.motionVectorsTextureUrl);
-        }
-      }
-      const handle: ParticleAttachmentHandle = {
+      let handle: ParticleAttachmentHandle;
+      const instantiated = this.instantiateRecordSystems(
+        rec,
+        grp,
+        false,
+        true,
+        (request) => {
+          void this.spawnChildEffect(handle, grp, request, 0);
+        },
+      );
+      handle = {
         attachment: a,
         group: grp,
-        systems,
-        lights,
+        systems: instantiated.systems,
+        lights: instantiated.lights,
         record: rec,
         active: false,
       };
@@ -2418,6 +2498,148 @@ export class ParticleScene {
       .slice(0, PARTICLE_POINT_LIGHT_BUDGET);
     for (const l of pointLights) l.enablePointLight();
     return handles;
+  }
+
+  private instantiateRecordSystems(
+    rec: ParticleRecord,
+    group: THREE.Group,
+    active: boolean,
+    loopOneShot: boolean,
+    spawnEffect?: ParticleEffectSpawnCallback,
+  ): { systems: SystemRenderer[]; lights: LightRenderer[] } {
+    const systems: SystemRenderer[] = [];
+    const lights: LightRenderer[] = [];
+    for (const sys of rec.systems) {
+      const r = sys.renderer;
+      const anim = sys.animation;
+      // Texture source: prefer the direct DDS URL when present (the
+      // texture was extracted as its own file); otherwise route through the
+      // manifest atlas mapping. Both paths compose with the animation grid.
+      const useAtlas = !r?.textureUrl0 && !!r?.textureAtlas0;
+      const useLut = !!r?.blendType && PS_RBT_LUT_MODES.has(r.blendType) && !!r?.textureUrl1;
+      const useMv = anim?.animationType === 'motionVectors' && !!anim?.motionVectorsTextureUrl;
+      const mat = buildParticleMaterial({
+        blendType: r?.blendType,
+        lightingType: r?.lightingType,
+        framesPerX: anim?.framesPerX,
+        framesPerY: anim?.framesPerY,
+        framesRangeBegin: anim?.framesRangeBegin,
+        framesRangeEnd: anim?.framesRangeEnd,
+        animationPeriod: anim?.animationPeriod,
+        animationType: anim?.animationType,
+        atlasRect: useAtlas ? r!.textureAtlas0!.rect : undefined,
+        useLut,
+        motionVectorsDistortion: useMv ? anim?.motionVectorsDistortion : undefined,
+        useEmissionAlphaFromMV: useMv ? anim?.useEmissionAlphaFromMV : undefined,
+        randomFrameOnly: anim?.randomFrameOnly,
+        frameRateRamp: anim?.frameRateRamp,
+      });
+      const renderer = new SystemRenderer(sys, mat, rec.maxEmittingDuration, {
+        spawnEffect,
+        loopOneShot,
+      });
+      renderer.setActive(active);
+      group.add(renderer.points);
+      systems.push(renderer);
+      for (const c of sys.components ?? []) {
+        if (c.kind !== 'light' || !c.body) continue;
+        const light = new LightRenderer(c.body);
+        light.setActive(active);
+        group.add(light.group);
+        lights.push(light);
+      }
+      const texPath = r?.textureUrl0 ?? (useAtlas ? r!.textureAtlas0!.page : undefined);
+      if (texPath) {
+        void this.bindTexture(mat, texPath);
+      }
+      if (useLut && r?.textureUrl1) {
+        void this.bindLutTexture(mat, r.textureUrl1);
+      }
+      if (useMv && anim?.motionVectorsTextureUrl) {
+        void this.bindMvTexture(mat, anim.motionVectorsTextureUrl);
+      }
+    }
+    return { systems, lights };
+  }
+
+  private async loadParticleRecord(
+    path: string,
+    quality: ParticleQuality,
+  ): Promise<ParticleRecord | null> {
+    const normalized = normalizeParticleEffectPath(path);
+    const key = particleRecordCacheKey(normalized, quality);
+    const cached =
+      this.particleRecords.get(key) ??
+      (quality === 'high' ? this.particleRecords.get(normalized) : undefined);
+    if (cached) return cached;
+    let pending = this.particleRecordFetches.get(key);
+    if (!pending) {
+      pending = fetchParticleRecord(normalized, quality).catch((err) => {
+        console.warn('[particles] child effect record load failed', normalized, quality, err);
+        return null;
+      });
+      this.particleRecordFetches.set(key, pending);
+    }
+    const record = await pending;
+    if (record) {
+      this.particleRecords.set(key, record);
+      if (quality === 'high') this.particleRecords.set(normalized, record);
+    }
+    return record;
+  }
+
+  private async spawnChildEffect(
+    parent: ParticleAttachmentHandle,
+    parentGroup: THREE.Group,
+    request: ParticleEffectSpawnRequest,
+    depth: number,
+  ): Promise<void> {
+    if (!parent.active || depth >= CHILD_EFFECT_DEPTH_LIMIT) return;
+    if (this.spawnedEffects.length >= CHILD_EFFECT_BUDGET) return;
+    const effectRef = parseParticleEffectRef(request.effectName);
+    const effectPath = effectRef.path;
+    if (!effectPath.endsWith('.xml')) return;
+    const rec = await this.loadParticleRecord(effectPath, effectRef.quality);
+    if (!rec || !parent.active) return;
+
+    const group = new THREE.Group();
+    group.name = `spawn:${effectPath}`;
+    group.position.set(request.position[0], request.position[1], request.position[2]);
+    parentGroup.add(group);
+    const spawned: SpawnedParticleEffect = {
+      parent,
+      group,
+      systems: [],
+      lights: [],
+      depth: depth + 1,
+    };
+    const instantiated = this.instantiateRecordSystems(
+      rec,
+      group,
+      parent.active,
+      false,
+      (nextRequest) => {
+        void this.spawnChildEffect(parent, group, nextRequest, spawned.depth);
+      },
+    );
+    spawned.systems = instantiated.systems;
+    spawned.lights = instantiated.lights;
+    this.spawnedEffects.push(spawned);
+  }
+
+  private disposeSpawnedEffect(effect: SpawnedParticleEffect): void {
+    for (const s of effect.systems) s.dispose();
+    for (const l of effect.lights) l.dispose();
+    effect.group.parent?.remove(effect.group);
+  }
+
+  private pruneFinishedSpawnedEffects(): void {
+    for (let i = this.spawnedEffects.length - 1; i >= 0; i--) {
+      const effect = this.spawnedEffects[i];
+      if (!effect.systems.every((s) => s.isFinished)) continue;
+      this.disposeSpawnedEffect(effect);
+      this.spawnedEffects.splice(i, 1);
+    }
   }
 
   /** Resolve a workspace-relative DDS path through the texture cache
@@ -2510,6 +2732,12 @@ export class ParticleScene {
       for (const s of handle.systems) s.tick(dt);
       for (const l of handle.lights) l.tick(dt);
     }
+    for (const effect of this.spawnedEffects) {
+      if (!effect.parent.active) continue;
+      for (const s of effect.systems) s.tick(dt);
+      for (const l of effect.lights) l.tick(dt);
+    }
+    this.pruneFinishedSpawnedEffects();
   }
 
   /** Toggle one attachment on or off. */
@@ -2517,6 +2745,12 @@ export class ParticleScene {
     handle.active = active;
     for (const s of handle.systems) s.setActive(active);
     for (const l of handle.lights) l.setActive(active);
+    for (const effect of this.spawnedEffects) {
+      if (effect.parent !== handle) continue;
+      for (const s of effect.systems) s.setActive(active);
+      for (const l of effect.lights) l.setActive(active);
+      effect.group.visible = active;
+    }
     handle.group.visible = active;
   }
 
@@ -2526,6 +2760,8 @@ export class ParticleScene {
   }
 
   clear(): void {
+    for (const effect of this.spawnedEffects) this.disposeSpawnedEffect(effect);
+    this.spawnedEffects = [];
     for (const handle of this.attachments.values()) {
       for (const s of handle.systems) s.dispose();
       for (const l of handle.lights) l.dispose();

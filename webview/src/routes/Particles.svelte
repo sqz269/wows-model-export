@@ -396,6 +396,7 @@
     'jitter',
     'orbitor',
     'magnet',
+    'spawner',
     'sphere',
     'cylinder',
     'box',
