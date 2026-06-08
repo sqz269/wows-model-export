@@ -348,6 +348,53 @@ def _decode_color(buf: bytes | mmap.mmap, color_addr: int, file_end: int) -> dic
     return {"count": count, "points": points}
 
 
+def _decode_light_color_animation(
+    buf: bytes | mmap.mmap, color_addr: int, file_end: int,
+) -> dict:
+    """16-byte light-color curve header + time-first ColorKey[count].
+
+    Effect component kind=light uses the same 16-byte count/relptr
+    container as ``Color``, but the key payload order is
+    ``time,r,g,b,a`` rather than tint's ``r,g,b,a,time``.
+    """
+    if color_addr + 16 > file_end:
+        return {"_err": "light_color_hdr_oob"}
+    count, _pad, points_rp = struct.unpack_from("<IIq", buf, color_addr)
+    if count == 0:
+        return {"count": 0, "points": []}
+    if count > 256:
+        return {"count": count, "_err": "huge_count"}
+    pts_addr = color_addr + points_rp
+    if pts_addr + count * 20 > file_end:
+        return {"count": count, "_err": "points_oob"}
+    points = []
+    for i in range(count):
+        t, r, g, b, a = struct.unpack_from("<5f", buf, pts_addr + i * 20)
+        points.append({"r": r, "g": g, "b": b, "a": a, "time": t})
+    return {"count": count, "points": points}
+
+
+def _decode_time_value_ramp(
+    buf: bytes | mmap.mmap, ramp_addr: int, file_end: int,
+) -> dict:
+    """16-byte curve header + key[count] stored as ``time,value`` pairs."""
+    if ramp_addr + 16 > file_end:
+        return {"_err": "time_value_ramp_hdr_oob"}
+    count, _pad, points_rp = struct.unpack_from("<IIq", buf, ramp_addr)
+    if count == 0:
+        return {"count": 0, "points": []}
+    if count > 256:
+        return {"count": count, "_err": "huge_count"}
+    pts_addr = ramp_addr + points_rp
+    if pts_addr + count * 8 > file_end:
+        return {"count": count, "_err": "points_oob"}
+    points = []
+    for i in range(count):
+        t, v = struct.unpack_from("<2f", buf, pts_addr + i * 8)
+        points.append({"value": v, "time": t})
+    return {"count": count, "points": points}
+
+
 def _decode_scalar_vg(
     buf: bytes | mmap.mmap, slot_addr: int, file_end: int,
 ) -> dict:
@@ -575,6 +622,41 @@ def _read_texture_ref(
     if not all(0x20 <= c < 0x7f for c in body):
         return None
     return body.decode("ascii")
+
+
+def _decode_light_body(
+    buf: bytes | mmap.mmap, body_addr: int, file_end: int,
+) -> dict:
+    """Decode a component kind=light body.
+
+    Native schema field emitter at 0x1406fec20 names these fields as
+    colorAnimation, radiusAnimation, color, localPosition, radius,
+    minQuality, animatedColor, animatedRadius. The body has the same
+    16-byte header shape as PCAT/PSAT action bodies; fields start at
+    ``body + fields_relptr``.
+    """
+    if body_addr + 16 > file_end:
+        return {"_err": "light_hdr_oob"}
+    _kind_idx, _pad, fields_rp = struct.unpack_from("<iIq", buf, body_addr)
+    fa = body_addr + fields_rp
+    if fa + 0x6a > file_end:
+        return {"_err": "light_fields_oob"}
+    color = list(struct.unpack_from("<4f", buf, fa + 0x40))
+    local_position = list(struct.unpack_from("<3f", buf, fa + 0x50))
+    radius = struct.unpack_from("<f", buf, fa + 0x60)[0]
+    min_quality = struct.unpack_from("<I", buf, fa + 0x64)[0]
+    return {
+        "colorAnimationPeriod": struct.unpack_from("<f", buf, fa + 0x00)[0],
+        "colorAnimation": _decode_light_color_animation(buf, fa + 0x10, file_end),
+        "radiusAnimationPeriod": struct.unpack_from("<f", buf, fa + 0x20)[0],
+        "radiusAnimation": _decode_time_value_ramp(buf, fa + 0x30, file_end),
+        "color": color,
+        "localPosition": local_position,
+        "radius": radius,
+        "minQuality": int(min_quality),
+        "animatedColor": bool(buf[fa + 0x68]),
+        "animatedRadius": bool(buf[fa + 0x69]),
+    }
 
 
 # Per-action decoders. Each returns a dict of named fields for the action
@@ -861,6 +943,10 @@ def _decode_system(
                         rec["body"] = _decode_action_body(
                             buf, body_addr, kname, aname, file_end,
                         )
+                elif kname == "light":
+                    body_addr = comp_off + body_rp
+                    if body_addr + 16 <= file_end:
+                        rec["body"] = _decode_light_body(buf, body_addr, file_end)
                 components.append(rec)
 
     return {

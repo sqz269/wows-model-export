@@ -368,6 +368,17 @@ export interface ParticleComponentBody {
   vector?: [number, number, number];
   halfLife?: number;
   switchCoordinateStyle?: boolean;
+  // component kind=light
+  colorAnimationPeriod?: number;
+  colorAnimation?: ParticleColor;
+  radiusAnimationPeriod?: number;
+  radiusAnimation?: ParticleRamp;
+  color?: [number, number, number, number];
+  localPosition?: [number, number, number];
+  radius?: number;
+  minQuality?: number;
+  animatedColor?: boolean;
+  animatedRadius?: boolean;
   // resource refs (sphere/cylinder/box/spawner/plane/velocityField/etc.)
   effectName?: string;
   fieldSourceName?: string;

@@ -24,6 +24,7 @@ import * as THREE from 'three';
 import type {
   ParticleAttachment,
   ParticleColor,
+  ParticleComponentBody,
   ParticleRamp,
   ParticleRecord,
   ParticleSystem,
@@ -41,6 +42,7 @@ const DEFAULT_SIZE_M = 0.3; // metres — sane baseline if the
 // generator
 const HARD_MAX_EMIT_RATE_HZ = 200; // safety clamp on the per-frame
 // particles-emitted count
+const PARTICLE_POINT_LIGHT_BUDGET = 24;
 
 /** Sample a 1D ``Ramp`` curve at parameter ``t ∈ [0, 1]``. */
 function sampleRamp(ramp: ParticleRamp | undefined, t: number, fallback = 1): number {
@@ -1046,6 +1048,119 @@ class SystemRenderer {
   }
 }
 
+class LightRenderer {
+  readonly group: THREE.Group;
+  readonly sprite: THREE.Sprite;
+  pointLight: THREE.PointLight | null = null;
+  readonly score: number;
+  private elapsed = 0;
+  private active = true;
+  private readonly material: THREE.SpriteMaterial;
+
+  constructor(private readonly body: ParticleComponentBody) {
+    this.group = new THREE.Group();
+    this.group.name = 'particle-light';
+    const pos = body.localPosition;
+    if (Array.isArray(pos) && pos.length === 3) {
+      this.group.position.set(pos[0], pos[1], pos[2]);
+    }
+    this.material = new THREE.SpriteMaterial({
+      color: new THREE.Color(1, 1, 1),
+      opacity: 1,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      depthTest: true,
+    });
+    this.sprite = new THREE.Sprite(this.material);
+    this.group.add(this.sprite);
+    this.score = this.estimateScore();
+    this.applySample(0);
+  }
+
+  enablePointLight(): void {
+    if (this.pointLight) return;
+    this.pointLight = new THREE.PointLight(0xffffff, 1, 1, 2);
+    this.group.add(this.pointLight);
+    this.applySample(this.elapsed);
+  }
+
+  setActive(active: boolean): void {
+    this.active = active;
+    this.group.visible = active;
+  }
+
+  tick(dt: number): void {
+    if (!this.active) return;
+    this.elapsed += dt;
+    this.applySample(this.elapsed);
+  }
+
+  dispose(): void {
+    this.material.dispose();
+  }
+
+  private estimateScore(): number {
+    const fixed = this.body.color ?? [1, 1, 1, 1];
+    let peak = Math.max(0, fixed[0], fixed[1], fixed[2]);
+    for (const p of this.body.colorAnimation?.points ?? []) {
+      peak = Math.max(peak, p.r, p.g, p.b);
+    }
+    let radius = Math.max(0, this.body.radius ?? 0);
+    for (const p of this.body.radiusAnimation?.points ?? []) {
+      radius = Math.max(radius, p.value);
+    }
+    return peak * Math.max(0.1, radius);
+  }
+
+  private applySample(t: number): void {
+    const color = this.sampleColorAt(t);
+    const radius = Math.max(0.01, this.sampleRadiusAt(t));
+    this.material.color.setRGB(color[0], color[1], color[2]);
+    this.material.opacity = Math.max(0, Math.min(1, color[3]));
+    const spriteSize = Math.max(0.1, radius * 2);
+    this.sprite.scale.set(spriteSize, spriteSize, spriteSize);
+    if (!this.pointLight) return;
+    const r = Math.max(0, color[0]);
+    const g = Math.max(0, color[1]);
+    const b = Math.max(0, color[2]);
+    const peak = Math.max(r, g, b);
+    if (peak > 0) {
+      this.pointLight.color.setRGB(r / peak, g / peak, b / peak);
+      this.pointLight.intensity = peak * Math.max(0, color[3]);
+      this.pointLight.distance = radius;
+      this.pointLight.visible = this.group.visible;
+    } else {
+      this.pointLight.intensity = 0;
+    }
+  }
+
+  private sampleColorAt(t: number): [number, number, number, number] {
+    const out = LightRenderer.TMP_COLOR;
+    const period = this.body.colorAnimationPeriod ?? 0;
+    const axis = this.body.animatedColor && period > 0 ? t % period : t;
+    sampleColor(this.body.animatedColor ? this.body.colorAnimation : undefined, axis, out);
+    if (!this.body.animatedColor || !this.body.colorAnimation?.points?.length) {
+      const fixed = this.body.color ?? [1, 1, 1, 1];
+      out[0] = fixed[0];
+      out[1] = fixed[1];
+      out[2] = fixed[2];
+      out[3] = fixed[3];
+    }
+    return [out[0], out[1], out[2], out[3]];
+  }
+
+  private sampleRadiusAt(t: number): number {
+    const period = this.body.radiusAnimationPeriod ?? 0;
+    const axis = this.body.animatedRadius && period > 0 ? t % period : t;
+    return this.body.animatedRadius
+      ? sampleRamp(this.body.radiusAnimation, axis, this.body.radius ?? 1)
+      : (this.body.radius ?? 1);
+  }
+
+  private static readonly TMP_COLOR = new Float32Array(4);
+}
+
 // ---------------------------------------------------------------------------
 // Per-system point-sprite material
 // ---------------------------------------------------------------------------
@@ -1592,6 +1707,9 @@ export interface ParticleAttachmentHandle {
   group: THREE.Group;
   /** Per-system simulators inside the attachment. */
   systems: SystemRenderer[];
+  /** Decoded kind=light components rendered as glow sprites, with the
+   *  strongest subset also promoted to real point lights. */
+  lights: LightRenderer[];
   /** The parsed source record this attachment renders. Carries the
    *  authoring data the UI inspector needs (renderer.textureName0,
    *  general.capacity, components[].action, …) without poking through
@@ -1674,6 +1792,7 @@ export class ParticleScene {
       }
       this.root.add(grp);
       const systems: SystemRenderer[] = [];
+      const lights: LightRenderer[] = [];
       for (const sys of rec.systems) {
         const r = sys.renderer;
         const anim = sys.animation;
@@ -1708,6 +1827,13 @@ export class ParticleScene {
         renderer.setActive(false); // start inactive — UI toggles on
         grp.add(renderer.points);
         systems.push(renderer);
+        for (const c of sys.components ?? []) {
+          if (c.kind !== 'light' || !c.body) continue;
+          const light = new LightRenderer(c.body);
+          light.setActive(false);
+          grp.add(light.group);
+          lights.push(light);
+        }
         // Texture binding: direct URL takes precedence; otherwise load
         // the manifest atlas page (the rect is already in the material's
         // uniforms via buildParticleMaterial).
@@ -1726,6 +1852,7 @@ export class ParticleScene {
         attachment: a,
         group: grp,
         systems,
+        lights,
         record: rec,
         active: false,
       };
@@ -1733,6 +1860,11 @@ export class ParticleScene {
       this.attachments.set(key, handle);
       handles.push(handle);
     }
+    const pointLights = handles
+      .flatMap((h) => h.lights)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, PARTICLE_POINT_LIGHT_BUDGET);
+    for (const l of pointLights) l.enablePointLight();
     return handles;
   }
 
@@ -1824,6 +1956,7 @@ export class ParticleScene {
     for (const handle of this.attachments.values()) {
       if (!handle.active) continue;
       for (const s of handle.systems) s.tick(dt);
+      for (const l of handle.lights) l.tick(dt);
     }
   }
 
@@ -1831,6 +1964,7 @@ export class ParticleScene {
   setAttachmentActive(handle: ParticleAttachmentHandle, active: boolean): void {
     handle.active = active;
     for (const s of handle.systems) s.setActive(active);
+    for (const l of handle.lights) l.setActive(active);
     handle.group.visible = active;
   }
 
@@ -1842,6 +1976,7 @@ export class ParticleScene {
   clear(): void {
     for (const handle of this.attachments.values()) {
       for (const s of handle.systems) s.dispose();
+      for (const l of handle.lights) l.dispose();
       this.root.remove(handle.group);
     }
     this.attachments.clear();
