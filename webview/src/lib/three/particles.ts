@@ -3420,6 +3420,17 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             // by texture luminance while preserving tighter authored alpha on
             // DXT/atlas textures.
             base.a = min(base.a, clamp(rawCoverage, 0.0, 1.0));
+            // Soft-round the sprite footprint. Native blends MANY faint (~0.1
+            // alpha) overlapping sprites into a soft mass via high emitter
+            // density; the webview is sparser + axis-aligned (spinRate=0), so a
+            // near-cell-filling _LM cell's hard quad bounds read as a SQUARE.
+            // Fade the alpha toward a soft disc so individual sprites don't show
+            // square edges. Gentle (only the outer corners/edges) so it barely
+            // touches already-soft cells whose corners are already transparent.
+            // Approximation: native has no per-texel falloff — it relies on
+            // emitter density (doc-63 H1) which the webview under-spawns.
+            float spriteR = length(vLocalUV - vec2(0.5)) * 2.0; // 0 center .. ~1.41 corner
+            base.a *= 1.0 - smoothstep(0.62, 1.04, spriteR);
           }
           // M3 (RE doc 63, ps4.txt:614-628) glow key = the particle texture's RAW
           // value at the sprite UV ("glow@spriteUV.r"). Capture base.r BEFORE the
