@@ -39,9 +39,23 @@ import { loadDdsMipChain, loadDdsSoftwareRgbaTexture } from '$lib/dds';
 
 const DEFAULT_PARTICLE_LIFETIME = 4.0; // seconds, when WG didn't author one
 const ABSOLUTE_MAX_CAPACITY = 512; // hard cap per system
-const DEFAULT_SIZE_M = 0.3; // metres — sane baseline if the
-// particle didn't author a size
-// generator
+// The toolkit exports ship geometry/bones/rig pivots scaled by this factor
+// (compose/turret_autorig.py:254 NATIVE_TO_METRES) so the GLB is in metres
+// (Baltimore hull = 205.8 m, ~15× its native BigWorld-unit length). Particle
+// records, however, carry RAW native BigWorld-unit lengths (the faithful
+// engine decode). The native engine has no ×15 — it renders everything in one
+// BW-unit space (RE: FUN_1406d29c0 builds the billboard corner as
+// worldPos + billboardAxis·(size·tiling), so SIZE is a world-space length in
+// the SAME unit as position). Because the consumer's world is ×15 metres,
+// every length-dimensioned particle quantity — size, spawn offset, velocity,
+// and all velocity-derived displacement — must be ×15 to sit correctly on the
+// ship. The sim runs in raw record units and this factor is applied to its
+// OUTPUT (and the few world-frame INPUTS are divided back). NOT applied to
+// times, dimensionless multipliers (dampfer/ageScale), sprite-space offsets
+// (customCenterOffset, tiling), or colour.
+const NATIVE_TO_METRES = 15;
+const DEFAULT_SIZE = 0.02; // native BW units (≈0.3 m after NATIVE_TO_METRES) —
+// sane baseline if the particle didn't author a size generator
 const HARD_MAX_EMIT_RATE_HZ = 200; // safety clamp on the per-frame
 // particles-emitted count
 const PARTICLE_POINT_LIGHT_BUDGET = 24;
@@ -1345,7 +1359,10 @@ class SystemRenderer {
       this.parentVelocityLocal.set(0, 0, 0);
       return;
     }
-    this.parentVelocityLocal.copy(velocity);
+    // World velocity is metres/s (×15); divide back into the record-unit sim
+    // frame so it composes with the raw spawn velocity (re-scaled ×15 at the
+    // draw boundary). See NATIVE_TO_METRES.
+    this.parentVelocityLocal.copy(velocity).multiplyScalar(1 / NATIVE_TO_METRES);
     const source = this.sourceFrame();
     if (!source) return;
     source.updateWorldMatrix(true, false);
@@ -1789,17 +1806,24 @@ class SystemRenderer {
     const dst3 = drawSlot * 3;
     const src4 = sourceSlot * 4;
     const dst4 = drawSlot * 4;
-    this.drawPos[dst3 + 0] = this.pos[src3 + 0];
-    this.drawPos[dst3 + 1] = this.pos[src3 + 1];
-    this.drawPos[dst3 + 2] = this.pos[src3 + 2];
-    this.velGpu[dst3 + 0] = this.vel[src3 + 0];
-    this.velGpu[dst3 + 1] = this.vel[src3 + 1];
-    this.velGpu[dst3 + 2] = this.vel[src3 + 2];
+    // Convert the sim's raw native BW-unit local frame to the consumer's ×15
+    // metre world (see NATIVE_TO_METRES). Position + velocity + size are all
+    // world-space lengths; the sim is linear in them, so scaling the OUTPUT
+    // reproduces the correctly-scaled envelope, force/stream displacement, and
+    // sprite footprint without touching every per-frame input. (World-frame
+    // INPUTS — sea-level snap, parent velocity — are divided back at their
+    // source so they enter the record-unit sim consistently.)
+    this.drawPos[dst3 + 0] = this.pos[src3 + 0] * NATIVE_TO_METRES;
+    this.drawPos[dst3 + 1] = this.pos[src3 + 1] * NATIVE_TO_METRES;
+    this.drawPos[dst3 + 2] = this.pos[src3 + 2] * NATIVE_TO_METRES;
+    this.velGpu[dst3 + 0] = this.vel[src3 + 0] * NATIVE_TO_METRES;
+    this.velGpu[dst3 + 1] = this.vel[src3 + 1] * NATIVE_TO_METRES;
+    this.velGpu[dst3 + 2] = this.vel[src3 + 2] * NATIVE_TO_METRES;
     this.drawColorRGBA[dst4 + 0] = this.colorRGBA[src4 + 0];
     this.drawColorRGBA[dst4 + 1] = this.colorRGBA[src4 + 1];
     this.drawColorRGBA[dst4 + 2] = this.colorRGBA[src4 + 2];
     this.drawColorRGBA[dst4 + 3] = this.colorRGBA[src4 + 3];
-    this.drawSizeArr[drawSlot] = this.sizeArr[sourceSlot];
+    this.drawSizeArr[drawSlot] = this.sizeArr[sourceSlot] * NATIVE_TO_METRES;
     this.drawGlowStrength[drawSlot] = this.glowStrengthArr[sourceSlot];
     this.drawSpriteScaleX[drawSlot] = this.spriteScaleXArr[sourceSlot];
     this.ageGpu[drawSlot] = this.age[sourceSlot];
@@ -1947,7 +1971,7 @@ class SystemRenderer {
     sc.particleSpeed = 0;
     sc.systemSpeed = 0;
     sc.particleIndex = this.pidx[slot];
-    const base = sampleGenAxis(this.emitterSizeGen, sc, DEFAULT_SIZE_M);
+    const base = sampleGenAxis(this.emitterSizeGen, sc, DEFAULT_SIZE);
     const ageScale = this.ageScaleGen ? sampleGenAxis(this.ageScaleGen, sc, 1) : 1;
     this.psize[slot] = base * ageScale;
     let sizeScale0 = 1;
@@ -1988,7 +2012,9 @@ class SystemRenderer {
     // only the parent-translation delta at spawn.
     source.updateWorldMatrix(true, false);
     source.getWorldPosition(SystemRenderer.TMP_WORLD);
-    const dy = SEA_LEVEL_Y - SystemRenderer.TMP_WORLD.y;
+    // The world Y is in metres (×15); the sim runs in raw record units, so the
+    // snap delta is divided back by NATIVE_TO_METRES before entering it.
+    const dy = (SEA_LEVEL_Y - SystemRenderer.TMP_WORLD.y) / NATIVE_TO_METRES;
     if (Math.abs(dy) <= 1e-6) return;
     const offset = SystemRenderer.TMP_POS2.set(0, dy, 0);
     source.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
@@ -2290,9 +2316,16 @@ class SystemRenderer {
           if (allowChildSpawns && crossed && action.effectName && this.spawnEffect) {
             const spawnPos = SystemRenderer.TMP_WORLD.copy(current);
             this.convertSimulationPositionToSourceFrame(spawnPos);
+            // The child group is positioned relative to the metre-scaled parent
+            // group, so the record-unit sim position is re-scaled ×15. See
+            // NATIVE_TO_METRES (the spawner-action path passes [0,0,0], no scale).
             this.spawnEffect({
               effectName: action.effectName,
-              position: [spawnPos.x, spawnPos.y, spawnPos.z],
+              position: [
+                spawnPos.x * NATIVE_TO_METRES,
+                spawnPos.y * NATIVE_TO_METRES,
+                spawnPos.z * NATIVE_TO_METRES,
+              ],
             });
           }
           break;
@@ -2582,7 +2615,12 @@ class LightRenderer {
     this.group.name = 'particle-light';
     const pos = body.localPosition;
     if (Array.isArray(pos) && pos.length === 3) {
-      this.group.position.set(pos[0], pos[1], pos[2]);
+      // Light offset is a native BW-unit length placed in the ×15 metre frame.
+      this.group.position.set(
+        pos[0] * NATIVE_TO_METRES,
+        pos[1] * NATIVE_TO_METRES,
+        pos[2] * NATIVE_TO_METRES,
+      );
     }
     this.material = new THREE.SpriteMaterial({
       color: new THREE.Color(1, 1, 1),
@@ -2698,7 +2736,12 @@ class LightRenderer {
 
   private applySample(t: number): void {
     const color = this.sampleColorAt(t);
-    const radius = Math.max(0.01, this.sampleRadiusAt(t) * this.lightRadiusMultiplier);
+    // Radius is a native BW-unit influence distance → metres for the ×15 world
+    // (drives both the clamped preview flare and the point-light range).
+    const radius = Math.max(
+      0.01,
+      this.sampleRadiusAt(t) * this.lightRadiusMultiplier * NATIVE_TO_METRES,
+    );
     const r = Math.max(0, color[0] * this.lightTintRMultiplier);
     const g = Math.max(0, color[1] * this.lightTintGMultiplier);
     const b = Math.max(0, color[2] * this.lightTintBMultiplier);
