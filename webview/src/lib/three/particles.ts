@@ -54,6 +54,9 @@ const ABSOLUTE_MAX_CAPACITY = 512; // hard cap per system
 // times, dimensionless multipliers (dampfer/ageScale), sprite-space offsets
 // (customCenterOffset, tiling), or colour.
 const NATIVE_TO_METRES = 15;
+// Native per-particle update substep ceiling, seconds (FUN_140718f00 clamps
+// every integration substep to DAT_142556548 = 0.25; RE 2026-06-09).
+const NATIVE_SUBSTEP_MAX_S = 0.25;
 const DEFAULT_SIZE = 0.02; // native BW units (≈0.3 m after NATIVE_TO_METRES) —
 // sane baseline if the particle didn't author a size generator
 const HARD_MAX_EMIT_RATE_HZ = 200; // safety clamp on the per-frame
@@ -1391,8 +1394,23 @@ class SystemRenderer {
       this.prewarmed = true;
     }
     this.updateDistanceState();
-    this.advance(dt, true);
+    this.advanceBy(dt, true);
     this.writeBuffers();
+  }
+
+  /** Advance the sim by `dt`, subdivided into ≤0.25 s substeps like the
+   *  native integrator (FUN_140718f00 clamps every substep to
+   *  DAT_142556548 = 0.25 s; emission, actions and integration all run per
+   *  substep). The render-loop dt is already clamped to 0.1 s by
+   *  ParticleScene.tick, so this mainly matters for prewarm (steps of
+   *  maxAge×0.1 can exceed 0.25 s) and any future coarse-dt callers. */
+  private advanceBy(dt: number, write: boolean): void {
+    let remaining = dt;
+    do {
+      const step = Math.min(remaining, NATIVE_SUBSTEP_MAX_S);
+      this.advance(step, write);
+      remaining -= step;
+    } while (remaining > 0);
   }
 
   private updateDistanceState(): void {
@@ -1851,7 +1869,7 @@ class SystemRenderer {
     if (!(horizon > 0)) return;
     const STEPS = 10;
     const dt = horizon / STEPS;
-    for (let s = 0; s < STEPS; s++) this.advance(dt, false);
+    for (let s = 0; s < STEPS; s++) this.advanceBy(dt, false);
   }
 
   /** Spawn whole particles from one emission source at ``rate`` Hz, carrying
@@ -2109,6 +2127,13 @@ class SystemRenderer {
     this.vel[ix + 2] = vz;
   }
 
+  /** RE-VERIFIED byte-accurate vs native (Ghidra 2026-06-09, build 12506899):
+   *  jitter apply FUN_140741720 does exactly `pos/vel += generate() * dt`
+   *  with a FRESH generator sample per tick — no per-particle persistence,
+   *  no extra randomness. A `point` generator returns its fixed vector
+   *  (FUN_14073e080), so point-jitter is a deterministic drift BY DESIGN;
+   *  plume diversity comes from sibling systems' sphere/line generators.
+   *  Do not "fix" this into a random-walk or persistent-offset model. */
   private applyJitterActions(slot: number, age: number, dt: number): void {
     if (this.jitterActions.length === 0) return;
     const ix = slot * 3;
