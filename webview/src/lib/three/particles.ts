@@ -2992,6 +2992,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         value: new THREE.Vector2(opts.flipTexcoordU ? 1 : 0, opts.flipTexcoordV ? 1 : 0),
       },
       uVelocityOriented: { value: opts.velocityOriented ? 1 : 0 },
+      uViewportHeight: { value: 600 },
       // Renderer hide-angle fade. Native FUN_1406d31f0 multiplies alpha by a
       // clamped `(abs(dot(viewDir, explicitOrientation)) - start) * speed`
       // term and flips it for one lightmapping path. Gate to non-default
@@ -3098,6 +3099,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float uVelocityOriented;
       uniform float uSpriteAspectX;
       uniform float uPointExtent;
+      uniform float uViewportHeight;
       uniform float uUseHideAngle;
       uniform vec3 uExplicitOrientation;
       uniform float uExplicitOrientationLocal;
@@ -3143,10 +3145,10 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         vPointExtent = (uUseSpriteRotation > 0.5)
           ? sqrt(spriteAspectX * spriteAspectX + 1.0)
           : max(spriteAspectX, 1.0);
-        // size is metres (world space); divide by distance for perspective.
-        // vPointExtent expands the square GL_POINT enough to contain the
-        // per-particle scaleX and the worst-case rotated bounding square.
-        gl_PointSize = max(1.0, size * vPointExtent * 200.0 / -mvPosition.z);
+        // size is metres (world space). Project it to framebuffer pixels using
+        // the active camera and viewport instead of an arbitrary preview scale.
+        float pixelScale = projectionMatrix[1][1] * 0.5 * max(uViewportHeight, 1.0);
+        gl_PointSize = max(1.0, size * vPointExtent * pixelScale / -mvPosition.z);
       }
     `,
     fragmentShader: /* glsl */ `
@@ -3614,6 +3616,7 @@ export class ParticleScene {
   private particleRecordFetches = new Map<string, Promise<ParticleRecord | null>>();
   private spawnedEffects: SpawnedParticleEffect[] = [];
   private sortCamera: THREE.Camera | null = null;
+  private viewportSize = new THREE.Vector2();
 
   constructor(renderer?: THREE.WebGLRenderer) {
     this.root = new THREE.Group();
@@ -3877,6 +3880,22 @@ export class ParticleScene {
     if (color instanceof THREE.Color) color.copy(this.sunColorNorm);
   }
 
+  private updateViewportHeightUniforms(): void {
+    if (!this.renderer) return;
+    this.renderer.getDrawingBufferSize(this.viewportSize);
+    const height = Math.max(1, this.viewportSize.y);
+    const apply = (system: SystemRenderer) => {
+      const uniform = system.material.uniforms.uViewportHeight;
+      if (uniform) uniform.value = height;
+    };
+    for (const handle of this.attachments.values()) {
+      for (const system of handle.systems) apply(system);
+    }
+    for (const effect of this.spawnedEffects) {
+      for (const system of effect.systems) apply(system);
+    }
+  }
+
   private async spawnChildEffect(
     parent: ParticleAttachmentHandle,
     parentGroup: THREE.Group,
@@ -4015,6 +4034,7 @@ export class ParticleScene {
 
   /** Step every emitter forward by `dt`. Call this from the render loop. */
   tick(nowMs?: number): void {
+    this.updateViewportHeightUniforms();
     const now = nowMs ?? performance.now();
     if (this.lastTickMs < 0) {
       this.lastTickMs = now;

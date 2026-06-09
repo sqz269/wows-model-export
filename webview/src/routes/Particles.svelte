@@ -219,7 +219,7 @@
       far: 1000,
     });
     env.setBloomEnabled(true);
-    env.setBloomParams({ strength: 0.7, radius: 0.4, threshold: 0.6 });
+    env.setBloomParams({ strength: 0.28, radius: 0.25, threshold: 1.35 });
     env.setBackground(BACKDROPS[backdrop]);
     // Every inspected effect spawns at the origin, so the axes helper sits
     // right inside the effect — and its bright-green Y axis blooms into a beam
