@@ -106,6 +106,20 @@ export interface CamoUniforms {
   wgPackMG: { value: number };
   /** 1.0 → reconstruct normal Z from N.xy (WG `_n.dds` packs B = mask). */
   wgPackN: { value: number };
+  /**
+   * 1.0 → apply the `PBS_ship.fx` ("legacy") runtime texel remaps on top
+   * of the sampled `_mg` values (engine §6b,
+   * `reference/engine/wg_render_deferred_gbuffer.md`, build 12506899):
+   *   roughness = 1 − pow(gloss, g_legacyGlossRemap = 0.75)
+   *   metallic  = min(1, (m·g_legacySpecularMul)^g_legacySpecularPow)
+   *             = min(1, (3m)^4)            (γ = g_gammaCorrection = 1)
+   * `ship_camo_material.fx` — the family this shader chunk models — does
+   * NOT apply them (zero `g_legacy*` constants across all 48 camo DXBC
+   * chunks), so the default is 0.0. Wire per-material once the sidecar
+   * carries the MFM fx family (producer TODO — mfms are hash-packed, the
+   * toolkit must resolve the fx reference).
+   */
+  wgLegacyRemap: { value: number };
 
   // ── Detail-normal atlas overlay ────────────────────────────────────
   //
@@ -170,6 +184,7 @@ export function makeCamoUniforms(): CamoUniforms {
     catUseCamoMaskGlobal: { value: 0.0 },
     wgPackMG: { value: 0.0 },
     wgPackN: { value: 0.0 },
+    wgLegacyRemap: { value: 0.0 },
     detailMap: { value: dummyDetailTexture },
     detailMapBound: { value: 0.0 },
     detailScale: { value: new THREE.Vector2(1, 1) },
