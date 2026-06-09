@@ -1444,32 +1444,28 @@ class SystemRenderer {
 
   /** Advance the CPU simulation by `dt` seconds (emission + per-particle
    *  update). Does NOT touch the GPU buffers — see writeBuffers(). */
-  /** Emitter duty-cycle gate. Whether the emitter is in an active emission
-   *  window at system time `elapsed`. sleepPeriod<0 ⇒ one-shot (one window then
-   *  stop); >=0 ⇒ repeating (active, sleep, repeat); NaN/activePeriod<=0 ⇒ no gate. */
+  /** Emitter duty-cycle gate. Per BigWorld `source_psa.cpp:398-434`, the active/
+   *  sleep cycle applies ONLY when `sleepPeriod > 0` (emit for `activePeriod`,
+   *  sleep for `sleepPeriod`, repeat). `sleepPeriod <= 0` (e.g. -1) means "active
+   *  all the time" (continuous); NaN/`activePeriod<=0` means no gate. Verified
+   *  live (Frida, build 12506899): GK_Shot (`sleepPeriod=-1`) emits a SUSTAINED
+   *  ~0.5s+ plateau bounded by `maxEmittingDuration`, NOT a 0.275s one-shot —
+   *  `activePeriod` does NOT bound `sleepPeriod<=0` emission. */
   private emitterActive(elapsed: number): boolean {
     const ap = this.emitterActivePeriod;
-    if (ap <= 0 || Number.isNaN(this.emitterSleepPeriod)) return true;
+    const sp = this.emitterSleepPeriod;
+    if (ap <= 0 || Number.isNaN(sp) || sp <= 0) return true; // continuous
     const phase = elapsed - this.emitterDelay;
     if (phase < 0) return false;
-    if (this.emitterSleepPeriod < 0) return phase <= ap; // one-shot
-    const cycle = ap + this.emitterSleepPeriod;
-    return cycle <= 0 ? true : phase % cycle <= ap; // repeating duty
+    const cycle = ap + sp;
+    return cycle <= 0 ? true : phase % cycle <= ap; // active sub-window of each cycle
   }
 
-  /** System time (seconds) at which emission stops, for the one-shot finish/loop.
-   *  A one-shot duty emitter (sleepPeriod<0, no creator) stops at
-   *  delay+activePeriod — often far earlier than maxEmittingDuration. */
+  /** System time (seconds) at which emission stops, for the finish/loop. All
+   *  `sleepPeriod<=0` systems (the majority — incl. every GK_Shot muzzle system)
+   *  emit continuously until `maxEmittingDuration`; the `sleepPeriod>0` duty
+   *  cycle is gated in `emitterActive()`, not here. */
   private oneShotEmitEnd(): number {
-    if (
-      this.emitterRateVg &&
-      !this.rateRamp &&
-      this.emitterActivePeriod > 0 &&
-      this.emitterSleepPeriod < 0
-    ) {
-      const end = this.emitterDelay + this.emitterActivePeriod;
-      return this.maxEmittingDuration > 0 ? Math.min(this.maxEmittingDuration, end) : end;
-    }
     return this.maxEmittingDuration;
   }
 
