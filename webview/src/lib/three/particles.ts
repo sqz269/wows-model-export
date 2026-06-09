@@ -2885,9 +2885,11 @@ interface ParticleMaterialOptions {
   flipTexcoordV?: boolean;
   /** Renderer.velocityOriented (+0x9a): rotate sprite toward screen-space velocity. */
   velocityOriented?: boolean;
-  /** Renderer.lightingShineness (+0x4c): native texture RGB exponent. */
-  lightingShineness?: number;
-  /** Renderer lighting scalars (+0x54, +0x64..+0x6c). */
+  /** Renderer lighting scalars (+0x54, +0x64..+0x6c). Note: renderer
+   *  lightingShineness (+0x4c) is deliberately NOT consumed here — DXBC audit
+   *  2026-06-09 showed the native body pow exponent is the PerFrame global
+   *  g_gammaCorrection.x (≈1.0), not the per-record field; lightingShineness
+   *  only reaches a CPU-side draw descriptor (FUN_140716f00 +0x24). */
   lightingAmbient?: number;
   lightingDiffuse?: number;
   lightingTransmission?: number;
@@ -3069,7 +3071,6 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
   const distortionMode =
     opts.blendType === 'DEFORM_WATER_SURFACE' ? 1 : opts.blendType === 'SHIMMER' ? 2 : 0;
   const distortionStrength = distortionMode === 1 ? 0.018 : distortionMode === 2 ? 0.012 : 0;
-  const lightingShineness = Math.max(0, finiteNumber(opts.lightingShineness, 1));
   const lightingAmbient = Math.max(0, finiteNumber(opts.lightingAmbient, 0.06));
   const lightingDiffuse = Math.max(0, finiteNumber(opts.lightingDiffuse, 1));
   const lightingTransmission = Math.max(0, finiteNumber(opts.lightingTransmission, 0));
@@ -3182,9 +3183,10 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uSunColorNorm: {
         value: opts.sunColorNorm?.clone() ?? DEFAULT_PARTICLE_SUN_COLOR_NORM.clone(),
       },
-      // Native pixel shader applies pow(texture.rgb, lightingShineness) via
-      // log/mul/exp before lightmapping and gradient-ramp evaluation.
-      uLightingShineness: { value: lightingShineness },
+      // The native log/mul/exp on body RGB uses the PerFrame global
+      // g_gammaCorrection.x (cb1[20], default 1.0 — identity), NOT a
+      // per-record exponent (DXBC audit 2026-06-09, ps4/6/24/40/46/47/55).
+      // No uniform needed: the webview renders in linear space already.
       uLightingAmbient: { value: lightingAmbient },
       uLightingDiffuse: { value: lightingDiffuse },
       uLightingTransmission: { value: lightingTransmission },
@@ -3340,7 +3342,6 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float uLightingMode;
       uniform vec3 uSunDirWorld;
       uniform vec3 uSunColorNorm;
-      uniform float uLightingShineness;
       uniform float uLightingAmbient;
       uniform float uLightingDiffuse;
       uniform float uLightingTransmission;
@@ -3558,20 +3559,17 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           // off the _LM red put the warm band of fire_yellow_1_HDR on the
           // wrong texels (cream wash instead of the saturated orange core).
           // Fall back to the raw _LM red only when no _MVEA is available.
-          // Captured BEFORE the lightingShineness pow below: the fireball
-          // systems author shineness up to 100 (GK_Shot systems[1]) and
-          // pow(base,100) crushes the fallback key to 0 (U=1 = the ramp's
-          // black tail). The shineness pow shapes the relit BODY only.
           float gmag = (uGradientMapMode > 0.5 && mvEmissionSample >= 0.0)
             ? mvEmissionSample
             : base.r;
-          if (uDistortion <= 0.5) {
-            // Native uses log/mul/exp with renderer.lightingShineness before
-            // the lightmap/ramp branches. Keep distortion approximations out
-            // of this path because their texture RGB is treated as a normal
-            // vector in the webview, not color.
-            base.rgb = pow(max(base.rgb, vec3(0.000001)), vec3(uLightingShineness));
-          }
+          // Native applies pow(base.rgb, g_gammaCorrection.x) here — a
+          // PerFrame GLOBAL defaulting to 1.0 (identity), confirmed by DXBC
+          // audit 2026-06-09 (cb1[20] in all 7 permutations; reflection
+          // header "g_gammaCorrection // Offset: 320"). An earlier port
+          // mis-read the exponent as renderer.lightingShineness — authored
+          // up to 100 on GK_Shot smoke, which crushed the lightmapped body
+          // to black. lightingShineness never reaches the GPU (it stops in
+          // a CPU draw descriptor, FUN_140716f00 +0x24), so no pow here.
           if (uLightingMode > 0.5) {
             // _LM directional lightmap (PS_RLT lightmapping4Way/HL2):
             // base.rgb are 3 grayscale renders of the same sprite baked-lit
@@ -4021,7 +4019,6 @@ export class ParticleScene {
         flipTexcoordU: r?.flipTexcoordU,
         flipTexcoordV: r?.flipTexcoordV,
         velocityOriented: r?.velocityOriented,
-        lightingShineness: r?.lightingShineness,
         lightingAmbient: r?.lightingAmbient,
         lightingDiffuse: r?.lightingDiffuse,
         lightingTransmission: r?.lightingTransmission,
