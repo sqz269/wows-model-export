@@ -2464,6 +2464,10 @@ class LightRenderer {
   private lightTintGMultiplier = 1;
   private lightTintBMultiplier = 1;
 
+  private static readonly SPRITE_RADIUS_SCALE = 0.25;
+  private static readonly SPRITE_MAX_SIZE = 1.25;
+  private static readonly SPRITE_OPACITY_SCALE = 0.22;
+
   constructor(
     private readonly body: ParticleComponentBody,
     private readonly intensityChannels: ParticleSystemIntensityChannel[] = [],
@@ -2590,19 +2594,28 @@ class LightRenderer {
   private applySample(t: number): void {
     const color = this.sampleColorAt(t);
     const radius = Math.max(0.01, this.sampleRadiusAt(t) * this.lightRadiusMultiplier);
-    this.material.color.setRGB(
-      color[0] * this.lightTintRMultiplier,
-      color[1] * this.lightTintGMultiplier,
-      color[2] * this.lightTintBMultiplier,
-    );
-    this.material.opacity = Math.max(0, Math.min(1, color[3]));
-    const spriteSize = Math.max(0.1, radius * 2);
-    this.sprite.scale.set(spriteSize, spriteSize, spriteSize);
-    if (!this.pointLight) return;
     const r = Math.max(0, color[0] * this.lightTintRMultiplier);
     const g = Math.max(0, color[1] * this.lightTintGMultiplier);
     const b = Math.max(0, color[2] * this.lightTintBMultiplier);
     const peak = Math.max(r, g, b);
+    if (peak > 0) {
+      this.material.color.setRGB(r / peak, g / peak, b / peak);
+    } else {
+      this.material.color.setRGB(0, 0, 0);
+    }
+    this.material.opacity = Math.max(
+      0,
+      Math.min(1, color[3] * LightRenderer.SPRITE_OPACITY_SCALE),
+    );
+    // The decoded radius is a point-light influence distance, not the diameter
+    // of a visible billboard. Keep the preview flare compact so light metadata
+    // does not mask the authored smoke/fire/debris systems.
+    const spriteSize = Math.max(
+      0.08,
+      Math.min(radius * LightRenderer.SPRITE_RADIUS_SCALE, LightRenderer.SPRITE_MAX_SIZE),
+    );
+    this.sprite.scale.set(spriteSize, spriteSize, spriteSize);
+    if (!this.pointLight) return;
     if (peak > 0) {
       this.pointLight.color.setRGB(r / peak, g / peak, b / peak);
       this.pointLight.intensity = peak * Math.max(0, color[3]);
@@ -2615,8 +2628,11 @@ class LightRenderer {
 
   private sampleColorAt(t: number): [number, number, number, number] {
     const out = LightRenderer.TMP_COLOR;
-    const period = this.body.colorAnimationPeriod ?? 0;
-    const axis = this.body.animatedColor && period > 0 ? t % period : t;
+    // The decoded period matches the final key time across the current light
+    // corpus; there is no repeat flag on the light prototype. Clamp through
+    // sampleColor instead of wrapping, otherwise one-shot explosion flashes
+    // restart every period and dominate the effect as a recurring orb.
+    const axis = t;
     sampleColor(this.body.animatedColor ? this.body.colorAnimation : undefined, axis, out);
     if (!this.body.animatedColor || !this.body.colorAnimation?.points?.length) {
       const fixed = this.body.color ?? [1, 1, 1, 1];
@@ -2629,8 +2645,7 @@ class LightRenderer {
   }
 
   private sampleRadiusAt(t: number): number {
-    const period = this.body.radiusAnimationPeriod ?? 0;
-    const axis = this.body.animatedRadius && period > 0 ? t % period : t;
+    const axis = t;
     return this.body.animatedRadius
       ? sampleRamp(this.body.radiusAnimation, axis, this.body.radius ?? 1)
       : (this.body.radius ?? 1);
