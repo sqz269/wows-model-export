@@ -1817,7 +1817,13 @@ export class ShipViewer {
     this.syncParticleSunLighting(scene);
     this.env.scene.add(scene.root);
 
-    const handles = scene.build(expanded, result.records, (a) => this.resolveParticleAnchor(a));
+    // Ambient hull loops (smoke/wake/fire) keep re-bursting; event effects
+    // (muzzle/explosion) fire ONCE per trigger and finish — their lifetime is
+    // the trigger's, like the native fire-and-forget EffectManager one-shots.
+    // restartAttachment() in triggerShipParticleEvent re-fires them.
+    const handles = scene.build(expanded, result.records, (a) => this.resolveParticleAnchor(a), {
+      loopOneShot: (a) => this.isAmbientParticleAttachment(a),
+    });
     this.particleScene = scene;
     this.particleHandles = handles;
     this.particleAnchorObjects.clear();

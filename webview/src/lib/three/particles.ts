@@ -303,6 +303,10 @@ type ParticleEffectSpawnCallback = (request: ParticleEffectSpawnRequest) => void
 interface SystemRendererOptions {
   spawnEffect?: ParticleEffectSpawnCallback;
   loopOneShot?: boolean;
+  /** Effect-level one-shot loop period (maxEmittingDuration + the longest
+   *  sibling maxAge) so every system of an attachment re-bursts on the SAME
+   *  clock. 0/absent ⇒ per-system window+maxAge boundary. */
+  loopResetPeriod?: number;
   intensityDefaults?: readonly number[];
   /** Attachment/group frame WG uses while sampling spawn authoring data. */
   sourceGroup?: THREE.Object3D;
@@ -584,6 +588,22 @@ class SystemRenderer {
   // False until the first active tick has pre-filled the ring buffer (H1
   // prewarm). Reset on each one-shot re-burst so the next burst re-warms.
   private prewarmed = false;
+  // Authored `general.prewarm`. Native prewarm is OPT-IN per system: the
+  // activation warm in FUN_1406ce8a0 is gated on a per-system flag (+0x34,
+  // seeded from the authored bool, set-then-cleared = one-time). Only ~102 of
+  // 13,737 corpus systems author it true (continuous ambient loops that must
+  // look steady-state when they pop into view). Event one-shots (muzzle/
+  // explosion, e.g. all 12 GK_Shot systems) author false and start EMPTY —
+  // the spool-up ramp IS the flash. Warming them pre-ages the pool, which
+  // skips the orange ignition window of the tint ramp and pops the effect in
+  // at full density on frame 1.
+  private authoredPrewarm = false;
+  // Effect-level one-shot loop period (seconds), shared by every system of
+  // the attachment (maxEmittingDuration + the LONGEST sibling maxAge). The
+  // engine restarts/kills a one-shot effect as a UNIT; resetting each system
+  // at its own window+maxAge desyncs siblings after the first cycle (GK_Shot
+  // periods range 1.84-7.5s). 0 ⇒ fall back to the per-system boundary.
+  private loopResetPeriod = 0;
   // SIZE model (RE 2026-06-04, build 12506899; memory
   // project-particle-runtime-eval-size-model). Engine:
   //   size = emitter.sizeGenerator (BASE, in METRES, per-particle)
@@ -841,7 +861,9 @@ class SystemRenderer {
     this.maxEmittingDuration = maxEmittingDuration;
     this.spawnEffect = options.spawnEffect;
     this.loopOneShot = options.loopOneShot ?? true;
+    this.loopResetPeriod = Math.max(0, options.loopResetPeriod ?? 0);
     const gen = system.general;
+    this.authoredPrewarm = !!gen?.prewarm;
     this.sourceGroup = options.sourceGroup;
     this.rootGroup = options.rootGroup;
     this.coordinateStyle = gen?.coordinateStyle ?? 2;
@@ -1018,13 +1040,15 @@ class SystemRenderer {
     this.emitterPosVg = system.emitter?.initialPositionGenerator;
     this.emitterVelVg = system.emitter?.initialVelocityGenerator;
     this.emitterActivePeriod = Math.max(0, system.emitter?.activePeriod ?? 0);
-    // Emitter duty cycle. sleepPeriod<0 (e.g. -1) ⇒ ONE-SHOT: emit a single
-    // `activePeriod` window then stop forever (muzzle/explosion). >=0 ⇒ repeating
-    // duty (active, then sleep, repeat). Absent (NaN) or activePeriod<=0 ⇒ no
-    // gate. Without it a flat-rate one-shot emitter fired for the whole
-    // maxEmittingDuration — a ~0.275s muzzle burst became a ~1.5s firehose (the
-    // muzzle/explosion parity bug). GK_Shot.xml: rate 200/s over [0,0.275s],
-    // sleepPeriod=-1, maxAge=2.25 (verified against assets.bin, build 12506899).
+    // Emitter duty cycle (BigWorld source_psa.cpp:398-434; live-verified vs
+    // build 12506899 — see emitterActive()): the active/sleep cycle applies
+    // ONLY when sleepPeriod>0 (emit `activePeriod`, sleep `sleepPeriod`,
+    // repeat). sleepPeriod<=0 (e.g. -1) = active the WHOLE emission window —
+    // continuous to maxEmittingDuration; activePeriod does NOT bound it (it
+    // is the rate ramp's wrap period). Absent (NaN) or activePeriod<=0 ⇒ no
+    // gate. The per-emitter delay staggers ignition regardless of duty mode.
+    // GK_Shot.xml systems[1] (0-based): rate ramp 200/s over [0,0.275s],
+    // sleepPeriod=-1, maxAge=2.25 (verified against assets.bin).
     this.emitterDelay = Math.max(0, sampleScalarVg(system.emitter?.delayGenerator, 0, 0));
     this.emitterSleepPeriod = sampleScalarVg(system.emitter?.sleepPeriodGenerator, 0, Number.NaN);
     this.inheritVelocityFactor = system.emitter?.inheritVelocityFactor ?? 0;
@@ -1336,13 +1360,17 @@ class SystemRenderer {
       // frozen. Optional — for MVP we just fully freeze.
       return;
     }
-    // Prewarm on the first active frame (and after each one-shot re-burst): the
-    // engine pre-runs ~10 substeps on activation (FUN_1406ce8a0, scale 0.1) so a
-    // continuous emitter is at steady-state and a one-shot at peak on frame 1.
-    // Without it the buffer fills from empty over ~maxAge — 3-4x too sparse in
-    // the visible window, and a one-shot never catches up. See RE doc 63 (H1).
+    // Prewarm on the first active frame (and after each one-shot re-burst),
+    // ONLY for systems that author `general.prewarm` — the engine's activation
+    // warm (FUN_1406ce8a0, 10 substeps of maxAge*0.1) is gated on a per-system
+    // flag (+0x34) seeded from that bool. ~102/13737 corpus systems opt in
+    // (steady-state ambient loops). Everything else (incl. every GK_Shot
+    // muzzle system) starts from an EMPTY pool and spools up naturally; doc-63
+    // H1's "one-shot never catches up" applied only to prewarm-authored
+    // systems — warming the rest pre-aged the pool past the tint ramp's
+    // ignition window (grey instead of orange) and popped in at full density.
     if (!this.prewarmed) {
-      this.runPrewarm();
+      if (this.authoredPrewarm) this.runPrewarm();
       this.prewarmed = true;
     }
     this.updateDistanceState();
@@ -1464,11 +1492,16 @@ class SystemRenderer {
    *  ~0.5s+ plateau bounded by `maxEmittingDuration`, NOT a 0.275s one-shot —
    *  `activePeriod` does NOT bound `sleepPeriod<=0` emission. */
   private emitterActive(elapsed: number): boolean {
+    // The per-emitter start delay applies regardless of duty mode — it was
+    // previously short-circuited by the sleepPeriod<=0 "continuous" return,
+    // which collapsed authored ignition staggers (6/12 GK_Shot systems delay
+    // their smoke shells by 0.025-0.105s after the core flash) into one
+    // simultaneous t=0 spawn.
+    const phase = elapsed - this.emitterDelay;
+    if (phase < 0) return false;
     const ap = this.emitterActivePeriod;
     const sp = this.emitterSleepPeriod;
     if (ap <= 0 || Number.isNaN(sp) || sp <= 0) return true; // continuous
-    const phase = elapsed - this.emitterDelay;
-    if (phase < 0) return false;
     const cycle = ap + sp;
     return cycle <= 0 ? true : phase % cycle <= ap; // active sub-window of each cycle
   }
@@ -1494,7 +1527,17 @@ class SystemRenderer {
     // `maxEmittingDuration <= 0` ⇒ continuous emitter (no gate), e.g.
     // persistent fire/smoke.
     const oneShot = this.maxEmittingDuration > 0;
-    if (oneShot && this.elapsed >= this.oneShotEmitEnd() + this.maxAge) {
+    // Loop/finish boundary. When looping for inspection, every system of the
+    // attachment resets on the SHARED effect clock (loopResetPeriod = window +
+    // longest sibling maxAge) so the 12 systems of e.g. GK_Shot re-burst
+    // together instead of drifting apart on 6 different periods. A non-looping
+    // system just finishes at its own window+maxAge (nothing re-bursts, and a
+    // shared boundary would only delay the cleanup).
+    const resetAt =
+      this.loopOneShot && this.loopResetPeriod > 0
+        ? this.loopResetPeriod
+        : this.oneShotEmitEnd() + this.maxAge;
+    if (oneShot && this.elapsed >= resetAt) {
       for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
       this.alive = 0;
       this.emitAccum = 0;
@@ -1507,7 +1550,9 @@ class SystemRenderer {
         return;
       }
       this.elapsed = 0;
-      this.prewarmed = false; // re-warm the next burst (engine re-warms on re-activation)
+      // Re-warm the next burst (prewarm-authored systems only; engine
+      // re-warms on re-activation).
+      this.prewarmed = false;
     }
     const emitting = !oneShot || this.elapsed <= this.oneShotEmitEnd();
     if (emitting && allowChildSpawns) this.applySpawnerActions(dt);
@@ -1648,8 +1693,10 @@ class SystemRenderer {
         // Emitter ramp keyed in SECONDS against systemAge, sampled at
         // `elapsed mod activePeriod` (constant/linear VGs ignore t; ramp VGs
         // hold their last value past the tail; activePeriod==0 ⇒ raw elapsed).
-        const t =
-          this.emitterActivePeriod > 0 ? this.elapsed % this.emitterActivePeriod : this.elapsed;
+        // The clock starts at the emitter delay (emitterActive gates spawn
+        // until then), so the rate ramp begins at ignition, not at t=0.
+        const tBase = Math.max(0, this.elapsed - this.emitterDelay);
+        const t = this.emitterActivePeriod > 0 ? tBase % this.emitterActivePeriod : tBase;
         const eRate =
           sampleScalarVg(this.emitterRateVg, t, 0) *
           this.intensityRateMultiplier *
@@ -1763,8 +1810,9 @@ class SystemRenderer {
 
   /** Pre-fill the ring buffer to the engine's frame-1 density: run STEPS
    *  internal sub-steps (no GPU writes) before the first visible frame, like the
-   *  engine's 10x activation prewarm (FUN_1406ce8a0, scale 0.1). Continuous
-   *  emitters reach steady-state; one-shot bursts reach peak. See RE doc 63 (H1). */
+   *  engine's 10x activation prewarm (FUN_1406ce8a0, scale 0.1). Called ONLY for
+   *  systems that author `general.prewarm` (the native warm is flag-gated,
+   *  +0x34); see tick(). RE doc 63 (H1). */
   private runPrewarm(): void {
     // Native period = the max emitter particle LIFETIME (maxAge), NOT
     // maxEmittingDuration (Ghidra FUN_1406ce8a0: dt = maxAge*0.1 ×10, clock left
@@ -3327,18 +3375,33 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           // H5 (RE doc 63): a randomFrameOnly system is NOT animated — each
           // particle freezes on its spawn-seeded cell. Takes precedence.
           bool randomCell = (hasGrid && uRandomFrame > 0.5);
-          float mvEmissive = 0.0;   // additive emission from _MVEA.R (if on)
+          // _MVEA emission plumbing. The emission channel (.R) is consumed by
+          // TWO permutations (ps4.txt:589-628): the non-gradient body
+          // substitution (M4) and — for GRADIENT_MAP — the glow-ramp KEY (the
+          // engine's r5.x is the t3/g_particleMVTexture sample, NOT the _LM
+          // body texel). Sample it wherever the texture is available; -1
+          // sentinel = no sample this fragment (texture missing/not loaded).
           bool useMvAlpha = (useEmissionAlphaFromMV > 0.5 && uGradientMapMode <= 0.5);
           bool useMvEmissionBody = useMvAlpha;
+          bool wantMvEmission = (useMvAlpha || uGradientMapMode > 0.5);
+          float mvEmissionSample = -1.0;
 
           if (randomCell) {
             // Fixed per-particle random cell (no time advance, no cross-fade).
             // vFrameSeed was assigned floor(rand()*framesRangeEnd) at spawn.
-            vec2 puv = (vec2(mod(vFrameSeed, fx), floor(vFrameSeed / fx)) + local) / vec2(fx, fy);
+            vec2 gridUv = (vec2(mod(vFrameSeed, fx), floor(vFrameSeed / fx)) + local) / vec2(fx, fy);
+            vec2 puv = gridUv;
             if (useAtlasRect > 0.5) {
               puv = mix(atlasRect.xy, atlasRect.zw, puv);
             }
             base = texture2D(map, puv);
+            if (useMv > 0.5 && wantMvEmission) {
+              // _MVEA shares the flipbook grid layout (it is its own file —
+              // the atlas-rect remap applies to the packed page only).
+              vec4 e = texture2D(mvMap, gridUv);
+              mvEmissionSample = e.r;
+              if (useMvAlpha) base.a = e.a;
+            }
           } else if (animated && useMv > 0.5) {
             // Motion-vector flipbook blend (WG _MVEA): sample the two
             // adjacent frames, warp each along the per-pixel optical-flow
@@ -3363,18 +3426,16 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             vec2 uv0 = cell0 - mv0 * f * mvDistortion;
             vec2 uv1 = cell1 + mv1 * (1.0 - f) * mvDistortion;
             base = mix(texture2D(map, uv0), texture2D(map, uv1), f);
-            if (useMvAlpha) {
-              // _MVEA.R = emission, .A = opacity — sampled at the warped
-              // UVs, lerped by f. In the webview this is gated to the
-              // non-gradient permutation: GRADIENT_MAP / UNDERWATER_GRADIENT_MAP
-              // take the authored texture0/ramp branch and suppress the
-              // extra MVEA contribution.
+            if (wantMvEmission) {
+              // _MVEA.R = emission, .A = opacity — sampled at the warped UVs,
+              // lerped by f. Non-gradient permutation: emission substitutes
+              // the body and .A is the opacity (M4). GRADIENT_MAP permutation:
+              // the emission is the glow-ramp KEY (ps4.txt:597-618) while the
+              // _LM body keeps its own alpha.
               vec4 e0 = texture2D(mvMap, uv0);
               vec4 e1 = texture2D(mvMap, uv1);
-              base.a = mix(e0.a, e1.a, f);
-              if (useMvEmissionBody) {
-                mvEmissive = mix(e0.r, e1.r, f);
-              }
+              mvEmissionSample = mix(e0.r, e1.r, f);
+              if (useMvAlpha) base.a = mix(e0.a, e1.a, f);
             }
           } else if (animated) {
             // Age-driven flipbook (framesPlayback / no MV texture), composed
@@ -3408,18 +3469,25 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             if (fx * fy > 1.0 && useAtlasRect <= 0.5) {
               puv = puv / vec2(fx, fy);
             }
+            vec2 gridUv = puv; // pre-atlas-remap cell-0 UV, shared by _MVEA
             if (useAtlasRect > 0.5) {
               puv = mix(atlasRect.xy, atlasRect.zw, puv);
             }
             base = texture2D(map, puv);
+            if (useMv > 0.5 && wantMvEmission) {
+              vec4 e = texture2D(mvMap, gridUv);
+              mvEmissionSample = e.r;
+              if (useMvAlpha) base.a = e.a;
+            }
           }
           // M4 (RE doc 63, ps4.txt:595-606): when MVEA.R is selected as
           // the emission source, native substitutes it into the non-gradient
           // body before lighting/tinting. It is not an extra additive glow, and
           // gradient-map permutations take the ramp/glow branch instead.
-          if (useMvEmissionBody) {
-            base.rgb = vec3(mvEmissive);
-            mvEmissive = 0.0;
+          // Guarded on an actual sample so a system that authors the flag but
+          // has no _MVEA loaded keeps its texture body instead of going black.
+          if (useMvEmissionBody && mvEmissionSample >= 0.0) {
+            base.rgb = vec3(mvEmissionSample);
           }
           float rawCoverage = max(max(base.r, base.g), base.b);
           if (uGradientMapMode > 0.5 && uLightingMode > 0.5) {
@@ -3441,14 +3509,19 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             float spriteR = length(vLocalUV - vec2(0.5)) * 2.0; // 0 center .. ~1.41 corner
             base.a *= 1.0 - smoothstep(0.62, 1.04, spriteR);
           }
-          // M3 (RE doc 63, ps4.txt:614-628) glow key = the particle texture's RAW
-          // value at the sprite UV ("glow@spriteUV.r"). Capture base.r BEFORE the
-          // lightingShineness pow below: muzzle-flash systems author shineness=100
-          // (GK_Shot sys#1), and pow(base.rgb,100) crushes base.rgb→~0 — capturing
-          // gmag after it zeroed the glow key, so U=1 sampled the ramp's BLACK tail
-          // (grey body, no fire). The shineness pow shapes the relit BODY; the glow
-          // key is the unshaded texture value. (2026-06-09: fixes grey muzzle.)
-          float gmag = base.r;
+          // GRADIENT_MAP glow key (ps4.txt:589-628; CORRECTS doc-63 M3): the
+          // engine keys the ramp by the _MVEA EMISSION sample (r5.x = the
+          // t3/g_particleMVTexture read) — never by the _LM body texel. Keying
+          // off the _LM red put the warm band of fire_yellow_1_HDR on the
+          // wrong texels (cream wash instead of the saturated orange core).
+          // Fall back to the raw _LM red only when no _MVEA is available.
+          // Captured BEFORE the lightingShineness pow below: the fireball
+          // systems author shineness up to 100 (GK_Shot systems[1]) and
+          // pow(base,100) crushes the fallback key to 0 (U=1 = the ramp's
+          // black tail). The shineness pow shapes the relit BODY only.
+          float gmag = (uGradientMapMode > 0.5 && mvEmissionSample >= 0.0)
+            ? mvEmissionSample
+            : base.r;
           if (uDistortion <= 0.5) {
             // Native uses log/mul/exp with renderer.lightingShineness before
             // the lightmap/ramp branches. Keep distortion approximations out
@@ -3528,8 +3601,6 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
               base = vec4(texture2D(lut, vec2(base.r, 0.5)).rgb, base.a);
             }
           }
-          // _MVEA emission (when useEmissionAlphaFromMV): additive glow on
-          // top of the lit/remapped colour. Zero when not enabled.
           if (uDistortion <= 0.5 && uOpacityLightingSteps > 0.5) {
             // Native extracts Renderer.opacityMultiplier as an 8-bit step
             // count and quantizes lighting factors before composing the body
@@ -3541,7 +3612,6 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
               base.rgb *= qLum / bodyLum;
             }
           }
-          base.rgb += vec3(mvEmissive);
         } else {
           vec2 c = vLocalUV - vec2(0.5);
           float r = length(c) * 2.0;
@@ -3553,6 +3623,15 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         float outA = vColor.a * base.a * vHideFade;
         vec3 outRgb = vColor.rgb * base.rgb + glow;
         if (uDistortion > 0.5) {
+          // SHIMMER systems that author useEmissionAlphaFromMV compose an
+          // EMISSIVE body with the refraction (the &8 MVEA control bit
+          // substitutes the emission into the body even for distortion
+          // techniques, ps4.txt:597-602) — without it the muzzle-flash core
+          // (GK_Shot systems[0]) contributes nothing. base.rgb already holds
+          // the MVEA emission when one was sampled, else the lit _LM body
+          // (an approximation for framesPlayback systems with no _MVEA bound).
+          vec3 emissionBody =
+            (useEmissionAlphaFromMV > 0.5) ? vColor.rgb * base.rgb : vec3(0.0);
           vec2 screenUv = gl_FragCoord.xy / uDistortionSceneSize;
           vec2 normalOffset = base.rg * 2.0 - 1.0;
           if (dot(normalOffset, normalOffset) < 0.0001) {
@@ -3566,8 +3645,12 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             );
             vec3 refracted = texture2D(uDistortionSceneTexture, warpedUv).rgb;
             float foam = uDistortionMode < 1.5 ? 0.10 * clamp(outA, 0.0, 1.0) : 0.0;
-            outRgb = refracted + vec3(foam);
+            outRgb = refracted + vec3(foam) + emissionBody;
             outA *= (uDistortionMode < 1.5) ? 0.45 : 0.55;
+          } else if (useEmissionAlphaFromMV > 0.5) {
+            // No scene-colour RTT (the inspector's normal state): keep the
+            // emissive flash core visible instead of the faint placeholder.
+            outRgb = emissionBody;
           } else {
             // Fallback when the scene-color copy is unavailable.
             outRgb = vec3(1.0);
@@ -3744,11 +3827,18 @@ export class ParticleScene {
   }
 
   /** Build the scene from a sidecar's `effects` block. Returns the
-   *  flat list of attachment handles for UI binding. */
+   *  flat list of attachment handles for UI binding.
+   *
+   *  `options.loopOneShot` decides per attachment whether a one-shot effect
+   *  loops for inspection (inspector/ambient default) or plays once and
+   *  finishes (ship-view event effects — muzzle/explosion — whose lifetime is
+   *  governed by the trigger, mirroring the native fire-once-then-kill
+   *  EffectManager model). `restartAttachment()` re-fires a finished one. */
   build(
     attachments: ParticleAttachment[],
     particles: Record<string, ParticleRecord>,
     resolveNodePosition: (attachment: ParticleAttachment) => THREE.Vector3 | null,
+    options: { loopOneShot?: (attachment: ParticleAttachment) => boolean } = {},
   ): ParticleAttachmentHandle[] {
     this.clear();
     this.particleRecords.clear();
@@ -3793,7 +3883,7 @@ export class ParticleScene {
         rec,
         grp,
         false,
-        true,
+        options.loopOneShot ? options.loopOneShot(a) : true,
         (request) => {
           void this.spawnChildEffect(handle, grp, request, 0);
         },
@@ -3829,6 +3919,19 @@ export class ParticleScene {
     const systems: SystemRenderer[] = [];
     const lights: LightRenderer[] = [];
     const intensityDefaults = intensityDefaultsForRecord(rec);
+    // Effect-level one-shot loop clock: window + the LONGEST system maxAge,
+    // shared by all systems so the looped re-burst stays synchronized (the
+    // engine restarts an effect as a unit). Mirrors the constructor's maxAge
+    // clamp so the boundary can never undercut a system's own decay window.
+    let longestMaxAge = 0;
+    for (const sys of rec.systems) {
+      longestMaxAge = Math.max(
+        longestMaxAge,
+        Math.max(0.05, sys.general?.maxParticleAge ?? DEFAULT_PARTICLE_LIFETIME),
+      );
+    }
+    const loopResetPeriod =
+      (rec.maxEmittingDuration ?? 0) > 0 ? rec.maxEmittingDuration! + longestMaxAge : 0;
     for (const sys of rec.systems) {
       const r = sys.renderer;
       const anim = sys.animation;
@@ -3859,7 +3962,10 @@ export class ParticleScene {
         atlasRect: useAtlas ? r!.textureAtlas0!.rect : undefined,
         useLut,
         motionVectorsDistortion: useMv ? anim?.motionVectorsDistortion : undefined,
-        useEmissionAlphaFromMV: useMv ? anim?.useEmissionAlphaFromMV : undefined,
+        // Authored flag, NOT gated on the MV texture: it also drives the
+        // SHIMMER emission-body composite (which falls back to the lit _LM
+        // when no _MVEA is loaded). All mvMap samples are guarded on useMv.
+        useEmissionAlphaFromMV: anim?.useEmissionAlphaFromMV,
         randomFrameOnly: anim?.randomFrameOnly,
         frameRateRamp: anim?.frameRateRamp,
         spriteRotation: useSpriteRotation,
@@ -3890,6 +3996,7 @@ export class ParticleScene {
       const renderer = new SystemRenderer(sys, mat, rec.maxEmittingDuration, {
         spawnEffect,
         loopOneShot,
+        loopResetPeriod,
         intensityDefaults,
         sourceGroup: group,
         rootGroup: this.root,
