@@ -37,7 +37,17 @@ from . import effects_textures as _eff_tex
 LIBRARY_ROOT = Path("library") / "particles"
 RECORDS_FILE = LIBRARY_ROOT / "records.json"
 INDEX_FILE = LIBRARY_ROOT / "index.json"
-SCHEMA_VERSION = 1
+# Bump whenever the per-record JSON shape emitted by ``read.particles``
+# changes (new/renamed fields), so ``ensure_built`` regenerates the library
+# even though assets.bin itself is unchanged. v2: 2026-06-08 decode
+# expansions — full renderer scalar/bool cluster (lightingShineness/Ambient/
+# Diffuse/Transmission, hideStartCos/Speed, softParticleDepthScale,
+# opacityMultiplier, spinRate*, explicitOrientation*, scaleX, billboard,
+# velocityOriented), per-system ``intensities`` + ``distance`` configs,
+# coordinate-style byte fix. A library built before these landed carries a
+# truncated schema that the mtime gate alone accepts forever (assets.bin
+# predates the parser change).
+SCHEMA_VERSION = 2
 
 
 def library_paths(workspace: Path) -> dict[str, Path]:
@@ -50,11 +60,31 @@ def library_paths(workspace: Path) -> dict[str, Path]:
     }
 
 
-def is_current(records_path: Path, assets_bin_path: Path) -> bool:
-    """True iff ``records_path`` exists and is newer than ``assets_bin_path``."""
+def is_current(
+    records_path: Path,
+    assets_bin_path: Path,
+    index_path: Path | None = None,
+) -> bool:
+    """True iff ``records_path`` is newer than ``assets_bin_path`` AND was
+    built by the current decode schema.
+
+    The mtime check alone is insufficient: the parser's output shape can
+    change while assets.bin stays untouched, leaving a permanently-accepted
+    stale artefact. When ``index_path`` is provided, the recorded
+    ``schema_version`` must match :data:`SCHEMA_VERSION`.
+    """
     if not records_path.is_file() or not assets_bin_path.is_file():
         return False
-    return records_path.stat().st_mtime >= assets_bin_path.stat().st_mtime
+    if records_path.stat().st_mtime < assets_bin_path.stat().st_mtime:
+        return False
+    if index_path is not None:
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if index.get("schema_version") != SCHEMA_VERSION:
+            return False
+    return True
 
 
 def _atomic_write_text(target: Path, content: str) -> None:
@@ -190,7 +220,7 @@ def ensure_built(
     paths = library_paths(workspace)
 
     assets_bin_path = _assets_bin.default_path(cfg)
-    if is_current(paths["records"], assets_bin_path):
+    if is_current(paths["records"], assets_bin_path, paths["index"]):
         return {
             "status": "cached",
             "records_path": str(paths["records"]),
