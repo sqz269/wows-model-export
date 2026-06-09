@@ -35,7 +35,7 @@ import type {
   ParticleVgtPrototype,
 } from '$lib/types/sidecar';
 import { fetchParticleRecord, repoUrl } from '$lib/api';
-import { loadDdsMipChain } from '$lib/dds';
+import { loadDdsMipChain, loadDdsSoftwareRgbaTexture } from '$lib/dds';
 
 const DEFAULT_PARTICLE_LIFETIME = 4.0; // seconds, when WG didn't author one
 const ABSOLUTE_MAX_CAPACITY = 512; // hard cap per system
@@ -1517,7 +1517,14 @@ class SystemRenderer {
       this.applyJitterActions(i, age, dt);
       this.applyVelocityFieldActions(i, age);
       // dampfer: a per-frame drag multiplier on the velocity's displacement.
+      // Sample the drag at the start of the integration step. Short impact
+      // effects often author damp ramps that fall to zero by 0.1s; sampling
+      // only after the coarse activation prewarm step pins freshly spawned
+      // particles at the emitter and stacks their quads into square flashes.
+      const dampParticleAge = clocks.particleAge;
+      clocks.particleAge = prevAge;
       const damp = this.dampGen ? sampleGenAxis(this.dampGen, clocks, 1) : 1;
+      clocks.particleAge = dampParticleAge;
       if (this.applyBarrierActions(i, age, dt * damp, allowChildSpawns)) continue;
       this.pos[i * 3 + 0] += this.vel[i * 3 + 0] * dt * damp;
       this.pos[i * 3 + 1] += this.vel[i * 3 + 1] * dt * damp;
@@ -2408,6 +2415,41 @@ class SystemRenderer {
   }
 }
 
+let particleLightSpriteTexture: THREE.DataTexture | null = null;
+
+function getParticleLightSpriteTexture(): THREE.DataTexture {
+  if (particleLightSpriteTexture) return particleLightSpriteTexture;
+  const size = 64;
+  const center = (size - 1) * 0.5;
+  const invRadius = 1 / center;
+  const pixels = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = (x - center) * invRadius;
+      const dy = (y - center) * invRadius;
+      const r = Math.sqrt(dx * dx + dy * dy);
+      const t = Math.max(0, 1 - r);
+      const alpha = Math.pow(t, 2.25) * (3 - 2 * t);
+      const off = (y * size + x) * 4;
+      pixels[off + 0] = 255;
+      pixels[off + 1] = 255;
+      pixels[off + 2] = 255;
+      pixels[off + 3] = Math.max(0, Math.min(255, Math.round(alpha * 255)));
+    }
+  }
+  const tex = new THREE.DataTexture(pixels, size, size, THREE.RGBAFormat, THREE.UnsignedByteType);
+  tex.name = 'particle-light-radial-alpha';
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.needsUpdate = true;
+  particleLightSpriteTexture = tex;
+  return tex;
+}
+
 class LightRenderer {
   readonly group: THREE.Group;
   readonly sprite: THREE.Sprite;
@@ -2435,6 +2477,7 @@ class LightRenderer {
     }
     this.material = new THREE.SpriteMaterial({
       color: new THREE.Color(1, 1, 1),
+      map: getParticleLightSpriteTexture(),
       opacity: 1,
       transparent: true,
       blending: THREE.AdditiveBlending,
@@ -2882,6 +2925,11 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       // against the null sampler.
       lut: { value: null as THREE.Texture | null },
       useLut: { value: 0 },
+      // Native gradient-map permutations take the authored ramp/glow branch.
+      // Keep this separate from useLut, which starts at 0 until the ramp
+      // texture finishes loading and therefore is not a reliable shader-mode
+      // discriminator.
+      uGradientMapMode: { value: PS_RBT_LUT_MODES.has(opts.blendType ?? '') ? 1 : 0 },
       // Manifest atlas rect (u0, v0, u1, v1). useAtlasRect=1 lerps the
       // (already grid-sampled) UV through the rect — composes with grid.
       atlasRect: {
@@ -3091,6 +3139,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float useMap;
       uniform sampler2D lut;
       uniform float useLut;
+      uniform float uGradientMapMode;
       uniform vec4 atlasRect;
       uniform float useAtlasRect;
       uniform vec2 framesPerXY;
@@ -3195,6 +3244,8 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           // particle freezes on its spawn-seeded cell. Takes precedence.
           bool randomCell = (hasGrid && uRandomFrame > 0.5);
           float mvEmissive = 0.0;   // additive emission from _MVEA.R (if on)
+          bool useMvAlpha = (useEmissionAlphaFromMV > 0.5 && uGradientMapMode <= 0.5);
+          bool useMvEmissionBody = useMvAlpha;
 
           if (randomCell) {
             // Fixed per-particle random cell (no time advance, no cross-fade).
@@ -3228,16 +3279,18 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             vec2 uv0 = cell0 - mv0 * f * mvDistortion;
             vec2 uv1 = cell1 + mv1 * (1.0 - f) * mvDistortion;
             base = mix(texture2D(map, uv0), texture2D(map, uv1), f);
-            if (useEmissionAlphaFromMV > 0.5) {
+            if (useMvAlpha) {
               // _MVEA.R = emission, .A = opacity — sampled at the warped
-              // UVs, lerped by f. Opacity overrides the base alpha; emission
-              // is ADDED to the final colour below (the engine replaces in
-              // its non-lit permutation; adding lets it compose with the
-              // lightmap relight without erasing it).
+              // UVs, lerped by f. In the webview this is gated to the
+              // non-gradient permutation: GRADIENT_MAP / UNDERWATER_GRADIENT_MAP
+              // take the authored texture0/ramp branch and suppress the
+              // extra MVEA contribution.
               vec4 e0 = texture2D(mvMap, uv0);
               vec4 e1 = texture2D(mvMap, uv1);
               base.a = mix(e0.a, e1.a, f);
-              mvEmissive = mix(e0.r, e1.r, f);
+              if (useMvEmissionBody) {
+                mvEmissive = mix(e0.r, e1.r, f);
+              }
             }
           } else if (animated) {
             // Age-driven flipbook (framesPlayback / no MV texture), composed
@@ -3260,12 +3313,15 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             }
             base = mix(texture2D(map, puv0), texture2D(map, puv1), f);
           } else {
-            // Static cell. H4 (RE doc 63): a noAnimation system on a multi-cell
-            // atlas shows CELL 0 only (engine forces the frame byte to 0,
-            // FUN_14071b7f0 @0x14071c5a3) — without this the whole grid crams
-            // into one quad and reads as garbage. fx*fy==1 → full texture.
+            // Static cell. H4 (RE doc 63): a noAnimation system on a direct
+            // multi-cell DDS shows CELL 0 only (engine forces the frame byte
+            // to 0, FUN_14071b7f0 @0x14071c5a3) — without this the whole grid
+            // crams into one quad and reads as garbage. Manifest atlas rects
+            // already select one authored TGA sprite inside the packed atlas,
+            // so splitting the rect again samples only its padded corner and
+            // turns soft/glow sprites into hard squares.
             vec2 puv = local;
-            if (fx * fy > 1.0) {
+            if (fx * fy > 1.0 && useAtlasRect <= 0.5) {
               puv = puv / vec2(fx, fy);
             }
             if (useAtlasRect > 0.5) {
@@ -3277,11 +3333,18 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           // the emission source, native substitutes it into the non-gradient
           // body before lighting/tinting. It is not an extra additive glow, and
           // gradient-map permutations take the ramp/glow branch instead.
-          if (useEmissionAlphaFromMV > 0.5) {
-            if (useLut <= 0.5) {
-              base.rgb = vec3(mvEmissive);
-            }
+          if (useMvEmissionBody) {
+            base.rgb = vec3(mvEmissive);
             mvEmissive = 0.0;
+          }
+          float rawCoverage = max(max(base.r, base.g), base.b);
+          if (uGradientMapMode > 0.5 && uLightingMode > 0.5) {
+            // Particle LM sheets are commonly BC7. In Chrome/WebGL the
+            // compressed BC7 alpha path can over-broaden coverage. Native
+            // authored RGB carries the same smoke/fire mask, so clamp opacity
+            // by texture luminance while preserving tighter authored alpha on
+            // DXT/atlas textures.
+            base.a = min(base.a, clamp(rawCoverage, 0.0, 1.0));
           }
           if (uDistortion <= 0.5) {
             // Native uses log/mul/exp with renderer.lightingShineness before
@@ -3865,10 +3928,13 @@ export class ParticleScene {
     const url = repoUrl(workspaceRelPath);
     let pending = this.textureCache.get(url);
     if (!pending) {
-      pending = loadDdsMipChain([url], false, r).catch((err) => {
-        console.warn('[particles] DDS load failed', workspaceRelPath, err);
-        return null;
-      });
+      pending = loadDdsSoftwareRgbaTexture(url, false, r)
+        .catch(() => null)
+        .then((tex) => tex ?? loadDdsMipChain([url], false, r))
+        .catch((err) => {
+          console.warn('[particles] DDS load failed', workspaceRelPath, err);
+          return null;
+        });
       this.textureCache.set(url, pending);
     }
     const tex = await pending;
@@ -3916,10 +3982,13 @@ export class ParticleScene {
     const url = repoUrl(workspaceRelPath);
     let pending = this.textureCache.get(url);
     if (!pending) {
-      pending = loadDdsMipChain([url], false, r).catch((err) => {
-        console.warn('[particles] MV DDS load failed', workspaceRelPath, err);
-        return null;
-      });
+      pending = loadDdsSoftwareRgbaTexture(url, false, r)
+        .catch(() => null)
+        .then((tex) => tex ?? loadDdsMipChain([url], false, r))
+        .catch((err) => {
+          console.warn('[particles] MV DDS load failed', workspaceRelPath, err);
+          return null;
+        });
       this.textureCache.set(url, pending);
     }
     const tex = await pending;
