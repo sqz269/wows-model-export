@@ -3558,23 +3558,22 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           if (useMvEmissionBody && mvEmissionSample >= 0.0) {
             base.rgb = vec3(mvEmissionSample);
           }
-          float rawCoverage = max(max(base.r, base.g), base.b);
-          if (uGradientMapMode > 0.5 && uLightingMode > 0.5) {
-            // Particle LM sheets are commonly BC7. In Chrome/WebGL the
-            // compressed BC7 alpha path can over-broaden coverage. Native
-            // authored RGB carries the same smoke/fire mask, so clamp opacity
-            // by texture luminance while preserving tighter authored alpha on
-            // DXT/atlas textures.
-            base.a = min(base.a, clamp(rawCoverage, 0.0, 1.0));
-            // (RETIRED 2026-06-09) A radial soft-disc falloff lived here to
-            // "de-square" Moray smoke (831a426). The squares were an artifact
-            // of the pre-×15 size era — sprites were 15× too small, barely
-            // overlapping, so quad bounds showed (199265f fixed the scale).
-            // Re-tested live with the falloff stripped: Moray waterSmoke_big
-            // renders soft billows, and GK_Shot's plume looks BETTER (the
-            // disc edge was accentuating the bead-string banding). Native has
-            // no per-texel falloff — do not re-add one.
-          }
+          // (RETIRED 2026-06-09) Two GRADIENT_MAP+lightmapping alpha hacks
+          // lived here; both are gone and must not return:
+          // 1. A radial soft-disc falloff ("de-square" Moray smoke, 831a426).
+          //    The squares were a pre-×15 size-era artifact — sprites were
+          //    15× too small, barely overlapping, so quad bounds showed
+          //    (199265f fixed the scale). Re-tested live: Moray renders soft
+          //    billows, and GK_Shot looks BETTER without it (the disc edge
+          //    accentuated the bead-string banding). Native has no per-texel
+          //    falloff.
+          // 2. base.a = min(base.a, luminance) "BC7 coverage clamp". Premise
+          //    obsolete (bindTexture software-decodes BC7 → exact alpha) and
+          //    native never couples alpha to RGB (DXBC: o0.w = texA × tint.a
+          //    × fade). It distorted 14.6% of Smoke_run_7x7_LM texels (mean
+          //    −42/255, max −231/255), thinning authored dark-opaque smoke
+          //    cores. A/B-verified: removal = denser faithful cores, no
+          //    squares.
           // GRADIENT_MAP glow key (ps4.txt:589-628; CORRECTS doc-63 M3): the
           // engine keys the ramp by the _MVEA EMISSION sample (r5.x = the
           // t3/g_particleMVTexture read) — never by the _LM body texel. Keying
