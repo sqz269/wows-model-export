@@ -617,6 +617,8 @@ class SystemRenderer {
   private emitterPosVg: ParticleVariantVg | undefined;
   private emitterVelVg: ParticleVariantVg | undefined;
   private emitterActivePeriod: number;
+  private emitterDelay = 0;
+  private emitterSleepPeriod = Number.NaN;
   private inheritVelocityFactor = 0;
   private snapToSeaLevel = false;
   // Per-action driver fields.
@@ -1015,6 +1017,15 @@ class SystemRenderer {
     this.emitterPosVg = system.emitter?.initialPositionGenerator;
     this.emitterVelVg = system.emitter?.initialVelocityGenerator;
     this.emitterActivePeriod = Math.max(0, system.emitter?.activePeriod ?? 0);
+    // Emitter duty cycle. sleepPeriod<0 (e.g. -1) ⇒ ONE-SHOT: emit a single
+    // `activePeriod` window then stop forever (muzzle/explosion). >=0 ⇒ repeating
+    // duty (active, then sleep, repeat). Absent (NaN) or activePeriod<=0 ⇒ no
+    // gate. Without it a flat-rate one-shot emitter fired for the whole
+    // maxEmittingDuration — a ~0.275s muzzle burst became a ~1.5s firehose (the
+    // muzzle/explosion parity bug). GK_Shot.xml: rate 200/s over [0,0.275s],
+    // sleepPeriod=-1, maxAge=2.25 (verified against assets.bin, build 12506899).
+    this.emitterDelay = Math.max(0, sampleScalarVg(system.emitter?.delayGenerator, 0, 0));
+    this.emitterSleepPeriod = sampleScalarVg(system.emitter?.sleepPeriodGenerator, 0, Number.NaN);
     this.inheritVelocityFactor = system.emitter?.inheritVelocityFactor ?? 0;
     this.snapToSeaLevel = !!system.emitter?.snapToSeaLevel;
     // SIZE base (RE 2026-06-04): the emitter's sizeGenerator is the per-particle
@@ -1433,6 +1444,35 @@ class SystemRenderer {
 
   /** Advance the CPU simulation by `dt` seconds (emission + per-particle
    *  update). Does NOT touch the GPU buffers — see writeBuffers(). */
+  /** Emitter duty-cycle gate. Whether the emitter is in an active emission
+   *  window at system time `elapsed`. sleepPeriod<0 ⇒ one-shot (one window then
+   *  stop); >=0 ⇒ repeating (active, sleep, repeat); NaN/activePeriod<=0 ⇒ no gate. */
+  private emitterActive(elapsed: number): boolean {
+    const ap = this.emitterActivePeriod;
+    if (ap <= 0 || Number.isNaN(this.emitterSleepPeriod)) return true;
+    const phase = elapsed - this.emitterDelay;
+    if (phase < 0) return false;
+    if (this.emitterSleepPeriod < 0) return phase <= ap; // one-shot
+    const cycle = ap + this.emitterSleepPeriod;
+    return cycle <= 0 ? true : phase % cycle <= ap; // repeating duty
+  }
+
+  /** System time (seconds) at which emission stops, for the one-shot finish/loop.
+   *  A one-shot duty emitter (sleepPeriod<0, no creator) stops at
+   *  delay+activePeriod — often far earlier than maxEmittingDuration. */
+  private oneShotEmitEnd(): number {
+    if (
+      this.emitterRateVg &&
+      !this.rateRamp &&
+      this.emitterActivePeriod > 0 &&
+      this.emitterSleepPeriod < 0
+    ) {
+      const end = this.emitterDelay + this.emitterActivePeriod;
+      return this.maxEmittingDuration > 0 ? Math.min(this.maxEmittingDuration, end) : end;
+    }
+    return this.maxEmittingDuration;
+  }
+
   private advance(dt: number, allowChildSpawns: boolean): void {
     this.elapsed += dt;
 
@@ -1446,7 +1486,7 @@ class SystemRenderer {
     // `maxEmittingDuration <= 0` ⇒ continuous emitter (no gate), e.g.
     // persistent fire/smoke.
     const oneShot = this.maxEmittingDuration > 0;
-    if (oneShot && this.elapsed >= this.maxEmittingDuration + this.maxAge) {
+    if (oneShot && this.elapsed >= this.oneShotEmitEnd() + this.maxAge) {
       for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
       this.alive = 0;
       this.emitAccum = 0;
@@ -1461,7 +1501,7 @@ class SystemRenderer {
       this.elapsed = 0;
       this.prewarmed = false; // re-warm the next burst (engine re-warms on re-activation)
     }
-    const emitting = !oneShot || this.elapsed <= this.maxEmittingDuration;
+    const emitting = !oneShot || this.elapsed <= this.oneShotEmitEnd();
     if (emitting && allowChildSpawns) this.applySpawnerActions(dt);
 
     // Per-particle update. WG's authoring convention: ramp + color
@@ -1596,7 +1636,7 @@ class SystemRenderer {
     // position/velocity volume generators; they share the capacity cap so the
     // system can't exceed `capacity`. A source whose rate is 0 spawns nothing.
     if (emitting) {
-      if (this.emitterRateVg) {
+      if (this.emitterRateVg && this.emitterActive(this.elapsed)) {
         // Emitter ramp keyed in SECONDS against systemAge, sampled at
         // `elapsed mod activePeriod` (constant/linear VGs ignore t; ramp VGs
         // hold their last value past the tail; activePeriod==0 ⇒ raw elapsed).
