@@ -574,7 +574,8 @@ function samplePosFromPrototype(proto: ParticleVgtPrototype, out: THREE.Vector3)
  * Effect record. Updates a ring buffer of particles each frame.
  */
 class SystemRenderer {
-  readonly points: THREE.Points;
+  readonly points: THREE.Mesh;
+  private instGeom: THREE.InstancedBufferGeometry;
   private capacity: number;
   private maxAge: number;
   // Record-level emission window (seconds). >0 ⇒ one-shot burst that
@@ -1091,31 +1092,41 @@ class SystemRenderer {
     this.pidx = new Float32Array(this.capacity);
     for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
 
-    // Geometry: one vertex per particle. Three.js's `Points` renders
-    // every vertex as a quad facing the camera (when the material is a
-    // PointsMaterial).
-    const geom = new THREE.BufferGeometry();
-    this.posAttr = new THREE.BufferAttribute(this.drawPos, 3);
+    // Geometry: INSTANCED camera-facing billboard quads (one instance per
+    // particle). Replaces the old THREE.Points path, whose `gl_PointSize` is
+    // hardware-capped (ALIASED_POINT_SIZE_RANGE, commonly 1024px) — large/near
+    // particles clamped to that cap, which both under-sized them and (via the
+    // fragment's center-crop of a fixed square) produced the "blocky square"
+    // look. The native engine draws unbounded world-space quads; this matches it.
+    const geom = new THREE.InstancedBufferGeometry();
+    // Base quad: 4 corners in [0,1]^2 (xy = cornerUV, the old gl_PointCoord),
+    // two triangles. All particle data below is PER-INSTANCE.
+    geom.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0], 3),
+    );
+    geom.setIndex([0, 1, 2, 2, 1, 3]);
+    this.posAttr = new THREE.InstancedBufferAttribute(this.drawPos, 3);
     this.posAttr.setUsage(THREE.DynamicDrawUsage);
-    this.velocityAttr = new THREE.BufferAttribute(this.velGpu, 3);
+    this.velocityAttr = new THREE.InstancedBufferAttribute(this.velGpu, 3);
     this.velocityAttr.setUsage(THREE.DynamicDrawUsage);
-    this.colorAttr = new THREE.BufferAttribute(this.drawColorRGBA, 4);
+    this.colorAttr = new THREE.InstancedBufferAttribute(this.drawColorRGBA, 4);
     this.colorAttr.setUsage(THREE.DynamicDrawUsage);
-    this.sizeAttr = new THREE.BufferAttribute(this.drawSizeArr, 1);
+    this.sizeAttr = new THREE.InstancedBufferAttribute(this.drawSizeArr, 1);
     this.sizeAttr.setUsage(THREE.DynamicDrawUsage);
-    this.glowStrengthAttr = new THREE.BufferAttribute(this.drawGlowStrength, 1);
+    this.glowStrengthAttr = new THREE.InstancedBufferAttribute(this.drawGlowStrength, 1);
     this.glowStrengthAttr.setUsage(THREE.DynamicDrawUsage);
-    this.spriteScaleXAttr = new THREE.BufferAttribute(this.drawSpriteScaleX, 1);
+    this.spriteScaleXAttr = new THREE.InstancedBufferAttribute(this.drawSpriteScaleX, 1);
     this.spriteScaleXAttr.setUsage(THREE.DynamicDrawUsage);
-    this.ageAttr = new THREE.BufferAttribute(this.ageGpu, 1);
+    this.ageAttr = new THREE.InstancedBufferAttribute(this.ageGpu, 1);
     this.ageAttr.setUsage(THREE.DynamicDrawUsage);
-    this.frameSeedAttr = new THREE.BufferAttribute(this.drawFrameSeed, 1);
+    this.frameSeedAttr = new THREE.InstancedBufferAttribute(this.drawFrameSeed, 1);
     this.frameSeedAttr.setUsage(THREE.DynamicDrawUsage);
-    this.framePhaseAttr = new THREE.BufferAttribute(this.drawFramePhase, 1);
+    this.framePhaseAttr = new THREE.InstancedBufferAttribute(this.drawFramePhase, 1);
     this.framePhaseAttr.setUsage(THREE.DynamicDrawUsage);
-    this.rotationPhaseAttr = new THREE.BufferAttribute(this.drawRotationPhase, 1);
+    this.rotationPhaseAttr = new THREE.InstancedBufferAttribute(this.drawRotationPhase, 1);
     this.rotationPhaseAttr.setUsage(THREE.DynamicDrawUsage);
-    geom.setAttribute('position', this.posAttr);
+    geom.setAttribute('iPosition', this.posAttr);
     geom.setAttribute('velocity', this.velocityAttr);
     geom.setAttribute('color', this.colorAttr);
     geom.setAttribute('size', this.sizeAttr);
@@ -1125,8 +1136,9 @@ class SystemRenderer {
     geom.setAttribute('frameSeed', this.frameSeedAttr);
     geom.setAttribute('framePhase', this.framePhaseAttr);
     geom.setAttribute('rotationPhase', this.rotationPhaseAttr);
-    geom.setDrawRange(0, 0);
-    this.points = new THREE.Points(geom, material);
+    geom.instanceCount = 0;
+    this.instGeom = geom;
+    this.points = new THREE.Mesh(geom, material);
     this.points.frustumCulled = false;
     this.intensityChannels = system.intensities?.channels ?? [];
     this.intensityDefaults = Array.from(options.intensityDefaults ?? []);
@@ -1156,7 +1168,7 @@ class SystemRenderer {
     this.creatorAccum = 0;
     for (const action of this.spawnerActions) action.accum = 0;
     for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
-    this.points.geometry.setDrawRange(0, 0);
+    this.instGeom.instanceCount = 0;
   }
 
   setSortCamera(camera: THREE.Camera | null): void {
@@ -1488,7 +1500,7 @@ class SystemRenderer {
       this.emitAccum = 0;
       this.creatorAccum = 0;
       for (const action of this.spawnerActions) action.accum = 0;
-      this.points.geometry.setDrawRange(0, 0);
+      this.instGeom.instanceCount = 0;
       if (!this.loopOneShot) {
         this.finished = true;
         this.active = false;
@@ -1699,7 +1711,7 @@ class SystemRenderer {
     for (let writeIdx = 0; writeIdx < order.length; writeIdx++) {
       this.writeDrawSlot(order[writeIdx], writeIdx);
     }
-    this.points.geometry.setDrawRange(0, order.length);
+    this.instGeom.instanceCount = order.length;
     this.posAttr.needsUpdate = true;
     this.velocityAttr.needsUpdate = true;
     this.colorAttr.needsUpdate = true;
@@ -3131,6 +3143,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       attribute float frameSeed;
       attribute float framePhase;
       attribute float rotationPhase;
+      attribute vec3 iPosition;
       uniform float uUseSpriteRotation;
       uniform float uVelocityOriented;
       uniform float uSpriteAspectX;
@@ -3152,6 +3165,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       varying float vGlowStrength;
       varying float vSpriteAspectX;
       varying float vPointExtent;
+      varying vec2 vLocalUV;
 
       void main() {
         vColor = color;
@@ -3164,7 +3178,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         vVelocityAngle = (uVelocityOriented > 0.5 && length(viewVel.xy) > 0.00001)
           ? atan(viewVel.y, viewVel.x)
           : 0.0;
-        vec3 worldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+        vec3 worldPos = (modelMatrix * vec4(iPosition, 1.0)).xyz;
         vHideFade = 1.0;
         if (uUseHideAngle > 0.5) {
           vec3 orientW = uExplicitOrientationLocal > 0.5
@@ -3174,17 +3188,24 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           float h = clamp((abs(dot(viewDirW, orientW)) - uHideStartCos) * uHideSpeed, 0.0, 1.0);
           vHideFade = (uHideInvert > 0.5) ? (1.0 - h) : h;
         }
-        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-        gl_Position = projectionMatrix * mvPosition;
         float spriteAspectX = max(0.001, abs(uSpriteAspectX * spriteScaleX));
         vSpriteAspectX = spriteAspectX;
         vPointExtent = (uUseSpriteRotation > 0.5)
           ? sqrt(spriteAspectX * spriteAspectX + 1.0)
           : max(spriteAspectX, 1.0);
-        // size is metres (world space). Project it to framebuffer pixels using
-        // the active camera and viewport instead of an arbitrary preview scale.
-        float pixelScale = projectionMatrix[1][1] * 0.5 * max(uViewportHeight, 1.0);
-        gl_PointSize = max(1.0, size * vPointExtent * pixelScale / -mvPosition.z);
+        // INSTANCED camera-facing billboard. position.xy is the quad corner in
+        // [0,1] (= the old gl_PointCoord); iPosition is the per-particle world
+        // center. The old point's world-space DIAMETER was size*vPointExtent
+        // (gl_PointSize = that projected to px); expand the quad by that amount
+        // in view space so it always faces the camera. Flip corner.y so vLocalUV
+        // matches gl_PointCoord (top-left origin, y down). No gl_PointSize ->
+        // no hardware ALIASED_POINT_SIZE_RANGE cap.
+        vec2 cornerUV = position.xy;
+        vLocalUV = cornerUV;
+        vec4 mvPosition = modelViewMatrix * vec4(iPosition, 1.0);
+        float worldDiam = size * vPointExtent;
+        vec2 viewOffset = vec2(cornerUV.x - 0.5, 0.5 - cornerUV.y) * worldDiam;
+        gl_Position = projectionMatrix * vec4(mvPosition.xyz + vec3(viewOffset, 0.0), 1.0);
       }
     `,
     fragmentShader: /* glsl */ `
@@ -3247,6 +3268,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       varying float vGlowStrength;
       varying float vSpriteAspectX;
       varying float vPointExtent;
+      varying vec2 vLocalUV;
 
       float perspectiveDepthToViewZ(const in float invClipZ, const in float near, const in float far) {
         return (near * far) / ((far - near) * invClipZ - far);
@@ -3265,7 +3287,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           // Geometry is measured in sprite-height units: width=scaleX,
           // height=1. Rotation happens in that geometric space so rectangular
           // sprites and custom pivots stay coherent.
-          vec2 pointGeom = (gl_PointCoord - vec2(0.5)) * vPointExtent;
+          vec2 pointGeom = (vLocalUV - vec2(0.5)) * vPointExtent;
           vec2 pivotGeom = vec2(
             (uRotationPivot.x - 0.5) * vSpriteAspectX,
             uRotationPivot.y - 0.5
@@ -3501,7 +3523,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           }
           base.rgb += vec3(mvEmissive);
         } else {
-          vec2 c = gl_PointCoord - vec2(0.5);
+          vec2 c = vLocalUV - vec2(0.5);
           float r = length(c) * 2.0;
           if (r > 1.0) discard;
           // Soft circular falloff (squared).
@@ -3514,7 +3536,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           vec2 screenUv = gl_FragCoord.xy / uDistortionSceneSize;
           vec2 normalOffset = base.rg * 2.0 - 1.0;
           if (dot(normalOffset, normalOffset) < 0.0001) {
-            normalOffset = (gl_PointCoord - vec2(0.5)) * 2.0;
+            normalOffset = (vLocalUV - vec2(0.5)) * 2.0;
           }
           if (uDistortionSceneSize.x > 1.0 && uDistortionSceneSize.y > 1.0) {
             vec2 warpedUv = clamp(
@@ -3560,6 +3582,9 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
     blending: blend.blending,
     transparent: true,
     depthWrite: false,
+    // Instanced camera-facing billboard quads (not GL_POINTS) — draw both faces
+    // so the quad is never back-face culled regardless of corner winding.
+    side: THREE.DoubleSide,
   });
   if (blend.blendSrc !== undefined) mat.blendSrc = blend.blendSrc;
   if (blend.blendDst !== undefined) mat.blendDst = blend.blendDst;
