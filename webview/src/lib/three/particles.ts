@@ -1766,10 +1766,19 @@ class SystemRenderer {
    *  engine's 10x activation prewarm (FUN_1406ce8a0, scale 0.1). Continuous
    *  emitters reach steady-state; one-shot bursts reach peak. See RE doc 63 (H1). */
   private runPrewarm(): void {
-    const window = this.maxEmittingDuration > 0 ? this.maxEmittingDuration : this.maxAge;
-    if (!(window > 0)) return;
+    // Native period = the max emitter particle LIFETIME (maxAge), NOT
+    // maxEmittingDuration (Ghidra FUN_1406ce8a0: dt = maxAge*0.1 ×10, clock left
+    // ADVANCED ~1 lifetime, not reset). Warming over maxEmittingDuration instead
+    // parks `elapsed` exactly at the emission-STOP boundary, so the always-
+    // looping inspector renders only the post-emission DECAY tail and never the
+    // dense emission phase (the H1 sparseness). Warm one lifetime, capped to the
+    // emission window so a true short burst still stops at its peak; a
+    // continuous/long-window emitter lands mid-emission at steady state. RE doc 63 H1.
+    const emitWindow = this.maxEmittingDuration > 0 ? this.maxEmittingDuration : Infinity;
+    const horizon = Math.min(this.maxAge, emitWindow);
+    if (!(horizon > 0)) return;
     const STEPS = 10;
-    const dt = window / STEPS;
+    const dt = horizon / STEPS;
     for (let s = 0; s < STEPS; s++) this.advance(dt, false);
   }
 
