@@ -3399,6 +3399,14 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             // DXT/atlas textures.
             base.a = min(base.a, clamp(rawCoverage, 0.0, 1.0));
           }
+          // M3 (RE doc 63, ps4.txt:614-628) glow key = the particle texture's RAW
+          // value at the sprite UV ("glow@spriteUV.r"). Capture base.r BEFORE the
+          // lightingShineness pow below: muzzle-flash systems author shineness=100
+          // (GK_Shot sys#1), and pow(base.rgb,100) crushes base.rgb→~0 — capturing
+          // gmag after it zeroed the glow key, so U=1 sampled the ramp's BLACK tail
+          // (grey body, no fire). The shineness pow shapes the relit BODY; the glow
+          // key is the unshaded texture value. (2026-06-09: fixes grey muzzle.)
+          float gmag = base.r;
           if (uDistortion <= 0.5) {
             // Native uses log/mul/exp with renderer.lightingShineness before
             // the lightmap/ramp branches. Keep distortion approximations out
@@ -3406,11 +3414,6 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             // vector in the webview, not color.
             base.rgb = pow(max(base.rgb, vec3(0.000001)), vec3(uLightingShineness));
           }
-          // M3 (RE doc 63, ps4.txt:614-628): the GRADIENT_MAP+lightmapping glow
-          // samples the ramp at U = 1 - glow, where glow is the particle
-          // texture's value at the sprite UV BEFORE the LM relight overwrites
-          // base. Capture it here (the relight block below replaces base.rgb).
-          float gmag = base.r;
           if (uLightingMode > 0.5) {
             // _LM directional lightmap (PS_RLT lightmapping4Way/HL2):
             // base.rgb are 3 grayscale renders of the same sprite baked-lit
