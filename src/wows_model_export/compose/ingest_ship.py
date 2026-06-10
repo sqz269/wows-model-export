@@ -417,6 +417,7 @@ def ingest_ship(
     publish_target: Path | None = None,
     publish_force: bool = False,
     variant_permoflage: str | None = "auto",
+    export_exterior_hulls: bool = False,
     toolkit_ship_override: str | None = None,
     gameparams_ship_id: str | None = None,
     provenance_build_library: bool | None = None,
@@ -477,6 +478,14 @@ def ingest_ship(
             Exterior carries a full hull mesh swap.  Pass an Exterior
             id (e.g. ``PJES478_RED_TAKAO``) to scaffold a non-default
             variant; ``"none"`` to disable.
+        export_exterior_hulls
+            HullDelta (ship-exterior unification): export each
+            hull-swap exterior's variant hull GLB-only into
+            ``models/exteriors/<exterior_id>_hull.glb`` and stamp the
+            record's ``hull`` field.  One extra toolkit subprocess per
+            hull-swap exterior (idempotent skip-on-existence).  Only
+            applies to BASE scaffolds (variant-routed ingests skip the
+            exteriors emit entirely).
         toolkit_ship_override
             Override the name passed to ``wowsunpack export-ship`` /
             ``armor-json`` / ``ammo``.  Useful when disambiguation
@@ -621,6 +630,7 @@ def ingest_ship(
             toolkit_ship=toolkit_name if toolkit_name != label else None,
             gameparams_ship_id=gameparams_ship_id,
             variant_permoflage=variant_permoflage,
+            export_exterior_hulls=export_exterior_hulls,
             on_event=on_event,
             cancel=cancel,
         )
@@ -668,6 +678,10 @@ def ingest_ship(
             toolkit_ship=toolkit_name if toolkit_name != label else None,
             gameparams_ship_id=gameparams_ship_id,
             variant_permoflage=variant_permoflage,
+            # Skip-on-existence makes this cheap on the post-library pass —
+            # the hulls already exported at scaffold time; the re-emit only
+            # refreshes the materials manifests + Ry180 folds.
+            export_exterior_hulls=export_exterior_hulls,
             on_event=on_event,
             cancel=cancel,
         )

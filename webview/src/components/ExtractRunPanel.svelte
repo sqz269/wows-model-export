@@ -18,6 +18,10 @@
     onEnqueue: () => void;
     /** True while an enqueue POST is in flight. Disables the button. */
     enqueueBusy: boolean;
+    /** HullDelta: export hull-swap exteriors' variant hulls on base
+     *  extracts. Owned by the parent route (shared with Run + Queue). */
+    exteriorHulls: boolean;
+    onExteriorHullsChange: (on: boolean) => void;
   }
 
   const {
@@ -28,7 +32,13 @@
     onRun,
     onEnqueue,
     enqueueBusy,
+    exteriorHulls,
+    onExteriorHullsChange,
   }: Props = $props();
+
+  // Hull export only applies to BASE scaffolds — a mesh-swap permoflage
+  // pick is a variant-routed legacy extract that skips the exteriors emit.
+  const exteriorHullsApplies = $derived(!(permoflage && permoflage.topology === 'mesh_swap'));
 
   const label = $derived(suggestedLabel(vehicle, permoflage));
   const alreadyExtracted = $derived(extractedShips.some((s) => s.name === label));
@@ -49,6 +59,7 @@
     } else if (!permoflage) {
       out.push(`  --variant-permoflage none`);
     }
+    if (exteriorHulls && exteriorHullsApplies) out.push('  --exterior-hulls');
     out.push('  --build-library');
     out.push('  --non-interactive');
     return out;
@@ -70,6 +81,25 @@
   </div>
   <pre
     class="bg-popover text-foreground border-border max-h-60 overflow-auto rounded border px-2.5 py-2 font-mono text-[11px] leading-snug">{commandLines.join(' \\\n')}</pre>
+  {#if exteriorHullsApplies}
+    <label class="mt-2 flex items-start gap-2 text-[11px]">
+      <input
+        type="checkbox"
+        checked={exteriorHulls}
+        onchange={(e) => onExteriorHullsChange(e.currentTarget.checked)}
+        class="mt-0.5"
+      />
+      <span>
+        <strong>Export exterior hulls</strong>
+        <span class="text-muted-foreground">
+          (HullDelta) — also export each hull-swap exterior's variant hull into
+          <code class="font-mono">models/exteriors/</code> so the ship viewer's Exteriors tab can
+          swap hulls. One extra <code class="font-mono">export-ship</code> per hull-swap exterior;
+          skipped for hulls already on disk.
+        </span>
+      </span>
+    </label>
+  {/if}
   <div class="mt-2.5 flex flex-wrap items-center gap-3">
     <button
       type="button"
