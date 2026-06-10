@@ -187,6 +187,25 @@ def _publish_ship(
                     copied += 1
                 else:
                     skipped += 1
+        # models/exteriors/ — variant hull GLBs for hull-swap exteriors
+        # (ship-exterior unification HullDelta; the top-level iterdir above
+        # is deliberately non-recursive, so without this block the variant
+        # hulls would never publish — handoff §9f.2). Empty/absent until
+        # the producer cutover step emits them.
+        src_ext = src_gm3d / "exteriors"
+        if src_ext.is_dir():
+            dst_ext = dst_gm3d / "exteriors"
+            for src in src_ext.rglob("*"):
+                if not src.is_file():
+                    continue
+                if src.suffix.lower() not in (".glb", ".json"):
+                    continue
+                rel = src.relative_to(src_ext)
+                dst = dst_ext / rel
+                if _copy_if_changed(src, dst, force):
+                    copied += 1
+                else:
+                    skipped += 1
         # skins/<skin_id>/{hull,accessories/<asset_id>}/*.dd*
         # Sidecar `Skin.texture_sets[<scheme>][<slot>].dds_mips` paths
         # are relative to the hull GLB dir; preserving the subtree keeps
