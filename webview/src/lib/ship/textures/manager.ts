@@ -753,6 +753,37 @@ export class TextureManager {
 
   // ── Lifecycle ─────────────────────────────────────────────────────
 
+  /**
+   * Replace the variant-swap camo opt-out set. The ACTIVE exterior owns
+   * the set (ship-exterior unification): its swapped mounts ship bespoke
+   * albedos that already encode the variant, so Path A / Path B-MGN paint
+   * is suppressed on them. Takes effect on the next texture application
+   * (`setShowTextures(true)` / `setActiveSkin`) via the per-entry
+   * `variantOptOut` gate in updateCamoUniforms.
+   */
+  setVariantSwappedAssetIds(ids: Iterable<string>): void {
+    this.variantSwappedAssetIds = new Set(ids);
+  }
+
+  /**
+   * Drop the bind-index entries for a set of meshes — the per-mount
+   * counterpart of `clearShip`, used when an exterior switch tears down
+   * individual placements. Scheme bindings (keyed by asset, not mesh)
+   * survive so a re-instantiated mount re-adopts them. Like `clearShip`,
+   * cloned materials are dropped by reference, not disposed — their
+   * textures live in the shared decoded cache.
+   */
+  unregisterMeshes(meshes: ReadonlySet<THREE.Object3D>): void {
+    if (meshes.size === 0) return;
+    this.entries = this.entries.filter((e) => !meshes.has(e.mesh));
+    for (const [key, bucket] of this.entriesByKey) {
+      const kept = bucket.filter((e) => !meshes.has(e.mesh));
+      if (kept.length === bucket.length) continue;
+      if (kept.length === 0) this.entriesByKey.delete(key);
+      else this.entriesByKey.set(key, kept);
+    }
+  }
+
   /** Per-ship cleanup. Drops entries + scheme bindings; KEEPS the decoded
    *  texture cache (most ship swaps reuse the same library textures). */
   clearShip(): void {

@@ -592,6 +592,67 @@ export interface SidecarEffects {
   // join by `attachment.particle_path`.
 }
 
+// ─── Exteriors (ship-exterior unification Step 0) ────────────────────────
+// One record per WG Exterior (mesh-swap permoflage) on the BASE ship's
+// sidecar — sibling to `skins[]`, DISTINCT from hull-module `variants`.
+// `camo_scheme_key` cross-links into this ship's `skins[].scheme_key` so one
+// selector flips geometry + paint together. Additive at schema_version 3;
+// absent on pre-Step-0 sidecars. See the producer's resolve/exterior_unify.py.
+
+/** Per-HP resolved mount swap. `transform` is the schema_v6 Ry(180°)-baked
+ *  VARIANT placement matrix and `misc_filter` the nodesConfig override —
+ *  neither is reconstructable from the base placement; consume VERBATIM. */
+export interface ExteriorMountSwap {
+  hp_name: string;
+  /** The base ship's asset at this HP (the mount this swap replaces). */
+  base_asset_id?: string | null;
+  asset_id?: string | null;
+  dead_asset_id?: string | null;
+  transform?: { matrix: number[] } | null;
+  /** 3-state whitelist override: null/absent = all, [] = none, [list]. */
+  misc_filter?: string[] | null;
+  /** Diagnostic only — consumers do NOT re-apply Ry(180°). */
+  attached_y_flip?: boolean;
+}
+
+export interface ExteriorSwapTable {
+  by_asset_id?: Record<string, string>;
+  by_hp_name?: Record<string, string>;
+  dead_by_hp_name?: Record<string, string>;
+  misc_filter_by_hp?: Record<string, string[]>;
+}
+
+export interface ExteriorRecord {
+  /** WG Exterior param-name (`PAES488_Azur_Baltimore`) — the index key.
+   *  Index 0 is always the synthesised `default` (vanilla composition). */
+  exterior_id: string;
+  display_name?: string | null;
+  /** Lowercased variant hull model_dir (`asc080_baltimore_1944_azur`) when
+   *  the Exterior carries a genuine hull swap; null when the hull is shared.
+   *  The variant hull GLB is NOT extracted into the unified folder yet
+   *  (HullDelta is a later producer step) — treat non-null as "hull differs
+   *  in game" provenance, not as a loadable asset. */
+  wg_asset_id?: string | null;
+  /** GameParams typeinfo.species (`Skin` / `MSkin` / `default`). */
+  species?: string | null;
+  /** Grouping key for pickers (`azurlane` / `arpeggio` / `default` / …). */
+  peculiarity?: string | null;
+  /** Exactly one record per ship is native; consumers auto-select it on
+   *  load (WG renders nativePermoflage by default — ARP-style ships never
+   *  show their bare hull in game). */
+  is_native?: boolean;
+  /** Cross-link into `skins[].scheme_key`; null when the matching skin was
+   *  never ingested (keep the current skin and surface a console warning). */
+  camo_scheme_key?: string | null;
+  /** HullDelta — always null until the producer cutover step lands. */
+  hull?: unknown | null;
+  swap_table?: ExteriorSwapTable;
+  mounts?: ExteriorMountSwap[];
+  /** Camo opt-out set for THIS exterior (swap targets + bespoke attached
+   *  children); replaces ship.variant_swapped_asset_ids while active. */
+  variant_swapped_asset_ids?: string[];
+}
+
 export interface SidecarDoc {
   ship?: SidecarShip;
   materials?: SidecarMaterial[];
@@ -605,6 +666,9 @@ export interface SidecarDoc {
   ballistics?: BallisticsSection;
   skins?: Skin[];
   effects?: SidecarEffects;
+  /** Ship-exterior unification: indexable mesh-swap permoflage selector.
+   *  Absent on pre-Step-0 sidecars (treat as `[default]`). */
+  exteriors?: ExteriorRecord[];
 }
 
 /** Per-material scheme inventory surfaced on the Camos tab. */
