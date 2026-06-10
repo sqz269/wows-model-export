@@ -658,10 +658,7 @@ export class ShipViewer {
     const overrideRec = overrideId
       ? (sidecar?.exteriors ?? []).find((e) => e.exterior_id === overrideId)
       : undefined;
-    const overrideHull = (overrideRec?.hull ?? null) as {
-      hull_glb?: string | null;
-      materials?: SidecarDoc['materials'];
-    } | null;
+    const overrideHull = overrideRec?.hull ?? null;
 
     report('Loading hull GLB…');
     // `hull.hull_glb` is ship-folder-relative (`models/exteriors/<id>_hull.glb`).
@@ -728,6 +725,37 @@ export class ShipViewer {
       throw new Error(`failed to load placements: HTTP ${placementsRes.status}`);
     }
     const placementsDoc = (await placementsRes.json()) as ShipPlacementsDoc;
+
+    // Variant-hull decoratives REPLACEMENT (hull skel_ext layer): the
+    // engine reads hull decoratives (voice tubes, binoculars,
+    // searchlights…) from the LOADED hull model's `.skel_ext` files, so a
+    // hull swap replaces the whole layer — drop every base
+    // `source == "skel_ext_hash"` placement and instantiate the variant
+    // doc's instead. Without the doc (producer harvest not run yet) the
+    // base decoratives stay — consistent with the never-a-hole fallback.
+    if (overrideHull?.decoratives) {
+      try {
+        const decoRes = await fetch(repoUrl(`${shipRootPath}/${overrideHull.decoratives}`));
+        if (decoRes.ok) {
+          const decoDoc = (await decoRes.json()) as Partial<ShipPlacementsDoc>;
+          let dropped = 0;
+          let added = 0;
+          for (const section of SHIP_SECTIONS) {
+            const before = placementsDoc[section] ?? [];
+            const kept = before.filter((p) => p.source !== 'skel_ext_hash');
+            dropped += before.length - kept.length;
+            const extra = decoDoc[section] ?? [];
+            added += extra.length;
+            placementsDoc[section] = [...kept, ...extra];
+          }
+          report(`Variant hull decoratives: ${dropped} base dropped, ${added} variant added.`);
+        } else {
+          console.warn(`[exterior] decoratives doc HTTP ${decoRes.status}; base decoratives kept`);
+        }
+      } catch (err) {
+        console.warn('[exterior] decoratives doc fetch failed; base decoratives kept:', err);
+      }
+    }
 
     // Build the per-HP miscFilter lookup from sidecar mounts. WG runtime
     // treats miscFilter as a WHITELIST (verified 2026-05-08 from

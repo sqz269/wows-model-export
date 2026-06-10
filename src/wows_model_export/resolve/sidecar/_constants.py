@@ -409,6 +409,15 @@ _HULL_DELTA_ORDER: tuple[str, ...] = (
     "hull_glb",
     "material_mappings",
     "materials",
+    # Ship-folder-relative path to the variant hull's OWN skel_ext
+    # decoratives doc (``models/exteriors/<exterior_id>_decoratives.json``,
+    # same sections shape as ``<Ship>_accessories.json``). REPLACEMENT
+    # semantics: the engine reads decoratives from the loaded hull model's
+    # ``.skel_ext`` files, so a hull swap replaces the whole layer —
+    # consumers drop every base ``source == "skel_ext_hash"`` placement and
+    # instantiate this doc's instead (often near-empty: themed hulls bake
+    # their greebles into the mesh).
+    "decoratives",
 )
 
 #: Top-level ``variants`` section keys (schema v3.1).

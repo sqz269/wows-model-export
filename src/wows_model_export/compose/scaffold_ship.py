@@ -55,7 +55,9 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import re
+import shutil
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -79,6 +81,7 @@ from ..toolkit import ingest_ship_supported as _toolkit_ingest_ship_supported
 from ..toolkit.gameparams import ensure_dump as _ensure_gameparams_dump
 from ..types import OnEvent, ScaffoldResult
 from . import exterior_hull_hp as _exterior_hull_hp
+from . import skel_ext_resolve as _skel_ext_resolve
 from ._step_runner import StepRunner
 
 # ---------------------------------------------------------------------------
@@ -371,6 +374,17 @@ def _export_exterior_hulls(
       persists only meaningfully-moved HPs. ``_collect_exteriors_block``
       reads the file on every emit, so the re-anchored ``mounts[]``
       survive flag-less refreshes.
+    - **Decoratives harvest** (``<exterior_id>_decoratives.json``,
+      skip-on-existence): hull skel_ext decoratives (voice tubes,
+      binoculars, searchlights — the ``source == "skel_ext_hash"``
+      placements) belong to the LOADED hull model, so a hull swap
+      replaces the whole layer. The variant's own candidates resolve
+      through the same ``resolve_decorative_placements`` pipeline
+      (``keep_record_offsets=("0x0",)`` = the variant model's base
+      block); the record's ``hull.decoratives`` references the doc and
+      consumers swap the layer wholesale. Candidates (~35 MB/hull) are
+      resolved from a temp dir and never persisted; when the hull GLB
+      already exists a JSON-only throwaway export harvests them.
 
     Returns ``(fresh_glb_exports, fresh_hp_harvests)``. Failures degrade
     to a warning per exterior; the record's ``hull`` stays absent
@@ -378,7 +392,11 @@ def _export_exterior_hulls(
     """
     exported = 0
     harvested = 0
+    deco_harvested = 0
     ext_dir = gm3d_dir / "exteriors"
+    # Cross-nation phantom filter input for the decoratives resolve —
+    # the variant hull belongs to the same ship/nation as the base.
+    base_ship_nation = ((base_doc or {}).get("ship") or {}).get("nation") or None
 
     # Base-hull context for the HP re-anchor harvest, resolved lazily ONCE
     # (one dump-bones sweep of the base hull serves every exterior).
@@ -424,6 +442,17 @@ def _export_exterior_hulls(
             continue
         glb_path = ext_dir / f"{ext_id}_hull.glb"
         mappings_path = ext_dir / f"{ext_id}_material_mappings.json"
+        deco_path = ext_dir / f"{ext_id}_decoratives.json"
+        need_deco = not deco_path.is_file()
+        # Temp homes for the export's side JSONs (the skel_ext candidates
+        # file is ~35 MB per hull — resolve immediately, never persist).
+        _tmp_dir: Path | None = None
+        pl_tmp: Path | None = None
+        cand_tmp: Path | None = None
+        if need_deco:
+            _tmp_dir = Path(tempfile.mkdtemp(prefix=f"extdeco_{ext_id}_"))
+            pl_tmp = _tmp_dir / f"{ext_id}_placements.json"
+            cand_tmp = _tmp_dir / f"{ext_id}_skel_ext.json"
         try:
             if not glb_path.is_file():
                 ext_dir.mkdir(parents=True, exist_ok=True)
@@ -431,14 +460,27 @@ def _export_exterior_hulls(
                     model_dir, glb_path,
                     accessories="exclude",
                     all_render_sets=True,
-                    placements_json=None,
-                    skel_ext_candidates_json=None,
+                    placements_json=pl_tmp,
+                    skel_ext_candidates_json=cand_tmp,
                     material_mappings_json=mappings_path,
                     no_textures=True,
                     raw_dds_dir=textures_dds_dir,
                     config=cfg,
                 )
                 exported += 1
+            elif need_deco:
+                # Hull GLB already on disk (skip-on-existence) but the
+                # decoratives doc is missing — run a JSON-only harvest
+                # export to a throwaway GLB, mirroring the per-hull
+                # placements harvester.
+                _toolkit_export_ship(
+                    model_dir, _tmp_dir / "_discard.glb",
+                    accessories="exclude",
+                    placements_json=pl_tmp,
+                    skel_ext_candidates_json=cand_tmp,
+                    no_textures=True,
+                    config=cfg,
+                )
             mats = sidecar.materials_from_glb(
                 glb_path,
                 textures_dir=textures_dir if textures_dir.is_dir() else None,
@@ -456,6 +498,38 @@ def _export_exterior_hulls(
             }
         except Exception as e:
             _warn(warnings, f"exterior hull export failed for {ext_id} ({e}); hull left null")
+
+        # Variant-hull skel_ext decoratives (REPLACEMENT layer): the engine
+        # reads hull decoratives (voice tubes, binoculars, searchlights …)
+        # from the LOADED hull model's `.skel_ext` files, so a hull swap
+        # replaces the whole layer — themed hulls usually carry few or
+        # none (greebles baked into the mesh). Resolve the variant's own
+        # candidates through the SAME pipeline the base ship used
+        # (`keep_record_offsets=("0x0",)` = the variant model's base
+        # block) and persist the doc for consumers.
+        if need_deco and cand_tmp is not None and cand_tmp.is_file():
+            try:
+                _skel_ext_resolve.resolve_decorative_placements(
+                    pl_tmp,
+                    candidates_json=cand_tmp,
+                    output_json=deco_path,
+                    hull_glb=glb_path if glb_path.is_file() else None,
+                    ship_nation=base_ship_nation,
+                    config=cfg,
+                )
+                deco_harvested += 1
+            except Exception as e:
+                _warn(
+                    warnings,
+                    f"exterior decoratives resolve failed for {ext_id} ({e}); "
+                    f"base decoratives kept",
+                )
+        if _tmp_dir is not None:
+            shutil.rmtree(_tmp_dir, ignore_errors=True)
+        if deco_path.is_file() and isinstance(rec.get("hull"), dict):
+            rec["hull"]["decoratives"] = (
+                f"models/exteriors/{ext_id}_decoratives.json"
+            )
 
         # HP re-anchor harvest — independent of the GLB skip so existing
         # HullDelta exports gain the map on their next refresh.
@@ -491,6 +565,12 @@ def _export_exterior_hulls(
                 f"exterior HP-transform harvest failed for {ext_id} ({e}); "
                 f"base-anchored mounts kept",
             )
+    if deco_harvested:
+        print(
+            f"[scaffold_ship] resolved {deco_harvested} exterior decoratives "
+            f"doc(s) -> {ext_dir}",
+            file=sys.stderr,
+        )
     return exported, harvested
 
 

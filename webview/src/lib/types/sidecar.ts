@@ -718,6 +718,24 @@ export interface ExteriorSwapTable {
   misc_filter_by_hp?: Record<string, string[]>;
 }
 
+/** HullDelta payload on a hull-swap exterior record (`exteriors[].hull`).
+ *  All paths are ship-folder-relative (`models/exteriors/...`); texture
+ *  paths inside `materials` resolve against the BASE `models/` dir (variant
+ *  DDS stems coexist in the shared `textures_dds/`). */
+export interface ExteriorHullDelta {
+  hull_glb?: string | null;
+  material_mappings?: string | null;
+  /** The variant hull's own manifest — same shape as the top-level
+   *  `materials[]`. Bound INSTEAD of the base manifest on the reload path. */
+  materials?: SidecarMaterial[];
+  /** The variant hull's own skel_ext decoratives doc (same sections shape
+   *  as `<Ship>_accessories.json`). REPLACEMENT semantics: drop every base
+   *  `source == "skel_ext_hash"` placement and instantiate this doc's
+   *  instead — themed hulls usually carry few or none (greebles baked into
+   *  the hull mesh). Absent until the producer harvest ran. */
+  decoratives?: string | null;
+}
+
 export interface ExteriorRecord {
   /** WG Exterior param-name (`PAES488_Azur_Baltimore`) — the index key.
    *  Index 0 is always the synthesised `default` (vanilla composition). */
@@ -740,8 +758,9 @@ export interface ExteriorRecord {
   /** Cross-link into `skins[].scheme_key`; null when the matching skin was
    *  never ingested (keep the current skin and surface a console warning). */
   camo_scheme_key?: string | null;
-  /** HullDelta — always null until the producer cutover step lands. */
-  hull?: unknown | null;
+  /** HullDelta — null/absent until the producer's hull export ran for
+   *  this exterior (`scaffold_ship(export_exterior_hulls=True)`). */
+  hull?: ExteriorHullDelta | null;
   swap_table?: ExteriorSwapTable;
   mounts?: ExteriorMountSwap[];
   /** Camo opt-out set for THIS exterior (swap targets + bespoke attached

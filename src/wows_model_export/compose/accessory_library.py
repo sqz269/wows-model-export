@@ -219,6 +219,48 @@ def _harvest_exterior_mounts(
                 r.species = base.get("species")
 
 
+def _harvest_exterior_decoratives(
+    doc: dict,
+    *,
+    ship_dir: Path,
+    ship_name: str,
+    records: dict[AssetKey, AssetRecord],
+    warnings: list[str],
+) -> None:
+    """Harvest asset_ids from each hull-swap exterior's decoratives doc
+    (``exteriors[].hull.decoratives`` → ``models/exteriors/<id>_decoratives.json``).
+
+    The variant hull's skel_ext layer REPLACES the base one, and themed
+    hulls can reference bespoke decorative assets that appear in no
+    placement section anywhere (e.g. ``JM6055_Kawanishi_N1K1_StarTrek``) —
+    without this walk their GLBs are never built and consumers drop them.
+    Unlike ``_harvest_exterior_mounts`` no taxonomy borrowing is needed:
+    the resolver stamped each entry's own ``scope/category/subcategory``.
+    """
+    exteriors = doc.get("exteriors")
+    if not isinstance(exteriors, list):
+        return
+    for rec in exteriors:
+        if not isinstance(rec, dict):
+            continue
+        hull = rec.get("hull")
+        rel = hull.get("decoratives") if isinstance(hull, dict) else None
+        if not isinstance(rel, str) or not rel:
+            continue
+        deco_path = ship_dir / rel
+        if not deco_path.is_file():
+            continue
+        try:
+            deco = json.loads(deco_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            warnings.append(f"couldn't read decoratives doc {deco_path}: {e}")
+            continue
+        for section in PLACEMENT_SECTIONS:
+            _harvest_section_entries(
+                deco.get(section), ship_name=ship_name, records=records,
+            )
+
+
 def union_assets(
     sidecar_files: list[Path],
     *,
@@ -260,6 +302,16 @@ def union_assets(
         # Ship-exterior unification: swap-target assets referenced only by
         # exteriors[].mounts[] (never by any placement section).
         _harvest_exterior_mounts(doc, ship_name=ship_name, records=records)
+
+        # HullDelta decoratives: bespoke assets referenced only by a
+        # variant hull's skel_ext replacement layer.
+        _harvest_exterior_decoratives(
+            doc,
+            ship_dir=path.parent,
+            ship_name=ship_name,
+            records=records,
+            warnings=warn_log,
+        )
 
     # Legacy fallback for ship folders without a sidecar yet.
     for path in (fallback_placements_files or []):
