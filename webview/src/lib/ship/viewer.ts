@@ -28,6 +28,7 @@ import { loadWgEnvironment, type WetnessParams, type WgEnvironment } from '$lib/
 import { repoUrl } from '$lib/api';
 import { SHIP_SECTIONS } from '$lib/types';
 import type {
+  ExteriorRecord,
   LibraryIndex,
   SeamKey,
   SeamState,
@@ -280,6 +281,64 @@ interface MountArmorRecord {
   thicknessOf: ArmorThicknessFn | null;
 }
 
+/** Synthesised vanilla-composition record for sidecars that predate the
+ *  exteriors[] emit — mirrors the producer's default_exterior_record(). */
+const DEFAULT_EXTERIOR: ExteriorRecord = {
+  exterior_id: 'default',
+  display_name: 'Standard',
+  species: 'default',
+  peculiarity: 'default',
+  is_native: true,
+  camo_scheme_key: 'main',
+  hull: null,
+  mounts: [],
+  variant_swapped_asset_ids: [],
+};
+
+/** Context captured at `loadShip` time so `setActiveExterior` can later
+ *  re-instantiate individual mounts with the exact machinery (library
+ *  index, sidecar-derived per-instance maps, texture base URL) the
+ *  original load used. Null before the first load. */
+interface ShipLoadContext {
+  library: LibraryIndex;
+  sidecar: SidecarDoc | null;
+  hullBaseUrl: string;
+  placementsDoc: ShipPlacementsDoc;
+  miscFilterByInstanceId: Map<string, string[]>;
+  arcLimitsByInstanceId: Map<string, MountArcLimits>;
+}
+
+/** Loaded GLB template + attached-children bundle for one asset_id —
+ *  everything `instantiateMount` needs to clone synchronously. */
+interface AssetBundle {
+  assetId: string;
+  tpl: THREE.Object3D;
+  attachedDoc: Awaited<ReturnType<AttachedDocCache['load']>>;
+  attachedChildTpls: Map<string, THREE.Object3D | null>;
+}
+
+/** Per-placement instancing stats, accumulated into `ShipLoadStats`. */
+interface MountStats {
+  attachmentsRendered: number;
+  attachmentsFilteredByMisc: number;
+}
+
+/** Per-mount bookkeeping so an exterior switch can tear down + rebuild ONE
+ *  placement without a whole-ship reload. Mirrors exactly what
+ *  `instantiateMount` contributed to the shared tracking structures. */
+interface MountRecord {
+  instanceId: string;
+  section: ShipSectionKey;
+  /** The effective placement used (base, or exterior-overridden). */
+  placement: ShipPlacement;
+  /** The cloned root added to `sectionGroups[section]`. */
+  inst: THREE.Object3D;
+  /** Every Object3D in the instance subtree (incl. attached children) —
+   *  drives one-pass removal from the shared tracking maps. */
+  subtree: Set<THREE.Object3D>;
+  armorRecord: MountArmorRecord | null;
+}
+
 /** Detach an accessory's `Armor` group from its parent so the normal
  *  texture / color / LOD registration skips it. Returns the group + meshes;
  *  the caller re-adds the group (hidden) after registration so the armor
@@ -354,6 +413,13 @@ export class ShipViewer {
   private hpByInstanceId = new Map<string, string>();
   private hitboxEntries: HitboxMeshEntry[] | null = null;
   private hitboxViewEnabled = false;
+
+  // Exterior switching (ship-exterior unification). `mountRecords` mirrors
+  // every live placement so `setActiveExterior` can tear down + rebuild the
+  // swapped subset; `shipCtx` is the loadShip context the rebuild reuses.
+  private mountRecords = new Map<string, MountRecord>();
+  private shipCtx: ShipLoadContext | null = null;
+  private activeExteriorId = 'default';
 
   // WG-authored bones & VFX-points overlay. Lives in the scene from
   // construction (like the accessory viewer's rig overlay); rebuilt per
@@ -570,6 +636,18 @@ export class ShipViewer {
       }
     }
 
+    // Stash the load context — setActiveExterior re-instantiates individual
+    // mounts through the same machinery after this load completes.
+    const ctx: ShipLoadContext = {
+      library,
+      sidecar,
+      hullBaseUrl,
+      placementsDoc,
+      miscFilterByInstanceId,
+      arcLimitsByInstanceId,
+    };
+    this.shipCtx = ctx;
+
     // Flatten typed sections into one queue.
     const queue: { section: ShipSectionKey; placement: ShipPlacement }[] = [];
     for (const section of SHIP_SECTIONS) {
@@ -598,198 +676,28 @@ export class ShipViewer {
       while (cursor < tasks.length) {
         const idx = cursor++;
         const [assetId, places] = tasks[idx];
-        const libEntry = library.assets[assetId];
+        const bundle = await this.loadAssetBundle(assetId, ctx, unresolved);
 
-        if (!libEntry) {
+        if (!bundle) {
           unresolved.set(assetId, places.length);
           loadedAssets++;
           report(
             `Loaded ${loadedAssets}/${tasks.length} types · ${renderedPlacements} placements · ${attachmentsRendered} attached`,
           );
           continue;
-        }
-
-        // Load host template + attached_accessories.json in parallel.
-        // For hosts without a bundle (~most assets) the doc resolves to
-        // null; the inner loop short-circuits.
-        const [tpl, attachedDoc] = await Promise.all([
-          this.accessoryCache.load(libEntry.glb),
-          this.attachedDocCache.load(libEntry),
-        ]);
-        if (!tpl) {
-          unresolved.set(assetId, places.length);
-          loadedAssets++;
-          report(
-            `Loaded ${loadedAssets}/${tasks.length} types · ${renderedPlacements} placements · ${attachmentsRendered} attached`,
-          );
-          continue;
-        }
-
-        // Bind host's texture sets before cloning so registerAccessoryMesh
-        // sees populated schemes.
-        this.textures.bindLibraryAsset(assetId, libEntry, sidecar, hullBaseUrl);
-
-        // Pre-warm every distinct attached-child template + bind its
-        // texture sets. The accessoryCache dedupes across hosts so a
-        // child bundled by N main turrets is fetched once. Resolved
-        // templates are stashed locally so the per-placement loop below
-        // can clone them synchronously.
-        const attachedChildTpls = new Map<string, THREE.Object3D | null>();
-        if (attachedDoc && attachedDoc.attachments_live.length > 0) {
-          const childIds = new Set<string>();
-          for (const att of attachedDoc.attachments_live) childIds.add(att.asset_id);
-          const childPromises = Array.from(childIds).map(async (cid) => {
-            const childLib = library.assets[cid];
-            if (!childLib) {
-              attachedChildTpls.set(cid, null);
-              unresolved.set(cid, (unresolved.get(cid) ?? 0) + 1);
-              return;
-            }
-            this.textures.bindLibraryAsset(cid, childLib, sidecar, hullBaseUrl);
-            const tpl = await this.accessoryCache.load(childLib.glb);
-            attachedChildTpls.set(cid, tpl);
-          });
-          await Promise.all(childPromises);
         }
 
         for (const e of places) {
-          // Deep-clone with SkeletonUtils for skinned templates so each
-          // placement has its own bones — sharing a Skeleton would tie
-          // every turret's yaw to the same `Rotate_Y` instance.
-          const inst = cloneAccessoryInstance(tpl);
-          applyPlacementMatrix(inst, e.placement.transform.matrix);
-          // Pull the accessory's own armor (turret/secondary `Armor` group)
-          // out before registration so it isn't textured / colored / LOD-
-          // bucketed as normal turret geometry. Re-added hidden below.
-          const armorDetached = detachAccessoryArmor(inst);
-          const { colorEntries, meshesByLodLevel } = tagAndIndexInstance(
-            inst,
-            {
-              section: e.section,
-              placement: e.placement,
-              colorMaterials: this.colorMaterials,
-              lodPolicy: this.lodPolicy,
-            },
-            this.placementsByMesh,
-          );
-          this.placementColorEntries.push(...colorEntries);
-          for (const [level, meshes] of meshesByLodLevel) {
-            let bucket = this.placementMeshesByLodLevel.get(level);
-            if (!bucket) {
-              bucket = [];
-              this.placementMeshesByLodLevel.set(level, bucket);
-            }
-            bucket.push(...meshes);
-          }
-          inst.traverse((obj) => {
-            const m = obj as THREE.Mesh;
-            if (!m.isMesh) return;
-            this.textures.registerAccessoryMesh(m, e.placement);
-          });
-          // Look for WG rig nodes (`Rotate_Y` / `Rotate_X`). Most
-          // gun/main and gun/secondary mounts have them; AA and static
-          // miscs return null silently.
-          const arcLimits = arcLimitsByInstanceId.get(e.placement.instance_id) ?? null;
-          const rig = extractTurretRig(
-            inst,
-            e.placement.asset_id,
-            e.placement.instance_id,
-            arcLimits,
-          );
-          if (rig) {
-            this.turretRigs.register(rig);
-          } else if (arcLimits?.yawRangeDeg) {
-            // Static mount with a traverse arc — torpedo tubes are static
-            // meshes (no Rotate_Y bone), so draw their firing arc without
-            // animating them.
-            this.turretRigs.registerStaticArc(e.placement.instance_id, inst, arcLimits);
-          }
-          // Re-attach the detached armor (hidden) so it rides the placement
-          // transform, and record it for the armor view. Rigged mounts get
-          // their armor attached to the yaw bone on first reveal so it rotates
-          // with the turret.
-          if (armorDetached && armorDetached.meshes.length > 0) {
-            armorDetached.parent.add(armorDetached.group);
-            // Hide per-mesh (not the group): the armor view toggles mesh
-            // visibility, and rigged mounts move their meshes out of the group
-            // onto the yaw bone — so group-level visibility wouldn't gate them.
-            for (const m of armorDetached.meshes) m.visible = false;
-            this.mountArmorRecords.push({
-              hp: this.hpByInstanceId.get(e.placement.instance_id) ?? null,
-              assetId: e.placement.asset_id,
-              instanceId: e.placement.instance_id,
-              section: e.section,
-              meshes: armorDetached.meshes,
-              rig,
-              entries: [],
-              thicknessOf: null,
-            });
-          }
-          this.sectionGroups[e.section].add(inst);
+          // HP-side miscFilter: sidecar Phase 6 autofill takes precedence
+          // over any value the placements JSON might carry.
+          const miscFilter =
+            miscFilterByInstanceId.get(e.placement.instance_id) ??
+            e.placement.misc_filter ??
+            null;
+          const stats = this.instantiateMount(e.section, e.placement, bundle, miscFilter);
           renderedPlacements++;
-
-          // Attached accessories. Resolve HP-side miscFilter (sidecar
-          // Phase 6 autofill takes precedence over any value the
-          // placements JSON might carry).
-          if (attachedDoc && attachedDoc.attachments_live.length > 0) {
-            const filterList: string[] | null =
-              miscFilterByInstanceId.get(e.placement.instance_id) ??
-              e.placement.misc_filter ??
-              null;
-            const filterSet = filterList && filterList.length > 0 ? new Set(filterList) : null;
-            const dropAll = filterList !== null && filterList.length === 0;
-
-            for (const att of attachedDoc.attachments_live) {
-              if (dropAll) {
-                attachmentsFilteredByMisc++;
-                continue;
-              }
-              if (filterSet !== null && !filterSet.has(att.placement_id)) {
-                attachmentsFilteredByMisc++;
-                continue;
-              }
-              const childTpl = attachedChildTpls.get(att.asset_id);
-              if (!childTpl) continue;
-
-              // Attached children (catapults, rangefinders, etc.) are
-              // typically static, but use the skin-aware cloner anyway so
-              // the rare rigged child (e.g. some director mounts) gets
-              // its own bones.
-              const childInst = cloneAccessoryInstance(childTpl);
-              applyAttachedMatrix(childInst, att.transform.matrix);
-              childInst.userData.attached_to_instance_id = e.placement.instance_id;
-              childInst.userData.attached_placement_id = att.placement_id;
-              childInst.userData.attached_asset_id = att.asset_id;
-              childInst.userData.section = e.section;
-              inst.add(childInst);
-
-              // Build a per-child placement so camo classification reads
-              // the child's own scope/category (catches misc/plane/float
-              // routing for catapults, rangefinders, ammo boxes).
-              const childLib = library.assets[att.asset_id];
-              const childPlacement: ShipPlacement = {
-                ...e.placement,
-                asset_id: att.asset_id,
-                scope: childLib?.scope ?? e.placement.scope,
-                category: childLib?.category ?? e.placement.category,
-                subcategory: childLib?.subcategory ?? e.placement.subcategory,
-              };
-              childInst.traverse((obj) => {
-                const cm = obj as THREE.Mesh;
-                if (!cm.isMesh) return;
-                const level = lodLevelOfName(cm.name || '');
-                let bucket = this.placementMeshesByLodLevel.get(level);
-                if (!bucket) {
-                  bucket = [];
-                  this.placementMeshesByLodLevel.set(level, bucket);
-                }
-                bucket.push(cm);
-                if (level > 0 && this.lodPolicy === 'lod0') cm.visible = false;
-                this.textures.registerAccessoryMesh(cm, childPlacement);
-              });
-              attachmentsRendered++;
-            }
-          }
+          attachmentsRendered += stats.attachmentsRendered;
+          attachmentsFilteredByMisc += stats.attachmentsFilteredByMisc;
         }
 
         loadedAssets++;
@@ -820,6 +728,18 @@ export class ShipViewer {
     // before this ship loaded, so its wetness must be re-applied here.
     this.textures.reapplyWetness();
 
+    // Auto-select the native exterior (§8 of the unification handoff): WG
+    // renders the nativePermoflage by default — an ARP-style ship never
+    // shows its bare hull in game. Exactly one record is native; when it's
+    // the synthesised default this is a no-op.
+    const native = this.getExteriors().find(
+      (e) => e.is_native && e.exterior_id !== 'default',
+    );
+    if (native) {
+      report(`Applying native exterior ${native.exterior_id}…`);
+      await this.setActiveExterior(native.exterior_id, onProgress);
+    }
+
     const loadMs = performance.now() - t0;
     report(`Loaded in ${(loadMs / 1000).toFixed(1)}s.`);
 
@@ -834,6 +754,276 @@ export class ShipViewer {
       unresolvedAssets: unresolved,
       skinCount: this.textures.getSkins().length,
     };
+  }
+
+  /**
+   * Load one asset's GLB template + attached-children bundle, binding
+   * texture sets along the way. Extracted from the loadShip worker so
+   * `setActiveExterior` can fetch swap-target assets through the same
+   * path (caches dedupe repeat loads). Returns null when the asset is
+   * missing from the library or its template fails to load; `unresolved`
+   * (when given) collects missing attached-child ids.
+   */
+  private async loadAssetBundle(
+    assetId: string,
+    ctx: ShipLoadContext,
+    unresolved?: Map<string, number>,
+  ): Promise<AssetBundle | null> {
+    const libEntry = ctx.library.assets[assetId];
+    if (!libEntry) return null;
+
+    // Load host template + attached_accessories.json in parallel.
+    // For hosts without a bundle (~most assets) the doc resolves to
+    // null; instantiateMount's inner loop short-circuits.
+    const [tpl, attachedDoc] = await Promise.all([
+      this.accessoryCache.load(libEntry.glb),
+      this.attachedDocCache.load(libEntry),
+    ]);
+    if (!tpl) return null;
+
+    // Bind host's texture sets before cloning so registerAccessoryMesh
+    // sees populated schemes.
+    this.textures.bindLibraryAsset(assetId, libEntry, ctx.sidecar, ctx.hullBaseUrl);
+
+    // Pre-warm every distinct attached-child template + bind its
+    // texture sets. The accessoryCache dedupes across hosts so a
+    // child bundled by N main turrets is fetched once. Resolved
+    // templates are stashed so instantiateMount can clone them
+    // synchronously.
+    const attachedChildTpls = new Map<string, THREE.Object3D | null>();
+    if (attachedDoc && attachedDoc.attachments_live.length > 0) {
+      const childIds = new Set<string>();
+      for (const att of attachedDoc.attachments_live) childIds.add(att.asset_id);
+      const childPromises = Array.from(childIds).map(async (cid) => {
+        const childLib = ctx.library.assets[cid];
+        if (!childLib) {
+          attachedChildTpls.set(cid, null);
+          unresolved?.set(cid, (unresolved.get(cid) ?? 0) + 1);
+          return;
+        }
+        this.textures.bindLibraryAsset(cid, childLib, ctx.sidecar, ctx.hullBaseUrl);
+        const childTpl = await this.accessoryCache.load(childLib.glb);
+        attachedChildTpls.set(cid, childTpl);
+      });
+      await Promise.all(childPromises);
+    }
+
+    return { assetId, tpl, attachedDoc, attachedChildTpls };
+  }
+
+  /**
+   * Clone + place + register ONE placement (and its attached children).
+   * Extracted verbatim from the loadShip worker loop; also records a
+   * `MountRecord` so an exterior switch can later tear this mount down
+   * without a whole-ship reload.
+   *
+   * `miscFilter` is the RESOLVED per-HP whitelist (3-state: null = all,
+   * `[]` = drop all, `[list]` = whitelist) — the caller owns precedence
+   * (sidecar autofill vs placements JSON vs exterior override).
+   */
+  private instantiateMount(
+    section: ShipSectionKey,
+    placement: ShipPlacement,
+    bundle: AssetBundle,
+    miscFilter: string[] | null,
+  ): MountStats {
+    const ctx = this.shipCtx;
+    const stats: MountStats = { attachmentsRendered: 0, attachmentsFilteredByMisc: 0 };
+
+    // Deep-clone with SkeletonUtils for skinned templates so each
+    // placement has its own bones — sharing a Skeleton would tie
+    // every turret's yaw to the same `Rotate_Y` instance.
+    const inst = cloneAccessoryInstance(bundle.tpl);
+    applyPlacementMatrix(inst, placement.transform.matrix);
+    // Pull the accessory's own armor (turret/secondary `Armor` group)
+    // out before registration so it isn't textured / colored / LOD-
+    // bucketed as normal turret geometry. Re-added hidden below.
+    const armorDetached = detachAccessoryArmor(inst);
+    const { colorEntries, meshesByLodLevel } = tagAndIndexInstance(
+      inst,
+      {
+        section,
+        placement,
+        colorMaterials: this.colorMaterials,
+        lodPolicy: this.lodPolicy,
+      },
+      this.placementsByMesh,
+    );
+    this.placementColorEntries.push(...colorEntries);
+    for (const [level, meshes] of meshesByLodLevel) {
+      let bucket = this.placementMeshesByLodLevel.get(level);
+      if (!bucket) {
+        bucket = [];
+        this.placementMeshesByLodLevel.set(level, bucket);
+      }
+      bucket.push(...meshes);
+    }
+    inst.traverse((obj) => {
+      const m = obj as THREE.Mesh;
+      if (!m.isMesh) return;
+      this.textures.registerAccessoryMesh(m, placement);
+    });
+    // Look for WG rig nodes (`Rotate_Y` / `Rotate_X`). Most
+    // gun/main and gun/secondary mounts have them; AA and static
+    // miscs return null silently.
+    const arcLimits = ctx?.arcLimitsByInstanceId.get(placement.instance_id) ?? null;
+    const rig = extractTurretRig(inst, placement.asset_id, placement.instance_id, arcLimits);
+    if (rig) {
+      this.turretRigs.register(rig);
+    } else if (arcLimits?.yawRangeDeg) {
+      // Static mount with a traverse arc — torpedo tubes are static
+      // meshes (no Rotate_Y bone), so draw their firing arc without
+      // animating them.
+      this.turretRigs.registerStaticArc(placement.instance_id, inst, arcLimits);
+    }
+    // Re-attach the detached armor (hidden) so it rides the placement
+    // transform, and record it for the armor view. Rigged mounts get
+    // their armor attached to the yaw bone on first reveal so it rotates
+    // with the turret.
+    let armorRecord: MountArmorRecord | null = null;
+    if (armorDetached && armorDetached.meshes.length > 0) {
+      armorDetached.parent.add(armorDetached.group);
+      // Hide per-mesh (not the group): the armor view toggles mesh
+      // visibility, and rigged mounts move their meshes out of the group
+      // onto the yaw bone — so group-level visibility wouldn't gate them.
+      for (const m of armorDetached.meshes) m.visible = false;
+      armorRecord = {
+        hp: this.hpByInstanceId.get(placement.instance_id) ?? null,
+        assetId: placement.asset_id,
+        instanceId: placement.instance_id,
+        section,
+        meshes: armorDetached.meshes,
+        rig,
+        entries: [],
+        thicknessOf: null,
+      };
+      this.mountArmorRecords.push(armorRecord);
+    }
+    this.sectionGroups[section].add(inst);
+
+    // Attached accessories, gated by the resolved miscFilter whitelist.
+    const attachedDoc = bundle.attachedDoc;
+    if (attachedDoc && attachedDoc.attachments_live.length > 0) {
+      const filterSet = miscFilter && miscFilter.length > 0 ? new Set(miscFilter) : null;
+      const dropAll = miscFilter !== null && miscFilter.length === 0;
+
+      for (const att of attachedDoc.attachments_live) {
+        if (dropAll) {
+          stats.attachmentsFilteredByMisc++;
+          continue;
+        }
+        if (filterSet !== null && !filterSet.has(att.placement_id)) {
+          stats.attachmentsFilteredByMisc++;
+          continue;
+        }
+        const childTpl = bundle.attachedChildTpls.get(att.asset_id);
+        if (!childTpl) continue;
+
+        // Attached children (catapults, rangefinders, etc.) are
+        // typically static, but use the skin-aware cloner anyway so
+        // the rare rigged child (e.g. some director mounts) gets
+        // its own bones.
+        const childInst = cloneAccessoryInstance(childTpl);
+        applyAttachedMatrix(childInst, att.transform.matrix);
+        childInst.userData.attached_to_instance_id = placement.instance_id;
+        childInst.userData.attached_placement_id = att.placement_id;
+        childInst.userData.attached_asset_id = att.asset_id;
+        childInst.userData.section = section;
+        inst.add(childInst);
+
+        // Build a per-child placement so camo classification reads
+        // the child's own scope/category (catches misc/plane/float
+        // routing for catapults, rangefinders, ammo boxes).
+        const childLib = ctx?.library.assets[att.asset_id];
+        const childPlacement: ShipPlacement = {
+          ...placement,
+          asset_id: att.asset_id,
+          scope: childLib?.scope ?? placement.scope,
+          category: childLib?.category ?? placement.category,
+          subcategory: childLib?.subcategory ?? placement.subcategory,
+        };
+        childInst.traverse((obj) => {
+          const cm = obj as THREE.Mesh;
+          if (!cm.isMesh) return;
+          const level = lodLevelOfName(cm.name || '');
+          let bucket = this.placementMeshesByLodLevel.get(level);
+          if (!bucket) {
+            bucket = [];
+            this.placementMeshesByLodLevel.set(level, bucket);
+          }
+          bucket.push(cm);
+          if (level > 0 && this.lodPolicy === 'lod0') cm.visible = false;
+          this.textures.registerAccessoryMesh(cm, childPlacement);
+        });
+        stats.attachmentsRendered++;
+      }
+    }
+
+    // Record the mount for per-HP teardown on exterior switch.
+    const subtree = new Set<THREE.Object3D>();
+    inst.traverse((o) => subtree.add(o));
+    this.mountRecords.set(placement.instance_id, {
+      instanceId: placement.instance_id,
+      section,
+      placement,
+      inst,
+      subtree,
+      armorRecord,
+    });
+
+    return stats;
+  }
+
+  /**
+   * Tear down a set of live mounts — the inverse of `instantiateMount`,
+   * scoped to the swapped placements so an exterior switch never touches
+   * the rest of the ship. One pass over each shared tracking structure
+   * (the union subtree set makes membership checks O(1)).
+   *
+   * Cloned geometry is NOT disposed — clones share buffers with the
+   * templates in `accessoryCache` (same rule as clearShip).
+   */
+  private disposeMounts(instanceIds: string[]): void {
+    const records = instanceIds
+      .map((id) => this.mountRecords.get(id))
+      .filter((r): r is MountRecord => !!r);
+    if (records.length === 0) return;
+
+    const union = new Set<THREE.Object3D>();
+    for (const rec of records) {
+      for (const o of rec.subtree) union.add(o);
+    }
+
+    for (const rec of records) {
+      this.sectionGroups[rec.section].remove(rec.inst);
+      // placementsByMesh holds instance ROOTS keyed by parent hull mesh.
+      const pm = rec.placement.parent_mesh;
+      if (pm) {
+        const list = this.placementsByMesh.get(pm);
+        if (list) {
+          const i = list.indexOf(rec.inst);
+          if (i >= 0) list.splice(i, 1);
+        }
+      }
+      this.turretRigs.unregister(rec.instanceId);
+      if (rec.armorRecord) {
+        disposeArmorView(rec.armorRecord.entries, null);
+        const i = this.mountArmorRecords.indexOf(rec.armorRecord);
+        if (i >= 0) this.mountArmorRecords.splice(i, 1);
+      }
+      this.mountRecords.delete(rec.instanceId);
+    }
+
+    this.placementColorEntries = this.placementColorEntries.filter(
+      (e) => !union.has(e.mesh),
+    );
+    for (const [level, bucket] of this.placementMeshesByLodLevel) {
+      this.placementMeshesByLodLevel.set(
+        level,
+        bucket.filter((m) => !union.has(m)),
+      );
+    }
+    this.textures.unregisterMeshes(union);
   }
 
   /**
@@ -887,6 +1077,9 @@ export class ShipViewer {
     this.nodeOverlay.clear();
     this.sidecar = null;
     this.hullBaseUrl = null;
+    this.mountRecords.clear();
+    this.shipCtx = null;
+    this.activeExteriorId = 'default';
   }
 
   /** Per-instance turret rigs (yaw + pitch bones extracted from each
@@ -1337,6 +1530,212 @@ export class ShipViewer {
 
   async setActiveSkin(skinId: string, onProgress?: (msg: string) => void): Promise<void> {
     await this.textures.setActiveSkin(skinId, onProgress);
+  }
+
+  // ── Exteriors (mesh-swap permoflage selector) ─────────────────────────
+
+  /** The sidecar's `exteriors[]`, falling back to a synthesised `default`
+   *  for pre-Step-0 sidecars. Index 0 is always the vanilla composition. */
+  getExteriors(): readonly ExteriorRecord[] {
+    const fromSidecar = this.sidecar?.exteriors;
+    return fromSidecar && fromSidecar.length > 0 ? fromSidecar : [DEFAULT_EXTERIOR];
+  }
+
+  getActiveExteriorId(): string {
+    return this.activeExteriorId;
+  }
+
+  /**
+   * Switch the active exterior: tear down + rebuild ONLY the swapped
+   * mounts with the record's per-HP overrides (asset_id, the Ry180-baked
+   * variant transform, the miscFilter whitelist), then re-sync every
+   * subsystem that indexed the replaced Object3Ds, and finally flip the
+   * paint via the record's `camo_scheme_key` cross-link into `skins[]`.
+   *
+   * Mirrors how the WG runtime equips a permoflage (geometry resolution +
+   * camo bind are one selection). Hull-swap exteriors render their mounts
+   * on the BASE hull until the producer's HullDelta step extracts variant
+   * hull GLBs — `wg_asset_id != null` marks those records.
+   */
+  async setActiveExterior(
+    exteriorId: string,
+    onProgress?: (msg: string) => void,
+  ): Promise<void> {
+    const ctx = this.shipCtx;
+    if (!ctx) return;
+    if (exteriorId === this.activeExteriorId) return;
+    const exteriors = this.getExteriors();
+    const target = exteriors.find((e) => e.exterior_id === exteriorId);
+    if (!target) {
+      console.warn(`[exterior] unknown exterior ${exteriorId}; keeping current`);
+      return;
+    }
+    const current = exteriors.find((e) => e.exterior_id === this.activeExteriorId) ?? null;
+    const report = (msg: string) => onProgress?.(msg);
+    report(`Switching exterior to ${target.display_name ?? exteriorId}…`);
+
+    // Affected mounts = union of HPs swapped by the OLD and NEW records
+    // (old-only HPs revert to base; new-only HPs gain the variant).
+    const targetByHp = new Map<string, NonNullable<ExteriorRecord['mounts']>[number]>();
+    for (const m of target.mounts ?? []) if (m.hp_name) targetByHp.set(m.hp_name, m);
+    const affectedHps = new Set<string>(targetByHp.keys());
+    for (const m of current?.mounts ?? []) if (m.hp_name) affectedHps.add(m.hp_name);
+
+    // Base (vanilla) placements by instance_id — overrides always compose
+    // against the ORIGINAL placements doc, never the previous exterior's.
+    const baseByInstanceId = new Map<
+      string,
+      { section: ShipSectionKey; placement: ShipPlacement }
+    >();
+    for (const section of SHIP_SECTIONS) {
+      for (const p of ctx.placementsDoc[section] ?? []) {
+        baseByInstanceId.set(p.instance_id, { section, placement: p });
+      }
+    }
+
+    const toRebuild: string[] = [];
+    for (const [iid, hp] of this.hpByInstanceId) {
+      if (affectedHps.has(hp) && baseByInstanceId.has(iid) && this.mountRecords.has(iid)) {
+        toRebuild.push(iid);
+      }
+    }
+
+    this.disposeMounts(toRebuild);
+
+    // Compose the effective placement per mount and group by asset so each
+    // swap-target GLB is fetched once (the accessory cache dedupes repeats).
+    interface RebuildJob {
+      section: ShipSectionKey;
+      placement: ShipPlacement;
+      miscFilter: string[] | null;
+      /** Vanilla fallback when the swap-target GLB isn't in the library
+       *  (variant never harvested — a missing variant must degrade to the
+       *  base mount, never to a hole in the ship). Null on unswapped jobs. */
+      fallback: { placement: ShipPlacement; miscFilter: string[] | null } | null;
+    }
+    const jobsByAsset = new Map<string, RebuildJob[]>();
+    for (const iid of toRebuild) {
+      const base = baseByInstanceId.get(iid);
+      if (!base) continue;
+      const hp = this.hpByInstanceId.get(iid);
+      const swap = hp ? (targetByHp.get(hp) ?? null) : null;
+      // Base-resolution miscFilter, exactly like loadShip (sidecar autofill
+      // over placements JSON).
+      const baseMiscFilter: string[] | null =
+        ctx.miscFilterByInstanceId.get(iid) ?? base.placement.misc_filter ?? null;
+      const placement: ShipPlacement = swap
+        ? {
+            ...base.placement,
+            asset_id: swap.asset_id ?? base.placement.asset_id,
+            dead_asset_id: swap.dead_asset_id ?? base.placement.dead_asset_id,
+            transform: swap.transform?.matrix
+              ? { ...base.placement.transform, matrix: swap.transform.matrix }
+              : base.placement.transform,
+            misc_filter: swap.misc_filter ?? undefined,
+          }
+        : base.placement;
+      // miscFilter precedence: a swapped mount uses the record's value
+      // VERBATIM (the nodesConfig override replaces the vanilla whitelist;
+      // null = render all, [] = drop all).
+      const miscFilter: string[] | null = swap ? (swap.misc_filter ?? null) : baseMiscFilter;
+      const list = jobsByAsset.get(placement.asset_id) ?? [];
+      list.push({
+        section: base.section,
+        placement,
+        miscFilter,
+        fallback:
+          swap && placement.asset_id !== base.placement.asset_id
+            ? { placement: base.placement, miscFilter: baseMiscFilter }
+            : null,
+      });
+      jobsByAsset.set(placement.asset_id, list);
+    }
+
+    let rebuilt = 0;
+    let fellBack = 0;
+    for (const [assetId, jobs] of jobsByAsset) {
+      const bundle = await this.loadAssetBundle(assetId, ctx);
+      if (bundle) {
+        for (const j of jobs) {
+          this.instantiateMount(j.section, j.placement, bundle, j.miscFilter);
+          rebuilt++;
+        }
+        continue;
+      }
+      // Swap-target GLB missing from the library (variant never built —
+      // see the exteriors[] harvest note in the producer). Degrade to the
+      // vanilla mounts so the ship never loses geometry.
+      console.warn(
+        `[exterior] asset ${assetId} unresolved in library; falling back to base mounts`,
+      );
+      for (const j of jobs) {
+        if (!j.fallback) continue;
+        const baseBundle = await this.loadAssetBundle(j.fallback.placement.asset_id, ctx);
+        if (!baseBundle) continue;
+        this.instantiateMount(j.section, j.fallback.placement, baseBundle, j.fallback.miscFilter);
+        fellBack++;
+      }
+    }
+    this.activeExteriorId = exteriorId;
+    report(
+      `Exterior ${exteriorId}: ${rebuilt} mount(s) rebuilt` +
+        (fellBack ? `, ${fellBack} kept vanilla (variant GLB not in library)` : '') +
+        '.',
+    );
+
+    // ── Re-sync, in dependency order ──────────────────────────────────
+
+    // 1. Camo opt-out follows the active exterior. The default record
+    //    falls back to the ship block's list (legacy / native-routed
+    //    folders carry it there).
+    this.textures.setVariantSwappedAssetIds(
+      exteriorId === 'default'
+        ? (this.sidecar?.ship?.variant_swapped_asset_ids ?? [])
+        : (target.variant_swapped_asset_ids ?? []),
+    );
+
+    // 2. Paint: resolve camo_scheme_key against the skin table (skin_id
+    //    first, scheme_key fallback — mat_* skins use the same string for
+    //    both; tile schemes may be shared by several skins). A null key
+    //    (skins entry never ingested, e.g. ARP) keeps the current skin.
+    const camoKey = target.camo_scheme_key ?? null;
+    if (camoKey) {
+      const skins = this.textures.getSkins();
+      const skin =
+        skins.find((s) => s.skin_id === camoKey) ??
+        skins.find((s) => s.scheme_key === camoKey);
+      if (skin) {
+        await this.textures.setActiveSkin(skin.skin_id, onProgress);
+      } else {
+        console.warn(`[exterior] camo_scheme_key ${camoKey} has no skins[] entry; keeping current skin`);
+      }
+    }
+
+    // 3. Apply textures to the freshly-registered entries (setActiveSkin
+    //    skips applyTextureState when the scheme didn't change, so the new
+    //    mounts would otherwise stay untextured). Also re-evaluates the
+    //    per-entry camo opt-out gates against the new set, and re-pushes
+    //    weather wetness onto the rebuilt materials.
+    if (this.textures.isShowingTextures()) {
+      await this.textures.setShowTextures(true, onProgress);
+      this.textures.reapplyWetness();
+    }
+
+    // 4. Visibility cascade (seam states + LOD policy) for the new mounts.
+    this.applyAllStates();
+
+    // 5. Armor X-ray: lazy-prepare + reveal the rebuilt mounts' armor
+    //    (setArmorView(true) only touches records with empty entries).
+    if (this.armorViewEnabled) this.setArmorView(true);
+
+    // 6. Color mode onto the rebuilt color entries.
+    if (this.colorMode !== 'off') {
+      applyColorMode(this.placementColorEntries, this.colorMode);
+    }
+
+    // 7. Node overlay anchors were captured by world position from the old
+    //    Object3Ds — re-derive against the live graph.
+    this.nodeOverlay.refresh(this.shipRoot, this.sidecar?.effects?.attachments ?? null);
   }
 
   setAoEnabled(on: boolean): void {

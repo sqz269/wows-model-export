@@ -620,6 +620,25 @@ export class TurretRigManager {
     this.fans.clear();
   }
 
+  /**
+   * Drop ONE mount's rig / static arc (exterior switch teardown). The
+   * global aim is deliberately untouched — `register()` re-applies it to
+   * the replacement rig, so a mount swap never snaps the fleet to rest
+   * pose (contrast `clear()`, which resets the aim for a new ship).
+   */
+  unregister(instanceId: string): void {
+    const fan = this.fans.get(instanceId);
+    if (fan) {
+      fan.parent?.remove(fan);
+      fan.geometry.dispose();
+      const m = fan.material;
+      (Array.isArray(m) ? m : [m]).forEach((x) => x.dispose());
+      this.fans.delete(instanceId);
+    }
+    this.rigs.delete(instanceId);
+    this.staticArcs.delete(instanceId);
+  }
+
   clear(): void {
     this.disposeFans();
     this.rigs.clear();

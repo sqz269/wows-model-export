@@ -27,6 +27,7 @@
   import { tabBtnBase } from '$lib/ui/controls';
   import { SHIP_SECTIONS, SEAMS } from '$lib/types';
   import type {
+    ExteriorRecord,
     LibraryIndex,
     SeamKey,
     SeamState,
@@ -58,6 +59,7 @@
     | 'hull'
     | 'armor'
     | 'skins'
+    | 'exteriors'
     | 'damage'
     | 'textures'
     | 'nodes'
@@ -104,6 +106,11 @@
     /** Async skin-activate handler (lives in the parent so the side
      *  panel + bottom panel share one toast id). */
     onPickSkin: (skinId: string) => void;
+    /** Mesh-swap permoflage selector (ship-exterior unification). Index 0
+     *  is always the vanilla `default`; hidden when that's all there is. */
+    exteriors: readonly ExteriorRecord[];
+    activeExteriorId: string | null;
+    onPickExterior: (exteriorId: string) => void;
     /** Snapshot of seam states. Updated on `revision` bump. */
     seamStates: Readonly<Record<SeamKey, SeamState>>;
     /** Currently-picked mesh (null = nothing picked). Drives the Pick
@@ -127,6 +134,9 @@
     skins,
     activeSkin,
     onPickSkin,
+    exteriors,
+    activeExteriorId,
+    onPickExterior,
     seamStates,
     selectedPick,
     onClosePick,
@@ -155,6 +165,7 @@
     'hull',
     'armor',
     'skins',
+    'exteriors',
     'damage',
     'textures',
     'nodes',
@@ -477,6 +488,7 @@
       { id: 'hull', label: 'Hull' },
       { id: 'armor', label: 'Armor', hide: !hasArmorTab },
       { id: 'skins', label: 'Skins', hide: skins.length <= 1 },
+      { id: 'exteriors', label: 'Exteriors', hide: exteriors.length <= 1 },
       { id: 'damage', label: 'Damage' },
       { id: 'textures', label: 'Textures', hide: !hasHullTextures },
       { id: 'nodes', label: 'Nodes', hide: !hasNodesTab },
@@ -490,6 +502,23 @@
     if (!visible.has(activeTab)) {
       activeTab = 'overview';
     }
+  });
+
+  // Exteriors grouped by peculiarity — `default` first, then alphabetical.
+  const exteriorGroups = $derived.by(() => {
+    const by = new Map<string, ExteriorRecord[]>();
+    for (const e of exteriors) {
+      const k = e.peculiarity || 'other';
+      const list = by.get(k) ?? [];
+      list.push(e);
+      by.set(k, list);
+    }
+    return Array.from(by.entries())
+      .map(([peculiarity, records]) => ({ peculiarity, records }))
+      .sort((a, b) =>
+        a.peculiarity === 'default' ? -1 : b.peculiarity === 'default' ? 1
+          : a.peculiarity.localeCompare(b.peculiarity),
+      );
   });
 
   const pickInfo = $derived(selectedPick?.info ?? null);
@@ -916,6 +945,68 @@
             {/each}
           </div>
         {/if}
+      {:else if activeTab === 'exteriors'}
+        <div class="flex flex-col gap-2">
+          <div class="text-muted-foreground max-w-[64ch] text-[11px]">
+            Mesh-swap permoflages (WG <code class="font-mono text-[10px]">Exterior</code> records).
+            Selecting one swaps the affected mounts to the variant models and applies the matching
+            camo. Entries marked <span class="text-amber-500">hull differs</span> also swap the
+            hull in game — the variant hull isn't extracted yet, so mounts render on the base hull.
+          </div>
+          {#each exteriorGroups as group (group.peculiarity)}
+            <div>
+              <div class="text-muted-foreground mb-1 text-[10px] font-medium uppercase tracking-wider">
+                {group.peculiarity}
+              </div>
+              <div class="flex flex-col gap-1">
+                {#each group.records as ext (ext.exterior_id)}
+                  <button
+                    type="button"
+                    onclick={() => onPickExterior(ext.exterior_id)}
+                    class="flex items-center gap-2 rounded border px-2 py-1 text-left text-[11px] {activeExteriorId ===
+                    ext.exterior_id
+                      ? 'border-primary bg-primary/10'
+                      : 'border-border bg-popover hover:bg-accent'}"
+                    title={ext.exterior_id}
+                  >
+                    <span
+                      class="inline-flex size-3 flex-none items-center justify-center rounded-full border {activeExteriorId ===
+                      ext.exterior_id
+                        ? 'border-primary bg-primary'
+                        : 'border-border'}"
+                    ></span>
+                    <span class="min-w-0 flex-1">
+                      <span class="block truncate font-medium text-foreground">
+                        {ext.display_name || ext.exterior_id}
+                      </span>
+                      <span class="text-muted-foreground block truncate font-mono text-[10px]">
+                        {ext.exterior_id}
+                      </span>
+                    </span>
+                    {#if ext.is_native && ext.exterior_id !== 'default'}
+                      <span class="flex-none rounded bg-primary/15 px-1 text-[9px] uppercase tracking-wider text-primary">
+                        native
+                      </span>
+                    {/if}
+                    {#if (ext.mounts?.length ?? 0) > 0}
+                      <span class="text-muted-foreground flex-none text-[10px]">
+                        {ext.mounts?.length} mounts
+                      </span>
+                    {/if}
+                    {#if ext.wg_asset_id}
+                      <span
+                        class="flex-none rounded bg-amber-500/15 px-1 text-[9px] uppercase tracking-wider text-amber-500"
+                        title="This exterior also swaps the hull model in game; the variant hull GLB isn't extracted into the unified folder yet."
+                      >
+                        hull differs
+                      </span>
+                    {/if}
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/each}
+        </div>
       {:else if activeTab === 'damage'}
         <div class="flex flex-col gap-2">
           <div class="text-muted-foreground text-[11px] max-w-[60ch]">

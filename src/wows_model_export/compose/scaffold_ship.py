@@ -67,6 +67,7 @@ from ..errors import StepError
 from ..read import gameparams as _gp_read
 from ..read import localization as _localization
 from ..resolve import camo as wg_camo
+from ..resolve import exterior_unify as _exterior_unify
 from ..resolve import gameparams_autofill as _gp_autofill
 from ..resolve import sidecar
 from ..resolve import synth_emission as _synth_emission
@@ -195,6 +196,98 @@ def _bespoke_attached_children_for_swap(
     if not variant:
         return set()
     return set(variant) - set(base)
+
+
+# ---------------------------------------------------------------------------
+# Additive exteriors[] emit (ship-exterior unification Step 0)
+# ---------------------------------------------------------------------------
+
+
+def _collect_exteriors_block(
+    doc: dict[str, Any],
+    *,
+    vehicle_id: str,
+    library_root: Path,
+) -> list[dict[str, Any]]:
+    """Build the additive ``exteriors[]`` block for a BASE ship's sidecar.
+
+    Thin wiring over :func:`exterior_unify.collect_exteriors_for_vehicle`
+    (ship-exterior unification Step 0 — see ``resolve/exterior_unify.py``):
+    enumerates the Vehicle's ``permoflages[]``, resolves each mesh-swap
+    Exterior's per-mount delta with the SAME resolvers the legacy
+    ``__<Variant>`` folder path uses (``resolve_variant_accessory_swaps`` +
+    ``apply_variant_asset_swaps``, so the Ry(180°) bone conjugation and the
+    per-HP ``misc_filter`` override land identically), and records the result
+    as indexable per-exterior ``mounts[]`` on the base doc.
+
+    The Ry(180°) leg needs the variant mount GLBs in the shared accessory
+    library; on a first ingest (library built after scaffold) the matrices
+    land un-flipped and the post-library ``refresh_ship_sidecar`` pass —
+    which re-enters this function — heals them, exactly like the legacy
+    variant-folder flow.
+
+    Legacy-parity extension: each record's ``variant_swapped_asset_ids`` is
+    widened with the bespoke attached children of every swapped parent (the
+    same set-diff that feeds ``ship.variant_swapped_asset_ids`` on a variant
+    folder) so per-exterior camo opt-out semantics match the legacy ship
+    block.
+    """
+    base_sections: dict[str, list[dict[str, Any]]] = {
+        sec: [p for p in (doc.get(sec) or []) if isinstance(p, dict)]
+        for sec in sidecar.PLACEMENT_SECTIONS
+    }
+    base_aid_by_hp: dict[str, str] = {}
+    for items in base_sections.values():
+        for p in items:
+            hp, aid = p.get("hp_name"), p.get("asset_id")
+            if isinstance(hp, str) and isinstance(aid, str):
+                base_aid_by_hp[hp] = aid
+
+    def _apply_swaps(base: dict, swaps: dict) -> dict:
+        swapped, _n, _unused = sidecar.apply_variant_asset_swaps(
+            dict(base), swaps,
+            library_root=library_root,
+            base_aid_by_hp=base_aid_by_hp,
+        )
+        return swapped
+
+    skins = [s for s in (doc.get("skins") or []) if isinstance(s, dict)]
+
+    def _camo_scheme_for(ext_id: str) -> str | None:
+        for s in skins:
+            if s.get("exterior_id") == ext_id:
+                scheme = s.get("scheme_key") or s.get("skin_id")
+                return scheme if isinstance(scheme, str) else None
+        return None
+
+    def _resolve_model_dir(vid: str, *, permoflage_id: str) -> str | None:
+        model_dir, _ext = _gp_autofill.resolve_variant_model_dir(
+            vid, permoflage_id=permoflage_id,
+        )
+        return model_dir
+
+    block = _exterior_unify.collect_exteriors_for_vehicle(
+        vehicle_id,
+        base_sections,
+        get_ship=_gp_read.get_ship,
+        resolve_swaps=_gp_autofill.resolve_variant_accessory_swaps,
+        apply_swaps=_apply_swaps,
+        get_exterior=_gp_read.get_exterior,
+        camo_scheme_for=_camo_scheme_for,
+        resolve_model_dir=_resolve_model_dir,
+    )
+
+    for rec in block:
+        extras: set[str] = set()
+        for m in rec.get("mounts") or []:
+            b, v = m.get("base_asset_id"), m.get("asset_id")
+            if isinstance(b, str) and isinstance(v, str) and b != v:
+                extras |= _bespoke_attached_children_for_swap(library_root, b, v)
+        if extras:
+            rec["variant_swapped_asset_ids"] = sorted(
+                set(rec.get("variant_swapped_asset_ids") or []) | extras
+            )
+    return block
 
 
 # ---------------------------------------------------------------------------
@@ -2256,6 +2349,27 @@ def scaffold_ship(
         doc.setdefault("ship", {})["camo_skip_asset_ids"] = sorted(_camo_skip)
     except Exception as e:
         warnings.append(f"camo_skip_asset_ids scan failed ({e})")
+
+    # ── Additive exteriors[] emit (ship-exterior unification Step 0) ──
+    # One record per mesh-swap permoflage in the BASE Vehicle's
+    # permoflages[], diffed against this vanilla composition. Skipped on
+    # variant-routed scaffolds (explicit ``__<Variant>`` folders AND
+    # native-routed ships like ARP_Takao) — their placements are already
+    # swapped, so the diff base would be wrong; legacy variant folders
+    # keep working unchanged until cutover. Additive at schema_version 3;
+    # merged by exterior_id so a degenerate re-run (GameParams hiccup)
+    # can never clobber a previously richer block. Guarded: any failure
+    # degrades to a warning, never breaks the emit.
+    if base_vehicle_for_swap and not variant_perm_for_swap:
+        try:
+            _ext_block = _collect_exteriors_block(
+                doc,
+                vehicle_id=base_vehicle_for_swap,
+                library_root=workspace / "libraries" / "accessories",
+            )
+            doc = sidecar.merge_preserving(doc, {"exteriors": _ext_block})
+        except Exception as e:
+            warnings.append(f"exteriors[] emit failed ({e}); prior value kept")
 
     # ── Step: emit_sidecar ────────────────────────────────────────────
     timer.start("emit_sidecar", detail=sidecar_path.name)

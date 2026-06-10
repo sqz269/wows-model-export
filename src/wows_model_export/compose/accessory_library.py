@@ -165,6 +165,60 @@ def _harvest_section_entries(
             rec.species = entry.get("species")
 
 
+def _harvest_exterior_mounts(
+    doc: dict,
+    *,
+    ship_name: str,
+    records: dict[AssetKey, AssetRecord],
+) -> None:
+    """Harvest ``exteriors[].mounts[]`` swap-target asset_ids (ship-exterior
+    unification Step 0). A mesh-swap exterior's variant mounts reference
+    library assets that may appear in NO ship's placement sections (the
+    base sidecar keeps vanilla asset_ids; the legacy ``__<Variant>`` folder
+    may not exist for that permoflage), so without this walk the variant
+    GLBs are never built and consumers can't render the exterior.
+
+    The variant asset shares the BASE placement's taxonomy — the same
+    convention ``apply_variant_asset_swaps`` relies on for its bone-mismatch
+    GLB lookup — so ``(scope, category, subcategory)`` is resolved from the
+    base placement at the mount's ``hp_name``.
+    """
+    exteriors = doc.get("exteriors")
+    if not isinstance(exteriors, list):
+        return
+    base_by_hp: dict[str, dict] = {}
+    for section in PLACEMENT_SECTIONS:
+        for entry in doc.get(section) or []:
+            if isinstance(entry, dict) and entry.get("hp_name"):
+                base_by_hp.setdefault(entry["hp_name"], entry)
+    for rec in exteriors:
+        if not isinstance(rec, dict):
+            continue
+        for m in rec.get("mounts") or []:
+            if not isinstance(m, dict):
+                continue
+            base = base_by_hp.get(m.get("hp_name") or "")
+            if not isinstance(base, dict):
+                continue
+            scope = base.get("scope")
+            category = base.get("category")
+            asset_id = m.get("asset_id")
+            if not asset_id or not scope or not category:
+                continue
+            if asset_id == base.get("asset_id"):
+                continue  # transform/miscFilter-only swap — asset already harvested
+            key = AssetKey(
+                scope=scope,
+                category=category,
+                subcategory=base.get("subcategory"),
+                asset_id=asset_id,
+            )
+            r = records.setdefault(key, AssetRecord(key=key))
+            r.used_by_ships.add(ship_name)
+            if r.species is None:
+                r.species = base.get("species")
+
+
 def union_assets(
     sidecar_files: list[Path],
     *,
@@ -202,6 +256,10 @@ def union_assets(
                         hull_entry.get(section),
                         ship_name=ship_name, records=records,
                     )
+
+        # Ship-exterior unification: swap-target assets referenced only by
+        # exteriors[].mounts[] (never by any placement section).
+        _harvest_exterior_mounts(doc, ship_name=ship_name, records=records)
 
     # Legacy fallback for ship folders without a sidecar yet.
     for path in (fallback_placements_files or []):

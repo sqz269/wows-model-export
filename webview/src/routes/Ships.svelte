@@ -23,7 +23,14 @@
   import { extractEvents } from '$lib/extract_events.svelte';
   import { navState } from '$lib/nav_state.svelte';
   import { hasModifier, isTypingContext } from '$lib/shortcuts';
-  import type { LibraryIndex, SeamKey, SeamState, ShipSummary, Skin } from '$lib/types';
+  import type {
+    ExteriorRecord,
+    LibraryIndex,
+    SeamKey,
+    SeamState,
+    ShipSummary,
+    Skin,
+  } from '$lib/types';
   import type { PickResult, ShipLoadStats, ShipViewer, WgEnvironmentInfo } from '$lib/ship';
   import ShipPicker from '$components/ShipPicker.svelte';
   import ShipViewerCmp from '$components/ShipViewer.svelte';
@@ -77,6 +84,11 @@
   let showTextures = $state(false);
   let skins = $state<readonly Skin[]>([]);
   let activeSkin = $state<string | null>(null);
+  // Mesh-swap permoflage selector (ship-exterior unification). Mirrors of
+  // viewer.getExteriors() / getActiveExteriorId(); the bottom panel's
+  // Exteriors tab drives pickExterior the same way Skins drives pickSkin.
+  let exteriors = $state<readonly ExteriorRecord[]>([]);
+  let activeExteriorId = $state<string | null>(null);
   let envInfo = $state<WgEnvironmentInfo | null>(null);
   let seamStates = $state<Readonly<Record<SeamKey, SeamState>>>({
     'Bow-MidFront': 'Intact',
@@ -129,6 +141,32 @@
       } else {
         toast.error(`Failed to apply ${skinId}`, { description: msg, duration: 8000 });
       }
+    }
+  }
+
+  async function pickExterior(exteriorId: string) {
+    if (!viewer) return;
+    const toastId = toast.loading(`Switching exterior to ${exteriorId}…`, {
+      duration: Number.POSITIVE_INFINITY,
+    });
+    try {
+      await viewer.setActiveExterior(exteriorId, (msg) => {
+        toast.loading(msg, { id: toastId, duration: Number.POSITIVE_INFINITY });
+      });
+      // The switch may also flip the active skin (camo_scheme_key) — re-read
+      // both mirrors from the viewer rather than assuming.
+      activeExteriorId = viewer.getActiveExteriorId();
+      activeSkin = viewer.getActiveSkinId();
+      selectedPick = null; // picked mesh may have been torn down
+      toast.success(`Exterior: ${exteriorId}`, { id: toastId, duration: 2000 });
+      controlsRevision++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`Failed to switch exterior to ${exteriorId}`, {
+        id: toastId,
+        description: msg,
+        duration: 8000,
+      });
     }
   }
 
@@ -289,6 +327,10 @@
       showTextures = viewer.isShowingTextures();
       skins = viewer.getSkins();
       activeSkin = viewer.getActiveSkinId();
+      // loadShip may have auto-selected the native exterior (ARP-style
+      // ships) — read back rather than assuming 'default'.
+      exteriors = viewer.getExteriors();
+      activeExteriorId = viewer.getActiveExteriorId();
       seamStates = { ...viewer.getSeamStates() };
       hullGroups = viewer.getHullGroups();
       lodLevels = viewer.getAvailableLodLevels();
@@ -390,6 +432,9 @@
         {activeSkin}
         {envInfo}
         onPickSkin={pickSkin}
+        {exteriors}
+        {activeExteriorId}
+        onPickExterior={pickExterior}
         {seamStates}
         {selectedPick}
         onClosePick={() => (selectedPick = null)}
