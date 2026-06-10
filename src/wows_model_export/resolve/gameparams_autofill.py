@@ -315,7 +315,20 @@ def resolve_variant_accessory_swaps(
           "by_hp_name":           {hp_name: variant_asset_id},
           "dead_by_hp_name":      {hp_name: variant_dead_asset_id},
           "misc_filter_by_hp":    {hp_name: [MP_<variant_aid>, ...]},
+          "vfs_dir_by_asset_id":  {variant_asset_id: "content/gameplay/…"},
         }
+
+    ``vfs_dir_by_asset_id`` is the WG-faithful half: the engine resolves
+    every swap by FULL VFS path (GameParams is path-keyed throughout —
+    ``peculiarityModels`` is literally a path→path remap; taxonomy
+    folders are an artist convention the runtime never consults). The
+    stems in the first four dicts are OUR join keys against placements;
+    this dict preserves the directory of the actual GameParams path
+    (original case) so downstream consumers (library harvest, Ry180 GLB
+    lookup) never have to re-derive taxonomy — event-themed exteriors
+    re-home armament under ``content/gameplay/events/…`` (314 swap
+    targets corpus-wide), where derived taxonomy is wrong. Keyed by the
+    variant stem (live AND dead entries both recorded).
 
     All four sub-dicts are empty for ships without an Exterior,
     without a permoflage selected, or where the Exterior is texture-
@@ -354,6 +367,7 @@ def resolve_variant_accessory_swaps(
         "by_hp_name":        {},
         "dead_by_hp_name":   {},
         "misc_filter_by_hp": {},
+        "vfs_dir_by_asset_id": {},
     }
     ship = get_ship(vehicle_id, refresh=refresh)
     if not ship:
@@ -369,6 +383,13 @@ def resolve_variant_accessory_swaps(
     by_hp_name: dict[str, str] = {}
     dead_by_hp_name: dict[str, str] = {}
     misc_filter_by_hp: dict[str, list[str]] = {}
+    vfs_dir_by_asset_id: dict[str, str] = {}
+
+    def _record_vfs_dir(stem: str, model_path: str) -> None:
+        """Preserve the GameParams path's directory for a swap target."""
+        parts = model_path.replace("\\", "/").split("/")
+        if len(parts) >= 2:
+            vfs_dir_by_asset_id.setdefault(stem, "/".join(parts[:-1]))
 
     # Pattern A — peculiarityModels (asset-path keyed).
     pm = ext.get("peculiarityModels") or {}
@@ -384,6 +405,7 @@ def resolve_variant_accessory_swaps(
             vs = _path_to_stem(dst)
             if bs and vs and bs != vs:
                 by_asset_id[bs] = vs
+                _record_vfs_dir(vs, dst)
 
     # Pattern B — nodesConfig per-HP (hardpoint-name keyed). Carries
     # model + deadMesh swaps AND a per-HP miscFilter override that
@@ -404,11 +426,13 @@ def resolve_variant_accessory_swaps(
                     stem = _path_to_stem(m)
                     if stem:
                         by_hp_name[hp] = stem
+                        _record_vfs_dir(stem, m)
                 d = body.get("deadMesh")
                 if isinstance(d, str):
                     stem = _path_to_stem(d)
                     if stem:
                         dead_by_hp_name[hp] = stem
+                        _record_vfs_dir(stem, d)
                 # Per-HP miscFilter override. WG runtime treats this as
                 # the authoritative whitelist when present (overrides the
                 # vanilla ship's <Component>.<HP>.miscFilter). Empty list
@@ -425,6 +449,7 @@ def resolve_variant_accessory_swaps(
         "by_hp_name":        by_hp_name,
         "dead_by_hp_name":   dead_by_hp_name,
         "misc_filter_by_hp": misc_filter_by_hp,
+        "vfs_dir_by_asset_id": vfs_dir_by_asset_id,
     }
 
 

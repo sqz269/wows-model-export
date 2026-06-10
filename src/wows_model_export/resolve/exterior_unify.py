@@ -115,7 +115,7 @@ def build_exterior_record(
             base_p = base_by_hp.get(hp) if hp else None
             if base_p is None or not _mount_differs(base_p, var_p):
                 continue
-            mounts.append({
+            mount: dict[str, Any] = {
                 "hp_name": hp,
                 "base_asset_id": base_p.get("asset_id"),
                 "asset_id": var_p.get("asset_id"),
@@ -123,7 +123,17 @@ def build_exterior_record(
                 "transform": copy.deepcopy(var_p.get("transform")),
                 "misc_filter": copy.deepcopy(var_p.get("misc_filter")),
                 "attached_y_flip": var_p.get("attached_y_flip", False),
-            })
+            }
+            # WG-faithful path provenance: the swap target's actual VFS
+            # directory from the GameParams model path (stamped by
+            # apply_variant_asset_swaps). The engine resolves swaps by
+            # full path — taxonomy folders are artist convention — so
+            # this is what grounds the library build for cross-scope
+            # targets (events/-scoped armament etc.). Optional: absent
+            # on transform-only records and pre-path-channel sidecars.
+            if isinstance(var_p.get("vfs_dir"), str) and var_p["vfs_dir"]:
+                mount["vfs_dir"] = var_p["vfs_dir"]
+            mounts.append(mount)
 
     swap_table = _swap_table_from_mounts(mounts)
     # Camo opt-out set = variant-bespoke assets only. Transform-only
@@ -161,6 +171,7 @@ def _swap_table_from_mounts(mounts: Sequence[Mapping[str, Any]]) -> dict[str, di
     by_hp_name: dict[str, str] = {}
     dead_by_hp_name: dict[str, str] = {}
     misc_filter_by_hp: dict[str, list] = {}
+    vfs_dir_by_asset_id: dict[str, str] = {}
     for m in mounts:
         hp = m.get("hp_name")
         # Swap-table semantics stay strictly "asset swaps": transform-only
@@ -175,11 +186,14 @@ def _swap_table_from_mounts(mounts: Sequence[Mapping[str, Any]]) -> dict[str, di
             dead_by_hp_name[hp] = m["dead_asset_id"]
         if hp and m.get("misc_filter") is not None:
             misc_filter_by_hp[hp] = list(m["misc_filter"])
+        if swapped and m.get("asset_id") and isinstance(m.get("vfs_dir"), str):
+            vfs_dir_by_asset_id[m["asset_id"]] = m["vfs_dir"]
     return {
         "by_asset_id": by_asset_id,
         "by_hp_name": by_hp_name,
         "dead_by_hp_name": dead_by_hp_name,
         "misc_filter_by_hp": misc_filter_by_hp,
+        "vfs_dir_by_asset_id": vfs_dir_by_asset_id,
     }
 
 
@@ -207,6 +221,8 @@ def project_exterior(
             if m.get("transform") is not None:
                 p["transform"] = copy.deepcopy(m["transform"])
             p["misc_filter"] = copy.deepcopy(m.get("misc_filter"))
+            if isinstance(m.get("vfs_dir"), str) and m["vfs_dir"]:
+                p["vfs_dir"] = m["vfs_dir"]
     return out
 
 

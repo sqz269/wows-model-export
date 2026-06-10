@@ -396,6 +396,15 @@ _MOUNT_SWAP_ORDER: tuple[str, ...] = (
     "transform",
     "misc_filter",
     "attached_y_flip",
+    # WG-faithful path provenance (optional): the directory of the swap
+    # target's actual GameParams model path, original case — e.g.
+    # ``content/gameplay/events/director/XD017_Director_Mk51``. The engine
+    # resolves swaps by FULL path (taxonomy folders are artist convention),
+    # so this grounds the library build / Ry180 GLB lookup for cross-scope
+    # targets. Absent on transform-only records (hull-HP re-anchors) and on
+    # sidecars emitted before the path channel. Consumers keep resolving
+    # render assets via the library index by ``asset_id``.
+    "vfs_dir",
 )
 
 #: HullDelta key order (``exteriors[].hull`` when non-null — a genuine

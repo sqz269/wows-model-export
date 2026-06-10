@@ -165,6 +165,32 @@ def _harvest_section_entries(
             rec.species = entry.get("species")
 
 
+def _asset_key_from_vfs_dir(asset_id: str, vfs_dir: str) -> AssetKey | None:
+    """Derive an AssetKey from a swap target's actual VFS directory (the
+    ``vfs_dir`` GameParams path channel) — WG-faithful: the engine
+    resolves swaps by full path; this is that path's taxonomy verbatim."""
+    d = vfs_dir.replace("\\", "/").strip("/")
+    if d.startswith("content/gameplay/"):
+        parts = d[len("content/gameplay/"):].split("/")
+        # <scope>/<category>[/<subcategory>]/<asset_id>
+        if len(parts) >= 3 and parts[-1] == asset_id:
+            return AssetKey(
+                scope=parts[0],
+                category=parts[1],
+                subcategory="/".join(parts[2:-1]) or None,
+                asset_id=asset_id,
+            )
+        return None
+    if d.startswith("content/styles/"):
+        style = d[len("content/styles/"):].split("/", 1)[0]
+        if style:
+            return AssetKey(
+                scope="style", category=style, subcategory=None,
+                asset_id=asset_id,
+            )
+    return None
+
+
 def _harvest_exterior_mounts(
     doc: dict,
     *,
@@ -178,17 +204,18 @@ def _harvest_exterior_mounts(
     may not exist for that permoflage), so without this walk the variant
     GLBs are never built and consumers can't render the exterior.
 
-    The variant asset usually shares the BASE placement's taxonomy — the
-    convention ``apply_variant_asset_swaps`` relies on for its bone-mismatch
-    GLB lookup — so ``(scope, category, subcategory)`` starts from the base
-    placement at the mount's ``hp_name``. But event-themed exteriors
-    (Halloween / PostAp / Space) re-home whole armament sets under
-    ``content/gameplay/events/<category>/`` — 314 swap-target assets
-    corpus-wide (80 AA + 60 main + 37 secondary + 31 director + …), e.g.
-    ``XD017_Director_Mk51`` swapping a ``usa/director`` base. The borrowed
-    key is therefore VALIDATED against the VFS manifest and re-keyed via
-    :func:`_vfs_lookup_asset_key` (the same probe the attached-children
-    discovery uses) when the conventional geometry path doesn't exist.
+    Key resolution, most- to least-grounded:
+
+    1. ``mounts[].vfs_dir`` — the directory of the actual GameParams model
+       path (the engine's own resolution is path-keyed; taxonomy folders
+       are artist convention). Exact, including the 314 corpus-wide
+       ``events/``-scoped targets (80 AA + 60 main + 37 secondary +
+       31 director + …, e.g. ``XD017_Director_Mk51``).
+    2. VFS-manifest probe (:func:`_vfs_lookup_asset_key`, the same probe
+       the attached-children discovery uses) — for sidecars emitted before
+       the path channel existed.
+    3. The BASE placement's taxonomy at the mount's ``hp_name`` — the
+       legacy heuristic, correct for same-scope swaps only.
     """
     exteriors = doc.get("exteriors")
     if not isinstance(exteriors, list):
@@ -208,30 +235,41 @@ def _harvest_exterior_mounts(
             base = base_by_hp.get(m.get("hp_name") or "")
             if not isinstance(base, dict):
                 continue
-            scope = base.get("scope")
-            category = base.get("category")
             asset_id = m.get("asset_id")
-            if not asset_id or not scope or not category:
+            if not asset_id:
                 continue
             if asset_id == base.get("asset_id"):
                 continue  # transform/miscFilter-only swap — asset already harvested
-            key = AssetKey(
-                scope=scope,
-                category=category,
-                subcategory=base.get("subcategory"),
-                asset_id=asset_id,
-            )
-            if manifest_paths is None:
-                try:
-                    manifest_paths = _load_manifest_paths(None)
-                except Exception:
-                    manifest_paths = set()
-            if manifest_paths and vfs_geometry_path(key) not in manifest_paths:
-                true_key = _vfs_lookup_asset_key(
-                    asset_id, manifest_paths, allow_style=True,
+
+            key: AssetKey | None = None
+            # Tier 1 — GameParams path channel.
+            vfs_dir = m.get("vfs_dir")
+            if isinstance(vfs_dir, str) and vfs_dir:
+                key = _asset_key_from_vfs_dir(asset_id, vfs_dir)
+            # Tier 3 seed — borrowed base taxonomy (also the tier-2 probe
+            # trigger: a borrowed key that doesn't exist in the VFS).
+            if key is None:
+                scope = base.get("scope")
+                category = base.get("category")
+                if not scope or not category:
+                    continue
+                key = AssetKey(
+                    scope=scope,
+                    category=category,
+                    subcategory=base.get("subcategory"),
+                    asset_id=asset_id,
                 )
-                if true_key is not None:
-                    key = true_key
+                if manifest_paths is None:
+                    try:
+                        manifest_paths = _load_manifest_paths(None)
+                    except Exception:
+                        manifest_paths = set()
+                if manifest_paths and vfs_geometry_path(key) not in manifest_paths:
+                    true_key = _vfs_lookup_asset_key(
+                        asset_id, manifest_paths, allow_style=True,
+                    )
+                    if true_key is not None:
+                        key = true_key
             r = records.setdefault(key, AssetRecord(key=key))
             r.used_by_ships.add(ship_name)
             if r.species is None:

@@ -103,6 +103,12 @@ export interface ShipPlacement {
    */
   source?: string | null;
   /**
+   * Producer provenance on variant-swapped placements: the swap target's
+   * actual GameParams VFS directory. Informational — render assets
+   * resolve via the library index by `asset_id`.
+   */
+  vfs_dir?: string | null;
+  /**
    * Per-mount ammo list (gun mounts only). Joins to
    * `Sidecar.ballistics.shells[<id>]` for the per-shell profile. Empty
    * or absent on AA, torpedo, and accessory placements.

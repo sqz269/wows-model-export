@@ -709,6 +709,11 @@ export interface ExteriorMountSwap {
   misc_filter?: string[] | null;
   /** Diagnostic only — consumers do NOT re-apply Ry(180°). */
   attached_y_flip?: boolean;
+  /** Producer provenance: the swap target's actual GameParams VFS
+   *  directory (WG resolves swaps by full path; taxonomy folders are
+   *  artist convention). Consumers keep resolving render assets via the
+   *  library index by `asset_id` — this field is informational. */
+  vfs_dir?: string | null;
 }
 
 export interface ExteriorSwapTable {

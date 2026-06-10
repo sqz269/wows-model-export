@@ -247,6 +247,37 @@ def test_reanchor_composes_with_swaps():
     assert rec["swap_table"]["by_hp_name"] == {"HP_AGM_1": "AGM622_8in55_CA68_Azur"}
 
 
+def test_vfs_dir_path_channel():
+    """WG-faithful path provenance: a variant placement stamped with
+    `vfs_dir` (the GameParams model path's directory) flows into the
+    mounts[] record + swap_table + projection; transform-only records
+    never carry it."""
+    base = _make_base()
+    variant = _make_variant()
+    xd_dir = "content/gameplay/events/director/XD017_Director_Mk51"
+    for t in variant["turrets"]:
+        t["vfs_dir"] = xd_dir
+    rec = build_exterior_record("paths", base, variant)
+    assert all(m.get("vfs_dir") == xd_dir for m in rec["mounts"]), rec["mounts"]
+    assert rec["swap_table"]["vfs_dir_by_asset_id"] == {
+        "AGM622_8in55_CA68_Azur": xd_dir,
+    }
+    projected = project_exterior(base, rec)
+    assert all(p.get("vfs_dir") == xd_dir for p in projected["turrets"])
+    # base copy untouched; unswapped director never gains the key
+    assert "vfs_dir" not in base["turrets"][0]
+    assert "vfs_dir" not in projected["accessories"][0]
+
+    # transform-only record (re-anchor) → no vfs_dir, no swap_table row
+    moved = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, -2.03, 1]
+    anchored = reanchor_base_placements(
+        base, {"HP_AD_1": {"matrix": list(moved), "position": [0, 0, -2.03]}},
+    )
+    rec2 = build_exterior_record("parked", base, anchored)
+    assert "vfs_dir" not in rec2["mounts"][0]
+    assert rec2["swap_table"]["vfs_dir_by_asset_id"] == {}
+
+
 def _placement_sections(doc):
     return {k: doc.get(k) or [] for k in ("turrets", "secondaries", "antiair", "torpedoes", "accessories")}
 
@@ -314,6 +345,7 @@ if __name__ == "__main__":
         test_reanchor_parked_hp,
         test_reanchor_epsilon_keeps_base_bytes,
         test_reanchor_composes_with_swaps,
+        test_vfs_dir_path_channel,
         test_onfile_parity_baltimore,
     ]
     failed = 0
