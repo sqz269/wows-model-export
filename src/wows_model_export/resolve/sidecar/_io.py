@@ -304,6 +304,11 @@ _KEYED_LIST_SECTIONS: dict[str, str] = {
     "accessories": "instance_id",
     "materials": "material_id",
     "skins": "skin_id",
+    # Ship-exterior unification Step 0 (additive, schema stays 3): one record
+    # per WG Exterior (mesh-swap permoflage). Keyed merge keeps prior records
+    # alive when a re-scaffold's GameParams pass degrades to just the
+    # synthesised ``default`` entry.
+    "exteriors": "exterior_id",
 }
 
 

@@ -236,6 +236,13 @@ def build_exteriors_block(
     pipeline functions and injected here (see :func:`collect_exteriors_for_vehicle`).
     Records whose diff yields no ``mounts`` and no ``hull`` are dropped (a
     texture-only camo is a ``skins[]`` entry, not an exterior).
+
+    Exactly ONE entry carries ``is_native: true``: when a real mesh-swap
+    exterior is the Vehicle's ``nativePermoflage`` (ARP / Azur-style ships,
+    which never show their bare hull in game), the synthesised ``default``
+    yields its native flag to it; otherwise ``default`` stays native (a
+    texture-only native permoflage is base geometry + a ``skins[]`` entry).
+    Consumers auto-select the ``is_native`` entry on load (handoff §8).
     """
     out = [default_exterior_record()]
     for vr in variant_records:
@@ -253,6 +260,8 @@ def build_exteriors_block(
         )
         if rec["mounts"] or rec["hull"]:
             out.append(rec)
+    if any(rec.get("is_native") for rec in out[1:]):
+        out[0]["is_native"] = False
     return out
 
 
@@ -271,48 +280,71 @@ def collect_exteriors_for_vehicle(
     apply_swaps: Callable[..., dict[str, list[Placement]]],
     get_exterior: Callable[[str], Mapping[str, Any] | None] | None = None,
     camo_scheme_for: Callable[[str], str | None] | None = None,
+    resolve_model_dir: Callable[..., str | None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Enumerate a Vehicle's ``permoflages[]`` and build the ``exteriors[]`` block,
+    """Enumerate a Vehicle's ``permoflages[]`` (plus its ``nativePermoflage``,
+    which is not always listed there) and build the ``exteriors[]`` block,
     reusing the existing resolvers (dependency-injected so this stays testable and
     has no hard import cycle):
 
     * ``get_ship(vehicle_id)`` -> the Vehicle GameParams dict (``permoflages`` /
-      ``nativePermoflage``) — e.g. ``gameparams_autofill.get_ship``.
+      ``nativePermoflage``) — e.g. ``read.gameparams.get_ship``.
     * ``resolve_swaps(vehicle_id, permoflage_id=...)`` ->
       ``gameparams_autofill.resolve_variant_accessory_swaps``.
     * ``apply_swaps(base_placements, swap_table, ...)`` -> the existing
       ``resolve.sidecar._absorb.apply_variant_asset_swaps`` (produces the
       Ry180-baked variant placements). This is the step that needs the variant
       mount GLB on disk and a full pipeline run to validate.
-    * ``get_exterior(id)`` -> Exterior dict (for ``species`` / ``peculiarity`` /
-      ``wg_asset_id`` / ``camouflage``).
+    * ``get_exterior(id)`` -> Exterior dict (for ``species`` / ``peculiarity``).
     * ``camo_scheme_for(exterior_id)`` -> the matching ``skins[].scheme_key``.
+    * ``resolve_model_dir(vehicle_id, permoflage_id=...)`` -> the Exterior's
+      variant hull model_dir (``"ASC080_Baltimore_1944_Azur"``) or ``None``.
+      Lowercased it becomes the record's ``wg_asset_id`` — the SAME value the
+      legacy ``__<Variant>`` folder stamps into ``ship.wg_asset_id`` (see
+      ``sidecar._documents``). The GameParams Exterior ``id`` field is numeric
+      and deliberately NOT used.
 
-    Any exception is swallowed and logged-as-skip so the additive emit can never
-    regress the existing pipeline.
+    Failures are contained at two levels: a bad individual permoflage is
+    skipped (logged) without dropping its siblings, and any outer failure
+    degrades to ``[default]`` so the additive emit can never regress the
+    existing pipeline.
     """
     try:
         ship = get_ship(vehicle_id) or {}
         permos: list[str] = list(ship.get("permoflages") or [])
-        native = ship.get("nativePermoflage")
+        native = ship.get("nativePermoflage") or None
+        if native and native not in permos:
+            permos.append(native)
         variant_records: list[dict[str, Any]] = []
         for ext_id in permos:
-            swaps = resolve_swaps(vehicle_id, permoflage_id=ext_id) or {}
-            if not _has_mesh_swap(swaps):
-                continue  # texture-only camo -> skins[], not an exterior row
-            variant_placements = apply_swaps(base, swaps)
-            ext = (get_exterior(ext_id) if get_exterior else None) or {}
-            variant_records.append({
-                "exterior_id": ext_id,
-                "variant_placements": variant_placements,
-                "display_name": ext.get("title") or ext.get("name"),
-                "wg_asset_id": ext.get("id") or ext.get("name"),
-                "species": (ext.get("typeinfo") or {}).get("species"),
-                "peculiarity": ext.get("peculiarity"),
-                "is_native": ext_id == native,
-                "camo_scheme_key": camo_scheme_for(ext_id) if camo_scheme_for else None,
-                "hull": None,  # HullDelta resolution is a later step
-            })
+            try:
+                swaps = resolve_swaps(vehicle_id, permoflage_id=ext_id) or {}
+                if not _has_mesh_swap(swaps):
+                    continue  # texture-only camo -> skins[], not an exterior row
+                variant_placements = apply_swaps(base, swaps)
+                ext = (get_exterior(ext_id) if get_exterior else None) or {}
+                model_dir: str | None = None
+                if resolve_model_dir is not None:
+                    model_dir = resolve_model_dir(vehicle_id, permoflage_id=ext_id)
+                variant_records.append({
+                    "exterior_id": ext_id,
+                    "variant_placements": variant_placements,
+                    "display_name": ext.get("title") or ext.get("name"),
+                    "wg_asset_id": (
+                        model_dir.lower() if isinstance(model_dir, str) else None
+                    ),
+                    "species": (ext.get("typeinfo") or {}).get("species"),
+                    "peculiarity": ext.get("peculiarity"),
+                    "is_native": ext_id == native,
+                    "camo_scheme_key": camo_scheme_for(ext_id) if camo_scheme_for else None,
+                    "hull": None,  # HullDelta resolution is a later step
+                })
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "exterior_unify: skipping exterior %s on %s (%s)",
+                    ext_id, vehicle_id, exc,
+                )
         return build_exteriors_block(base, variant_records)
     except Exception as exc:  # pragma: no cover - defensive, must not break emit
         import logging
