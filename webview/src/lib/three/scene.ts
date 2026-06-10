@@ -62,6 +62,44 @@ export const DEFAULT_TONEMAP_PARAMS: GTTonemapParams = {
   black: 1.21,
 };
 
+type RenderableDepthObject = THREE.Object3D & {
+  material?: THREE.Material | THREE.Material[];
+  isMesh?: boolean;
+  isInstancedMesh?: boolean;
+  isSkinnedMesh?: boolean;
+};
+
+function objectMaterials(object: THREE.Object3D): THREE.Material[] {
+  const material = (object as RenderableDepthObject).material;
+  if (!material) return [];
+  return Array.isArray(material) ? material : [material];
+}
+
+function materialHasSoftParticleUniform(material: THREE.Material): material is THREE.ShaderMaterial {
+  const uniforms = (material as THREE.ShaderMaterial).uniforms;
+  return !!uniforms?.uSoftParticleDepthScale;
+}
+
+function materialIsDistortionParticle(material: THREE.Material): material is THREE.ShaderMaterial {
+  const uniforms = (material as THREE.ShaderMaterial).uniforms;
+  return !!uniforms?.uDistortion && Number(uniforms.uDistortion.value ?? 0) > 0.5;
+}
+
+function shouldHideForOpaqueDepth(object: THREE.Object3D): boolean {
+  if (!object.visible) return false;
+  const renderable = object as RenderableDepthObject;
+  const materials = objectMaterials(object);
+  if (materials.length === 0) return false;
+  if (materials.some(materialHasSoftParticleUniform)) return true;
+  if (!renderable.isMesh && !renderable.isInstancedMesh && !renderable.isSkinnedMesh) return true;
+  return materials.some((mat) => mat.transparent || mat.depthWrite === false);
+}
+
+function shouldHideForDistortionSource(object: THREE.Object3D): boolean {
+  if (!object.visible) return false;
+  return objectMaterials(object).some(materialIsDistortionParticle);
+}
+
 // Uchimura GT tonemap (GDC 2017) + sRGB OETF as an EffectComposer ShaderPass.
 // Input is linear scene radiance (RenderPass renders into a linear HDR target
 // with Three's tonemapper disabled); output is display-encoded sRGB written
@@ -167,6 +205,9 @@ export interface SceneEnvironment {
     color?: THREE.ColorRepresentation;
     intensity?: number;
   }): void;
+  /** Current key-light direction/color. Direction points TOWARD the sun,
+   *  matching `setSunLight`. Returned objects are clones. */
+  getSunLight(): { direction: THREE.Vector3; color: THREE.Color; intensity: number };
   /** Forwarded by the resize observer so the composer stays in sync. */
   setSize(width: number, height: number): void;
   /** Replace the scene background color (e.g. to switch a particle
@@ -260,6 +301,7 @@ export function createSceneEnvironment(
   const hemi = new THREE.HemisphereLight(0xbcd3ff, 0x222833, 0.85);
   const dir = new THREE.DirectionalLight(0xffffff, 0.85);
   dir.position.set(50, 80, 50);
+  const sunDirectionState = dir.position.clone().normalize();
   scene.add(hemi, dir);
 
   // Helpers — the ship is huge (~300 m) so the default grid scale
@@ -281,6 +323,16 @@ export function createSceneEnvironment(
   let composer: EffectComposer | null = null;
   let bloomPass: UnrealBloomPass | null = null;
   let gtPass: ShaderPass | null = null;
+  let opaqueDepthTarget: THREE.WebGLRenderTarget | null = null;
+  let sceneColorTarget: THREE.WebGLRenderTarget | null = null;
+  const opaqueDepthMaterial = new THREE.MeshDepthMaterial({
+    depthPacking: THREE.BasicDepthPacking,
+  });
+  opaqueDepthMaterial.blending = THREE.NoBlending;
+  const opaqueDepthSize = new THREE.Vector2(1, 1);
+  const softDepthUvSize = new THREE.Vector2(1, 1);
+  const sceneColorSize = new THREE.Vector2(1, 1);
+  const distortionUvSize = new THREE.Vector2(1, 1);
   let lastSize = { w: 1, h: 1 };
   let postprocessEnabled = postprocess;
 
@@ -324,6 +376,139 @@ export function createSceneEnvironment(
     applyTonemapParams();
   };
 
+  const collectSoftDepthConsumers = (): THREE.ShaderMaterial[] => {
+    const consumers = new Set<THREE.ShaderMaterial>();
+    scene.traverse((object) => {
+      if (!object.visible) return;
+      for (const mat of objectMaterials(object)) {
+        if (!materialHasSoftParticleUniform(mat)) continue;
+        const scale = Number(mat.uniforms.uSoftParticleDepthScale?.value ?? 0);
+        if (Number.isFinite(scale) && scale > 0) consumers.add(mat);
+      }
+    });
+    return [...consumers];
+  };
+
+  const collectDistortionConsumers = (): THREE.ShaderMaterial[] => {
+    const consumers = new Set<THREE.ShaderMaterial>();
+    scene.traverse((object) => {
+      if (!object.visible) return;
+      for (const mat of objectMaterials(object)) {
+        if (materialIsDistortionParticle(mat)) consumers.add(mat);
+      }
+    });
+    return [...consumers];
+  };
+
+  const ensureOpaqueDepthTarget = () => {
+    renderer.getDrawingBufferSize(opaqueDepthSize);
+    const width = Math.max(1, Math.floor(opaqueDepthSize.x));
+    const height = Math.max(1, Math.floor(opaqueDepthSize.y));
+    if (opaqueDepthTarget && opaqueDepthTarget.width === width && opaqueDepthTarget.height === height) {
+      return opaqueDepthTarget;
+    }
+    opaqueDepthTarget?.dispose();
+    opaqueDepthTarget = new THREE.WebGLRenderTarget(width, height, {
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      generateMipmaps: false,
+      stencilBuffer: false,
+      depthBuffer: true,
+    });
+    opaqueDepthTarget.texture.name = 'WowsOpaqueDepthColorDiscard';
+    opaqueDepthTarget.depthTexture = new THREE.DepthTexture(width, height, THREE.UnsignedIntType);
+    opaqueDepthTarget.depthTexture.name = 'WowsOpaqueDepthCopy';
+    opaqueDepthTarget.depthTexture.format = THREE.DepthFormat;
+    opaqueDepthTarget.depthTexture.minFilter = THREE.NearestFilter;
+    opaqueDepthTarget.depthTexture.magFilter = THREE.NearestFilter;
+    return opaqueDepthTarget;
+  };
+
+  const ensureSceneColorTarget = () => {
+    renderer.getDrawingBufferSize(sceneColorSize);
+    const width = Math.max(1, Math.floor(sceneColorSize.x));
+    const height = Math.max(1, Math.floor(sceneColorSize.y));
+    if (sceneColorTarget && sceneColorTarget.width === width && sceneColorTarget.height === height) {
+      return sceneColorTarget;
+    }
+    sceneColorTarget?.dispose();
+    sceneColorTarget = new THREE.WebGLRenderTarget(width, height, {
+      type: THREE.HalfFloatType,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      generateMipmaps: false,
+      stencilBuffer: false,
+      depthBuffer: true,
+    });
+    sceneColorTarget.texture.name = 'WowsDistortionSceneColor';
+    return sceneColorTarget;
+  };
+
+  const renderOpaqueDepthSnapshot = (consumers: THREE.ShaderMaterial[]) => {
+    if (consumers.length === 0) return;
+    const target = ensureOpaqueDepthTarget();
+    const hidden: THREE.Object3D[] = [];
+    scene.traverse((object) => {
+      if (shouldHideForOpaqueDepth(object)) {
+        hidden.push(object);
+        object.visible = false;
+      }
+    });
+    const previousTarget = renderer.getRenderTarget();
+    const previousOverride = scene.overrideMaterial;
+    try {
+      scene.overrideMaterial = opaqueDepthMaterial;
+      renderer.setRenderTarget(target);
+      renderer.clear(true, true, true);
+      renderer.render(scene, camera);
+    } finally {
+      renderer.setRenderTarget(previousTarget);
+      scene.overrideMaterial = previousOverride;
+      for (const object of hidden) object.visible = true;
+    }
+
+    softDepthUvSize.set(target.width, target.height);
+    for (const mat of consumers) {
+      const uniforms = mat.uniforms;
+      if (uniforms.uSoftDepthTexture) uniforms.uSoftDepthTexture.value = target.depthTexture;
+      if (uniforms.uSoftDepthSize?.value instanceof THREE.Vector2) {
+        uniforms.uSoftDepthSize.value.copy(softDepthUvSize);
+      }
+      if (uniforms.uSoftCameraNear) uniforms.uSoftCameraNear.value = camera.near;
+      if (uniforms.uSoftCameraFar) uniforms.uSoftCameraFar.value = camera.far;
+    }
+  };
+
+  const renderDistortionSceneColor = (consumers: THREE.ShaderMaterial[]) => {
+    if (consumers.length === 0) return;
+    const target = ensureSceneColorTarget();
+    const hidden: THREE.Object3D[] = [];
+    scene.traverse((object) => {
+      if (shouldHideForDistortionSource(object)) {
+        hidden.push(object);
+        object.visible = false;
+      }
+    });
+    const previousTarget = renderer.getRenderTarget();
+    try {
+      renderer.setRenderTarget(target);
+      renderer.clear(true, true, true);
+      renderer.render(scene, camera);
+    } finally {
+      renderer.setRenderTarget(previousTarget);
+      for (const object of hidden) object.visible = true;
+    }
+
+    distortionUvSize.set(target.width, target.height);
+    for (const mat of consumers) {
+      const uniforms = mat.uniforms;
+      if (uniforms.uDistortionSceneTexture) uniforms.uDistortionSceneTexture.value = target.texture;
+      if (uniforms.uDistortionSceneSize?.value instanceof THREE.Vector2) {
+        uniforms.uDistortionSceneSize.value.copy(distortionUvSize);
+      }
+    }
+  };
+
   const applyBloomParams = () => {
     if (!bloomPass) return;
     bloomPass.strength = bloomParams.strength;
@@ -340,6 +525,8 @@ export function createSceneEnvironment(
     grid,
     axes,
     render() {
+      renderOpaqueDepthSnapshot(collectSoftDepthConsumers());
+      renderDistortionSceneColor(collectDistortionConsumers());
       if (!postprocessEnabled && !bloomEnabled) {
         renderer.render(scene, camera);
         return;
@@ -405,9 +592,21 @@ export function createSceneEnvironment(
       // DirectionalLight travels from `position` toward its target (origin),
       // so position along the to-sun direction makes the light shine "down"
       // from the sun. Magnitude is irrelevant (directional), so push it out.
-      if (opts.direction) dir.position.copy(opts.direction).multiplyScalar(100);
+      if (opts.direction) {
+        sunDirectionState.copy(opts.direction);
+        if (sunDirectionState.lengthSq() <= 1e-10) sunDirectionState.set(50, 80, 50);
+        sunDirectionState.normalize();
+        dir.position.copy(sunDirectionState).multiplyScalar(100);
+      }
       if (opts.color !== undefined) dir.color.set(opts.color);
       if (opts.intensity !== undefined) dir.intensity = opts.intensity;
+    },
+    getSunLight() {
+      return {
+        direction: sunDirectionState.clone(),
+        color: dir.color.clone(),
+        intensity: dir.intensity,
+      };
     },
     setBackground(color: number) {
       if (scene.background instanceof THREE.Color) {
@@ -426,6 +625,11 @@ export function createSceneEnvironment(
       (axes.material as THREE.Material).dispose();
       envRT.dispose();
       pmrem.dispose();
+      opaqueDepthMaterial.dispose();
+      opaqueDepthTarget?.dispose();
+      opaqueDepthTarget = null;
+      sceneColorTarget?.dispose();
+      sceneColorTarget = null;
       composer?.dispose();
       composer = null;
       bloomPass = null;

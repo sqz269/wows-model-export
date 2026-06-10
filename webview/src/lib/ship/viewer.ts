@@ -21,15 +21,17 @@ import {
   type BloomParams,
   type SceneEnvironment,
 } from '$lib/three/scene';
+import { ParticleScene, type ParticleAttachmentHandle } from '$lib/three/particles';
 import { observeResize } from '$lib/three/resize';
 import { startRenderLoop } from '$lib/three/render_loop';
 import { disposeTree } from '$lib/three/dispose';
 import { loadWgEnvironment, type WetnessParams, type WgEnvironment } from '$lib/three/env_ibl';
-import { repoUrl } from '$lib/api';
+import { fetchParticleRecords, repoUrl } from '$lib/api';
 import { SHIP_SECTIONS } from '$lib/types';
 import type {
   ExteriorRecord,
   LibraryIndex,
+  ParticleAttachment,
   SeamKey,
   SeamState,
   ShipPlacement,
@@ -145,6 +147,12 @@ export interface ArmorPickResult {
   point: THREE.Vector3;
 }
 
+interface ParticleAnchorMotion {
+  lastPosition: THREE.Vector3;
+  velocity: THREE.Vector3;
+  lastTimeMs: number;
+}
+
 export interface WgEnvironmentInfo {
   space: string;
   weather: string;
@@ -154,6 +162,8 @@ export interface WgEnvironmentInfo {
 
 const pickRaycaster = new THREE.Raycaster();
 const pickPointer = new THREE.Vector2();
+const particleWorldPos = new THREE.Vector3();
+const particleWorldQuat = new THREE.Quaternion();
 
 // Lighting when a WG IBL cube is active — the cube supplies ambient + specular,
 // so the hemisphere fill is killed and the key directional is driven from the
@@ -242,6 +252,32 @@ function armorZoneLabel(name: string): string | null {
   return s || null;
 }
 
+function muzzleIndex(name: string): number {
+  const m = /^HP_gunFire(\d+)$/i.exec(name);
+  return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
+}
+
+const SHIP_AMBIENT_PARTICLE_GROUPS = new Set(['idleport', 'smoke']);
+const SHIP_PARTICLE_EVENT_PREVIEW_MS = 3000;
+const SHIP_PARTICLE_SOURCE_ORDER = new Map<string, number>([
+  ['hull', 0],
+  ['artillery', 1],
+  ['atba', 2],
+  ['airDefense', 3],
+  ['aa_aura', 4],
+  ['munition', 5],
+  ['map', 6],
+]);
+
+function isWakeParticleGroup(group: string): boolean {
+  const g = group.toLowerCase();
+  return g.startsWith('waketrace') || g.startsWith('propeller');
+}
+
+function shipParticleEventKey(a: ParticleAttachment): string {
+  return `${a.source ?? 'hull'}:${a.group ?? ''}`;
+}
+
 export interface ShipLoadStats {
   ship: ShipSummary;
   hullMeshCount: number;
@@ -254,6 +290,51 @@ export interface ShipLoadStats {
   loadMs: number;
   unresolvedAssets: Map<string, number>;
   skinCount: number;
+}
+
+export type ShipParticleMode = 'ambient' | 'all';
+
+export interface ShipParticleEventOption {
+  key: string;
+  source: string;
+  group: string;
+  label: string;
+  handles: number;
+  systems: number;
+}
+
+export interface ShipParticleStats {
+  attachmentRows: number;
+  renderableAttachments: number;
+  anchorInstances: number;
+  activeAttachments: number;
+  ambientAttachments: number;
+  eventAttachments: number;
+  eventOnlyAttachments: number;
+  unanchoredAttachments: number;
+  unresolvedAnchors: number;
+  uniquePaths: number;
+  recordsLoaded: number;
+  missingRecords: number;
+  systems: number;
+}
+
+function emptyShipParticleStats(): ShipParticleStats {
+  return {
+    attachmentRows: 0,
+    renderableAttachments: 0,
+    anchorInstances: 0,
+    activeAttachments: 0,
+    ambientAttachments: 0,
+    eventAttachments: 0,
+    eventOnlyAttachments: 0,
+    unanchoredAttachments: 0,
+    unresolvedAnchors: 0,
+    uniquePaths: 0,
+    recordsLoaded: 0,
+    missingRecords: 0,
+    systems: 0,
+  };
 }
 
 /** Per-mount armor record — a turret/secondary's own armor meshes (from the
@@ -386,6 +467,10 @@ export class ShipViewer {
 
   // Placement tracking
   private placementsByMesh = new Map<string, THREE.Object3D[]>();
+  /** Placement clone roots keyed by sidecar/accessories identifiers. Used by
+   *  the particle layer to anchor gun/AA effects to live mount roots. */
+  private placementRootByInstanceId = new Map<string, THREE.Object3D>();
+  private placementRootByHp = new Map<string, THREE.Object3D>();
   private placementColorEntries: PlacementColorEntry[] = [];
   /** Per-level placement meshes — merged from each placement's
    *  `TagResult.meshesByLodLevel` so the cascade can filter by level. */
@@ -426,6 +511,21 @@ export class ShipViewer {
   // ship from the live scene graph + the sidecar's hull EP_ positions.
   private nodeOverlay = new NodeOverlay();
   private removeNodeHover: (() => void) | null = null;
+
+  // Ship particle rendering. Built lazily when the user enables the layer.
+  private particleScene: ParticleScene | null = null;
+  private particleHandles: ParticleAttachmentHandle[] = [];
+  private particleAnchorObjects = new Map<ParticleAttachmentHandle, THREE.Object3D>();
+  private particleAnchorMotion = new Map<ParticleAttachmentHandle, ParticleAnchorMotion>();
+  private particleAttachmentAnchors = new WeakMap<ParticleAttachment, THREE.Object3D>();
+  private particleLayerEnabled = false;
+  private particleMode: ShipParticleMode = 'ambient';
+  private particleEventOptions: ShipParticleEventOption[] = [];
+  private particlePreviewKeys = new Set<string>();
+  private particlePreviewTimers = new Map<string, number>();
+  private particleBuildPromise: Promise<ShipParticleStats> | null = null;
+  private particleBuildToken = 0;
+  private particleStats: ShipParticleStats = emptyShipParticleStats();
 
   // Texture pipeline
   private textures: TextureManager;
@@ -487,6 +587,8 @@ export class ShipViewer {
     this.stopLoop = startRenderLoop(() => {
       this.env.controls.update();
       this.textures.tickRipples(performance.now() / 1000); // advance L3.5 rain ripples
+      this.updateParticleAttachmentTransforms();
+      this.particleScene?.tick();
       this.env.render();
     });
 
@@ -835,6 +937,11 @@ export class ShipViewer {
     // every turret's yaw to the same `Rotate_Y` instance.
     const inst = cloneAccessoryInstance(bundle.tpl);
     applyPlacementMatrix(inst, placement.transform.matrix);
+    // Particle/effects anchor maps (gun-effect attachments resolve their
+    // host mount by hp_name / instance_id). Re-registered on exterior
+    // switch so anchors always point at the LIVE mount root.
+    this.placementRootByInstanceId.set(placement.instance_id, inst);
+    if (placement.hp_name) this.placementRootByHp.set(placement.hp_name, inst);
     // Pull the accessory's own armor (turret/secondary `Armor` group)
     // out before registration so it isn't textured / colored / LOD-
     // bucketed as normal turret geometry. Re-added hidden below.
@@ -996,6 +1103,15 @@ export class ShipViewer {
 
     for (const rec of records) {
       this.sectionGroups[rec.section].remove(rec.inst);
+      // Particle anchor maps — drop only when still pointing at THIS root
+      // (the replacement mount may already have re-registered).
+      if (this.placementRootByInstanceId.get(rec.instanceId) === rec.inst) {
+        this.placementRootByInstanceId.delete(rec.instanceId);
+      }
+      const hp = rec.placement.hp_name;
+      if (hp && this.placementRootByHp.get(hp) === rec.inst) {
+        this.placementRootByHp.delete(hp);
+      }
       // placementsByMesh holds instance ROOTS keyed by parent hull mesh.
       const pm = rec.placement.parent_mesh;
       if (pm) {
@@ -1075,6 +1191,9 @@ export class ShipViewer {
     this.attachedDocCache.clear();
     this.turretRigs.clear();
     this.nodeOverlay.clear();
+    this.disposeParticleLayer();
+    this.placementRootByInstanceId.clear();
+    this.placementRootByHp.clear();
     this.sidecar = null;
     this.hullBaseUrl = null;
     this.mountRecords.clear();
@@ -1290,6 +1409,101 @@ export class ShipViewer {
    *  turrets). Hull EP_ points are static. */
   refreshNodes(): void {
     this.nodeOverlay.refresh(this.shipRoot, this.sidecar?.effects?.attachments ?? null);
+  }
+
+  // ── Ship particle layer ───────────────────────────────────────────────
+
+  hasShipParticleData(): boolean {
+    return (this.sidecar?.effects?.attachments?.length ?? 0) > 0;
+  }
+
+  getShipParticlesVisible(): boolean {
+    return this.particleLayerEnabled;
+  }
+
+  getShipParticleMode(): ShipParticleMode {
+    return this.particleMode;
+  }
+
+  getShipParticleStats(): Readonly<ShipParticleStats> {
+    return this.particleStats;
+  }
+
+  getShipParticleEventOptions(): readonly ShipParticleEventOption[] {
+    return this.particleEventOptions;
+  }
+
+  async setShipParticleMode(mode: ShipParticleMode): Promise<ShipParticleStats> {
+    this.particleMode = mode;
+    if (!this.particleLayerEnabled) return this.particleStats;
+    if (this.particleBuildPromise) return this.particleBuildPromise;
+    if (!this.particleScene) return this.setShipParticlesVisible(true);
+    this.applyShipParticleActivation();
+    return this.particleStats;
+  }
+
+  async triggerShipParticleEvent(
+    key: string,
+    durationMs = SHIP_PARTICLE_EVENT_PREVIEW_MS,
+  ): Promise<ShipParticleStats> {
+    if (!key) return this.particleStats;
+    if (!this.particleLayerEnabled || !this.particleScene) {
+      await this.setShipParticlesVisible(true);
+    } else if (this.particleBuildPromise) {
+      await this.particleBuildPromise;
+    }
+    if (!this.particleScene) return this.particleStats;
+    const handles = this.particleHandles.filter((h) => shipParticleEventKey(h.attachment) === key);
+    if (handles.length === 0) return this.particleStats;
+
+    this.particlePreviewKeys.add(key);
+    const oldTimer = this.particlePreviewTimers.get(key);
+    if (oldTimer != null) window.clearTimeout(oldTimer);
+
+    for (const h of handles) this.particleScene.restartAttachment(h);
+    this.updateParticleAttachmentTransforms();
+    this.particleStats = {
+      ...this.particleStats,
+      activeAttachments: this.countActiveParticleHandles(),
+    };
+
+    if (durationMs > 0) {
+      const timer = window.setTimeout(() => {
+        this.particlePreviewTimers.delete(key);
+        this.particlePreviewKeys.delete(key);
+        this.applyShipParticleActivation();
+      }, durationMs);
+      this.particlePreviewTimers.set(key, timer);
+    }
+    return this.particleStats;
+  }
+
+  async setShipParticlesVisible(on: boolean): Promise<ShipParticleStats> {
+    this.particleLayerEnabled = on;
+    if (!on) {
+      this.clearShipParticleEventPreviews();
+      this.particleScene?.setAllActive(false);
+      if (this.particleScene) this.particleScene.root.visible = false;
+      this.particleStats = { ...this.particleStats, activeAttachments: 0 };
+      return this.particleStats;
+    }
+
+    if (!this.sidecar?.effects?.attachments?.length) {
+      this.particleStats = emptyShipParticleStats();
+      return this.particleStats;
+    }
+    if (this.particleScene) {
+      this.particleScene.root.visible = true;
+      this.applyShipParticleActivation();
+      return this.particleStats;
+    }
+    if (this.particleBuildPromise) return this.particleBuildPromise;
+
+    const token = ++this.particleBuildToken;
+    this.particleBuildPromise = this.buildShipParticleLayer(token).finally(() => {
+      if (token === this.particleBuildToken) this.particleBuildPromise = null;
+    });
+    return this.particleBuildPromise;
   }
 
   setLodPolicy(p: LodPolicy): void {
@@ -1911,6 +2125,7 @@ export class ShipViewer {
     } else {
       this.env.setSunLight({ intensity: 0.35 });
     }
+    this.syncParticleSunLighting();
 
     // Layer-1 rain wetness: tint albedo toward `wetnessColor` + drop roughness,
     // scaled by the per-weather `overallWetness` (dry in clear weather). The WG
@@ -1947,6 +2162,7 @@ export class ShipViewer {
     });
     this.env.setFillLights(PROCEDURAL_FILL_HEMI, PROCEDURAL_FILL_DIR);
     this.env.setSunLight({ direction: PROCEDURAL_SUN_DIR.clone(), color: 0xffffff });
+    this.syncParticleSunLighting();
     // Procedural sky has no weather → dry hull.
     this.textures.setWetness({ overallWetness: 0, wetnessColor: null, puddlesIntensity: 0 });
   }
@@ -1994,6 +2210,279 @@ export class ShipViewer {
       lodPolicy: this.lodPolicy,
       damageVariantsVisible: this.damageVariantsVisible,
     });
+  }
+
+  private async buildShipParticleLayer(token: number): Promise<ShipParticleStats> {
+    const attachments = this.sidecar?.effects?.attachments ?? [];
+    const renderable = attachments.filter((a) => this.canAnchorParticleAttachment(a));
+    const unanchored = attachments.length - renderable.length;
+    const paths = [...new Set(renderable.map((a) => a.particle_path).filter(Boolean))].sort();
+    const result = await fetchParticleRecords(paths, { concurrency: 8 });
+    if (token !== this.particleBuildToken) return this.particleStats;
+
+    this.disposeParticleLayer({ preserveEnabled: true, preserveToken: true });
+    const expanded = this.expandParticleAttachments(renderable);
+    const scene = new ParticleScene(this.env.renderer);
+    scene.root.name = 'ShipParticleEffects';
+    scene.setSortCamera(this.env.camera);
+    this.syncParticleSunLighting(scene);
+    this.env.scene.add(scene.root);
+
+    // Ambient hull loops (smoke/wake/fire) keep re-bursting; event effects
+    // (muzzle/explosion) fire ONCE per trigger and finish — their lifetime is
+    // the trigger's, like the native fire-and-forget EffectManager one-shots.
+    // restartAttachment() in triggerShipParticleEvent re-fires them.
+    const handles = scene.build(expanded, result.records, (a) => this.resolveParticleAnchor(a), {
+      loopOneShot: (a) => this.isAmbientParticleAttachment(a),
+    });
+    this.particleScene = scene;
+    this.particleHandles = handles;
+    this.particleAnchorObjects.clear();
+    for (const h of handles) {
+      const obj = this.resolveParticleAnchorObject(h.attachment);
+      if (obj) {
+        this.particleAnchorObjects.set(h, obj);
+        this.copyParticleAnchorTransform(h, obj);
+      }
+      scene.setAttachmentActive(h, false);
+    }
+    scene.root.visible = this.particleLayerEnabled;
+
+    let systems = 0;
+    for (const h of handles) systems += h.systems.length;
+    const ambient = handles.filter((h) => this.isAmbientParticleAttachment(h.attachment)).length;
+    const events = handles.length - ambient;
+    this.particleEventOptions = this.buildShipParticleEventOptions(handles);
+    const stats: ShipParticleStats = {
+      attachmentRows: attachments.length,
+      renderableAttachments: renderable.length,
+      anchorInstances: expanded.length,
+      activeAttachments: 0,
+      ambientAttachments: ambient,
+      eventAttachments: events,
+      eventOnlyAttachments: events,
+      unanchoredAttachments: unanchored,
+      unresolvedAnchors: Math.max(0, expanded.length - handles.length),
+      uniquePaths: paths.length,
+      recordsLoaded: Object.keys(result.records).length,
+      missingRecords: result.missing.length + result.errors.length,
+      systems,
+    };
+    this.particleStats = stats;
+    this.applyShipParticleActivation();
+    if (result.errors.length > 0) {
+      console.warn('[ship particles] some particle records failed to load', result.errors);
+    }
+    return this.particleStats;
+  }
+
+  private syncParticleSunLighting(scene = this.particleScene): void {
+    if (!scene) return;
+    const sun = this.env.getSunLight();
+    scene.setSunLighting(sun.direction, sun.color);
+  }
+
+  private disposeParticleLayer(
+    opts: { preserveEnabled?: boolean; preserveToken?: boolean } = {},
+  ): void {
+    if (!opts.preserveToken) this.particleBuildToken++;
+    if (!opts.preserveEnabled) this.particleLayerEnabled = false;
+    this.clearShipParticleEventPreviews();
+    if (this.particleScene) {
+      this.env.scene.remove(this.particleScene.root);
+      this.particleScene.dispose();
+    }
+    this.particleScene = null;
+    this.particleHandles = [];
+    this.particleAnchorObjects.clear();
+    this.particleAnchorMotion.clear();
+    this.particleAttachmentAnchors = new WeakMap<ParticleAttachment, THREE.Object3D>();
+    this.particleEventOptions = [];
+    this.particleBuildPromise = null;
+    this.particleStats = emptyShipParticleStats();
+  }
+
+  private canAnchorParticleAttachment(a: ParticleAttachment): boolean {
+    if (!a.particle_path) return false;
+    if (a.position?.length === 3) return true;
+    return !!this.resolveParticleAnchorObject(a);
+  }
+
+  private isAmbientParticleAttachment(a: ParticleAttachment): boolean {
+    const source = a.source ?? 'hull';
+    if (source === 'map') return true;
+    if (source !== 'hull') return false;
+    const group = (a.group ?? '').toLowerCase();
+    return SHIP_AMBIENT_PARTICLE_GROUPS.has(group) || isWakeParticleGroup(group);
+  }
+
+  private buildShipParticleEventOptions(
+    handles: readonly ParticleAttachmentHandle[],
+  ): ShipParticleEventOption[] {
+    const byKey = new Map<string, ShipParticleEventOption>();
+    for (const h of handles) {
+      if (this.isAmbientParticleAttachment(h.attachment)) continue;
+      const source = h.attachment.source ?? 'hull';
+      const group = h.attachment.group ?? '';
+      const key = shipParticleEventKey(h.attachment);
+      const existing =
+        byKey.get(key) ??
+        ({
+          key,
+          source,
+          group,
+          label: `${source}:${group}`,
+          handles: 0,
+          systems: 0,
+        } satisfies ShipParticleEventOption);
+      existing.handles++;
+      existing.systems += h.systems.length;
+      byKey.set(key, existing);
+    }
+    return [...byKey.values()].sort((a, b) => {
+      const sourceA = SHIP_PARTICLE_SOURCE_ORDER.get(a.source) ?? 999;
+      const sourceB = SHIP_PARTICLE_SOURCE_ORDER.get(b.source) ?? 999;
+      if (sourceA !== sourceB) return sourceA - sourceB;
+      return a.group.localeCompare(b.group);
+    });
+  }
+
+  private countActiveParticleHandles(): number {
+    let active = 0;
+    for (const h of this.particleHandles) if (h.active) active++;
+    return active;
+  }
+
+  private clearShipParticleEventPreviews(): void {
+    for (const timer of this.particlePreviewTimers.values()) window.clearTimeout(timer);
+    this.particlePreviewTimers.clear();
+    this.particlePreviewKeys.clear();
+  }
+
+  private applyShipParticleActivation(): number {
+    if (!this.particleScene) return 0;
+    let active = 0;
+    for (const h of this.particleHandles) {
+      const key = shipParticleEventKey(h.attachment);
+      const on =
+        this.particleLayerEnabled &&
+        (this.particleMode === 'all' ||
+          this.particlePreviewKeys.has(key) ||
+          this.isAmbientParticleAttachment(h.attachment));
+      this.particleScene.setAttachmentActive(h, on);
+      if (on) active++;
+    }
+    this.particleScene.root.visible = this.particleLayerEnabled;
+    this.particleStats = { ...this.particleStats, activeAttachments: active };
+    return active;
+  }
+
+  private expandParticleAttachments(attachments: ParticleAttachment[]): ParticleAttachment[] {
+    this.particleAttachmentAnchors = new WeakMap<ParticleAttachment, THREE.Object3D>();
+    const out: ParticleAttachment[] = [];
+    for (const a of attachments) {
+      const muzzleAnchors = this.resolveShotEffectMuzzles(a);
+      if (muzzleAnchors.length === 0) {
+        out.push(a);
+        continue;
+      }
+      muzzleAnchors.forEach((anchor, i) => {
+        const clone: ParticleAttachment = {
+          ...a,
+          node: `${a.node || a.source_id || 'mount'}/${anchor.name || `muzzle${i + 1}`}`,
+        };
+        this.particleAttachmentAnchors.set(clone, anchor);
+        out.push(clone);
+      });
+    }
+    return out;
+  }
+
+  private resolveShotEffectMuzzles(a: ParticleAttachment): THREE.Object3D[] {
+    if (a.group !== 'shotEffect') return [];
+    if (a.source !== 'artillery' && a.source !== 'atba' && a.source !== 'airDefense') return [];
+    const mountRoot = this.resolveParticleAnchorObject(a);
+    if (!mountRoot) return [];
+
+    const muzzles: THREE.Object3D[] = [];
+    mountRoot.traverse((obj) => {
+      if (/^HP_gunFire\d+$/i.test(obj.name)) muzzles.push(obj);
+    });
+    muzzles.sort((aObj, bObj) => muzzleIndex(aObj.name) - muzzleIndex(bObj.name));
+    return muzzles;
+  }
+
+  private resolveParticleAnchor(a: ParticleAttachment): THREE.Vector3 | null {
+    if (a.position?.length === 3) {
+      return new THREE.Vector3(a.position[0], a.position[1], a.position[2]);
+    }
+    const obj = this.resolveParticleAnchorObject(a);
+    return obj ? obj.getWorldPosition(new THREE.Vector3()) : null;
+  }
+
+  private resolveParticleAnchorObject(a: ParticleAttachment): THREE.Object3D | null {
+    const mapped = this.particleAttachmentAnchors.get(a);
+    if (mapped) return mapped;
+    const keys = [a.node, a.source_id].filter((v): v is string => !!v);
+    for (const key of keys) {
+      const byHp = this.placementRootByHp.get(key);
+      if (byHp) return byHp;
+      const byInstance = this.placementRootByInstanceId.get(key);
+      if (byInstance) return byInstance;
+      const byName = this.shipRoot.getObjectByName(key);
+      if (byName) return byName;
+    }
+    return null;
+  }
+
+  private updateParticleAttachmentTransforms(): void {
+    if (!this.particleLayerEnabled || this.particleAnchorObjects.size === 0) return;
+    this.shipRoot.updateMatrixWorld(false);
+    const nowMs = performance.now();
+    for (const [handle, obj] of this.particleAnchorObjects) {
+      this.copyParticleAnchorTransform(handle, obj, nowMs);
+    }
+  }
+
+  private copyParticleAnchorTransform(
+    handle: ParticleAttachmentHandle,
+    obj: THREE.Object3D,
+    nowMs = performance.now(),
+  ): void {
+    obj.getWorldPosition(particleWorldPos);
+    this.updateParticleAnchorMotion(handle, particleWorldPos, nowMs);
+    handle.group.position.copy(particleWorldPos);
+    handle.group.quaternion.copy(obj.getWorldQuaternion(particleWorldQuat));
+  }
+
+  private updateParticleAnchorMotion(
+    handle: ParticleAttachmentHandle,
+    worldPosition: THREE.Vector3,
+    nowMs: number,
+  ): void {
+    // WG inheritVelocityFactor is a spawn-time velocity term. Sample the
+    // anchor's world-space derivative here, then ParticleScene converts it to
+    // each system's local frame before the next spawn.
+    let motion = this.particleAnchorMotion.get(handle);
+    if (!motion) {
+      motion = {
+        lastPosition: worldPosition.clone(),
+        velocity: new THREE.Vector3(),
+        lastTimeMs: nowMs,
+      };
+      this.particleAnchorMotion.set(handle, motion);
+      this.particleScene?.setAttachmentParentVelocity(handle, motion.velocity);
+      return;
+    }
+    const dt = (nowMs - motion.lastTimeMs) * 0.001;
+    if (dt > 1e-5 && dt < 0.5) {
+      motion.velocity.copy(worldPosition).sub(motion.lastPosition).multiplyScalar(1 / dt);
+    } else {
+      motion.velocity.set(0, 0, 0);
+    }
+    motion.lastPosition.copy(worldPosition);
+    motion.lastTimeMs = nowMs;
+    this.particleScene?.setAttachmentParentVelocity(handle, motion.velocity);
   }
 
   /**

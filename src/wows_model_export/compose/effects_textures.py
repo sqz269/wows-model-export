@@ -1,4 +1,4 @@
-"""Extract particle-system DDS textures into a webview-reachable cache.
+"""Extract particle-system DDS textures and velocity fields into webview caches.
 
 The particle parser surfaces texture references on the Renderer
 sub-struct (``textureName0`` / ``textureName1``) and the Animation
@@ -36,9 +36,11 @@ from ..toolkit import vfs as _vfs
 # VFS layout below keeps the on-disk paths content-addressable
 # (`Fire01.dds` is `Fire01.dds`, not `<hash>.dds`).
 TEXTURE_CACHE_ROOT = Path("content") / "effects_textures"
+VELOCITY_FIELD_CACHE_ROOT = Path("content") / "particles" / "velocity_fields"
 
-# Texture extensions we care about; everything else (e.g. ``.vfd``
-# velocityField sources) is referenced via a different code path.
+# Texture extensions we care about; velocity fields are collected by
+# ``collect_velocity_field_paths`` below because their runtime fetches use
+# the original ``content/particles/velocity_fields/*.vfd`` path.
 _TEXTURE_EXTS = frozenset({".dds", ".dd0", ".dd1", ".dd2", ".tga", ".bmp", ".png"})
 
 # Manifest binding ``<name> -> (atlas page DDS, UV rect)`` for the 117
@@ -90,6 +92,30 @@ def collect_texture_paths(particles: dict[str, Any]) -> set[str]:
     return out
 
 
+def collect_velocity_field_paths(particles: dict[str, Any]) -> set[str]:
+    """Return every ``velocityField.fieldSourceName`` path in the corpus."""
+    out: set[str] = set()
+    for rec in particles.values():
+        if not isinstance(rec, dict):
+            continue
+        for system in rec.get("systems") or []:
+            if not isinstance(system, dict):
+                continue
+            for comp in system.get("components") or []:
+                if not isinstance(comp, dict) or comp.get("action") != "velocityField":
+                    continue
+                body = comp.get("body")
+                if not isinstance(body, dict):
+                    continue
+                p = body.get("fieldSourceName")
+                if not isinstance(p, str) or not p:
+                    continue
+                norm = p.replace("\\", "/").strip().lstrip("/")
+                if Path(norm).suffix.lower() == ".vfd":
+                    out.add(norm)
+    return out
+
+
 def _strip_content_prefix(vfs_path: str) -> str:
     """WG VFS paths come both with and without a leading ``content/``
     segment. Strip it so the on-disk layout under
@@ -100,6 +126,13 @@ def _strip_content_prefix(vfs_path: str) -> str:
     if norm.startswith("content/"):
         return norm[len("content/"):]
     return norm
+
+
+def _with_content_prefix(vfs_path: str) -> str:
+    norm = vfs_path.replace("\\", "/").lstrip("/")
+    if norm.startswith("content/"):
+        return norm
+    return f"content/{norm}"
 
 
 # Note on the 117 unresolvable ``.tga`` refs in 2230-record corpus:
@@ -234,6 +267,91 @@ def ensure_textures_on_disk(
                 except OSError:
                     pass
             resolved[vfs_path] = rel_url
+
+    return resolved, missing
+
+
+def ensure_velocity_fields_on_disk(
+    paths: Iterable[str],
+    *,
+    config: PipelineConfig | None = None,
+    workspace_override: Path | None = None,
+) -> tuple[set[str], set[str]]:
+    """Extract ``.vfd`` resources to their repo-served ``content/...`` path.
+
+    Returns ``(resolved, missing)`` with entries keyed by the original VFS path.
+    Unlike textures, records do not need URL stamping: ``fieldSourceName`` is
+    already a workspace-relative ``content/particles/velocity_fields/*.vfd``
+    path after this extraction succeeds.
+    """
+    cfg = config or PipelineConfig.load()
+    workspace = (workspace_override or cfg.workspace).resolve()
+    resolved: set[str] = set()
+    missing: set[str] = set()
+    to_extract: list[tuple[str, Path]] = []
+
+    for vfs_path in paths:
+        norm = vfs_path.replace("\\", "/").strip().lstrip("/")
+        if not norm or Path(norm).suffix.lower() != ".vfd":
+            continue
+        rel = _with_content_prefix(norm)
+        on_disk = (workspace / rel).resolve()
+        if on_disk.is_file():
+            resolved.add(vfs_path)
+            continue
+        to_extract.append((norm, on_disk))
+
+    if not to_extract:
+        return resolved, missing
+
+    with tempfile.TemporaryDirectory(prefix="wms-vfd-") as td:
+        out_dir = Path(td)
+        try:
+            patterns = [
+                ("/" + t[0]) if not t[0].startswith("/") else t[0]
+                for t in to_extract
+            ]
+            _vfs.extract(patterns, out_dir=out_dir, config=cfg)
+        except Exception as e:
+            print(
+                f"  warn: velocity_fields: extract failed for "
+                f"{len(to_extract)} path(s): {e}",
+                file=sys.stderr,
+            )
+            for vfs_path, _ in to_extract:
+                missing.add(vfs_path)
+            return resolved, missing
+
+        for vfs_path, on_disk in to_extract:
+            candidates = [
+                out_dir / vfs_path.replace("\\", "/"),
+                out_dir / _strip_content_prefix(vfs_path),
+            ]
+            src: Path | None = None
+            for c in candidates:
+                if c.is_file():
+                    src = c
+                    break
+            if src is None:
+                fname = Path(vfs_path).name
+                matches = list(out_dir.rglob(fname))
+                if matches:
+                    src = max(matches, key=lambda p: p.stat().st_size)
+            if src is None:
+                missing.add(vfs_path)
+                continue
+            on_disk.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.replace(src, on_disk)
+            except OSError:
+                import shutil
+
+                shutil.copyfile(src, on_disk)
+                try:
+                    src.unlink()
+                except OSError:
+                    pass
+            resolved.add(vfs_path)
 
     return resolved, missing
 
@@ -415,9 +533,12 @@ def stamp_atlas_urls(
 
 __all__ = [
     "TEXTURE_CACHE_ROOT",
+    "VELOCITY_FIELD_CACHE_ROOT",
     "ATLAS_MANIFEST_VFS_PATH",
     "collect_texture_paths",
+    "collect_velocity_field_paths",
     "ensure_textures_on_disk",
+    "ensure_velocity_fields_on_disk",
     "stamp_texture_urls",
     "parse_atlas_manifest",
     "ensure_atlas_assets_on_disk",

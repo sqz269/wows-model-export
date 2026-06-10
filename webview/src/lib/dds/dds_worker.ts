@@ -16,6 +16,7 @@ const DDS_DX10_FOURCC = 0x30315844;
 const FOURCC_DXT1 = 0x31545844;
 const FOURCC_DXT3 = 0x33545844;
 const FOURCC_DXT5 = 0x35545844;
+const FOURCC_G16R16F = 0x70; // legacy D3DFMT_G16R16F (112)
 
 const DDPF_ALPHAPIXELS = 0x1;
 const DDPF_FOURCC = 0x4;
@@ -62,8 +63,8 @@ const CLASSIC_DXGI: Record<number, { format: number; blockSize: number; sRGB: bo
 };
 
 interface Mip {
-  // Uint8Array for compressed/8-bit paths; Float32Array for the BC6H HDR
-  // ('rgbaf') path where each pixel is 4 float32 (R,G,B,A=1).
+  // Uint8Array for compressed/8-bit paths; Float32Array for HDR/half-float
+  // ('rgbaf') paths where each pixel is 4 float32 (R,G,B,A=1).
   data: Uint8Array | Float32Array;
   width: number;
   height: number;
@@ -270,6 +271,58 @@ function parseBc6h(buf: ArrayBuffer, signed: boolean): ParseSuccess | null {
   };
 }
 
+function halfToFloat(h: number): number {
+  const s = (h & 0x8000) >> 15;
+  const e = (h & 0x7c00) >> 10;
+  const f = h & 0x03ff;
+  if (e === 0) return (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024);
+  if (e === 0x1f) return f ? NaN : (s ? -1 : 1) * Infinity;
+  return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+}
+
+// Legacy D3D9 G16R16F (fourCC 0x70): two half-float channels per texel.
+// WG uses this for particle water-deformation sprites
+// (particles/deform16f/*.dds). Expand to Float32 RGBA for a normal Three.js
+// DataTexture: R/G carry the authored channels, B=0, A=1.
+function parseLegacyG16R16F(buf: ArrayBuffer): ParseSuccess | null {
+  const view = new DataView(buf);
+  if (buf.byteLength < 128) return null;
+  const pfFlags = view.getUint32(80, true);
+  const fourCC = view.getUint32(84, true);
+  if ((pfFlags & DDPF_FOURCC) === 0 || fourCC !== FOURCC_G16R16F) return null;
+
+  let height = view.getUint32(12, true);
+  let width = view.getUint32(16, true);
+  const topW = width;
+  const topH = height;
+  const mipCount = Math.max(1, view.getUint32(28, true));
+
+  let offset = 128;
+  const mipmaps: Mip[] = [];
+  for (let i = 0; i < mipCount; i++) {
+    const pixelCount = width * height;
+    const byteSize = pixelCount * 4;
+    if (offset + byteSize > buf.byteLength) break;
+    const out = new Float32Array(pixelCount * 4);
+    let o = offset;
+    for (let p = 0; p < pixelCount; p++) {
+      const dst = p * 4;
+      out[dst] = halfToFloat(view.getUint16(o, true));
+      out[dst + 1] = halfToFloat(view.getUint16(o + 2, true));
+      out[dst + 2] = 0;
+      out[dst + 3] = 1;
+      o += 4;
+    }
+    mipmaps.push({ data: out, width, height });
+    offset += byteSize;
+    if (width === 1 && height === 1) break;
+    width = Math.max(1, width >> 1);
+    height = Math.max(1, height >> 1);
+  }
+  if (mipmaps.length === 0) return null;
+  return { kind: 'rgbaf', format: RGBAFormat, mipmaps, width: topW, height: topH };
+}
+
 // Classic non-DX10 DDS: reads DDS_HEADER, picks format from fourCC, slices
 // mips into fresh Uint8Arrays. Covers DXT1 / DXT3 / DXT5 (the only classic
 // codecs the WoWS pipeline emits). The DDPF_ALPHAPIXELS flag picks the
@@ -459,6 +512,8 @@ function parse(buf: ArrayBuffer): ParseSuccess | null {
   // uncompressed RGBA8 reader for files like fire_yellow_*.dds.
   const classic = parseClassic(buf);
   if (classic) return classic;
+  const g16r16f = parseLegacyG16R16F(buf);
+  if (g16r16f) return g16r16f;
   return parseUncompressedRgba8(buf);
 }
 
@@ -474,6 +529,7 @@ function describeFailure(buf: ArrayBuffer): string {
     if (name) return `DXGI ${dxgi} (${name}) not implemented by worker`;
     return `unsupported DXGI format ${dxgi}`;
   }
+  if (fourCC !== 0) return `unsupported classic fourCC 0x${fourCC.toString(16)}`;
   return 'unsupported or malformed DDS';
 }
 

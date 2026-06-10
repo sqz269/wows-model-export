@@ -28,6 +28,9 @@
     LodPolicy,
     NodeCategory,
     ShipViewer,
+    ShipParticleEventOption,
+    ShipParticleMode,
+    ShipParticleStats,
     WgEnvironmentInfo,
   } from '$lib/ship';
   import {
@@ -107,6 +110,17 @@
   let nodeCounts = $state<Record<NodeCategory, number>>(
     Object.fromEntries(NODE_CATEGORIES.map((c) => [c, 0])) as Record<NodeCategory, number>,
   );
+  let hasParticles = $state(false);
+  let particlesView = $state(false);
+  let particleMode = $state<ShipParticleMode>('ambient');
+  let particlesLoading = $state(false);
+  let particleStats = $state<Readonly<ShipParticleStats> | null>(null);
+  let particleEvents = $state<readonly ShipParticleEventOption[]>([]);
+  let selectedParticleEvent = $state('');
+  const PARTICLE_MODES: Array<{ value: ShipParticleMode; label: string }> = [
+    { value: 'ambient', label: 'Ambient' },
+    { value: 'all', label: 'All' },
+  ];
   // Color swatch CSS for the legend (hex int -> #rrggbb).
   function catSwatch(cat: NodeCategory): string {
     return '#' + NODE_CATEGORY_COLOR[cat].toString(16).padStart(6, '0');
@@ -262,6 +276,11 @@
       const nc = {} as Record<NodeCategory, boolean>;
       for (const c of NODE_CATEGORIES) nc[c] = viewer.getNodeCategoryVisible(c);
       nodeCats = nc;
+      hasParticles = viewer.hasShipParticleData();
+      particlesView = viewer.getShipParticlesVisible();
+      particleMode = viewer.getShipParticleMode();
+      particleStats = viewer.getShipParticleStats();
+      refreshParticleEvents();
 
       // Honor the persisted Show-textures choice. Each ship's viewer
       // starts with textures off (TextureManager.clearShip()); kick off
@@ -394,6 +413,55 @@
     nodeCats[cat] = v;
     nodeCats = { ...nodeCats };
     viewer.setNodeCategoryVisible(cat, v);
+  }
+  function refreshParticleEvents() {
+    particleEvents = viewer.getShipParticleEventOptions();
+    if (!particleEvents.some((event) => event.key === selectedParticleEvent)) {
+      selectedParticleEvent = particleEvents[0]?.key ?? '';
+    }
+  }
+  async function toggleParticlesView(v: boolean) {
+    particlesView = v;
+    particlesLoading = true;
+    try {
+      particleStats = await viewer.setShipParticlesVisible(v);
+      refreshParticleEvents();
+    } catch (err) {
+      particlesView = viewer.getShipParticlesVisible();
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error('Particle layer failed', { description: msg, duration: 8000 });
+    } finally {
+      particlesLoading = false;
+    }
+  }
+  async function setParticleMode(mode: ShipParticleMode) {
+    particleMode = mode;
+    particlesLoading = true;
+    try {
+      particleStats = await viewer.setShipParticleMode(mode);
+      refreshParticleEvents();
+    } catch (err) {
+      particleMode = viewer.getShipParticleMode();
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error('Particle mode failed', { description: msg, duration: 8000 });
+    } finally {
+      particlesLoading = false;
+    }
+  }
+  async function triggerParticleEvent() {
+    if (!selectedParticleEvent) return;
+    particlesLoading = true;
+    try {
+      particleStats = await viewer.triggerShipParticleEvent(selectedParticleEvent);
+      particlesView = viewer.getShipParticlesVisible();
+      particleMode = viewer.getShipParticleMode();
+      refreshParticleEvents();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error('Particle event failed', { description: msg, duration: 8000 });
+    } finally {
+      particlesLoading = false;
+    }
   }
   function toggleDamageVariants(v: boolean) {
     damageVariants = v;
@@ -792,6 +860,96 @@
             {/if}
           {/each}
         </div>
+      </div>
+    </details>
+  {/if}
+
+  {#if hasParticles}
+    <details
+      open={panelOpen.particles}
+      ontoggle={(e) => togglePanel('particles', e.currentTarget.open)}
+      class="group {detailsCls}"
+    >
+      <summary class={summaryCls}>Particles</summary>
+      <div class={bodyCls}>
+        <label class={rowCls}>
+          <input
+            type="checkbox"
+            checked={particlesView}
+            disabled={particlesLoading}
+            onchange={(e) => void toggleParticlesView(e.currentTarget.checked)}
+          />
+          Ship particles
+          {#if particlesLoading}
+            <span class="text-muted-foreground/70 text-[10px]">loading</span>
+          {/if}
+        </label>
+        <div class="ml-5 flex w-fit overflow-hidden rounded border border-border text-[10px]">
+          {#each PARTICLE_MODES as mode}
+            <button
+              type="button"
+              class="px-2 py-0.5 transition-colors disabled:opacity-50 {particleMode === mode.value
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-background text-muted-foreground hover:bg-muted hover:text-foreground'}"
+              aria-pressed={particleMode === mode.value}
+              disabled={particlesLoading}
+              onclick={() => void setParticleMode(mode.value)}
+            >
+              {mode.label}
+            </button>
+          {/each}
+        </div>
+        {#if particleEvents.length > 0}
+          <div class="ml-5 flex items-center gap-1 text-[10px]">
+            <select
+              class="h-6 min-w-0 max-w-[11rem] rounded border border-border bg-background px-1 text-[10px] text-foreground disabled:opacity-50"
+              value={selectedParticleEvent}
+              disabled={particlesLoading}
+              onchange={(e) => (selectedParticleEvent = e.currentTarget.value)}
+              aria-label="Particle event"
+            >
+              {#each particleEvents as event}
+                <option value={event.key}>{event.label} ({event.handles})</option>
+              {/each}
+            </select>
+            <button
+              type="button"
+              class="h-6 rounded border border-border px-2 text-[10px] text-foreground transition-colors hover:bg-muted disabled:opacity-50"
+              disabled={particlesLoading || !selectedParticleEvent}
+              onclick={() => void triggerParticleEvent()}
+            >
+              Trigger
+            </button>
+          </div>
+        {/if}
+        {#if particleStats}
+          <div class="grid grid-cols-2 gap-x-3 gap-y-0.5 pl-5 text-[10px]">
+            <span class="text-muted-foreground">active</span>
+            <span class="tabular-nums">{particleStats.activeAttachments}</span>
+            <span class="text-muted-foreground">ambient</span>
+            <span class="tabular-nums">{particleStats.ambientAttachments}</span>
+            <span class="text-muted-foreground">events</span>
+            <span class="tabular-nums">{particleStats.eventAttachments}</span>
+            <span class="text-muted-foreground">rows</span>
+            <span class="tabular-nums">{particleStats.renderableAttachments}</span>
+            <span class="text-muted-foreground">anchors</span>
+            <span class="tabular-nums">{particleStats.anchorInstances}</span>
+            <span class="text-muted-foreground">records</span>
+            <span class="tabular-nums"
+              >{particleStats.recordsLoaded}/{particleStats.uniquePaths}</span
+            >
+            <span class="text-muted-foreground">systems</span>
+            <span class="tabular-nums">{particleStats.systems}</span>
+            {#if particleStats.unanchoredAttachments > 0}
+              <span class="text-muted-foreground">unanchored</span>
+              <span class="tabular-nums">{particleStats.unanchoredAttachments}</span>
+            {/if}
+            {#if particleStats.missingRecords > 0}
+              <span class="text-muted-foreground">missing</span>
+              <span class="text-destructive tabular-nums">{particleStats.missingRecords}</span>
+            {/if}
+          </div>
+        {/if}
       </div>
     </details>
   {/if}

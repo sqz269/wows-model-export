@@ -364,10 +364,33 @@ export interface ParticleComponentBody {
   forceZGenerator?: ParticleValueGenerator;
   // generic
   delay?: number;
+  reaction?: number;
+  strength?: number;
+  stopAge?: number;
+  position?: [number, number, number];
+  radius?: number;
+  corner?: [number, number, number];
+  opposite?: [number, number, number];
+  planeEquation?: [number, number, number, number];
+  useWorldSpace?: boolean;
+  topLeftFront?: [number, number, number];
+  bottomRightBack?: [number, number, number];
+  velocityScale?: number;
+  influence?: number;
   // stream
   vector?: [number, number, number];
   halfLife?: number;
   switchCoordinateStyle?: boolean;
+  // component kind=light
+  colorAnimationPeriod?: number;
+  colorAnimation?: ParticleColor;
+  radiusAnimationPeriod?: number;
+  radiusAnimation?: ParticleRamp;
+  color?: [number, number, number, number];
+  localPosition?: [number, number, number];
+  minQuality?: number;
+  animatedColor?: boolean;
+  animatedRadius?: boolean;
   // resource refs (sphere/cylinder/box/spawner/plane/velocityField/etc.)
   effectName?: string;
   fieldSourceName?: string;
@@ -405,17 +428,22 @@ export interface ParticleGeneralSection {
   prewarm: boolean;
 }
 
+export interface ParticleSystemDistance {
+  maxDistance: number;
+  configsCount: number;
+  configs: ParticleSystemIntensityConfig[];
+}
+
 /**
  * Renderer block surfaced from the Effect blob. Field offsets confirmed
- * against the WoWS binary (build 12267945, FUN_1406f2150), superseding
+ * against the WoWS binary (build 12506899, FUN_1406f0c30), superseding
  * the 2026-05-23 statistical probe: texture refs
  * (`textureName0`/`textureName1`) + `yawRateRamp` at +0x00/+0x10/+0x20,
- * and the tail enums/floats (`rotationCenter`/`lightingType`/`blendType`/
- * `sortType`/`tilingU`/`tilingV`) at +0x80..+0x94 within the 0xa0-byte
- * struct.
- *
- * The +0x30..+0x7f float cluster and the +0x98/+0x9c bool quartets are
- * byte-mapped in the binary but not surfaced here.
+ * `explicitOrientation` at +0x30, `customCenterOffset` at +0x3c,
+ * spin/orientation/lighting/material scalars through +0x7c, the tail
+ * enums/floats (`rotationCenter`/`lightingType`/`blendType`/`sortType`/
+ * `tilingU`/`tilingV`) at +0x80..+0x94, and bool flags at +0x98..+0x9d
+ * within the 0xa0-byte struct.
  *
  * `textureUrl0` / `textureUrl1` are stamped by the library builder
  * (`compose/library_particles.py`) and carry a workspace-relative
@@ -433,6 +461,32 @@ export interface ParticleRenderer {
   textureAtlas0?: ParticleAtlasRect;
   textureAtlas1?: ParticleAtlasRect;
   yawRateRamp?: ParticleRamp;
+  /** Renderer +0x30 Vec3. Native explicit-orientation vector. */
+  explicitOrientation?: [number, number, number];
+  /** Renderer +0x3c Vec2. Used when `rotationCenter` is `custom`. */
+  customCenterOffset?: [number, number];
+  /** Renderer +0x44/+0x48 random spin-rate range/base, radians/sec in webview. */
+  spinRateRange?: number;
+  spinRateBase?: number;
+  /** Renderer +0x4c lighting scalar. WG field spelling is `Shineness`. */
+  lightingShineness?: number;
+  /** Renderer +0x50/+0x58 random initial sprite orientation range/base. */
+  initialOrientationRange?: number;
+  initialOrientationBase?: number;
+  /** Renderer lighting scalars at +0x54, +0x64..+0x70. */
+  lightingAmbient?: number;
+  lightingDiffuse?: number;
+  lightingTransmission?: number;
+  lightWrapAmount?: number;
+  shadowsStrength?: number;
+  /** Renderer +0x5c/+0x78/+0x7c view/depth fade scalars. */
+  hideStartCos?: number;
+  hideSpeed?: number;
+  softParticleDepthScale?: number;
+  /** Renderer +0x60 width multiplier for sprite aspect. */
+  scaleX?: number;
+  /** Renderer +0x74 alpha multiplier. */
+  opacityMultiplier?: number;
   /** PS_RRC label (4 values: bottom / corner / center / custom).
    *  Recovered from the binary enum table @ 0x1420bf0d0. */
   rotationCenter?: string;
@@ -451,6 +505,14 @@ export interface ParticleRenderer {
   /** Per-system UV tiling factors; default 1.0/1.0. */
   tilingU?: number;
   tilingV?: number;
+  /** Renderer +0x98..+0x9b orientation/background flags. */
+  explicitOrientationLocal?: boolean;
+  billboard?: boolean;
+  velocityOriented?: boolean;
+  background?: boolean;
+  /** Renderer +0x9c/+0x9d UV flip flags. */
+  flipTexcoordU?: boolean;
+  flipTexcoordV?: boolean;
 }
 
 /**
@@ -461,11 +523,12 @@ export interface ParticleRenderer {
  *
  * For systems with `framesPerX > 1 || framesPerY > 1`, the renderer
  * samples the texture at cell `(currentFrame % framesPerX, currentFrame
- * / framesPerX)` where `currentFrame` is driven by the particle age +
- * `animationPeriod` + `framesRangeBegin/End`. `animationType` (PS_PAT)
- * selects the animation mode (noAnimation / framesPlayback /
- * motionVectors) — NOT a loop/once/pingPong wrap mode (that is the
- * separate ramp-sampling enum).
+ * / framesPerX)`. Native playback advances `currentFrame` by integrating
+ * `frameRateRamp` over particle age and then applying
+ * `framesRangeBegin/End`; `animationPeriod` is carried for inspection only.
+ * `animationType` (PS_PAT) selects the animation mode (noAnimation /
+ * framesPlayback / motionVectors) — NOT a loop/once/pingPong wrap mode
+ * (that is the separate ramp-sampling enum).
  */
 export interface ParticleAnimation {
   frameRateRamp?: ParticleRamp;
@@ -501,13 +564,44 @@ export interface ParticleSystem {
   animation?: ParticleAnimation;
   emitter?: ParticleEmitter;
   general?: ParticleGeneralSection;
+  distance?: ParticleSystemDistance;
+  intensities?: ParticleSystemIntensities;
   components: ParticleComponent[];
+}
+
+export interface ParticleSystemIntensityConfig {
+  ramp?: ParticleRamp;
+  flagsCount?: number;
+  flags?: number[];
+  flagNames?: string[];
+}
+
+export interface ParticleSystemIntensityChannel {
+  configsCount: number;
+  configs: ParticleSystemIntensityConfig[];
+}
+
+export interface ParticleSystemIntensities {
+  channelCount: number;
+  channels: ParticleSystemIntensityChannel[];
+}
+
+export interface ParticleIntensityChannel {
+  index: number;
+  name: string;
+  nameLength?: number;
+  minIntensity?: number;
+  maxIntensity?: number;
+  defaultIntensity?: number;
+  channelKind?: number;
 }
 
 export interface ParticleRecord {
   name?: string;
   record_index: number;
   maxEmittingDuration: number;
+  intensityChannelCount?: number;
+  intensityChannels?: ParticleIntensityChannel[];
   systemsCount: number;
   systems: ParticleSystem[];
 }
@@ -556,6 +650,8 @@ export interface ParticleAttachment {
    * WG-side bone / node name.
    *  - hull: typically `EP_*`.
    *  - gun-type sources: the mount's hardpoint (`HP_AGM_1`, `HP_AGA_10`, …).
+   *    Consumers that render muzzle flashes expand `shotEffect` rows to
+   *    the mounted asset's `HP_gunFire<N>` child markers.
    *  - aa_aura / munition: empty — the effect spawns at altitude or hit
    *    location, with no fixed bone on the ship.
    */

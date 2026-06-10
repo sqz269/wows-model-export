@@ -219,7 +219,7 @@
       far: 1000,
     });
     env.setBloomEnabled(true);
-    env.setBloomParams({ strength: 0.7, radius: 0.4, threshold: 0.6 });
+    env.setBloomParams({ strength: 0.28, radius: 0.25, threshold: 1.35 });
     env.setBackground(BACKDROPS[backdrop]);
     // Every inspected effect spawns at the origin, so the axes helper sits
     // right inside the effect — and its bright-green Y axis blooms into a beam
@@ -227,6 +227,9 @@
     env.axes.visible = false;
 
     scene = new ParticleScene(env.renderer);
+    scene.setSortCamera(env.camera);
+    const sun = env.getSunLight();
+    scene.setSunLighting(sun.direction, sun.color);
     env.scene.add(scene.root);
 
     stopResize = observeResize({
@@ -381,7 +384,7 @@
    *  the inspector flags these so the user knows render fidelity is
    *  limited there.
    *
-   *  Source: `webview/src/lib/three/particles.ts:262-290` — the
+   *  Source: `webview/src/lib/three/particles.ts` — the
    *  `SystemRenderer` constructor's switch on `c.action`.
    */
   const RENDERED_ACTIONS = new Set([
@@ -391,11 +394,23 @@
     'scaler',
     'resizer',
     'force',
+    'dampfer',
+    'stream',
+    'jitter',
+    'orbitor',
+    'magnet',
+    'spawner',
+    'sphere',
+    'cylinder',
+    'box',
+    'plane',
+    'velocityField',
+    'light',
   ]);
 
-  /** PS_RBT blend modes the renderer can only approximate with an additive
-   *  placeholder — no bespoke water-deform / refraction shader yet. Mirror
-   *  of the placeholder branch in `three/particles.ts` `blendConfigForPsRbt`. */
+  /** PS_RBT blend modes rendered through the webview's screen-space
+   *  distortion approximation. Still not the full native water/heat-haze
+   *  technique, but no longer a plain alpha-over placeholder. */
   const PLACEHOLDER_BLEND_MODES = new Set(['SHIMMER', 'DEFORM_WATER_SURFACE']);
 
   /** Render-fidelity caveats that actually apply to THIS record, keyed off
@@ -407,8 +422,9 @@
    *  (`three/particles.ts` `blendConfigForPsRbt` + the flipbook-UV shader
    *  math) since the 2026-05-23 gap-closing pass — they are no longer gaps.
    *  What remains:
-   *    - a few PS_RBT modes (SHIMMER / DEFORM_WATER_SURFACE) fall back to an
-   *      additive placeholder pending a bespoke shader;
+   *    - a few PS_RBT modes (SHIMMER / DEFORM_WATER_SURFACE) use a
+   *      screen-space refraction approximation instead of the full native
+   *      water/heat-haze technique;
    *    - a texture ref that resolved to neither a direct extract
    *      (`textureUrl0`) nor an atlas region (`textureAtlas0`) renders as a
    *      procedural soft disc. */
@@ -434,14 +450,14 @@
       if (r.lightingType === 'lightmapping4Way' || r.lightingType === 'lightmappingHL2') {
         anyLightmap = true;
       }
-      // `_MVEA` motion-vector blend IS now applied; the one residual is the
-      // emission-from-MV path (engine replaces colour, we add — see below).
+      // `_MVEA` motion-vector blend is applied; emission-from-MV now follows
+      // the native non-gradient substitution rule.
       if (s.animation?.useEmissionAlphaFromMV) anyMvEmission = true;
     }
     if (placeholderBlends.size > 0) {
       gaps.push(
         `blend mode ${[...placeholderBlends].join(' / ')} approximated as ` +
-          'plain alpha-over (occluding) — no bespoke water-deform/refraction pass yet',
+          'screen-space refraction from a scene-color copy; native water/heat-haze pass not exact',
       );
     }
     if (anyUnresolvedTexture) {
@@ -458,8 +474,8 @@
     }
     if (anyMvEmission) {
       gaps.push(
-        '_MVEA emission (useEmissionAlphaFromMV) added on top of the lit ' +
-          'colour rather than replacing it — keeps the lightmap, not bit-exact',
+        '_MVEA emission (useEmissionAlphaFromMV) substitutes the non-gradient ' +
+          'particle body; gradient-map permutations use the authored ramp glow',
       );
     }
     return gaps;

@@ -12,6 +12,8 @@
 //     (bypasses three.js r0.165's broken RED_RGTC1 upload path)
 //   • BC6H (DXGI 95/96)             → software-decoded to Float32 RGBA
 //     DataTexture for HDR particle ramps
+//   • legacy G16R16F (fourCC 0x70)  → software-decoded to Float32 RGBA
+//     DataTexture for particle water-deformation sprites
 //   • DXT1 / DXT3 / DXT5 (classic)  → CompressedTexture, S3TC family
 //
 // BC5 / other unsupported DXGI codes are intentionally rejected — none appear
@@ -19,6 +21,8 @@
 // during normal loads.
 
 import * as THREE from 'three';
+import { Buffer } from 'buffer';
+import { decodeImage, parseDDSHeader } from 'dds-ktx-parser';
 import type { ParseSuccess } from './dds_worker';
 import { getSharedPool } from './worker_pool';
 
@@ -181,12 +185,48 @@ function makeRgba8DataTexture(
 }
 
 /**
- * Wrap a worker-decoded BC6H HDR mip (Float32 RGBA, R/G/B = decoded HDR value,
- * A = 1.0) into a Three.js FloatType ``DataTexture``. Used for HDR particle
- * colour ramps (e.g. ``particles/ramps/fire_yellow_3_HDR.dds``, DXGI 95). The
- * data is linear HDR — never display-referred — so NoColorSpace (no sRGB
- * decode). Clamp + Linear, same as the 8-bit ramp path: it's a 1D LUT sampled
- * at ``vec2(base.r, 0.5)``.
+ * Software-decode the top mip of a BC7 DDS to RGBA8. This is intentionally
+ * opt-in: ship/detail textures stay on the GPU BC7 path, while particle
+ * flipbooks can use this when their alpha channel must be sampled exactly.
+ */
+export async function loadDdsSoftwareRgbaTexture(
+  url: string,
+  sRGB: boolean,
+  renderer: THREE.WebGLRenderer,
+): Promise<THREE.Texture | null> {
+  const buf = await fetchBuffer(url);
+  if (!buf) return null;
+  const g = globalThis as typeof globalThis & { Buffer?: typeof Buffer };
+  if (!g.Buffer) g.Buffer = Buffer;
+  const bytes = new Uint8Array(buf);
+  const input = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const info = parseDDSHeader(input);
+  if (!info || info.format !== 'BC7' || info.layers.length === 0) return null;
+  const decoded = decodeImage(input, info.format, info.layers[0]);
+  const rgba = new Uint8Array(decoded);
+  const tex = new THREE.DataTexture(
+    rgba,
+    info.layers[0].shape.width,
+    info.layers[0].shape.height,
+    THREE.RGBAFormat,
+    THREE.UnsignedByteType,
+  );
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  tex.flipY = false;
+  tex.colorSpace = sRGB ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/**
+ * Wrap a worker-decoded float RGBA mip into a Three.js FloatType
+ * ``DataTexture``. Used for HDR particle colour ramps (DXGI 95/96 BC6H) and
+ * legacy G16R16F water-deformation sprites (fourCC 0x70, expanded to RGBA).
+ * The data is linear — never display-referred — so NoColorSpace (no sRGB
+ * decode).
  */
 function makeRgbafDataTexture(
   mip: { data: Uint8Array | Float32Array; width: number; height: number },

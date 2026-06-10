@@ -44,10 +44,16 @@ ASSETS_BIN_VERSION = 0x01010000
 
 # Particle data lives in the Effect blob (magic = murmur3_32("EffectPrototype")).
 EFFECT_BLOB_MAGIC = 0xEB23E0AF
+EFFECT_PRESET_BLOB_MAGIC = 0x42E15336
+EFFECT_METADATA_BLOB_MAGIC = 0xDFC8F8E0
 
 # Fixed struct sizes inside the Effect blob.
 SYSTEM_SIZE = 0x1c8
 COMPONENT_SIZE = 0x10
+SYSTEM_DISTANCE_CONFIG_SIZE = 0x20
+SYSTEM_INTENSITY_CHANNEL_SIZE = 0x10
+SYSTEM_INTENSITY_CONFIG_SIZE = 0x20
+EFFECT_METADATA_CHANNEL_SIZE = 0x20
 
 # Item sizes per database blob (index 0..9 in PrototypeDatabase.databases).
 # Sourced from the toolkit's `assets_bin` subcommand. Not all are used here.
@@ -130,6 +136,38 @@ PS_RRC = {0: "bottom", 1: "corner", 2: "center", 3: "custom"}
 # Labels recovered from the binary enum table @ 0x1420bf430 (WoWS build
 # 12267945, value-ordered).
 PS_PAT = {0: "noAnimation", 1: "framesPlayback", 2: "motionVectors"}
+
+# PS_IC — runtime intensity-channel target IDs. Recovered from the build
+# 12506899 sorted enum table at 0x1420bf640; system intensity configs store
+# these integer IDs in their `flags[]` array.
+PS_IC = {
+    0: "PARTICLE_TILING_U",
+    1: "LIGHT_TINT_R",
+    2: "PARTICLE_STREAMER_X",
+    3: "PARTICLE_SCALE_X",
+    4: "PARTICLE_VEL_Z",
+    5: "LIGHT_RADIUS",
+    6: "LIGHT_TINT_B",
+    7: "PARTICLE_COLOR_R",
+    8: "AGE_SCALE",
+    9: "PARTICLE_COLOR_B",
+    10: "PARTICLE_VEL_Y",
+    11: "PARTICLE_TILING_V",
+    12: "PARTICLE_COLOR_A",
+    13: "PARTICLE_TINT_G",
+    14: "AGE_AUX_SCALE",
+    15: "PARTICLE_TINT_B",
+    16: "PARTICLE_SCALE_Y",
+    17: "PARTICLE_STREAMER_Y",
+    18: "PARTICLE_TINT_R",
+    19: "EMITTER_RATE",
+    20: "PARTICLE_VEL_X",
+    21: "PARTICLE_STREAMER_Z",
+    22: "PARTICLE_COLOR_G",
+    23: "PARTICLE_SIZE",
+    24: "PARTICLE_TINT_A",
+    25: "LIGHT_TINT_G",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +386,53 @@ def _decode_color(buf: bytes | mmap.mmap, color_addr: int, file_end: int) -> dic
     return {"count": count, "points": points}
 
 
+def _decode_light_color_animation(
+    buf: bytes | mmap.mmap, color_addr: int, file_end: int,
+) -> dict:
+    """16-byte light-color curve header + time-first ColorKey[count].
+
+    Effect component kind=light uses the same 16-byte count/relptr
+    container as ``Color``, but the key payload order is
+    ``time,r,g,b,a`` rather than tint's ``r,g,b,a,time``.
+    """
+    if color_addr + 16 > file_end:
+        return {"_err": "light_color_hdr_oob"}
+    count, _pad, points_rp = struct.unpack_from("<IIq", buf, color_addr)
+    if count == 0:
+        return {"count": 0, "points": []}
+    if count > 256:
+        return {"count": count, "_err": "huge_count"}
+    pts_addr = color_addr + points_rp
+    if pts_addr + count * 20 > file_end:
+        return {"count": count, "_err": "points_oob"}
+    points = []
+    for i in range(count):
+        t, r, g, b, a = struct.unpack_from("<5f", buf, pts_addr + i * 20)
+        points.append({"r": r, "g": g, "b": b, "a": a, "time": t})
+    return {"count": count, "points": points}
+
+
+def _decode_time_value_ramp(
+    buf: bytes | mmap.mmap, ramp_addr: int, file_end: int,
+) -> dict:
+    """16-byte curve header + key[count] stored as ``time,value`` pairs."""
+    if ramp_addr + 16 > file_end:
+        return {"_err": "time_value_ramp_hdr_oob"}
+    count, _pad, points_rp = struct.unpack_from("<IIq", buf, ramp_addr)
+    if count == 0:
+        return {"count": 0, "points": []}
+    if count > 256:
+        return {"count": count, "_err": "huge_count"}
+    pts_addr = ramp_addr + points_rp
+    if pts_addr + count * 8 > file_end:
+        return {"count": count, "_err": "points_oob"}
+    points = []
+    for i in range(count):
+        t, v = struct.unpack_from("<2f", buf, pts_addr + i * 8)
+        points.append({"value": v, "time": t})
+    return {"count": count, "points": points}
+
+
 def _decode_scalar_vg(
     buf: bytes | mmap.mmap, slot_addr: int, file_end: int,
 ) -> dict:
@@ -516,6 +601,15 @@ def _read_resource_ref(
     """
     if addr + 16 > file_end:
         return None
+    # Most action effectName refs use the same length/pad/relptr shape as
+    # renderer texture refs. Inline refs also satisfy this form: the low u32 is
+    # the length, the high u32 is zero, and the inline tag at +0x08 is a
+    # relptr-like 0x10 to the bytes immediately after the 16-byte header.
+    length, len_pad, relptr = struct.unpack_from("<IIq", buf, addr)
+    if 0 < length < 2048 and len_pad == 0 and relptr != 0:
+        s = _read_cstr(buf, addr + relptr, file_end, max_len=length)
+        if s is not None and len(s.encode("ascii")) + 1 == length:
+            return s
     a, tag, pad = struct.unpack_from("<qII", buf, addr)
     if pad != 0:
         return None
@@ -575,6 +669,41 @@ def _read_texture_ref(
     if not all(0x20 <= c < 0x7f for c in body):
         return None
     return body.decode("ascii")
+
+
+def _decode_light_body(
+    buf: bytes | mmap.mmap, body_addr: int, file_end: int,
+) -> dict:
+    """Decode a component kind=light body.
+
+    Native schema field emitter at 0x1406fec20 names these fields as
+    colorAnimation, radiusAnimation, color, localPosition, radius,
+    minQuality, animatedColor, animatedRadius. The body has the same
+    16-byte header shape as PCAT/PSAT action bodies; fields start at
+    ``body + fields_relptr``.
+    """
+    if body_addr + 16 > file_end:
+        return {"_err": "light_hdr_oob"}
+    _kind_idx, _pad, fields_rp = struct.unpack_from("<iIq", buf, body_addr)
+    fa = body_addr + fields_rp
+    if fa + 0x6a > file_end:
+        return {"_err": "light_fields_oob"}
+    color = list(struct.unpack_from("<4f", buf, fa + 0x40))
+    local_position = list(struct.unpack_from("<3f", buf, fa + 0x50))
+    radius = struct.unpack_from("<f", buf, fa + 0x60)[0]
+    min_quality = struct.unpack_from("<I", buf, fa + 0x64)[0]
+    return {
+        "colorAnimationPeriod": struct.unpack_from("<f", buf, fa + 0x00)[0],
+        "colorAnimation": _decode_light_color_animation(buf, fa + 0x10, file_end),
+        "radiusAnimationPeriod": struct.unpack_from("<f", buf, fa + 0x20)[0],
+        "radiusAnimation": _decode_time_value_ramp(buf, fa + 0x30, file_end),
+        "color": color,
+        "localPosition": local_position,
+        "radius": radius,
+        "minQuality": int(min_quality),
+        "animatedColor": bool(buf[fa + 0x68]),
+        "animatedRadius": bool(buf[fa + 0x69]),
+    }
 
 
 # Per-action decoders. Each returns a dict of named fields for the action
@@ -700,23 +829,34 @@ def _decode_renderer(
 ) -> dict:
     """Decode the Renderer block at System +0x000 (0xa0 bytes).
 
-    Field offsets confirmed against the WoWS binary (build 12267945,
-    FUN_1406f2150) — supersedes the 2026-05-22 statistical probe.
+    Field offsets confirmed against the WoWS binary (build 12506899,
+    FUN_1406f0c30) — supersedes the 2026-05-22 statistical probe.
 
     Surfaced fields:
       +0x00 ``textureName0`` (16 B ResourceRef)
       +0x10 ``textureName1`` (16 B ResourceRef)
       +0x20 ``yawRateRamp``  (16 B Ramp)
+      +0x30 ``explicitOrientation`` (3-float Vec3)
+      +0x3c ``customCenterOffset`` (2-float Vec2)
+      +0x44 ``spinRateRange`` f32, +0x48 ``spinRateBase`` f32
+      +0x4c ``lightingShineness`` f32
+      +0x50 ``initialOrientationRange`` f32
+      +0x54 ``lightingAmbient`` f32
+      +0x58 ``initialOrientationBase`` f32
+      +0x5c ``hideStartCos`` f32
+      +0x60 ``scaleX`` f32
+      +0x64 ``lightingDiffuse`` f32, +0x68 ``lightingTransmission`` f32
+      +0x6c ``lightWrapAmount`` f32, +0x70 ``shadowsStrength`` f32
+      +0x74 ``opacityMultiplier`` f32
+      +0x78 ``hideSpeed`` f32, +0x7c ``softParticleDepthScale`` f32
       +0x80 ``rotationCenter`` i32 -> PS_RRC label
       +0x84 ``lightingType``  i32 -> PS_RLT label
       +0x88 ``blendType``     i32 -> PS_RBT label
       +0x8c ``sortType``      i32 (raw; enum fx::RendererSortType, labels TBD)
       +0x90 ``tilingU`` f32, +0x94 ``tilingV`` f32
-
-    The +0x30..+0x7f float cluster (explicitOrientation/customCenterOffset
-    + 13 lighting/spin/scale floats) and the +0x98/+0x9c bool quartets
-    (billboard/velocityOriented/flipTexcoordU-V …) are byte-mapped in the
-    binary but not surfaced here.
+      +0x98..+0x9b ``explicitOrientationLocal`` / ``billboard`` /
+             ``velocityOriented`` / ``background`` bools
+      +0x9c ``flipTexcoordU`` bool, +0x9d ``flipTexcoordV`` bool
     """
     base = sys_off  # Renderer is the first sub-struct
     out: dict[str, Any] = {}
@@ -727,10 +867,54 @@ def _decode_renderer(
     if t1:
         out["textureName1"] = t1
     out["yawRateRamp"] = _decode_ramp(buf, base + 0x20, file_end)
+    out["explicitOrientation"] = [
+        float(v) for v in struct.unpack_from("<3f", buf, base + 0x30)
+    ]
+    out["customCenterOffset"] = [
+        float(v) for v in struct.unpack_from("<2f", buf, base + 0x3c)
+    ]
+    (
+        spin_rate_range,
+        spin_rate_base,
+        lighting_shineness,
+        initial_orientation_range,
+        lighting_ambient,
+        initial_orientation_base,
+        hide_start_cos,
+        scale_x,
+        lighting_diffuse,
+        lighting_transmission,
+        light_wrap_amount,
+        shadows_strength,
+        opacity_multiplier,
+        hide_speed,
+        soft_particle_depth_scale,
+    ) = struct.unpack_from("<15f", buf, base + 0x44)
+    out["spinRateRange"] = float(spin_rate_range)
+    out["spinRateBase"] = float(spin_rate_base)
+    out["lightingShineness"] = float(lighting_shineness)
+    out["initialOrientationRange"] = float(initial_orientation_range)
+    out["lightingAmbient"] = float(lighting_ambient)
+    out["initialOrientationBase"] = float(initial_orientation_base)
+    out["hideStartCos"] = float(hide_start_cos)
+    out["scaleX"] = float(scale_x)
+    out["lightingDiffuse"] = float(lighting_diffuse)
+    out["lightingTransmission"] = float(lighting_transmission)
+    out["lightWrapAmount"] = float(light_wrap_amount)
+    out["shadowsStrength"] = float(shadows_strength)
+    out["opacityMultiplier"] = float(opacity_multiplier)
+    out["hideSpeed"] = float(hide_speed)
+    out["softParticleDepthScale"] = float(soft_particle_depth_scale)
     rotation_center, lighting_type, blend_type, sort_type = struct.unpack_from(
         "<4i", buf, base + 0x80,
     )
     tiling_u, tiling_v = struct.unpack_from("<2f", buf, base + 0x90)
+    explicit_orientation_local = bool(buf[base + 0x98])
+    billboard = bool(buf[base + 0x99])
+    velocity_oriented = bool(buf[base + 0x9a])
+    background = bool(buf[base + 0x9b])
+    flip_u = bool(buf[base + 0x9c])
+    flip_v = bool(buf[base + 0x9d])
     out["rotationCenter"] = PS_RRC.get(int(rotation_center), str(rotation_center))
     # +0x84 is fx::RendererLightingType (PS_RLT), NOT a blend sub-mode flag.
     # Confirmed via Ghidra (FUN_1406f2150, type_info 0x142a81bb8); the earlier
@@ -740,6 +924,12 @@ def _decode_renderer(
     out["sortType"] = int(sort_type)
     out["tilingU"] = float(tiling_u)
     out["tilingV"] = float(tiling_v)
+    out["explicitOrientationLocal"] = explicit_orientation_local
+    out["billboard"] = billboard
+    out["velocityOriented"] = velocity_oriented
+    out["background"] = background
+    out["flipTexcoordU"] = flip_u
+    out["flipTexcoordV"] = flip_v
     return out
 
 
@@ -819,9 +1009,9 @@ def _decode_general(buf: bytes | mmap.mmap, sys_off: int) -> dict:
     base = sys_off + 0x170
     capacity, max_instances = struct.unpack_from("<II", buf, base)
     max_age, camera_attach = struct.unpack_from("<2f", buf, base + 0x08)
-    coord_style = buf[base + 0x10]
-    refl = bool(buf[base + 0x11])
-    prewarm = bool(buf[base + 0x12])
+    coord_style = struct.unpack_from("<i", buf, base + 0x10)[0]
+    refl = bool(buf[base + 0x14])
+    prewarm = bool(buf[base + 0x15])
     return {
         "capacity": int(capacity),
         "maxInstancesCount": int(max_instances),
@@ -831,6 +1021,159 @@ def _decode_general(buf: bytes | mmap.mmap, sys_off: int) -> dict:
         "reflectionVisible": refl,
         "prewarm": prewarm,
     }
+
+
+def _decode_system_distance(
+    buf: bytes | mmap.mmap, sys_off: int, file_end: int,
+) -> dict:
+    """Decode System.DistanceSection (+0x188).
+
+    Native distance application (`FUN_1406c9c40`) consumes the config array as
+    the same 0x20 `{Ramp, flags[]}` shape used by intensity configs, keyed by
+    camera distance and folded into the runtime PS_IC multiplier block.
+    """
+    base = sys_off + 0x188
+    max_distance = struct.unpack_from("<f", buf, base)[0]
+    configs_count = struct.unpack_from("<I", buf, base + 0x04)[0]
+    configs_rp = struct.unpack_from("<q", buf, base + 0x08)[0]
+    out: dict[str, Any] = {
+        "maxDistance": float(max_distance),
+        "configsCount": int(configs_count),
+        "configs": [],
+    }
+    if configs_count == 0:
+        return out
+    if configs_count > 32 or configs_rp == 0:
+        out["_err"] = "configs_invalid"
+        return out
+    configs_addr = base + configs_rp
+    if (
+        configs_addr < 0
+        or configs_addr + configs_count * SYSTEM_DISTANCE_CONFIG_SIZE > file_end
+    ):
+        out["_err"] = "configs_oob"
+        return out
+
+    configs: list[dict[str, Any]] = []
+    for i in range(int(configs_count)):
+        cfg_off = configs_addr + i * SYSTEM_DISTANCE_CONFIG_SIZE
+        flags_count = struct.unpack_from("<I", buf, cfg_off + 0x10)[0]
+        flags_rp = struct.unpack_from("<q", buf, cfg_off + 0x18)[0]
+        cfg: dict[str, Any] = {
+            "ramp": _decode_ramp(buf, cfg_off, file_end),
+            "flagsCount": int(flags_count),
+            "flags": [],
+        }
+        if flags_count == 0:
+            configs.append(cfg)
+            continue
+        if flags_count > 32 or flags_rp == 0:
+            cfg["_err"] = "flags_invalid"
+            configs.append(cfg)
+            continue
+        flags_addr = cfg_off + flags_rp
+        if flags_addr < 0 or flags_addr + flags_count * 4 > file_end:
+            cfg["_err"] = "flags_oob"
+            configs.append(cfg)
+            continue
+        flags = [
+            int(struct.unpack_from("<I", buf, flags_addr + j * 4)[0])
+            for j in range(int(flags_count))
+        ]
+        cfg["flags"] = flags
+        cfg["flagNames"] = [PS_IC.get(flag, f"unk_{flag}") for flag in flags]
+        configs.append(cfg)
+    out["configs"] = configs
+    return out
+
+
+def _decode_system_intensities(
+    buf: bytes | mmap.mmap, sys_off: int, file_end: int,
+) -> dict:
+    """Decode System.Intensities (+0x1a8).
+
+    Each channel owns zero or more configs. A config is a scalar ramp sampled
+    by the live EffectManager channel value (usually 0..10), plus a compact
+    `flags[]` array of PS_IC target IDs. The flags relptr is relative to the
+    config start (`config + flags_relptr`), not the nested count field.
+    """
+    base = sys_off + 0x1a8
+    channel_count, _pad, channels_rp = struct.unpack_from("<IIq", buf, base)
+    out: dict[str, Any] = {
+        "channelCount": int(channel_count),
+        "channels": [],
+    }
+    if channel_count == 0:
+        return out
+    if channel_count > 32 or channels_rp == 0:
+        out["_err"] = "channels_invalid"
+        return out
+    channels_addr = base + channels_rp
+    if (
+        channels_addr < 0
+        or channels_addr + channel_count * SYSTEM_INTENSITY_CHANNEL_SIZE > file_end
+    ):
+        out["_err"] = "channels_oob"
+        return out
+
+    channels: list[dict[str, Any]] = []
+    for c in range(int(channel_count)):
+        ch_off = channels_addr + c * SYSTEM_INTENSITY_CHANNEL_SIZE
+        configs_count, _pad, configs_rp = struct.unpack_from("<IIq", buf, ch_off)
+        ch: dict[str, Any] = {
+            "configsCount": int(configs_count),
+            "configs": [],
+        }
+        if configs_count == 0:
+            channels.append(ch)
+            continue
+        if configs_count > 32 or configs_rp == 0:
+            ch["_err"] = "configs_invalid"
+            channels.append(ch)
+            continue
+        configs_addr = ch_off + configs_rp
+        if (
+            configs_addr < 0
+            or configs_addr + configs_count * SYSTEM_INTENSITY_CONFIG_SIZE > file_end
+        ):
+            ch["_err"] = "configs_oob"
+            channels.append(ch)
+            continue
+
+        configs: list[dict[str, Any]] = []
+        for i in range(int(configs_count)):
+            cfg_off = configs_addr + i * SYSTEM_INTENSITY_CONFIG_SIZE
+            flags_count = struct.unpack_from("<I", buf, cfg_off + 0x10)[0]
+            flags_rp = struct.unpack_from("<q", buf, cfg_off + 0x18)[0]
+            cfg: dict[str, Any] = {
+                "ramp": _decode_ramp(buf, cfg_off, file_end),
+                "flagsCount": int(flags_count),
+                "flags": [],
+            }
+            if flags_count == 0:
+                configs.append(cfg)
+                continue
+            if flags_count > 32 or flags_rp == 0:
+                cfg["_err"] = "flags_invalid"
+                configs.append(cfg)
+                continue
+            flags_addr = cfg_off + flags_rp
+            if flags_addr < 0 or flags_addr + flags_count * 4 > file_end:
+                cfg["_err"] = "flags_oob"
+                configs.append(cfg)
+                continue
+            flags = [
+                int(struct.unpack_from("<I", buf, flags_addr + j * 4)[0])
+                for j in range(int(flags_count))
+            ]
+            cfg["flags"] = flags
+            cfg["flagNames"] = [PS_IC.get(flag, f"unk_{flag}") for flag in flags]
+            configs.append(cfg)
+        ch["configs"] = configs
+        channels.append(ch)
+
+    out["channels"] = channels
+    return out
 
 
 def _decode_system(
@@ -861,6 +1204,10 @@ def _decode_system(
                         rec["body"] = _decode_action_body(
                             buf, body_addr, kname, aname, file_end,
                         )
+                elif kname == "light":
+                    body_addr = comp_off + body_rp
+                    if body_addr + 16 <= file_end:
+                        rec["body"] = _decode_light_body(buf, body_addr, file_end)
                 components.append(rec)
 
     return {
@@ -868,6 +1215,8 @@ def _decode_system(
         "animation": _decode_animation(buf, sys_off, file_end),
         "emitter": _decode_emitter(buf, sys_off, file_end),
         "general": _decode_general(buf, sys_off),
+        "distance": _decode_system_distance(buf, sys_off, file_end),
+        "intensities": _decode_system_intensities(buf, sys_off, file_end),
         "components": components,
     }
 
@@ -902,6 +1251,89 @@ def _decode_effect_record(
     return out
 
 
+def _read_null_terminated(
+    buf: bytes | mmap.mmap,
+    start: int,
+    file_end: int,
+    *,
+    max_len: int = 256,
+) -> str | None:
+    if start < 0 or start >= file_end:
+        return None
+    stop = min(file_end, start + max_len)
+    end = start
+    while end < stop and buf[end] != 0:
+        end += 1
+    if end == start:
+        return ""
+    try:
+        return bytes(buf[start:end]).decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def _decode_effect_metadata_record(
+    buf: bytes | mmap.mmap,
+    blob_data_off: int,
+    record_index: int,
+    file_end: int,
+) -> dict:
+    """Decode blob-8 EffectMetadata intensity channel metadata.
+
+    Blob 8 is parallel to blob 7 EffectPreset, so callers pass the preset
+    record index. Each 32-byte channel entry carries a name string and the
+    per-channel min/max/default scalar authored for EffectManager.
+    """
+    rec_off = blob_data_off + 0x10 + record_index * 16
+    if rec_off < 0 or rec_off + 16 > file_end:
+        return {"_err": "metadata_record_oob", "intensityChannels": []}
+    count, channels_rp = struct.unpack_from("<Qq", buf, rec_off)
+    out: dict[str, Any] = {
+        "intensityChannelCount": int(count),
+        "intensityChannels": [],
+    }
+    if count == 0:
+        return out
+    if count > 64 or channels_rp == 0:
+        out["_err"] = "metadata_channels_invalid"
+        return out
+    channels_addr = rec_off + channels_rp
+    if (
+        channels_addr < 0
+        or channels_addr + count * EFFECT_METADATA_CHANNEL_SIZE > file_end
+    ):
+        out["_err"] = "metadata_channels_oob"
+        return out
+
+    channels: list[dict[str, Any]] = []
+    for i in range(int(count)):
+        entry = channels_addr + i * EFFECT_METADATA_CHANNEL_SIZE
+        name_len = struct.unpack_from("<I", buf, entry)[0]
+        name_rp = struct.unpack_from("<q", buf, entry + 0x08)[0]
+        min_i, max_i, default_i = struct.unpack_from("<3f", buf, entry + 0x10)
+        kind = struct.unpack_from("<I", buf, entry + 0x1c)[0]
+        name_addr = entry + name_rp
+        name = _read_null_terminated(
+            buf,
+            name_addr,
+            file_end,
+            max_len=max(1, min(int(name_len), 256)),
+        )
+        channels.append(
+            {
+                "index": i,
+                "name": name if name is not None else f"Intensity {i}",
+                "nameLength": int(name_len),
+                "minIntensity": float(min_i),
+                "maxIntensity": float(max_i),
+                "defaultIntensity": float(default_i),
+                "channelKind": int(kind),
+            },
+        )
+    out["intensityChannels"] = channels
+    return out
+
+
 # ---------------------------------------------------------------------------
 # High-level reader
 # ---------------------------------------------------------------------------
@@ -923,11 +1355,15 @@ class ParticleStore:
     _buf: mmap.mmap | bytes
     _hdr: _AssetsBinHeader
     _effect_blob: BlobInfo
+    _effect_metadata_blob: BlobInfo | None = None
     _name_index: dict[str, int] = field(default_factory=dict)
     """Full per-quality path → record_index map (`.../Fire_small.xml/high`)."""
     _base_index: dict[str, dict[str, int]] = field(default_factory=dict)
     """Base-path → {quality: record_index} map (`.../Fire_small.xml`)."""
+    _base_metadata_index: dict[str, int] = field(default_factory=dict)
+    """Base-path → EffectMetadata record_index map from blob 7/8."""
     _decoded_cache: dict[int, dict] = field(default_factory=dict)
+    _metadata_cache: dict[int, dict] = field(default_factory=dict)
     _mmap_close: Any = None
     _file_end: int = 0
 
@@ -957,6 +1393,14 @@ class ParticleStore:
             )
             if effect is None:
                 raise ValueError("assets.bin has no Effect blob (magic 0xEB23E0AF)")
+            preset = next(
+                (b for b in hdr.blobs if b.prototype_magic == EFFECT_PRESET_BLOB_MAGIC),
+                None,
+            )
+            metadata = next(
+                (b for b in hdr.blobs if b.prototype_magic == EFFECT_METADATA_BLOB_MAGIC),
+                None,
+            )
 
             # Build name index. Walk every PathEntry; for those that
             # resolve to the Effect blob index, reconstruct the full path
@@ -968,9 +1412,11 @@ class ParticleStore:
             # (`base_index`) so callers can say ``"particles/vehicles/
             # Fire_small.xml"`` and get the highest-quality variant.
             effect_blob_index = hdr.blobs.index(effect)
+            preset_blob_index = hdr.blobs.index(preset) if preset is not None else None
             paths_by_self_id = _build_paths_by_self_id(hdr.paths)
             name_index: dict[str, int] = {}
             base_index: dict[str, dict[str, int]] = {}
+            base_metadata_index: dict[str, int] = {}
             for entry in hdr.paths:
                 if entry.self_id == 0 or not entry.name:
                     continue
@@ -978,18 +1424,23 @@ class ParticleStore:
                 if loc is None:
                     continue
                 blob_index, record_index = loc
-                if blob_index != effect_blob_index:
-                    continue
                 full = _reconstruct_full_path(paths_by_self_id, entry)
                 if not full:
                     continue
-                name_index[full] = record_index
-                # Strip the trailing quality suffix ("/high", "/low",
-                # "/shared") to derive the .xml base path.
-                if "/" in full:
-                    base, _, quality = full.rpartition("/")
-                    if base.endswith(".xml") and quality in ("high", "low", "shared"):
-                        base_index.setdefault(base, {})[quality] = record_index
+                if blob_index == effect_blob_index:
+                    name_index[full] = record_index
+                    # Strip the trailing quality suffix ("/high", "/low",
+                    # "/shared") to derive the .xml base path.
+                    if "/" in full:
+                        base, _, quality = full.rpartition("/")
+                        if base.endswith(".xml") and quality in ("high", "low", "shared"):
+                            base_index.setdefault(base, {})[quality] = record_index
+                elif (
+                    preset_blob_index is not None
+                    and blob_index == preset_blob_index
+                    and full.endswith(".xml")
+                ):
+                    base_metadata_index[full] = record_index
         except Exception:
             mm.close()
             f.close()
@@ -999,8 +1450,10 @@ class ParticleStore:
             _buf=mm,
             _hdr=hdr,
             _effect_blob=effect,
+            _effect_metadata_blob=metadata,
             _name_index=name_index,
             _base_index=base_index,
+            _base_metadata_index=base_metadata_index,
             _mmap_close=(mm, f),
             _file_end=len(mm),
         )
@@ -1054,6 +1507,34 @@ class ParticleStore:
         """Total Effect records in the blob (including unreachable)."""
         return self._effect_blob.record_count
 
+    def _metadata_for_base(self, base: str) -> dict | None:
+        if self._effect_metadata_blob is None:
+            return None
+        meta_idx = self._base_metadata_index.get(base)
+        if meta_idx is None:
+            return None
+        if meta_idx in self._metadata_cache:
+            return self._metadata_cache[meta_idx]
+        if meta_idx < 0 or meta_idx >= self._effect_metadata_blob.record_count:
+            return None
+        decoded = _decode_effect_metadata_record(
+            self._buf,
+            self._effect_metadata_blob.data_offset,
+            meta_idx,
+            self._file_end,
+        )
+        self._metadata_cache[meta_idx] = decoded
+        return decoded
+
+    def _attach_metadata(self, decoded: dict, base: str | None) -> None:
+        if not base:
+            return
+        metadata = self._metadata_for_base(base)
+        if not metadata:
+            return
+        decoded["intensityChannelCount"] = metadata.get("intensityChannelCount", 0)
+        decoded["intensityChannels"] = metadata.get("intensityChannels", [])
+
     def get(self, name: str, *, quality: str | None = None) -> dict | None:
         """Decode the Effect for ``name``. Returns ``None`` if not in the
         index.
@@ -1076,6 +1557,7 @@ class ParticleStore:
         # Direct fully-qualified lookup wins (preserves backwards-compat
         # for callers that pass the WG-form path verbatim).
         idx = self._name_index.get(key)
+        metadata_base: str | None = None
         if idx is None:
             # Try the base-path lookup with quality preference. The "high"
             # variant is the canonical authoring artefact; "low" is the
@@ -1091,12 +1573,20 @@ class ParticleStore:
                     break
             if idx is None:
                 return None
+            metadata_base = key
+        elif "/" in key:
+            base, _, suffix = key.rpartition("/")
+            if base.endswith(".xml") and suffix in ("high", "low", "shared"):
+                metadata_base = base
         if idx in self._decoded_cache:
-            return self._decoded_cache[idx]
+            decoded = self._decoded_cache[idx]
+            self._attach_metadata(decoded, metadata_base)
+            return decoded
         decoded = _decode_effect_record(
             self._buf, self._effect_blob.data_offset, idx, self._file_end,
         )
         decoded["name"] = key
+        self._attach_metadata(decoded, metadata_base)
         self._decoded_cache[idx] = decoded
         return decoded
 
@@ -1139,8 +1629,11 @@ def _canonicalize_name(name: str) -> str:
 __all__ = [
     "ASSETS_BIN_MAGIC",
     "EFFECT_BLOB_MAGIC",
+    "EFFECT_PRESET_BLOB_MAGIC",
+    "EFFECT_METADATA_BLOB_MAGIC",
     "PCAT",
     "PSAT",
+    "PS_IC",
     "PS_VGT",
     "PS_VALG_RAMP_PARAMETER",
     "PS_VALG_RAMP_SAMPLING",

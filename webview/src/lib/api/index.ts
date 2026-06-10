@@ -11,3 +11,4 @@ export * from './consumers';
 export * from './queue';
 export * from './projectiles';
 export * from './maps';
+export * from './particles';

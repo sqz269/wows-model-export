@@ -8,6 +8,7 @@
 // strings; line-by-line provenance matters when re-RE'ing a regression.
 
 import type * as THREE from 'three';
+import { ShaderChunk } from 'three';
 import { makeCamoUniforms, type CamoUniforms } from './uniforms';
 import { makeWetnessUniforms, sharedWetTime } from '../wetness';
 
@@ -82,6 +83,7 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.uniforms.catUseCamoMaskGlobal = uniforms.catUseCamoMaskGlobal;
     shader.uniforms.wgPackMG = uniforms.wgPackMG;
     shader.uniforms.wgPackN = uniforms.wgPackN;
+    shader.uniforms.wgLegacyRemap = uniforms.wgLegacyRemap;
     shader.uniforms.detailMap = uniforms.detailMap;
     shader.uniforms.detailMapBound = uniforms.detailMapBound;
     shader.uniforms.detailScale = uniforms.detailScale;
@@ -141,6 +143,7 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
       'uniform float catUseCamoMaskGlobal;\n' +
       'uniform float wgPackMG;\n' +
       'uniform float wgPackN;\n' +
+      'uniform float wgLegacyRemap;\n' +
       'uniform sampler2D detailMap;\n' +
       'uniform float detailMapBound;\n' +
       'uniform vec2 detailScale;\n' +
@@ -413,6 +416,14 @@ diffuseColor.rgb *= mix( 1.0, 0.6, wetBandF );
   // (factor = 0 when catMgnBound = 0 or Influence_g = 0).
   float catGlossMix = catPaintMask * catMgnInfluence.y * catMgnBound;
   roughTexel = mix( roughTexel, 1.0 - catMgnSample.r, catGlossMix );
+  // PBS_ship.fx "legacy" gloss remap (engine §6b, build 12506899,
+  // PBS_ship chunk046 i49-51): the base/no-camo material family applies
+  //   roughness = 1 - pow(gloss, g_legacyGlossRemap = 0.75)
+  // right after the gloss sample - BEFORE detail/wetness modifiers.
+  // ship_camo_material.fx (the family this chunk models) does NOT (zero
+  // g_legacy* constants in all 48 camo chunks). Off by default; see
+  // uniforms.ts 'wgLegacyRemap'.
+  roughTexel = mix( roughTexel, 1.0 - pow( max( 1.0 - roughTexel, 0.0 ), 0.75 ), wgLegacyRemap );
   roughnessFactor *= roughTexel;
 #endif
 
@@ -426,6 +437,28 @@ roughnessFactor *= mix( 1.0, wetRoughDrop, clamp( wetOverall, 0.0, 1.0 ) );
 // Layer 2 waterline band: extra gloss near the waterline. 'wetBandF' comes
 // from the map_fragment tail (earlier chunk, same main() scope).
 roughnessFactor *= mix( 1.0, 0.35, wetBandF );
+
+// ── WG specular AA + GGX floor (BOTH fx families: PBS_ship chunk046
+// i527-549 / ship_camo_material chunk046 i536-549) ──────────────────────────
+// Engine recipe: widen roughness by geometric-normal variance in the r⁴
+// domain, then floor at 0.005:
+//   r = pow( min( r⁴ + min( 0.3·(‖∂xN̂‖²+‖∂yN̂‖²), 0.2 ), 1 ), 1/4 )
+// The engine derives the variance from the interpolated VERTEX normal (v3,
+// pre-normal-map) — that's exactly 'vNormal' here. Runs after the wetness
+// gloss modifiers (engine order: wetness i460-483 precedes AA i527+), and
+// before the deck-puddle override in <normal_fragment_maps> (engine puddle
+// reflectance is a forward-lighting effect past the gbuffer roughness).
+// three.js's own linear 'geometryRoughness' add is neutralized in the
+// lights_physical_fragment patch below so AA isn't double-counted.
+{
+  vec3 wgGN = normalize( vNormal );
+  vec3 wgDx = dFdx( wgGN );
+  vec3 wgDy = dFdy( wgGN );
+  float wgVar = dot( wgDx, wgDx ) + dot( wgDy, wgDy );
+  float wgR2 = roughnessFactor * roughnessFactor;
+  float wgR4 = min( wgR2 * wgR2 + min( 0.3 * wgVar, 0.2 ), 1.0 );
+  roughnessFactor = clamp( pow( wgR4, 0.25 ), 0.005, 1.0 );
+}
 `,
         )
         .replace(
@@ -444,6 +477,12 @@ roughnessFactor *= mix( 1.0, 0.35, wetBandF );
   // metalness uniform feeds the same split downstream.)
   float catMetalMix = catPaintMask * catMgnInfluence.x * catMgnBound;
   metalTexel = mix( metalTexel, catMgnSample.g, catMetalMix );
+  // PBS_ship.fx "legacy" metallic S-curve (engine §6b, PBS_ship chunk046
+  // i29-36): metallic = min(1, (m^γ · g_legacySpecularMul)^g_legacySpecularPow)
+  // with defaults γ=1, mul=3, pow=4 → min(1, (3m)^4): below ~0.33 goes
+  // nearly dielectric, above ~0.4 saturates to full metal. The camo family
+  // consumes the raw texel. Off by default; see uniforms.ts 'wgLegacyRemap'.
+  metalTexel = mix( metalTexel, min( pow( metalTexel * 3.0, 4.0 ), 1.0 ), wgLegacyRemap );
   metalnessFactor *= metalTexel;
 #endif
 `,
@@ -559,6 +598,27 @@ if ( wetPuddles > 0.001 ) {
   }
 }
 `,
+        )
+        // WG roughness floor + AA handoff. Stock three.js (r165) floors
+        // roughness at 0.0525 and ADDS a linear 'geometryRoughness' term in
+        // lights_physical_fragment. The engine's spec-AA (already folded into
+        // roughnessFactor in the roughnessmap chunk above) is r⁴-domain with a
+        // 0.005 floor — substitute three's terms so AA isn't double-counted
+        // and mirror-gloss surfaces (WG rough → 0.005) aren't dimmed by the
+        // 0.0525 floor. Version-coupled to the r165 chunk text: on a three
+        // upgrade where these strings drift, the replaces no-op and three's
+        // slightly-stronger built-ins come back — a visually safe fallback.
+        .replace(
+          '#include <lights_physical_fragment>',
+          ShaderChunk.lights_physical_fragment
+            .replace(
+              'material.roughness = max( roughnessFactor, 0.0525 );',
+              'material.roughness = max( roughnessFactor, 0.005 ); // WG floor (engine 0.005, §6b)',
+            )
+            .replace(
+              'material.roughness += geometryRoughness;',
+              '// (WG r⁴-domain spec-AA already folded into roughnessFactor)',
+            ),
         );
   };
   return uniforms;
