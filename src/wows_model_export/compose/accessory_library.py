@@ -852,23 +852,38 @@ def _load_dead_orientation_map(library_root: Path) -> dict[str, str]:
 def _write_index(
     records: dict[AssetKey, AssetRecord],
     library_root: Path,
+    *,
+    merge_prior: bool = False,
 ) -> Path:
-    """Emit ``index.json`` for the accessory library."""
+    """Emit ``index.json`` for the accessory library.
+
+    ``merge_prior``: keep prior index entries whose asset_id isn't in
+    ``records``. MUST be set for partial walks (``--only <ships>``) —
+    without it a subset build TRUNCATES the fleet index to that subset,
+    and every index-driven consumer (Unity's prefab composer, the Ry180
+    GLB lookup) silently loses the rest of the library. Full builds keep
+    the fresh-only write so deleted assets age out.
+    """
     prior_built_at: dict[str, int] = {}
+    prior_assets: dict[str, dict] = {}
     out = library_root / "index.json"
     if out.is_file():
         try:
             prior = json.loads(out.read_text(encoding="utf-8"))
             for aid, entry in (prior.get("assets") or {}).items():
+                if not isinstance(entry, dict):
+                    continue
                 ts = entry.get("built_at")
                 if isinstance(ts, (int, float)):
                     prior_built_at[aid] = int(ts)
+                if merge_prior:
+                    prior_assets[aid] = entry
         except (OSError, ValueError, json.JSONDecodeError):
             pass
 
     dead_orient_map = _load_dead_orientation_map(library_root)
 
-    assets: dict[str, dict] = {}
+    assets: dict[str, dict] = dict(prior_assets)
     for rec in sorted(records.values(), key=lambda r: r.key.asset_id):
         if rec.glb_rel_path is None:
             continue
@@ -1145,7 +1160,8 @@ def build_accessory_library(
     # ── First-pass index write (dead_variant_audit reads from it) ─────
     try:
         with runner.step("write_index", "first pass") as st:
-            index_path = _write_index(records, lib_root)
+            index_path = _write_index(
+                records, lib_root, merge_prior=only_ships is not None)
             st.annotate(f"wrote {index_path.name}")
     except StepError:
         raise
@@ -1244,7 +1260,8 @@ def build_accessory_library(
     # ── Step: write_index (second pass, with attachments + dead audit) ─
     try:
         with runner.step("write_index", "second pass") as st:
-            index_path = _write_index(records, lib_root)
+            index_path = _write_index(
+                records, lib_root, merge_prior=only_ships is not None)
             st.annotate(f"wrote {index_path.name}")
     except StepError:
         raise
