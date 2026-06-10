@@ -165,7 +165,14 @@ export function groupLabel(key: string): string {
  *
  *  Native + non-mesh-swap permoflages get no suffix: native is the
  *  Vehicle's default, and texture-only permoflages share geometry with
- *  the base ship so they belong in `skins[]`, not a sibling folder. */
+ *  the base ship so they belong in `skins[]`, not a sibling folder.
+ *
+ *  LEGACY (ship-exterior unification): the `__<Variant>` suffix path is
+ *  superseded — the BASE ship's sidecar carries every mesh-swap
+ *  permoflage as a switchable `exteriors[]` entry (per-mount swaps +
+ *  HullDelta variant hull under `models/exteriors/`). The extract UI
+ *  warns when this branch fires; the convention retires at cutover
+ *  (handoff §4 Step 3 / §9a). */
 export function suggestedLabel(v: Vehicle, p: Permoflage | null): string {
   const base = v.display_name.replace(/\s+/g, '_').replace(/[^A-Za-z0-9_]/g, '');
   if (!p || p.is_native || p.topology !== 'mesh_swap') return base;
