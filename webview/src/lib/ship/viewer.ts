@@ -1800,6 +1800,23 @@ export class ShipViewer {
   }
 
   async setActiveSkin(skinId: string, onProgress?: (msg: string) => void): Promise<void> {
+    // In game, camouflages and mesh-swap exteriors are MUTUALLY EXCLUSIVE —
+    // mounting a camo unequips the permoflage. Mirror that: picking any
+    // skin other than the active exterior's own cross-linked scheme first
+    // reverts to the default exterior (reloading the base hull when a
+    // variant hull is up), then applies the requested camo.
+    if (this.activeExteriorId !== 'default') {
+      const active = this.getExteriors().find(
+        (e) => e.exterior_id === this.activeExteriorId,
+      );
+      const ownKey = active?.camo_scheme_key ?? null;
+      const target = this.textures.getSkins().find((s) => s.skin_id === skinId);
+      const isOwn =
+        !!ownKey && !!target && (target.skin_id === ownKey || target.scheme_key === ownKey);
+      if (!isOwn) {
+        await this.setActiveExterior('default', onProgress);
+      }
+    }
     await this.textures.setActiveSkin(skinId, onProgress);
   }
 
