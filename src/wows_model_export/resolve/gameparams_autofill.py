@@ -96,6 +96,55 @@ def _is_ship_hull_path(path: str) -> bool:
     return True
 
 
+def _resolve_variant_model_path(
+    vehicle_id: str,
+    *,
+    permoflage_id: str | None = None,
+    refresh: bool = False,
+) -> tuple[str | None, str | None]:
+    """Shared walk behind :func:`resolve_variant_model_dir` /
+    :func:`resolve_variant_model_vfs_dir`: returns the variant hull's raw
+    ``.model`` VFS path (``content/.../<dir>/<dir>.model``) or ``None``.
+    """
+    ship = get_ship(vehicle_id, refresh=refresh)
+    if not ship:
+        return (None, None)
+
+    chosen_id = permoflage_id or ship.get("nativePermoflage")
+    if not chosen_id:
+        return (None, None)
+
+    ext = get_exterior(chosen_id, refresh=refresh)
+    if not ext:
+        return (None, chosen_id)
+
+    # Path 1: hullConfig (per-hull-tier full hull swap)
+    hull_config = ext.get("hullConfig") or {}
+    if isinstance(hull_config, dict):
+        for hull_key in ("A_Hull", "B_Hull"):
+            entry = hull_config.get(hull_key)
+            if isinstance(entry, dict):
+                model = entry.get("model")
+                if isinstance(model, str) and model and _model_path_to_dir(model):
+                    return (model, chosen_id)
+
+    # Path 2: peculiarityModels keyed by top-level ship hull path
+    pm = ext.get("peculiarityModels") or {}
+    if isinstance(pm, dict):
+        for src, dst in pm.items():
+            if not _is_ship_hull_path(src):
+                continue
+            # Value can be either a string path or a dict with a "model" key
+            if isinstance(dst, dict):
+                dst = dst.get("model")
+            if not isinstance(dst, str):
+                continue
+            if _model_path_to_dir(dst):
+                return (dst, chosen_id)
+
+    return (None, chosen_id)
+
+
 def resolve_variant_model_dir(
     vehicle_id: str,
     *,
@@ -131,46 +180,36 @@ def resolve_variant_model_dir(
     See ``reference/topics/accessory/mesh_swap_permoflages.md`` for the
     full encoding and the ARP Takao worked example.
     """
-    ship = get_ship(vehicle_id, refresh=refresh)
-    if not ship:
-        return (None, None)
+    path, chosen_id = _resolve_variant_model_path(
+        vehicle_id, permoflage_id=permoflage_id, refresh=refresh,
+    )
+    return (_model_path_to_dir(path) if path else None, chosen_id)
 
-    chosen_id = permoflage_id or ship.get("nativePermoflage")
-    if not chosen_id:
-        return (None, None)
 
-    ext = get_exterior(chosen_id, refresh=refresh)
-    if not ext:
+def resolve_variant_model_vfs_dir(
+    vehicle_id: str,
+    *,
+    permoflage_id: str | None = None,
+    refresh: bool = False,
+) -> tuple[str | None, str | None]:
+    """Like :func:`resolve_variant_model_dir`, but returns the variant
+    hull's full VFS **directory path** (original case), e.g.
+    ``content/gameplay/japan/ship/battleship/JSB403_Yamato_StarTrek``.
+
+    Needed wherever the variant's assets must be read back from the VFS
+    (HullDelta HP-node harvest, the XD017 cross-scope lesson): the stem
+    alone forces consumers to guess nation/class taxonomy, which breaks
+    for ``events/``-scoped variants.
+    """
+    path, chosen_id = _resolve_variant_model_path(
+        vehicle_id, permoflage_id=permoflage_id, refresh=refresh,
+    )
+    if not path:
         return (None, chosen_id)
-
-    # Path 1: hullConfig (per-hull-tier full hull swap)
-    hull_config = ext.get("hullConfig") or {}
-    if isinstance(hull_config, dict):
-        for hull_key in ("A_Hull", "B_Hull"):
-            entry = hull_config.get(hull_key)
-            if isinstance(entry, dict):
-                model = entry.get("model")
-                if isinstance(model, str) and model:
-                    d = _model_path_to_dir(model)
-                    if d:
-                        return (d, chosen_id)
-
-    # Path 2: peculiarityModels keyed by top-level ship hull path
-    pm = ext.get("peculiarityModels") or {}
-    if isinstance(pm, dict):
-        for src, dst in pm.items():
-            if not _is_ship_hull_path(src):
-                continue
-            # Value can be either a string path or a dict with a "model" key
-            if isinstance(dst, dict):
-                dst = dst.get("model")
-            if not isinstance(dst, str):
-                continue
-            d = _model_path_to_dir(dst)
-            if d:
-                return (d, chosen_id)
-
-    return (None, chosen_id)
+    parts = path.replace("\\", "/").split("/")
+    if len(parts) < 2:
+        return (None, chosen_id)
+    return ("/".join(parts[:-1]), chosen_id)
 
 
 #: Per-process index ``{nativePermoflage → vehicle_key}`` built lazily on

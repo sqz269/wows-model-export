@@ -78,6 +78,7 @@ from ..toolkit import ingest_ship_bundle as _toolkit_ingest_ship_bundle
 from ..toolkit import ingest_ship_supported as _toolkit_ingest_ship_supported
 from ..toolkit.gameparams import ensure_dump as _ensure_gameparams_dump
 from ..types import OnEvent, ScaffoldResult
+from . import exterior_hull_hp as _exterior_hull_hp
 from ._step_runner import StepRunner
 
 # ---------------------------------------------------------------------------
@@ -208,13 +209,23 @@ def _collect_exteriors_block(
     *,
     vehicle_id: str,
     library_root: Path,
-) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    exteriors_dir: Path | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str]]:
     """Build the additive ``exteriors[]`` block for a BASE ship's sidecar.
 
-    Returns ``(block, model_dirs)`` where ``model_dirs`` maps
-    ``exterior_id -> variant hull model_dir`` (ORIGINAL case — the record's
-    ``wg_asset_id`` is the lowercased form) for every hull-swap exterior,
-    feeding the optional HullDelta export pass.
+    Returns ``(block, model_dirs, model_vfs_dirs)`` where ``model_dirs``
+    maps ``exterior_id -> variant hull model_dir`` (ORIGINAL case — the
+    record's ``wg_asset_id`` is the lowercased form) and ``model_vfs_dirs``
+    maps ``exterior_id -> full VFS directory path`` (taxonomy-correct even
+    for ``events/``-scoped variants), both feeding the optional HullDelta
+    export pass.
+
+    When ``exteriors_dir`` holds a ``<exterior_id>_hp_transforms.json``
+    re-anchor map (written by the HullDelta export pass), the base
+    placements are re-anchored onto the variant hull's HP nodes before
+    the swap diff — moved/parked mounts (WG's hide-by-parking mechanism;
+    see ``compose/exterior_hull_hp.py``) then emit as ordinary
+    transform-only ``mounts[]`` records.
 
     Thin wiring over :func:`exterior_unify.collect_exteriors_for_vehicle`
     (ship-exterior unification Step 0 — see ``resolve/exterior_unify.py``):
@@ -266,6 +277,7 @@ def _collect_exteriors_block(
         return None
 
     model_dirs: dict[str, str] = {}
+    model_vfs_dirs: dict[str, str] = {}
 
     def _resolve_model_dir(vid: str, *, permoflage_id: str) -> str | None:
         model_dir, _ext = _gp_autofill.resolve_variant_model_dir(
@@ -273,7 +285,27 @@ def _collect_exteriors_block(
         )
         if isinstance(model_dir, str) and model_dir:
             model_dirs[permoflage_id] = model_dir
+            vfs_dir, _ext2 = _gp_autofill.resolve_variant_model_vfs_dir(
+                vid, permoflage_id=permoflage_id,
+            )
+            if isinstance(vfs_dir, str) and vfs_dir:
+                model_vfs_dirs[permoflage_id] = vfs_dir
         return model_dir
+
+    def _hp_transforms_for(ext_id: str) -> dict[str, Any] | None:
+        """Load a previously harvested per-HP re-anchor map, if any."""
+        if exteriors_dir is None:
+            return None
+        f = exteriors_dir / f"{ext_id}_hp_transforms.json"
+        if not f.is_file():
+            return None
+        try:
+            with f.open("r", encoding="utf-8") as fh:
+                d = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return None
+        ht = d.get("hp_transforms") if isinstance(d, dict) else None
+        return ht if isinstance(ht, dict) and ht else None
 
     block = _exterior_unify.collect_exteriors_for_vehicle(
         vehicle_id,
@@ -284,6 +316,7 @@ def _collect_exteriors_block(
         get_exterior=_gp_read.get_exterior,
         camo_scheme_for=_camo_scheme_for,
         resolve_model_dir=_resolve_model_dir,
+        hp_transforms_for=_hp_transforms_for,
     )
 
     for rec in block:
@@ -296,19 +329,22 @@ def _collect_exteriors_block(
             rec["variant_swapped_asset_ids"] = sorted(
                 set(rec.get("variant_swapped_asset_ids") or []) | extras
             )
-    return block, model_dirs
+    return block, model_dirs, model_vfs_dirs
 
 
 def _export_exterior_hulls(
     block: list[dict[str, Any]],
     model_dirs: dict[str, str],
     *,
+    model_vfs_dirs: dict[str, str] | None = None,
+    base_doc: dict[str, Any] | None = None,
+    vehicle_id: str | None = None,
     gm3d_dir: Path,
     textures_dir: Path,
     textures_dds_dir: Path,
     cfg: PipelineConfig,
     warnings: list[str],
-) -> int:
+) -> tuple[int, int]:
     """HullDelta export pass: for every hull-swap exterior, export the
     variant hull GLB-only into ``models/exteriors/<exterior_id>_hull.glb``
     and stamp the record's ``hull`` field.
@@ -325,13 +361,62 @@ def _export_exterior_hulls(
       ``exteriors/`` — never overwriting the base ship's mappings (the
       legacy variant-folder flow overwrote because it replaced the hull;
       HullDelta keeps both).
+    - **HP re-anchor harvest** (``<exterior_id>_hp_transforms.json``,
+      skip-on-existence, independent of the GLB skip): WG variant hulls
+      keep the full base HP roster but MOVE the nodes — parking unused
+      decoratives inside the hull is the engine's accessory-hiding
+      mechanism. The harvest dumps the variant hull parts' node trees,
+      self-calibrates against the BASE hull (recovering the toolkit's
+      per-asset Ry180 frame corrections without re-deriving them), and
+      persists only meaningfully-moved HPs. ``_collect_exteriors_block``
+      reads the file on every emit, so the re-anchored ``mounts[]``
+      survive flag-less refreshes.
 
-    Returns the number of fresh GLB exports. Failures degrade to a warning
-    per exterior; the record's ``hull`` stays absent (consumers keep
-    treating it as a not-yet-extracted hull swap).
+    Returns ``(fresh_glb_exports, fresh_hp_harvests)``. Failures degrade
+    to a warning per exterior; the record's ``hull`` stays absent
+    (consumers keep treating it as a not-yet-extracted hull swap).
     """
     exported = 0
+    harvested = 0
     ext_dir = gm3d_dir / "exteriors"
+
+    # Base-hull context for the HP re-anchor harvest, resolved lazily ONCE
+    # (one dump-bones sweep of the base hull serves every exterior).
+    base_harvest_cache: list[dict[str, Any] | None] = []
+    base_tf_map: dict[str, list[float]] = {}
+    if base_doc:
+        for _sec in sidecar.PLACEMENT_SECTIONS:
+            for _p in base_doc.get(_sec) or []:
+                if not isinstance(_p, dict):
+                    continue
+                _hp = _p.get("hp_name")
+                _m = (_p.get("transform") or {}).get("matrix")
+                if isinstance(_hp, str) and isinstance(_m, list) and len(_m) == 16:
+                    base_tf_map.setdefault(_hp, _m)
+
+    def _base_hull_harvest() -> dict[str, Any] | None:
+        if base_harvest_cache:
+            return base_harvest_cache[0]
+        result: dict[str, Any] | None = None
+        try:
+            hull_name = ((base_doc or {}).get("variants") or {}).get("active_hull")
+            ship_gp = _gp_read.get_ship(vehicle_id) if vehicle_id else None
+            model_path = None
+            for _hk in ([hull_name] if isinstance(hull_name, str) else []) + ["A_Hull"]:
+                entry = (ship_gp or {}).get(_hk)
+                if isinstance(entry, dict) and isinstance(entry.get("model"), str):
+                    model_path = entry["model"]
+                    break
+            if model_path:
+                vfs_dir = model_path.replace("\\", "/").rsplit("/", 1)[0]
+                result = _exterior_hull_hp.harvest_hull_hp_transforms(
+                    vfs_dir, config=cfg,
+                )
+        except Exception as e:
+            _warn(warnings, f"base hull HP harvest failed ({e}); re-anchor skipped")
+        base_harvest_cache.append(result)
+        return result
+
     for rec in block:
         ext_id = rec.get("exterior_id")
         model_dir = model_dirs.get(ext_id or "")
@@ -371,7 +456,42 @@ def _export_exterior_hulls(
             }
         except Exception as e:
             _warn(warnings, f"exterior hull export failed for {ext_id} ({e}); hull left null")
-    return exported
+
+        # HP re-anchor harvest — independent of the GLB skip so existing
+        # HullDelta exports gain the map on their next refresh.
+        hp_path = ext_dir / f"{ext_id}_hp_transforms.json"
+        vfs_dir = (model_vfs_dirs or {}).get(ext_id)
+        if hp_path.is_file() or not vfs_dir or not base_tf_map:
+            continue
+        try:
+            base_h = _base_hull_harvest()
+            if base_h is None:
+                continue
+            variant_h = _exterior_hull_hp.harvest_hull_hp_transforms(
+                vfs_dir, config=cfg,
+            )
+            moved = _exterior_hull_hp.corrected_variant_hp_transforms(
+                base_tf_map, base_h, variant_h,
+            )
+            ext_dir.mkdir(parents=True, exist_ok=True)
+            with hp_path.open("w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "schema": 1,
+                        "model_dir": model_dir,
+                        "vfs_dir": vfs_dir,
+                        "hp_transforms": moved,
+                    },
+                    fh, indent=2, ensure_ascii=False,
+                )
+            harvested += 1
+        except Exception as e:
+            _warn(
+                warnings,
+                f"exterior HP-transform harvest failed for {ext_id} ({e}); "
+                f"base-anchored mounts kept",
+            )
+    return exported, harvested
 
 
 # ---------------------------------------------------------------------------
@@ -1557,9 +1677,13 @@ def scaffold_ship(
     variant hull exported GLB-only into ``models/exteriors/<exterior_id>_hull.glb``
     (idempotent skip-on-existence; raw DDS lands in the shared
     ``textures_dds/``) and its record's ``hull`` stamped with
-    ``{hull_glb, material_mappings, materials}``. Default False — one extra
-    toolkit subprocess per hull-swap exterior is too heavy for routine
-    refresh passes; previously-exported hull data survives merges either way.
+    ``{hull_glb, material_mappings, materials}``. The pass also harvests a
+    per-exterior ``<exterior_id>_hp_transforms.json`` re-anchor map (the
+    variant hull's moved/parked HP nodes — WG's accessory-hiding mechanism)
+    which folds moved mounts into the record as transform-only ``mounts[]``
+    entries on every subsequent emit. Default False — one extra toolkit
+    subprocess per hull-swap exterior is too heavy for routine refresh
+    passes; previously-exported hull data survives merges either way.
 
     ``on_event`` is an optional callback invoked at each step boundary
     with a :class:`StepEvent`.  Canonical step names:
@@ -2456,14 +2580,19 @@ def scaffold_ship(
     # degrades to a warning, never breaks the emit.
     if base_vehicle_for_swap and not variant_perm_for_swap:
         try:
-            _ext_block, _ext_model_dirs = _collect_exteriors_block(
+            _exteriors_dir = gm3d_dir / "exteriors"
+            _ext_block, _ext_model_dirs, _ext_vfs_dirs = _collect_exteriors_block(
                 doc,
                 vehicle_id=base_vehicle_for_swap,
                 library_root=workspace / "libraries" / "accessories",
+                exteriors_dir=_exteriors_dir,
             )
             if export_exterior_hulls and _ext_model_dirs:
-                _n_hulls = _export_exterior_hulls(
+                _n_hulls, _n_harvests = _export_exterior_hulls(
                     _ext_block, _ext_model_dirs,
+                    model_vfs_dirs=_ext_vfs_dirs,
+                    base_doc=doc,
+                    vehicle_id=base_vehicle_for_swap,
                     gm3d_dir=gm3d_dir,
                     textures_dir=textures_dir,
                     textures_dds_dir=textures_dds_dir,
@@ -2476,6 +2605,34 @@ def scaffold_ship(
                         f"-> {gm3d_dir / 'exteriors'}",
                         file=sys.stderr,
                     )
+                if _n_harvests:
+                    # Fresh hp_transforms maps landed AFTER this run's
+                    # collect pass — re-collect so the re-anchored
+                    # transform-only mounts emit THIS run (not one run
+                    # behind). The hull stamps live on the first block's
+                    # records; carry them over by exterior_id.
+                    print(
+                        f"[scaffold_ship] harvested {_n_harvests} exterior HP "
+                        f"re-anchor map(s); re-collecting exteriors[]",
+                        file=sys.stderr,
+                    )
+                    _hull_by_ext = {
+                        r.get("exterior_id"): r.get("hull")
+                        for r in _ext_block
+                        if r.get("hull") is not None
+                    }
+                    _ext_block, _ext_model_dirs, _ext_vfs_dirs = (
+                        _collect_exteriors_block(
+                            doc,
+                            vehicle_id=base_vehicle_for_swap,
+                            library_root=workspace / "libraries" / "accessories",
+                            exteriors_dir=_exteriors_dir,
+                        )
+                    )
+                    for _rec in _ext_block:
+                        _h = _hull_by_ext.get(_rec.get("exterior_id"))
+                        if _h is not None:
+                            _rec["hull"] = _h
             # A record without a resolved HullDelta must not carry an
             # explicit ``hull: null`` into the merge — merge_preserving
             # treats explicit None as "clear", which would erase hull data

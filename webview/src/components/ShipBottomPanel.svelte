@@ -951,7 +951,10 @@
             Mesh-swap permoflages (WG <code class="font-mono text-[10px]">Exterior</code> records).
             Selecting one swaps the affected mounts to the variant models and applies the matching
             camo. Entries marked <span class="text-amber-500">hull differs</span> also swap the
-            hull in game — the variant hull isn't extracted yet, so mounts render on the base hull.
+            hull: when the HullDelta export exists the ship reloads on the variant hull and mounts
+            re-anchor to its HP nodes (WG hides unused base accessories by parking their nodes
+            inside the hull); otherwise mounts render on the base hull until the ship is
+            re-extracted with exterior hulls on.
           </div>
           {#each exteriorGroups as group (group.peculiarity)}
             <div>
