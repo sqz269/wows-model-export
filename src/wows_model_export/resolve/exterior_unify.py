@@ -243,6 +243,12 @@ def build_exteriors_block(
     yields its native flag to it; otherwise ``default`` stays native (a
     texture-only native permoflage is base geometry + a ``skins[]`` entry).
     Consumers auto-select the ``is_native`` entry on load (handoff §8).
+
+    Keep-rule: a record survives when it carries mount swaps, a resolved
+    ``hull`` (HullDelta), or a hull-swap marker (``wg_asset_id`` — the
+    lowercased variant model_dir). The last keeps hull-only exteriors
+    (~14% of the corpus) visible even before their hull GLB is exported;
+    a texture-only camo (none of the three) stays a ``skins[]`` entry.
     """
     out = [default_exterior_record()]
     for vr in variant_records:
@@ -258,7 +264,7 @@ def build_exteriors_block(
             camo_scheme_key=vr.get("camo_scheme_key"),
             hull=vr.get("hull"),
         )
-        if rec["mounts"] or rec["hull"]:
+        if rec["mounts"] or rec["hull"] or rec["wg_asset_id"]:
             out.append(rec)
     if any(rec.get("is_native") for rec in out[1:]):
         out[0]["is_native"] = False
@@ -319,13 +325,13 @@ def collect_exteriors_for_vehicle(
         for ext_id in permos:
             try:
                 swaps = resolve_swaps(vehicle_id, permoflage_id=ext_id) or {}
-                if not _has_mesh_swap(swaps):
-                    continue  # texture-only camo -> skins[], not an exterior row
-                variant_placements = apply_swaps(base, swaps)
-                ext = (get_exterior(ext_id) if get_exterior else None) or {}
                 model_dir: str | None = None
                 if resolve_model_dir is not None:
                     model_dir = resolve_model_dir(vehicle_id, permoflage_id=ext_id)
+                if not _has_mesh_swap(swaps) and not model_dir:
+                    continue  # texture-only camo -> skins[], not an exterior row
+                variant_placements = apply_swaps(base, swaps)
+                ext = (get_exterior(ext_id) if get_exterior else None) or {}
                 variant_records.append({
                     "exterior_id": ext_id,
                     "variant_placements": variant_placements,

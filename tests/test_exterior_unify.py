@@ -163,6 +163,21 @@ def test_default_record_and_block():
     )
     assert [e["is_native"] for e in block3] == [False, True]
     assert [e["is_native"] for e in block] == [True, False]
+    # hull-only exterior (no mount swaps, but a hull-swap marker / HullDelta)
+    # is KEPT — ~14% of the corpus swaps only the hull
+    block4 = build_exteriors_block(
+        _make_base(),
+        [
+            {"exterior_id": "hull_only_marker", "variant_placements": _make_base(),
+             "wg_asset_id": "asc999_some_variant"},
+            {"exterior_id": "hull_only_delta", "variant_placements": _make_base(),
+             "hull": {"hull_glb": "models/exteriors/hull_only_delta_hull.glb"}},
+        ],
+    )
+    assert [e["exterior_id"] for e in block4] == [
+        "default", "hull_only_marker", "hull_only_delta",
+    ]
+    assert block4[2]["hull"]["hull_glb"].endswith("_hull.glb")
 
 
 def _placement_sections(doc):

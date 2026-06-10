@@ -260,6 +260,7 @@ def refresh_ship_sidecar(
     variant_permoflage: str | None = "auto",
     class_override: str | None = None,
     ship_key_suffix: str | None = None,
+    export_exterior_hulls: bool = False,
     on_event: OnEvent | None = None,
     cancel: threading.Event | None = None,
 ) -> "_scaffold_ship_mod.ScaffoldResult":
@@ -290,6 +291,7 @@ def refresh_ship_sidecar(
         skip_materials_skins=True,
         skip_geometry_hitbox=True,
         variant_permoflage=variant_permoflage,
+        export_exterior_hulls=export_exterior_hulls,
         on_event=on_event,
         cancel=cancel,
     )

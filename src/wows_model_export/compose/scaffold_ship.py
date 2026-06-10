@@ -208,8 +208,13 @@ def _collect_exteriors_block(
     *,
     vehicle_id: str,
     library_root: Path,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Build the additive ``exteriors[]`` block for a BASE ship's sidecar.
+
+    Returns ``(block, model_dirs)`` where ``model_dirs`` maps
+    ``exterior_id -> variant hull model_dir`` (ORIGINAL case — the record's
+    ``wg_asset_id`` is the lowercased form) for every hull-swap exterior,
+    feeding the optional HullDelta export pass.
 
     Thin wiring over :func:`exterior_unify.collect_exteriors_for_vehicle`
     (ship-exterior unification Step 0 — see ``resolve/exterior_unify.py``):
@@ -260,10 +265,14 @@ def _collect_exteriors_block(
                 return scheme if isinstance(scheme, str) else None
         return None
 
+    model_dirs: dict[str, str] = {}
+
     def _resolve_model_dir(vid: str, *, permoflage_id: str) -> str | None:
         model_dir, _ext = _gp_autofill.resolve_variant_model_dir(
             vid, permoflage_id=permoflage_id,
         )
+        if isinstance(model_dir, str) and model_dir:
+            model_dirs[permoflage_id] = model_dir
         return model_dir
 
     block = _exterior_unify.collect_exteriors_for_vehicle(
@@ -287,7 +296,82 @@ def _collect_exteriors_block(
             rec["variant_swapped_asset_ids"] = sorted(
                 set(rec.get("variant_swapped_asset_ids") or []) | extras
             )
-    return block
+    return block, model_dirs
+
+
+def _export_exterior_hulls(
+    block: list[dict[str, Any]],
+    model_dirs: dict[str, str],
+    *,
+    gm3d_dir: Path,
+    textures_dir: Path,
+    textures_dds_dir: Path,
+    cfg: PipelineConfig,
+    warnings: list[str],
+) -> int:
+    """HullDelta export pass: for every hull-swap exterior, export the
+    variant hull GLB-only into ``models/exteriors/<exterior_id>_hull.glb``
+    and stamp the record's ``hull`` field.
+
+    - GLB export is idempotent (skip-on-existence) — re-runs only rebuild
+      the cheap ``materials`` manifest, mirroring the merge-preserving
+      philosophy elsewhere in the scaffold.
+    - Raw DDS lands in the SHARED ``textures_dds/`` (variant stems like
+      ``ASC080_*`` coexist with the base ``ASC017_*``), so the emitted
+      ``materials`` texture paths resolve against ``models/`` exactly like
+      the top-level ``materials[]`` — one texture base dir per ship for
+      every consumer.
+    - The variant's material mappings go to a SIBLING file under
+      ``exteriors/`` — never overwriting the base ship's mappings (the
+      legacy variant-folder flow overwrote because it replaced the hull;
+      HullDelta keeps both).
+
+    Returns the number of fresh GLB exports. Failures degrade to a warning
+    per exterior; the record's ``hull`` stays absent (consumers keep
+    treating it as a not-yet-extracted hull swap).
+    """
+    exported = 0
+    ext_dir = gm3d_dir / "exteriors"
+    for rec in block:
+        ext_id = rec.get("exterior_id")
+        model_dir = model_dirs.get(ext_id or "")
+        if not ext_id or not model_dir:
+            continue
+        glb_path = ext_dir / f"{ext_id}_hull.glb"
+        mappings_path = ext_dir / f"{ext_id}_material_mappings.json"
+        try:
+            if not glb_path.is_file():
+                ext_dir.mkdir(parents=True, exist_ok=True)
+                _toolkit_export_ship(
+                    model_dir, glb_path,
+                    accessories="exclude",
+                    all_render_sets=True,
+                    placements_json=None,
+                    skel_ext_candidates_json=None,
+                    material_mappings_json=mappings_path,
+                    no_textures=True,
+                    raw_dds_dir=textures_dds_dir,
+                    config=cfg,
+                )
+                exported += 1
+            mats = sidecar.materials_from_glb(
+                glb_path,
+                textures_dir=textures_dir if textures_dir.is_dir() else None,
+                textures_dds_dir=textures_dds_dir if textures_dds_dir.is_dir() else None,
+                material_mappings_json=mappings_path,
+                legacy_name_fallback=not mappings_path.is_file(),
+            )
+            rec["hull"] = {
+                "hull_glb": f"models/exteriors/{ext_id}_hull.glb",
+                "material_mappings": (
+                    f"models/exteriors/{ext_id}_material_mappings.json"
+                    if mappings_path.is_file() else None
+                ),
+                "materials": mats,
+            }
+        except Exception as e:
+            _warn(warnings, f"exterior hull export failed for {ext_id} ({e}); hull left null")
+    return exported
 
 
 # ---------------------------------------------------------------------------
@@ -1447,6 +1531,7 @@ def scaffold_ship(
     skip_materials_skins: bool = False,
     skip_geometry_hitbox: bool = False,
     variant_permoflage: str | None = "auto",
+    export_exterior_hulls: bool = False,
     on_event: OnEvent | None = None,
     cancel: threading.Event | None = None,
 ) -> ScaffoldResult:
@@ -1466,6 +1551,15 @@ def scaffold_ship(
           pass against the variant model_dir.
         * ``<exterior_id>``: explicitly route to that Exterior's variant.
         * ``"none"`` / empty string: disable variant routing.
+
+    ``export_exterior_hulls`` (HullDelta, ship-exterior unification): when
+    True, every hull-swap exterior in the emitted ``exteriors[]`` gets its
+    variant hull exported GLB-only into ``models/exteriors/<exterior_id>_hull.glb``
+    (idempotent skip-on-existence; raw DDS lands in the shared
+    ``textures_dds/``) and its record's ``hull`` stamped with
+    ``{hull_glb, material_mappings, materials}``. Default False — one extra
+    toolkit subprocess per hull-swap exterior is too heavy for routine
+    refresh passes; previously-exported hull data survives merges either way.
 
     ``on_event`` is an optional callback invoked at each step boundary
     with a :class:`StepEvent`.  Canonical step names:
@@ -2362,11 +2456,33 @@ def scaffold_ship(
     # degrades to a warning, never breaks the emit.
     if base_vehicle_for_swap and not variant_perm_for_swap:
         try:
-            _ext_block = _collect_exteriors_block(
+            _ext_block, _ext_model_dirs = _collect_exteriors_block(
                 doc,
                 vehicle_id=base_vehicle_for_swap,
                 library_root=workspace / "libraries" / "accessories",
             )
+            if export_exterior_hulls and _ext_model_dirs:
+                _n_hulls = _export_exterior_hulls(
+                    _ext_block, _ext_model_dirs,
+                    gm3d_dir=gm3d_dir,
+                    textures_dir=textures_dir,
+                    textures_dds_dir=textures_dds_dir,
+                    cfg=cfg,
+                    warnings=warnings,
+                )
+                if _n_hulls:
+                    print(
+                        f"[scaffold_ship] exported {_n_hulls} exterior hull GLB(s) "
+                        f"-> {gm3d_dir / 'exteriors'}",
+                        file=sys.stderr,
+                    )
+            # A record without a resolved HullDelta must not carry an
+            # explicit ``hull: null`` into the merge — merge_preserving
+            # treats explicit None as "clear", which would erase hull data
+            # stamped by a previous export_exterior_hulls run.
+            for _rec in _ext_block:
+                if _rec.get("hull") is None:
+                    _rec.pop("hull", None)
             doc = sidecar.merge_preserving(doc, {"exteriors": _ext_block})
         except Exception as e:
             warnings.append(f"exteriors[] emit failed ({e}); prior value kept")

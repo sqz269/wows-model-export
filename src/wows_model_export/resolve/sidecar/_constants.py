@@ -398,6 +398,19 @@ _MOUNT_SWAP_ORDER: tuple[str, ...] = (
     "attached_y_flip",
 )
 
+#: HullDelta key order (``exteriors[].hull`` when non-null — a genuine
+#: hullConfig//ship/-path hull swap with its variant hull exported).
+#: ``hull_glb`` is relative to the ship folder (``models/exteriors/...``);
+#: ``materials`` is the variant hull's own manifest, same per-entry shape as
+#: the top-level ``materials[]`` (texture paths resolve against ``models/``,
+#: the same base dir as the main hull — variant DDS stems coexist in the
+#: shared ``textures_dds/``).
+_HULL_DELTA_ORDER: tuple[str, ...] = (
+    "hull_glb",
+    "material_mappings",
+    "materials",
+)
+
 #: Top-level ``variants`` section keys (schema v3.1).
 _VARIANTS_ORDER: tuple[str, ...] = (
     "active_hull",
