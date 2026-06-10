@@ -95,6 +95,20 @@ export interface ShipPlacement {
   };
   dead_asset_id?: string | null;
   /**
+   * Placement provenance. `"skel_ext_hash"` marks hull skel_ext
+   * decoratives (voice tubes, binoculars, searchlights…) — a layer the
+   * engine reads from the LOADED hull model's `.skel_ext` files, so a
+   * hull-swap exterior replaces it wholesale (see
+   * `ExteriorHullDelta.decoratives`). Absent on HP_-mount placements.
+   */
+  source?: string | null;
+  /**
+   * Producer provenance on variant-swapped placements: the swap target's
+   * actual GameParams VFS directory. Informational — render assets
+   * resolve via the library index by `asset_id`.
+   */
+  vfs_dir?: string | null;
+  /**
    * Per-mount ammo list (gun mounts only). Joins to
    * `Sidecar.ballistics.shells[<id>]` for the per-shell profile. Empty
    * or absent on AA, torpedo, and accessory placements.

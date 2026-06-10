@@ -282,6 +282,11 @@ def make_router(config: PipelineConfig) -> APIRouter:
         # the body omits the field.
         if permoflage is not None:
             kwargs["variant_permoflage"] = permoflage
+        # HullDelta: export hull-swap exteriors' variant hulls during the
+        # scaffold (base ingests only — the composer ignores it on
+        # variant-routed scaffolds).
+        if body.get("exterior_hulls"):
+            kwargs["export_exterior_hulls"] = True
 
         # Display-only command line preserves the legacy "what the user
         # asked the server to do" header that the Extract panel renders.
@@ -296,6 +301,8 @@ def make_router(config: PipelineConfig) -> APIRouter:
         ]
         if permoflage is not None:
             cmd_display += ["--variant-permoflage", permoflage]
+        if body.get("exterior_hulls"):
+            cmd_display.append("--exterior-hulls")
         if body.get("build_library"):
             cmd_display.append("--build-library")
         if body.get("and_publish"):

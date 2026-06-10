@@ -115,7 +115,7 @@ def build_exterior_record(
             base_p = base_by_hp.get(hp) if hp else None
             if base_p is None or not _mount_differs(base_p, var_p):
                 continue
-            mounts.append({
+            mount: dict[str, Any] = {
                 "hp_name": hp,
                 "base_asset_id": base_p.get("asset_id"),
                 "asset_id": var_p.get("asset_id"),
@@ -123,12 +123,27 @@ def build_exterior_record(
                 "transform": copy.deepcopy(var_p.get("transform")),
                 "misc_filter": copy.deepcopy(var_p.get("misc_filter")),
                 "attached_y_flip": var_p.get("attached_y_flip", False),
-            })
+            }
+            # WG-faithful path provenance: the swap target's actual VFS
+            # directory from the GameParams model path (stamped by
+            # apply_variant_asset_swaps). The engine resolves swaps by
+            # full path — taxonomy folders are artist convention — so
+            # this is what grounds the library build for cross-scope
+            # targets (events/-scoped armament etc.). Optional: absent
+            # on transform-only records and pre-path-channel sidecars.
+            if isinstance(var_p.get("vfs_dir"), str) and var_p["vfs_dir"]:
+                mount["vfs_dir"] = var_p["vfs_dir"]
+            mounts.append(mount)
 
     swap_table = _swap_table_from_mounts(mounts)
+    # Camo opt-out set = variant-bespoke assets only. Transform-only
+    # records (hull-HP re-anchors: parked / moved mounts) keep the BASE
+    # asset, which must keep taking the base camo wash — guard on a real
+    # asset swap so they never leak into the opt-out gate.
     swapped_ids = sorted({
         aid
         for m in mounts
+        if m.get("asset_id") != m.get("base_asset_id")
         for aid in (m.get("asset_id"), m.get("dead_asset_id"))
         if aid
     })
@@ -156,21 +171,29 @@ def _swap_table_from_mounts(mounts: Sequence[Mapping[str, Any]]) -> dict[str, di
     by_hp_name: dict[str, str] = {}
     dead_by_hp_name: dict[str, str] = {}
     misc_filter_by_hp: dict[str, list] = {}
+    vfs_dir_by_asset_id: dict[str, str] = {}
     for m in mounts:
         hp = m.get("hp_name")
-        if hp and m.get("asset_id"):
+        # Swap-table semantics stay strictly "asset swaps": transform-only
+        # records (hull-HP re-anchors) would otherwise inject identity
+        # base→base rows.
+        swapped = m.get("asset_id") != m.get("base_asset_id")
+        if swapped and hp and m.get("asset_id"):
             by_hp_name[hp] = m["asset_id"]
-        if m.get("base_asset_id") and m.get("asset_id"):
+        if swapped and m.get("base_asset_id") and m.get("asset_id"):
             by_asset_id[m["base_asset_id"]] = m["asset_id"]
-        if hp and m.get("dead_asset_id"):
+        if swapped and hp and m.get("dead_asset_id"):
             dead_by_hp_name[hp] = m["dead_asset_id"]
         if hp and m.get("misc_filter") is not None:
             misc_filter_by_hp[hp] = list(m["misc_filter"])
+        if swapped and m.get("asset_id") and isinstance(m.get("vfs_dir"), str):
+            vfs_dir_by_asset_id[m["asset_id"]] = m["vfs_dir"]
     return {
         "by_asset_id": by_asset_id,
         "by_hp_name": by_hp_name,
         "dead_by_hp_name": dead_by_hp_name,
         "misc_filter_by_hp": misc_filter_by_hp,
+        "vfs_dir_by_asset_id": vfs_dir_by_asset_id,
     }
 
 
@@ -198,6 +221,48 @@ def project_exterior(
             if m.get("transform") is not None:
                 p["transform"] = copy.deepcopy(m["transform"])
             p["misc_filter"] = copy.deepcopy(m.get("misc_filter"))
+            if isinstance(m.get("vfs_dir"), str) and m["vfs_dir"]:
+                p["vfs_dir"] = m["vfs_dir"]
+    return out
+
+
+def reanchor_base_placements(
+    base: PlacementSections,
+    hp_transforms: Mapping[str, Mapping[str, Any]],
+    *,
+    epsilon: float = 5e-3,
+) -> dict[str, list[Placement]]:
+    """Re-anchor base placements onto a variant hull's HP-node transforms.
+
+    ``hp_transforms`` maps ``hp_name`` → a sidecar-convention transform
+    (``{"matrix": [...16], "position": [...]}``) — the output of the
+    HullDelta harvest (``compose.exterior_hull_hp``). WG variant hulls
+    keep the full base HP roster but MOVE the nodes (parking unused
+    decoratives inside the hull — that's the engine's hiding mechanism),
+    so feeding the re-anchored copy through ``apply_swaps`` +
+    :func:`build_exterior_record` turns every moved/parked mount into an
+    ordinary transform-only ``mounts[]`` record that consumers already
+    replay verbatim. No removal schema needed.
+
+    PURE; returns a deep copy. Placements whose transform matches the
+    map within ``epsilon`` (max abs element diff) keep their original
+    bytes so the downstream diff stays quiet for unmoved HPs.
+    """
+    out = {sec: copy.deepcopy(list(base.get(sec) or [])) for sec in PLACEMENT_SECTIONS}
+    for sec in PLACEMENT_SECTIONS:
+        for p in out[sec]:
+            hp = p.get("hp_name")
+            t = hp_transforms.get(hp) if hp else None
+            tm = (t or {}).get("matrix")
+            if not isinstance(tm, list) or len(tm) != 16:
+                continue
+            bm = _matrix(p)
+            if (
+                isinstance(bm, list) and len(bm) == 16
+                and max(abs(a - b) for a, b in zip(tm, bm)) <= epsilon
+            ):
+                continue
+            p["transform"] = copy.deepcopy(dict(t))
     return out
 
 
@@ -243,6 +308,12 @@ def build_exteriors_block(
     yields its native flag to it; otherwise ``default`` stays native (a
     texture-only native permoflage is base geometry + a ``skins[]`` entry).
     Consumers auto-select the ``is_native`` entry on load (handoff §8).
+
+    Keep-rule: a record survives when it carries mount swaps, a resolved
+    ``hull`` (HullDelta), or a hull-swap marker (``wg_asset_id`` — the
+    lowercased variant model_dir). The last keeps hull-only exteriors
+    (~14% of the corpus) visible even before their hull GLB is exported;
+    a texture-only camo (none of the three) stays a ``skins[]`` entry.
     """
     out = [default_exterior_record()]
     for vr in variant_records:
@@ -258,7 +329,7 @@ def build_exteriors_block(
             camo_scheme_key=vr.get("camo_scheme_key"),
             hull=vr.get("hull"),
         )
-        if rec["mounts"] or rec["hull"]:
+        if rec["mounts"] or rec["hull"] or rec["wg_asset_id"]:
             out.append(rec)
     if any(rec.get("is_native") for rec in out[1:]):
         out[0]["is_native"] = False
@@ -281,6 +352,7 @@ def collect_exteriors_for_vehicle(
     get_exterior: Callable[[str], Mapping[str, Any] | None] | None = None,
     camo_scheme_for: Callable[[str], str | None] | None = None,
     resolve_model_dir: Callable[..., str | None] | None = None,
+    hp_transforms_for: Callable[[str], Mapping[str, Any] | None] | None = None,
 ) -> list[dict[str, Any]]:
     """Enumerate a Vehicle's ``permoflages[]`` (plus its ``nativePermoflage``,
     which is not always listed there) and build the ``exteriors[]`` block,
@@ -303,6 +375,12 @@ def collect_exteriors_for_vehicle(
       legacy ``__<Variant>`` folder stamps into ``ship.wg_asset_id`` (see
       ``sidecar._documents``). The GameParams Exterior ``id`` field is numeric
       and deliberately NOT used.
+    * ``hp_transforms_for(exterior_id)`` -> the HullDelta harvest's per-HP
+      re-anchor map for a hull-swap exterior (``None`` when not harvested).
+      When present, the base placements are re-anchored onto the variant
+      hull's HP nodes BEFORE the swap pass, so moved/parked mounts emit as
+      transform-only ``mounts[]`` records (see
+      :func:`reanchor_base_placements`).
 
     Failures are contained at two levels: a bad individual permoflage is
     skipped (logged) without dropping its siblings, and any outer failure
@@ -319,13 +397,17 @@ def collect_exteriors_for_vehicle(
         for ext_id in permos:
             try:
                 swaps = resolve_swaps(vehicle_id, permoflage_id=ext_id) or {}
-                if not _has_mesh_swap(swaps):
-                    continue  # texture-only camo -> skins[], not an exterior row
-                variant_placements = apply_swaps(base, swaps)
-                ext = (get_exterior(ext_id) if get_exterior else None) or {}
                 model_dir: str | None = None
                 if resolve_model_dir is not None:
                     model_dir = resolve_model_dir(vehicle_id, permoflage_id=ext_id)
+                if not _has_mesh_swap(swaps) and not model_dir:
+                    continue  # texture-only camo -> skins[], not an exterior row
+                anchor = hp_transforms_for(ext_id) if hp_transforms_for else None
+                eff_base = (
+                    reanchor_base_placements(base, anchor) if anchor else base
+                )
+                variant_placements = apply_swaps(eff_base, swaps)
+                ext = (get_exterior(ext_id) if get_exterior else None) or {}
                 variant_records.append({
                     "exterior_id": ext_id,
                     "variant_placements": variant_placements,

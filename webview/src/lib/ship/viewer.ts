@@ -505,6 +505,14 @@ export class ShipViewer {
   private mountRecords = new Map<string, MountRecord>();
   private shipCtx: ShipLoadContext | null = null;
   private activeExteriorId = 'default';
+  // Hull-swap exteriors (HullDelta): which exterior's VARIANT HULL is
+  // currently loaded (null = base hull). When a switch targets a different
+  // hull, the whole ship reloads with `exteriorOverrideId` set — v1 is a
+  // full reload, which is engine-faithful (WG has no in-place mesh-swap
+  // API; see handoff §8.5).
+  private activeHullExteriorId: string | null = null;
+  private exteriorOverrideId: string | null = null;
+  private currentShip: ShipSummary | null = null;
 
   // WG-authored bones & VFX-points overlay. Lives in the scene from
   // construction (like the accessory viewer's rig overlay); rebuilt per
@@ -625,13 +633,45 @@ export class ShipViewer {
   ): Promise<ShipLoadStats> {
     const t0 = performance.now();
     this.clearShip();
+    this.currentShip = ship;
     const report = (msg: string) => onProgress?.(msg);
 
+    // Fetch the sidecar FIRST (best-effort) — a hull-swap exterior override
+    // needs its record's `hull.hull_glb` + `hull.materials` BEFORE the hull
+    // GLB is chosen. (Registration vs binding order is safe either way:
+    // the texture manager's bind index is two-sided.)
+    let sidecar: SidecarDoc | null = null;
+    if (ship.sidecar_json) {
+      try {
+        const res = await fetch(repoUrl(ship.sidecar_json));
+        if (res.ok) sidecar = (await res.json()) as SidecarDoc;
+      } catch (err) {
+        console.warn('[ship] sidecar fetch failed:', err);
+      }
+    }
+
+    // Hull-swap exterior override (set by setActiveExterior's reload path):
+    // load the VARIANT hull GLB and bind ITS materials manifest. Texture
+    // paths in both manifests resolve against the same base `models/` dir —
+    // HullDelta puts variant DDS stems in the shared textures_dds/.
+    const overrideId = this.exteriorOverrideId;
+    const overrideRec = overrideId
+      ? (sidecar?.exteriors ?? []).find((e) => e.exterior_id === overrideId)
+      : undefined;
+    const overrideHull = overrideRec?.hull ?? null;
+
     report('Loading hull GLB…');
-    const hullUrl = repoUrl(ship.hull_glb);
-    // Resolve hull DDS paths against the hull GLB's directory (sidecar's
-    // `texture_sets[<scheme>][<slot>].dds_mips` carry `textures_dds/...`).
-    const hullBaseUrl = new URL(hullUrl, window.location.origin).toString();
+    // `hull.hull_glb` is ship-folder-relative (`models/exteriors/<id>_hull.glb`).
+    const shipRootPath = ship.sidecar_json
+      ? ship.sidecar_json.replace(/\/[^/]*$/, '')
+      : ship.hull_glb.replace(/\/models\/[^/]*$/, '');
+    const hullUrl = repoUrl(
+      overrideHull?.hull_glb ? `${shipRootPath}/${overrideHull.hull_glb}` : ship.hull_glb,
+    );
+    // Resolve hull DDS paths against the BASE hull GLB's directory — the
+    // sidecar's (and HullDelta's) `dds_mips` carry `textures_dds/...`
+    // relative to `models/`, for the variant hull too.
+    const hullBaseUrl = new URL(repoUrl(ship.hull_glb), window.location.origin).toString();
     const hullGltf = await this.hullLoader.loadAsync(hullUrl);
     this.hullRoot = hullGltf.scene;
     this.hullRoot.name = 'Hull';
@@ -653,23 +693,21 @@ export class ShipViewer {
       this.textures.registerHullMesh(m);
     });
 
-    // Fetch sidecar (best-effort). Drives hull material bindings,
-    // skin table, variant-swap opt-out list.
-    let sidecar: SidecarDoc | null = null;
-    if (ship.sidecar_json) {
+    if (sidecar) {
+      // Hull material bindings: a variant hull binds its OWN manifest
+      // (`hull.materials` — same shape as the top-level `materials[]`).
+      const sidecarForHull =
+        overrideHull?.materials?.length
+          ? { ...sidecar, materials: overrideHull.materials }
+          : sidecar;
       try {
-        const res = await fetch(repoUrl(ship.sidecar_json));
-        if (res.ok) {
-          sidecar = (await res.json()) as SidecarDoc;
-          this.textures.bindHullMaterials(sidecar, hullBaseUrl);
-        }
+        this.textures.bindHullMaterials(sidecarForHull, hullBaseUrl);
       } catch (err) {
-        console.warn('[ship] sidecar fetch failed:', err);
+        console.warn('[ship] hull material binding failed:', err);
       }
     }
-    // Stash for the bottom panel's Textures tab. Done after the texture
-    // manager binding so a binding failure doesn't strand a partially-
-    // loaded sidecar on the viewer.
+    // Stash for the bottom panel's Textures tab (always the REAL sidecar —
+    // the override only redirects the hull bind).
     this.sidecar = sidecar;
     this.hullBaseUrl = hullBaseUrl;
     // Always populate a skin table — synthesize the legacy default skin
@@ -687,6 +725,37 @@ export class ShipViewer {
       throw new Error(`failed to load placements: HTTP ${placementsRes.status}`);
     }
     const placementsDoc = (await placementsRes.json()) as ShipPlacementsDoc;
+
+    // Variant-hull decoratives REPLACEMENT (hull skel_ext layer): the
+    // engine reads hull decoratives (voice tubes, binoculars,
+    // searchlights…) from the LOADED hull model's `.skel_ext` files, so a
+    // hull swap replaces the whole layer — drop every base
+    // `source == "skel_ext_hash"` placement and instantiate the variant
+    // doc's instead. Without the doc (producer harvest not run yet) the
+    // base decoratives stay — consistent with the never-a-hole fallback.
+    if (overrideHull?.decoratives) {
+      try {
+        const decoRes = await fetch(repoUrl(`${shipRootPath}/${overrideHull.decoratives}`));
+        if (decoRes.ok) {
+          const decoDoc = (await decoRes.json()) as Partial<ShipPlacementsDoc>;
+          let dropped = 0;
+          let added = 0;
+          for (const section of SHIP_SECTIONS) {
+            const before = placementsDoc[section] ?? [];
+            const kept = before.filter((p) => p.source !== 'skel_ext_hash');
+            dropped += before.length - kept.length;
+            const extra = decoDoc[section] ?? [];
+            added += extra.length;
+            placementsDoc[section] = [...kept, ...extra];
+          }
+          report(`Variant hull decoratives: ${dropped} base dropped, ${added} variant added.`);
+        } else {
+          console.warn(`[exterior] decoratives doc HTTP ${decoRes.status}; base decoratives kept`);
+        }
+      } catch (err) {
+        console.warn('[exterior] decoratives doc fetch failed; base decoratives kept:', err);
+      }
+    }
 
     // Build the per-HP miscFilter lookup from sidecar mounts. WG runtime
     // treats miscFilter as a WHITELIST (verified 2026-05-08 from
@@ -830,16 +899,28 @@ export class ShipViewer {
     // before this ship loaded, so its wetness must be re-applied here.
     this.textures.reapplyWetness();
 
-    // Auto-select the native exterior (§8 of the unification handoff): WG
-    // renders the nativePermoflage by default — an ARP-style ship never
-    // shows its bare hull in game. Exactly one record is native; when it's
-    // the synthesised default this is a no-op.
-    const native = this.getExteriors().find(
-      (e) => e.is_native && e.exterior_id !== 'default',
-    );
-    if (native) {
-      report(`Applying native exterior ${native.exterior_id}…`);
-      await this.setActiveExterior(native.exterior_id, onProgress);
+    if (overrideId) {
+      // Hull-swap reload: the override IS the selection. Stamp the loaded
+      // hull's owner, then run the per-HP mount path against this fresh
+      // base composition (same-hull now → no recursion into the reload).
+      this.activeHullExteriorId = overrideHull?.hull_glb ? overrideId : null;
+      this.activeExteriorId = 'default';
+      if (overrideId !== 'default') {
+        await this.setActiveExterior(overrideId, onProgress);
+      }
+    } else {
+      // Auto-select the native exterior (§8 of the unification handoff): WG
+      // renders the nativePermoflage by default — an ARP-style ship never
+      // shows its bare hull in game. Exactly one record is native; when it's
+      // the synthesised default this is a no-op.
+      this.activeHullExteriorId = null;
+      const native = this.getExteriors().find(
+        (e) => e.is_native && e.exterior_id !== 'default',
+      );
+      if (native) {
+        report(`Applying native exterior ${native.exterior_id}…`);
+        await this.setActiveExterior(native.exterior_id, onProgress);
+      }
     }
 
     const loadMs = performance.now() - t0;
@@ -1199,6 +1280,10 @@ export class ShipViewer {
     this.mountRecords.clear();
     this.shipCtx = null;
     this.activeExteriorId = 'default';
+    this.activeHullExteriorId = null;
+    // `currentShip` + `exteriorOverrideId` survive deliberately — loadShip
+    // re-stamps the former right after this runs, and the reload path owns
+    // the latter's lifecycle.
   }
 
   /** Per-instance turret rigs (yaw + pitch bones extracted from each
@@ -1743,6 +1828,23 @@ export class ShipViewer {
   }
 
   async setActiveSkin(skinId: string, onProgress?: (msg: string) => void): Promise<void> {
+    // In game, camouflages and mesh-swap exteriors are MUTUALLY EXCLUSIVE —
+    // mounting a camo unequips the permoflage. Mirror that: picking any
+    // skin other than the active exterior's own cross-linked scheme first
+    // reverts to the default exterior (reloading the base hull when a
+    // variant hull is up), then applies the requested camo.
+    if (this.activeExteriorId !== 'default') {
+      const active = this.getExteriors().find(
+        (e) => e.exterior_id === this.activeExteriorId,
+      );
+      const ownKey = active?.camo_scheme_key ?? null;
+      const target = this.textures.getSkins().find((s) => s.skin_id === skinId);
+      const isOwn =
+        !!ownKey && !!target && (target.skin_id === ownKey || target.scheme_key === ownKey);
+      if (!isOwn) {
+        await this.setActiveExterior('default', onProgress);
+      }
+    }
     await this.textures.setActiveSkin(skinId, onProgress);
   }
 
@@ -1757,6 +1859,33 @@ export class ShipViewer {
 
   getActiveExteriorId(): string {
     return this.activeExteriorId;
+  }
+
+  /**
+   * Full-reload path for hull-swap exteriors: re-run loadShip with
+   * `exteriorOverrideId` set, so the variant hull GLB loads + its
+   * HullDelta materials bind, then the override's mounts + camo apply on
+   * the fresh composition. Restores the textures-on state across the
+   * reload (clearShip resets it).
+   */
+  private async reloadWithExteriorHull(
+    exteriorId: string,
+    onProgress?: (msg: string) => void,
+  ): Promise<void> {
+    const ship = this.currentShip;
+    const library = this.shipCtx?.library;
+    if (!ship || !library) return;
+    const wasShowing = this.textures.isShowingTextures();
+    this.exteriorOverrideId = exteriorId;
+    try {
+      await this.loadShip(ship, library, onProgress);
+    } finally {
+      this.exteriorOverrideId = null;
+    }
+    if (wasShowing && !this.textures.isShowingTextures()) {
+      await this.textures.setShowTextures(true, onProgress);
+      this.textures.reapplyWetness();
+    }
   }
 
   /**
@@ -1784,6 +1913,20 @@ export class ShipViewer {
       console.warn(`[exterior] unknown exterior ${exteriorId}; keeping current`);
       return;
     }
+    // Hull routing (HullDelta): when the target's hull differs from the
+    // one currently LOADED, the whole ship reloads with the target as the
+    // exterior override — v1 full reload, engine-faithful (§8.5: WG itself
+    // has no in-place mesh-swap; entity recreate is the native behavior).
+    // Same-hull targets (incl. mount-only exteriors on the base hull)
+    // continue into the cheap per-HP path below.
+    const targetHullId = (target.hull as { hull_glb?: string | null } | null)?.hull_glb
+      ? exteriorId
+      : null;
+    if (targetHullId !== this.activeHullExteriorId) {
+      await this.reloadWithExteriorHull(exteriorId, onProgress);
+      return;
+    }
+
     const current = exteriors.find((e) => e.exterior_id === this.activeExteriorId) ?? null;
     const report = (msg: string) => onProgress?.(msg);
     report(`Switching exterior to ${target.display_name ?? exteriorId}…`);

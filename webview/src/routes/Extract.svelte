@@ -253,6 +253,7 @@
       label,
       permoflage: p ? p.exterior_id : 'none',
       build_library: true,
+      exterior_hulls: exteriorHulls && exteriorHullsApplies(p),
     };
     let result;
     try {
@@ -284,6 +285,18 @@
     toast.success(`Extract started: ${label}`, { description: `job ${result.body.job_id}`, duration: 3000 });
   }
 
+  // HullDelta (ship-exterior unification): export hull-swap exteriors'
+  // variant hulls during base extracts. Default ON — this is "the new
+  // export with all exteriors"; the cost is one extra export-ship per
+  // hull-swap exterior, skip-on-existence on re-runs. No-op (and hidden
+  // in the run panel) when a mesh-swap permoflage is picked — those are
+  // variant-routed legacy extracts that skip the exteriors emit.
+  let exteriorHulls = $state(true);
+
+  function exteriorHullsApplies(p: Permoflage | null): boolean {
+    return !(p && p.topology === 'mesh_swap');
+  }
+
   // ── Enqueue (add to persistent queue without spawning now) ───────────
   let enqueueBusy = $state(false);
   async function onEnqueueExtract() {
@@ -294,10 +307,11 @@
     enqueueBusy = true;
     try {
       await enqueueExtract({
-        vehicle:       v.top_key || v.param_index,
+        vehicle:        v.top_key || v.param_index,
         label,
-        permoflage:    p ? p.exterior_id : 'none',
-        build_library: true,
+        permoflage:     p ? p.exterior_id : 'none',
+        build_library:  true,
+        exterior_hulls: exteriorHulls && exteriorHullsApplies(p),
       });
       toast.success(`Queued: ${label}`, {
         description: 'Worker will pick it up next. Picker selection preserved — pick another ship to queue more.',
@@ -482,6 +496,8 @@
           onRun={onRunExtract}
           onEnqueue={onEnqueueExtract}
           {enqueueBusy}
+          {exteriorHulls}
+          onExteriorHullsChange={(on) => (exteriorHulls = on)}
         />
         <ExtractSkinPackForm
           {extractedShips}

@@ -53,6 +53,9 @@ export interface RunExtractBody {
   label: string;
   permoflage: string | null;
   build_library: boolean;
+  /** HullDelta: export hull-swap exteriors' variant hull GLBs during the
+   *  scaffold (base ingests only — no-op on variant-routed extracts). */
+  exterior_hulls?: boolean;
 }
 
 export interface RunSkinBody {

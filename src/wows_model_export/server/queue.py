@@ -135,6 +135,10 @@ class QueueItem:
     # what tells the drain pass which completed items still owe a build —
     # and survives a restart so a crash mid-drain still gets a build.
     library_built:   bool = False
+    # HullDelta (ship-exterior unification): export hull-swap exteriors'
+    # variant hulls during the scaffold. Base ingests only — the composer
+    # ignores it on variant-routed scaffolds.
+    exterior_hulls:  bool = False
 
 
 def _item_to_dict(item: QueueItem) -> dict[str, Any]:
@@ -172,6 +176,7 @@ def _item_from_dict(d: dict[str, Any]) -> QueueItem | None:
             library_built=     bool(
                 d.get("library_built", d.get("status") == "done")
             ),
+            exterior_hulls=    bool(d.get("exterior_hulls", False)),
         )
     except (KeyError, ValueError, TypeError):
         return None
@@ -375,6 +380,8 @@ def _spawn_for_item(item: QueueItem) -> tuple[str, list[str]] | None:
     }
     if item.permoflage is not None:
         kwargs["variant_permoflage"] = item.permoflage
+    if item.exterior_hulls:
+        kwargs["export_exterior_hulls"] = True
 
     cmd_display: list[str] = [
         "compose.ingest_ship",
@@ -384,6 +391,8 @@ def _spawn_for_item(item: QueueItem) -> tuple[str, list[str]] | None:
     ]
     if item.permoflage is not None:
         cmd_display += ["--variant-permoflage", item.permoflage]
+    if item.exterior_hulls:
+        cmd_display.append("--exterior-hulls")
     if item.build_library:
         cmd_display.append("--build-library")
 
@@ -601,6 +610,7 @@ def enqueue(
     build_library:  bool,
     toolkit_ship:   str,
     gameparams_ship_id: str,
+    exterior_hulls: bool = False,
 ) -> QueueItem:
     """Append a new pending item to the queue. Returns the created item."""
     item = QueueItem(
@@ -614,6 +624,7 @@ def enqueue(
         status=            "pending",
         job_id=            None,
         enqueued_at=       _now_ms(),
+        exterior_hulls=    exterior_hulls,
     )
     with _cond:
         _items.append(item)

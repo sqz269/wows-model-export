@@ -396,6 +396,37 @@ _MOUNT_SWAP_ORDER: tuple[str, ...] = (
     "transform",
     "misc_filter",
     "attached_y_flip",
+    # WG-faithful path provenance (optional): the directory of the swap
+    # target's actual GameParams model path, original case — e.g.
+    # ``content/gameplay/events/director/XD017_Director_Mk51``. The engine
+    # resolves swaps by FULL path (taxonomy folders are artist convention),
+    # so this grounds the library build / Ry180 GLB lookup for cross-scope
+    # targets. Absent on transform-only records (hull-HP re-anchors) and on
+    # sidecars emitted before the path channel. Consumers keep resolving
+    # render assets via the library index by ``asset_id``.
+    "vfs_dir",
+)
+
+#: HullDelta key order (``exteriors[].hull`` when non-null — a genuine
+#: hullConfig//ship/-path hull swap with its variant hull exported).
+#: ``hull_glb`` is relative to the ship folder (``models/exteriors/...``);
+#: ``materials`` is the variant hull's own manifest, same per-entry shape as
+#: the top-level ``materials[]`` (texture paths resolve against ``models/``,
+#: the same base dir as the main hull — variant DDS stems coexist in the
+#: shared ``textures_dds/``).
+_HULL_DELTA_ORDER: tuple[str, ...] = (
+    "hull_glb",
+    "material_mappings",
+    "materials",
+    # Ship-folder-relative path to the variant hull's OWN skel_ext
+    # decoratives doc (``models/exteriors/<exterior_id>_decoratives.json``,
+    # same sections shape as ``<Ship>_accessories.json``). REPLACEMENT
+    # semantics: the engine reads decoratives from the loaded hull model's
+    # ``.skel_ext`` files, so a hull swap replaces the whole layer —
+    # consumers drop every base ``source == "skel_ext_hash"`` placement and
+    # instantiate this doc's instead (often near-empty: themed hulls bake
+    # their greebles into the mesh).
+    "decoratives",
 )
 
 #: Top-level ``variants`` section keys (schema v3.1).

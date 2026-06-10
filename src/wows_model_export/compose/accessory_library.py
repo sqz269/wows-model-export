@@ -165,6 +165,32 @@ def _harvest_section_entries(
             rec.species = entry.get("species")
 
 
+def _asset_key_from_vfs_dir(asset_id: str, vfs_dir: str) -> AssetKey | None:
+    """Derive an AssetKey from a swap target's actual VFS directory (the
+    ``vfs_dir`` GameParams path channel) — WG-faithful: the engine
+    resolves swaps by full path; this is that path's taxonomy verbatim."""
+    d = vfs_dir.replace("\\", "/").strip("/")
+    if d.startswith("content/gameplay/"):
+        parts = d[len("content/gameplay/"):].split("/")
+        # <scope>/<category>[/<subcategory>]/<asset_id>
+        if len(parts) >= 3 and parts[-1] == asset_id:
+            return AssetKey(
+                scope=parts[0],
+                category=parts[1],
+                subcategory="/".join(parts[2:-1]) or None,
+                asset_id=asset_id,
+            )
+        return None
+    if d.startswith("content/styles/"):
+        style = d[len("content/styles/"):].split("/", 1)[0]
+        if style:
+            return AssetKey(
+                scope="style", category=style, subcategory=None,
+                asset_id=asset_id,
+            )
+    return None
+
+
 def _harvest_exterior_mounts(
     doc: dict,
     *,
@@ -178,10 +204,18 @@ def _harvest_exterior_mounts(
     may not exist for that permoflage), so without this walk the variant
     GLBs are never built and consumers can't render the exterior.
 
-    The variant asset shares the BASE placement's taxonomy — the same
-    convention ``apply_variant_asset_swaps`` relies on for its bone-mismatch
-    GLB lookup — so ``(scope, category, subcategory)`` is resolved from the
-    base placement at the mount's ``hp_name``.
+    Key resolution, most- to least-grounded:
+
+    1. ``mounts[].vfs_dir`` — the directory of the actual GameParams model
+       path (the engine's own resolution is path-keyed; taxonomy folders
+       are artist convention). Exact, including the 314 corpus-wide
+       ``events/``-scoped targets (80 AA + 60 main + 37 secondary +
+       31 director + …, e.g. ``XD017_Director_Mk51``).
+    2. VFS-manifest probe (:func:`_vfs_lookup_asset_key`, the same probe
+       the attached-children discovery uses) — for sidecars emitted before
+       the path channel existed.
+    3. The BASE placement's taxonomy at the mount's ``hp_name`` — the
+       legacy heuristic, correct for same-scope swaps only.
     """
     exteriors = doc.get("exteriors")
     if not isinstance(exteriors, list):
@@ -191,6 +225,7 @@ def _harvest_exterior_mounts(
         for entry in doc.get(section) or []:
             if isinstance(entry, dict) and entry.get("hp_name"):
                 base_by_hp.setdefault(entry["hp_name"], entry)
+    manifest_paths: set[str] | None = None  # lazy — only when a key misses
     for rec in exteriors:
         if not isinstance(rec, dict):
             continue
@@ -200,23 +235,87 @@ def _harvest_exterior_mounts(
             base = base_by_hp.get(m.get("hp_name") or "")
             if not isinstance(base, dict):
                 continue
-            scope = base.get("scope")
-            category = base.get("category")
             asset_id = m.get("asset_id")
-            if not asset_id or not scope or not category:
+            if not asset_id:
                 continue
             if asset_id == base.get("asset_id"):
                 continue  # transform/miscFilter-only swap — asset already harvested
-            key = AssetKey(
-                scope=scope,
-                category=category,
-                subcategory=base.get("subcategory"),
-                asset_id=asset_id,
-            )
+
+            key: AssetKey | None = None
+            # Tier 1 — GameParams path channel.
+            vfs_dir = m.get("vfs_dir")
+            if isinstance(vfs_dir, str) and vfs_dir:
+                key = _asset_key_from_vfs_dir(asset_id, vfs_dir)
+            # Tier 3 seed — borrowed base taxonomy (also the tier-2 probe
+            # trigger: a borrowed key that doesn't exist in the VFS).
+            if key is None:
+                scope = base.get("scope")
+                category = base.get("category")
+                if not scope or not category:
+                    continue
+                key = AssetKey(
+                    scope=scope,
+                    category=category,
+                    subcategory=base.get("subcategory"),
+                    asset_id=asset_id,
+                )
+                if manifest_paths is None:
+                    try:
+                        manifest_paths = _load_manifest_paths(None)
+                    except Exception:
+                        manifest_paths = set()
+                if manifest_paths and vfs_geometry_path(key) not in manifest_paths:
+                    true_key = _vfs_lookup_asset_key(
+                        asset_id, manifest_paths, allow_style=True,
+                    )
+                    if true_key is not None:
+                        key = true_key
             r = records.setdefault(key, AssetRecord(key=key))
             r.used_by_ships.add(ship_name)
             if r.species is None:
                 r.species = base.get("species")
+
+
+def _harvest_exterior_decoratives(
+    doc: dict,
+    *,
+    ship_dir: Path,
+    ship_name: str,
+    records: dict[AssetKey, AssetRecord],
+    warnings: list[str],
+) -> None:
+    """Harvest asset_ids from each hull-swap exterior's decoratives doc
+    (``exteriors[].hull.decoratives`` → ``models/exteriors/<id>_decoratives.json``).
+
+    The variant hull's skel_ext layer REPLACES the base one, and themed
+    hulls can reference bespoke decorative assets that appear in no
+    placement section anywhere (e.g. ``JM6055_Kawanishi_N1K1_StarTrek``) —
+    without this walk their GLBs are never built and consumers drop them.
+    Unlike ``_harvest_exterior_mounts`` no taxonomy borrowing is needed:
+    the resolver stamped each entry's own ``scope/category/subcategory``.
+    """
+    exteriors = doc.get("exteriors")
+    if not isinstance(exteriors, list):
+        return
+    for rec in exteriors:
+        if not isinstance(rec, dict):
+            continue
+        hull = rec.get("hull")
+        rel = hull.get("decoratives") if isinstance(hull, dict) else None
+        if not isinstance(rel, str) or not rel:
+            continue
+        deco_path = ship_dir / rel
+        if not deco_path.is_file():
+            continue
+        try:
+            deco = json.loads(deco_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            warnings.append(f"couldn't read decoratives doc {deco_path}: {e}")
+            continue
+        for section in PLACEMENT_SECTIONS:
+            _harvest_section_entries(
+                deco.get(section), ship_name=ship_name, records=records,
+            )
 
 
 def union_assets(
@@ -260,6 +359,16 @@ def union_assets(
         # Ship-exterior unification: swap-target assets referenced only by
         # exteriors[].mounts[] (never by any placement section).
         _harvest_exterior_mounts(doc, ship_name=ship_name, records=records)
+
+        # HullDelta decoratives: bespoke assets referenced only by a
+        # variant hull's skel_ext replacement layer.
+        _harvest_exterior_decoratives(
+            doc,
+            ship_dir=path.parent,
+            ship_name=ship_name,
+            records=records,
+            warnings=warn_log,
+        )
 
     # Legacy fallback for ship folders without a sidecar yet.
     for path in (fallback_placements_files or []):

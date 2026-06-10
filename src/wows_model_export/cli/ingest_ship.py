@@ -105,6 +105,15 @@ def _build_parser() -> argparse.ArgumentParser:
              "disable.",
     )
     ap.add_argument(
+        "--exterior-hulls",
+        action="store_true",
+        help="HullDelta: export each hull-swap exterior's variant hull "
+             "GLB-only into models/exteriors/<exterior_id>_hull.glb and "
+             "stamp the exteriors[] hull field. One extra export-ship "
+             "per hull-swap exterior; idempotent (skip-on-existence). "
+             "Base scaffolds only.",
+    )
+    ap.add_argument(
         "--toolkit-ship",
         default=None,
         help="Override the name passed to wowsunpack export-ship / "
@@ -164,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
             publish_target=args.publish_target,
             publish_force=args.publish_force,
             variant_permoflage=args.variant_permoflage,
+            export_exterior_hulls=args.exterior_hulls,
             toolkit_ship_override=args.toolkit_ship,
             gameparams_ship_id=args.gameparams_ship_id,
             on_event=printer,

@@ -84,6 +84,13 @@
                 <span class="bg-emerald-900/40 rounded px-1.5 py-[1px] text-[10px] text-emerald-200">
                   native
                 </span>
+              {:else if p.topology === 'mesh_swap'}
+                <span
+                  class="bg-amber-900/40 rounded px-1.5 py-[1px] text-[10px] text-amber-200"
+                  title="Extracting this creates a separate legacy __<Variant> folder. The base ship's exteriors[] already carries this permoflage as a switchable entry — prefer extracting the Base ship."
+                >
+                  legacy folder
+                </span>
               {/if}
             </div>
             <div class="mt-0.5 flex flex-wrap items-center gap-1 text-[11px]">

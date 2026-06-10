@@ -139,7 +139,7 @@
     {:else if isMeshSwap}
       {@const variantTag = permoflage.is_native
         ? { label: 'native default', klass: 'bg-emerald-900/40 text-emerald-200' }
-        : { label: 'new ship folder', klass: 'bg-violet-900/40 text-violet-200' }}
+        : { label: 'legacy variant folder', klass: 'bg-amber-900/40 text-amber-200' }}
       <div class="text-foreground mb-2 text-xs">
         Mesh-swap permoflage.
         <span class="ml-1 rounded px-1.5 py-[1px] text-[10px] {variantTag.klass}">{variantTag.label}</span>
@@ -150,6 +150,19 @@
           <strong>a new variant folder</strong> (separate from the Vehicle's default).
         {/if}
       </div>
+      {#if !permoflage.is_native}
+        <div class="border-amber-500/40 bg-amber-950/30 mb-2 rounded border px-3 py-2 text-xs text-amber-200">
+          <strong>⚠ Legacy path — superseded by <code class="font-mono">exteriors[]</code>.</strong>
+          The BASE ship's sidecar now carries this permoflage as a switchable
+          <code class="font-mono">exteriors[]</code> entry (per-mount swaps + its own camo; the variant
+          hull exports via <code class="font-mono">export_exterior_hulls</code> into
+          <code class="font-mono">models/exteriors/</code>), selectable live in the ship viewer's
+          <strong>Exteriors</strong> tab — no duplicate ship folder needed. Prefer extracting the
+          <strong>Base ship</strong> row instead. This separate
+          <code class="font-mono">__&lt;Variant&gt;</code> folder still works but duplicates
+          armor/ballistics/skins (~30&nbsp;MB+) and is slated for removal at the unification cutover.
+        </div>
+      {/if}
       <table class="w-full text-xs">
         <tbody>
           <tr class="border-border/40 border-b">

@@ -165,6 +165,13 @@ def apply_variant_asset_swaps(
     by_hp_name: dict[str, str] = swaps.get("by_hp_name") or {}
     dead_by_hp_name: dict[str, str] = swaps.get("dead_by_hp_name") or {}
     misc_filter_by_hp: dict[str, list[str]] = swaps.get("misc_filter_by_hp") or {}
+    # WG-faithful path channel: the directory of the actual GameParams
+    # model path per swap-target stem (the engine resolves swaps by FULL
+    # path; taxonomy folders are artist convention). Stamped onto swapped
+    # placements as ``vfs_dir`` so the library harvest + consumers never
+    # re-derive taxonomy, and used here as the authoritative GLB-location
+    # tier for the Ry(180°) bone-mismatch check.
+    vfs_dir_by_asset_id: dict[str, str] = swaps.get("vfs_dir_by_asset_id") or {}
 
     if not (by_asset_id or by_hp_name or dead_by_hp_name or misc_filter_by_hp):
         return (doc, 0, set())
@@ -191,32 +198,85 @@ def apply_variant_asset_swaps(
     # benign (no flip is correct).
     missing_glb_aids: set[str] = set()
     warned_missing_glb_aids: set[str] = set()
+    # Lazy library index (asset_id → GLB path). Authoritative fallback
+    # when the taxonomy-constructed path misses: cross-scope swap targets
+    # (event-themed exteriors re-home armament under
+    # ``content/gameplay/events/…`` — XD017_Director_Mk51 et al., 314
+    # corpus-wide) build into the library under their TRUE taxonomy, not
+    # the base placement's that this function receives.
+    index_glb_by_aid: dict[str, Path] | None = None
+
+    def _index_glb(asset_id: str) -> Path | None:
+        nonlocal index_glb_by_aid
+        if index_glb_by_aid is None:
+            index_glb_by_aid = {}
+            try:
+                with (library_root / "index.json").open("r", encoding="utf-8") as fh:
+                    idx = json.load(fh)
+                for aid, entry in (idx.get("assets") or {}).items():
+                    rel = entry.get("glb") if isinstance(entry, dict) else None
+                    if isinstance(rel, str) and rel:
+                        index_glb_by_aid[aid] = library_root / rel
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass  # no index yet (first ingest) — taxonomy path is all we have
+        return index_glb_by_aid.get(asset_id)
+
+    def _lib_rel_from_vfs_dir(asset_id: str, vfs_dir: str) -> Path | None:
+        """Map a VFS content dir to its library GLB path — the library
+        mirrors the VFS taxonomy verbatim (`content/gameplay/<...>` →
+        `<root>/<...>`; styles collapse to `style/<style_name>/<asset>`)."""
+        d = vfs_dir.replace("\\", "/").strip("/")
+        if d.startswith("content/gameplay/"):
+            rel = d[len("content/gameplay/"):]
+            return library_root.joinpath(*rel.split("/"), f"{asset_id}.glb")
+        if d.startswith("content/styles/"):
+            style = d[len("content/styles/"):].split("/", 1)[0]
+            return library_root.joinpath("style", style, asset_id, f"{asset_id}.glb")
+        return None
 
     def _forward_sign(
         asset_id: str | None,
         scope: str | None,
         category: str | None,
         subcategory: str | None,
+        vfs_dir: str | None = None,
     ) -> int:
         if not isinstance(asset_id, str):
             return 0
         # Empty / missing taxonomy → can't locate the GLB. Returning 0
-        # (no opinion) is safe — no Y flip will be applied.
-        if not (scope and category):
+        # (no opinion) is safe — no Y flip will be applied. A known
+        # vfs_dir bypasses the taxonomy requirement entirely.
+        if not (scope and category) and not vfs_dir:
             return 0
-        cache_key = (asset_id, scope, category, subcategory or "")
+        cache_key = (asset_id, scope or "", category or "", subcategory or "")
         if cache_key in forward_z_cache:
             return forward_z_cache[cache_key]
         # Lazy-import: keeps the sidecar module importable on hosts that
         # don't have the orientation helper (e.g. minimal CI containers).
         from ..bone_orientation import glb_forward_z_sign
-        # Library layout: ``<root>/<scope>/<category>[/<subcategory>]/<asset_id>/<asset_id>.glb``.
-        parts: list[str] = [scope, category]
-        if subcategory:
-            parts.extend(subcategory.split("/"))
-        parts.extend([asset_id, f"{asset_id}.glb"])
-        glb_path = library_root.joinpath(*parts)
-        if glb_path.is_file():
+        # Tier 1 — GameParams ground truth: the swap's actual VFS dir
+        # mapped onto the library layout (exact for cross-scope assets).
+        glb_path: Path | None = None
+        if vfs_dir:
+            candidate = _lib_rel_from_vfs_dir(asset_id, vfs_dir)
+            if candidate is not None and candidate.is_file():
+                glb_path = candidate
+        # Tier 2 — conventional taxonomy construction:
+        # ``<root>/<scope>/<category>[/<subcategory>]/<asset_id>/<asset_id>.glb``.
+        if glb_path is None and scope and category:
+            parts: list[str] = [scope, category]
+            if subcategory:
+                parts.extend(subcategory.split("/"))
+            parts.extend([asset_id, f"{asset_id}.glb"])
+            candidate = library_root.joinpath(*parts)
+            if candidate.is_file():
+                glb_path = candidate
+        # Tier 3 — the library index knows every built asset's home.
+        if glb_path is None:
+            indexed = _index_glb(asset_id)
+            if indexed is not None and indexed.is_file():
+                glb_path = indexed
+        if glb_path is not None:
             sign = glb_forward_z_sign(glb_path)
         else:
             sign = 0
@@ -234,11 +294,15 @@ def apply_variant_asset_swaps(
         # Bone correction needed iff source and target meshes have
         # confidently-opposite forward-Z direction. Either ``0`` (no
         # opinion / file missing / axially symmetric) → no flip; same
-        # sign → no flip.
+        # sign → no flip. The target's GLB resolves through its
+        # GameParams vfs_dir when known (cross-scope swap targets).
         if not source_aid or not target_aid or source_aid == target_aid:
             return False
         s_sign = _forward_sign(source_aid, scope, category, subcategory)
-        t_sign = _forward_sign(target_aid, scope, category, subcategory)
+        t_sign = _forward_sign(
+            target_aid, scope, category, subcategory,
+            vfs_dir=vfs_dir_by_asset_id.get(target_aid),
+        )
         if s_sign == 0 or t_sign == 0:
             # Surface the canonical first-ingest race: scaffold called
             # apply_variant_asset_swaps with library_root set, a real
@@ -389,6 +453,20 @@ def apply_variant_asset_swaps(
                 n_swapped += 1
             if new_misc_filter is not None and p2.get("misc_filter") != new_misc_filter:
                 p2["misc_filter"] = new_misc_filter
+                n_swapped += 1
+            # Path provenance for the (possibly re-run) live swap target:
+            # the GameParams model path's directory, so downstream (library
+            # harvest, exterior mounts[] records) resolves the asset's true
+            # VFS home instead of borrowing the base mount's taxonomy.
+            _live_aid = p2.get("asset_id")
+            _vdir = (
+                vfs_dir_by_asset_id.get(_live_aid)
+                if isinstance(_live_aid, str) else None
+            )
+            if _vdir and p2.get("vfs_dir") != _vdir:
+                p2["vfs_dir"] = _vdir
+                # Counts as a change so heal-passes persist the stamp onto
+                # an accessories.json whose asset_ids were already swapped.
                 n_swapped += 1
 
             # Bone-mismatch Y flip — gated on the alive ``aid`` swap,
