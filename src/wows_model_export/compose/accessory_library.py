@@ -178,10 +178,17 @@ def _harvest_exterior_mounts(
     may not exist for that permoflage), so without this walk the variant
     GLBs are never built and consumers can't render the exterior.
 
-    The variant asset shares the BASE placement's taxonomy — the same
+    The variant asset usually shares the BASE placement's taxonomy — the
     convention ``apply_variant_asset_swaps`` relies on for its bone-mismatch
-    GLB lookup — so ``(scope, category, subcategory)`` is resolved from the
-    base placement at the mount's ``hp_name``.
+    GLB lookup — so ``(scope, category, subcategory)`` starts from the base
+    placement at the mount's ``hp_name``. But event-themed exteriors
+    (Halloween / PostAp / Space) re-home whole armament sets under
+    ``content/gameplay/events/<category>/`` — 314 swap-target assets
+    corpus-wide (80 AA + 60 main + 37 secondary + 31 director + …), e.g.
+    ``XD017_Director_Mk51`` swapping a ``usa/director`` base. The borrowed
+    key is therefore VALIDATED against the VFS manifest and re-keyed via
+    :func:`_vfs_lookup_asset_key` (the same probe the attached-children
+    discovery uses) when the conventional geometry path doesn't exist.
     """
     exteriors = doc.get("exteriors")
     if not isinstance(exteriors, list):
@@ -191,6 +198,7 @@ def _harvest_exterior_mounts(
         for entry in doc.get(section) or []:
             if isinstance(entry, dict) and entry.get("hp_name"):
                 base_by_hp.setdefault(entry["hp_name"], entry)
+    manifest_paths: set[str] | None = None  # lazy — only when a key misses
     for rec in exteriors:
         if not isinstance(rec, dict):
             continue
@@ -213,6 +221,17 @@ def _harvest_exterior_mounts(
                 subcategory=base.get("subcategory"),
                 asset_id=asset_id,
             )
+            if manifest_paths is None:
+                try:
+                    manifest_paths = _load_manifest_paths(None)
+                except Exception:
+                    manifest_paths = set()
+            if manifest_paths and vfs_geometry_path(key) not in manifest_paths:
+                true_key = _vfs_lookup_asset_key(
+                    asset_id, manifest_paths, allow_style=True,
+                )
+                if true_key is not None:
+                    key = true_key
             r = records.setdefault(key, AssetRecord(key=key))
             r.used_by_ships.add(ship_name)
             if r.species is None:

@@ -191,6 +191,28 @@ def apply_variant_asset_swaps(
     # benign (no flip is correct).
     missing_glb_aids: set[str] = set()
     warned_missing_glb_aids: set[str] = set()
+    # Lazy library index (asset_id → GLB path). Authoritative fallback
+    # when the taxonomy-constructed path misses: cross-scope swap targets
+    # (event-themed exteriors re-home armament under
+    # ``content/gameplay/events/…`` — XD017_Director_Mk51 et al., 314
+    # corpus-wide) build into the library under their TRUE taxonomy, not
+    # the base placement's that this function receives.
+    index_glb_by_aid: dict[str, Path] | None = None
+
+    def _index_glb(asset_id: str) -> Path | None:
+        nonlocal index_glb_by_aid
+        if index_glb_by_aid is None:
+            index_glb_by_aid = {}
+            try:
+                with (library_root / "index.json").open("r", encoding="utf-8") as fh:
+                    idx = json.load(fh)
+                for aid, entry in (idx.get("assets") or {}).items():
+                    rel = entry.get("glb") if isinstance(entry, dict) else None
+                    if isinstance(rel, str) and rel:
+                        index_glb_by_aid[aid] = library_root / rel
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass  # no index yet (first ingest) — taxonomy path is all we have
+        return index_glb_by_aid.get(asset_id)
 
     def _forward_sign(
         asset_id: str | None,
@@ -216,6 +238,12 @@ def apply_variant_asset_swaps(
             parts.extend(subcategory.split("/"))
         parts.extend([asset_id, f"{asset_id}.glb"])
         glb_path = library_root.joinpath(*parts)
+        if not glb_path.is_file():
+            # Cross-scope fallback: the library index knows the asset's
+            # true home regardless of borrowed taxonomy.
+            indexed = _index_glb(asset_id)
+            if indexed is not None and indexed.is_file():
+                glb_path = indexed
         if glb_path.is_file():
             sign = glb_forward_z_sign(glb_path)
         else:
