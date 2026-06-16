@@ -481,6 +481,33 @@ def _export_exterior_hulls(
                     no_textures=True,
                     config=cfg,
                 )
+            # Emissive synthesis for the VARIANT hull — parity with the
+            # base-ship `_variant_and_emissive` path. A themed hull using
+            # WG's `ship_emissive_material.fx` (e.g. ASB077_Iowa_AzurLane —
+            # emissive shader 0x00060xxx / sibling `*_emissive.mfm`) needs
+            # its `*_emissive` DDS synthesized from `diffuse * mg.B` so the
+            # stem classifier in `materials_from_glb` routes it into
+            # `texture_sets[<scheme>]["emissive"]`. Keyed on the VARIANT
+            # mappings (Path-B shader-id detection) plus the on-disk
+            # `*_emissive.mfm` siblings (Path A). No-op for non-emissive
+            # hulls. Runs even on the GLB skip-on-existence path — the raw
+            # `_a`/`_mg` DDS already exist, only the cheap materials manifest
+            # is rebuilt — and is itself idempotent (skip-on-existence DDS).
+            try:
+                _synth_emission.synthesize_emissive_textures(
+                    textures_dds_dir,
+                    config=cfg,
+                    label=ext_id,
+                    material_mappings_json=(
+                        mappings_path if mappings_path.is_file() else None
+                    ),
+                )
+            except Exception as e:
+                _warn(
+                    warnings,
+                    f"exterior hull emissive synth skipped for {ext_id} ({e})",
+                )
+
             mats = sidecar.materials_from_glb(
                 glb_path,
                 textures_dir=textures_dir if textures_dir.is_dir() else None,

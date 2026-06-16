@@ -773,6 +773,37 @@ def synthesize_emissive_textures_batch(
     return results
 
 
+def _propagate_wgn1_marker(src: Path, dst: Path) -> None:
+    """Copy the publisher's ``WGN1`` "already-normalized" marker (DDS-header
+    reserved bytes at offset 32) from a source map onto a synthesized one.
+
+    A synthesized ``_emissive`` shares its source diffuse's pixel
+    orientation byte-for-byte (it's ``diffuse * mask`` — no flip), so it MUST
+    carry the same marker. Two regimes, both handled by copying the source's
+    marker verbatim:
+
+    * raw pipeline — source ``.dd?`` is unmarked (WG-native, upside-down) →
+      output left unmarked; the publisher's ``normalize_dds`` later flips +
+      marks diffuse AND emissive together, keeping them aligned.
+    * re-synth over an already-published tree — source ``.dd?`` is WGN1-marked
+      (right-side-up) → output gets marked too, so the consumer's per-slot
+      V-flip rule treats the emissive exactly like the diffuse (identity UV)
+      instead of flipping it `(1,-1)` relative to the albedo.
+
+    No-op (and never raises) when the source carries no marker.
+    """
+    try:
+        with open(src, "rb") as f:
+            f.seek(32)
+            if f.read(4) != b"WGN1":
+                return
+        with open(dst, "r+b") as f:
+            f.seek(32)
+            f.write(b"WGN1")
+    except OSError:
+        pass
+
+
 def synth_emissive_dds_pyramid(
     diffuse_dd_paths: list[Path],
     mg_dd_paths: list[Path],
@@ -805,6 +836,9 @@ def synth_emissive_dds_pyramid(
             emissive_power=emissive_power,
             pixel_format=pixel_format,
         )
+        # Keep the emissive's normalize-orientation marker in lockstep with
+        # its source diffuse — else consumers V-flip it relative to the albedo.
+        _propagate_wgn1_marker(diffuse_dd_paths[i], out_path)
         written.append(out_path)
     return written
 
