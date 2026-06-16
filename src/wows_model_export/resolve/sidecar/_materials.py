@@ -38,6 +38,60 @@ from ._makers import make_default_skin, make_skin
 # (Unity URP default = 1.0). Mirrors `projectile_library.DEFAULT_EMISSION_INTENSITY`.
 DEFAULT_EMISSION_INTENSITY: float = 2.5
 
+
+def _vec4(raw: Any, default: tuple[float, float, float, float]) -> list[float]:
+    """Coerce a material_mappings ``vectors`` entry to a 4-float list.
+
+    WG vec params surface as JSON float arrays in the toolkit's
+    ``vectors`` section (material_mappings schema_version 2). Pads or
+    truncates to length 4 and falls back to ``default`` when absent or
+    malformed.
+    """
+    if isinstance(raw, (list, tuple)) and raw:
+        vals = [float(x) for x in raw[:4]]
+        while len(vals) < 4:
+            vals.append(default[len(vals)])
+        return vals
+    return list(default)
+
+
+def _emission_anim_from_entry(chosen: dict[str, Any]) -> dict[str, Any] | None:
+    """Animated-emission params for a material_mappings entry, or ``None``.
+
+    Decodes the ``ship_emissive_material.fx`` animation term from the
+    toolkit's v2 ``ints`` / ``vectors`` / ``floats`` sections (themed
+    exterior hulls — e.g. Azur Kearsarge, shader ``0x00060900``,
+    ``emissionAnimationMode=1`` sine pulse). Returns ``None`` for
+    non-animated materials (mode 0 or absent) so static-only and
+    non-emissive materials are untouched.
+
+    The STATIC glow term (``diffuse·mg.B·emissivePower``) is already
+    rendered via the synthesised ``_emissive`` texture; this dict carries
+    only the ANIMATED-term inputs. Defaults mirror the shader's cb0
+    (``$Globals``) constants. ``static_power`` (the real ``emissivePower``)
+    is surfaced for consumers that want to correct the static term too.
+    """
+    ints = chosen.get("ints") or {}
+    anim_mode = int(ints.get("emissionAnimationMode", 0) or 0)
+    if anim_mode == 0:
+        return None
+    floats = chosen.get("floats") or {}
+    vectors = chosen.get("vectors") or {}
+    anim_tex = chosen.get("textures", {}).get("animMap") or {}
+    return {
+        "mode":          anim_mode,
+        "color_mode":    int(ints.get("emissionColorMode", 0) or 0),
+        "anim_power":    float(floats.get("animEmissionPower", 1.0)),
+        "static_power":  float(floats.get("emissivePower", 2.0)),
+        "mask_smooth":   float(floats.get("maskSmooth", 1.0)),
+        "mask_speed":    _vec4(vectors.get("maskSpeed"), (0.1, 0.1, 0.5, 1.0)),
+        "anim_scale":    _vec4(vectors.get("animScale"), (1.0, 1.0, 1.0, 1.0)),
+        "mask_color1":   _vec4(vectors.get("maskColor1"), (1.0, 0.0, 0.0, 1.0)),
+        "mask_color2":   _vec4(vectors.get("maskColor2"), (1.0, 1.0, 0.0, 1.0)),
+        "anim_map_stem": ((anim_tex.get("stem") or "").strip() or None),
+    }
+
+
 def _glb_json_chunk(glb_path: str | Path) -> dict[str, Any]:
     """Extract and parse the JSON chunk from a GLB file.
 
@@ -956,6 +1010,13 @@ def _apply_material_mappings_json(
                     if key in dds_index and "detail" in dds_index[key]:
                         detail_slot_paths = list(dds_index[key]["detail"])
                         break
+
+        # Animated emission (`ship_emissive_material.fx`). Surfaces the
+        # animated-emission term's params from the toolkit's v2 material
+        # mappings; no-op (None) for non-animated materials.
+        emission_anim = _emission_anim_from_entry(chosen)
+        if emission_anim is not None:
+            mat["emission_anim"] = emission_anim
 
         existing_main = (mat.get("texture_sets") or {}).get("main") or {}
 
