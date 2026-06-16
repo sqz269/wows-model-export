@@ -2751,6 +2751,39 @@ def scaffold_ship(
         except Exception as e:
             warnings.append(f"exteriors[] emit failed ({e}); prior value kept")
 
+    # Variant-routed scaffolds skip the exteriors[] recompute above (their
+    # placements are already swapped, so the mount-diff base would be
+    # wrong). But material-level data on each exterior's hull — e.g.
+    # `emission_anim` for ship_emissive_material.fx hulls — would then stay
+    # stale across re-ingests, since the prior exteriors[] is merge-
+    # preserved verbatim. Refresh JUST the hull.materials of existing
+    # exteriors[] from their GLB + material_mappings: a pure re-resolve
+    # (no mount/placement derivation), safe for variant-routed ships and a
+    # no-op for non-variant ones (the full block already rebuilt them).
+    if variant_perm_for_swap:
+        _ext_refresh_dir = gm3d_dir / "exteriors"
+        for _rec in (doc.get("exteriors") or []):
+            _ext_id = _rec.get("exterior_id")
+            _hull = _rec.get("hull")
+            if not _ext_id or not isinstance(_hull, dict):
+                continue
+            _glb = _ext_refresh_dir / f"{_ext_id}_hull.glb"
+            if not _glb.is_file():
+                continue
+            _mm = _ext_refresh_dir / f"{_ext_id}_material_mappings.json"
+            try:
+                _hull["materials"] = sidecar.materials_from_glb(
+                    _glb,
+                    textures_dir=textures_dir if textures_dir.is_dir() else None,
+                    textures_dds_dir=textures_dds_dir if textures_dds_dir.is_dir() else None,
+                    material_mappings_json=_mm,
+                    legacy_name_fallback=not _mm.is_file(),
+                )
+            except Exception as e:
+                warnings.append(
+                    f"exterior {_ext_id} hull.materials refresh skipped ({e})"
+                )
+
     # ── Step: emit_sidecar ────────────────────────────────────────────
     timer.start("emit_sidecar", detail=sidecar_path.name)
     try:
