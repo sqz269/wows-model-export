@@ -90,6 +90,23 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.uniforms.detailInfluence = uniforms.detailInfluence;
     shader.uniforms.detailFadeDistance = uniforms.detailFadeDistance;
 
+    // Animated camo emission (ship_camo_mgn_material.fx chunk024).
+    shader.uniforms.emissionAnimEnable = uniforms.emissionAnimEnable;
+    shader.uniforms.emissionAnimMap = uniforms.emissionAnimMap;
+    shader.uniforms.emissionAnimMode = uniforms.emissionAnimMode;
+    shader.uniforms.emissionColorMode = uniforms.emissionColorMode;
+    shader.uniforms.emissionBasePower = uniforms.emissionBasePower;
+    shader.uniforms.emissionAnimMaxPower = uniforms.emissionAnimMaxPower;
+    shader.uniforms.emissionMaskSmooth = uniforms.emissionMaskSmooth;
+    shader.uniforms.emissionAnimScale = uniforms.emissionAnimScale;
+    shader.uniforms.emissionMaskSpeed = uniforms.emissionMaskSpeed;
+    shader.uniforms.emissionMaskColor1 = uniforms.emissionMaskColor1;
+    shader.uniforms.emissionMaskColor2 = uniforms.emissionMaskColor2;
+    shader.uniforms.exEmissiveAnimEnable = uniforms.exEmissiveAnimEnable;
+    shader.uniforms.exEmissiveAnimSpeed = uniforms.exEmissiveAnimSpeed;
+    shader.uniforms.exEmissiveAnimSmooth = uniforms.exEmissiveAnimSmooth;
+    shader.uniforms.exEmissiveAnimGain = uniforms.exEmissiveAnimGain;
+
     // Rain-wetness uniforms. Layer 1 (tint) is pushed by
     // `TextureManager.setWetness`; Layer 2 (waterline band) is static scene
     // geometry that stays at the `makeWetnessUniforms` defaults.
@@ -149,6 +166,21 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
       'uniform vec2 detailScale;\n' +
       'uniform vec3 detailInfluence;\n' +
       'uniform float detailFadeDistance;\n' +
+      'uniform float emissionAnimEnable;\n' +
+      'uniform sampler2D emissionAnimMap;\n' +
+      'uniform float emissionAnimMode;\n' +
+      'uniform float emissionColorMode;\n' +
+      'uniform float emissionBasePower;\n' +
+      'uniform float emissionAnimMaxPower;\n' +
+      'uniform float emissionMaskSmooth;\n' +
+      'uniform vec3 emissionAnimScale;\n' +
+      'uniform vec3 emissionMaskSpeed;\n' +
+      'uniform vec3 emissionMaskColor1;\n' +
+      'uniform vec4 emissionMaskColor2;\n' +
+      'uniform float exEmissiveAnimEnable;\n' +
+      'uniform float exEmissiveAnimSpeed;\n' +
+      'uniform float exEmissiveAnimSmooth;\n' +
+      'uniform float exEmissiveAnimGain;\n' +
       'uniform float wetOverall;\n' +
       'uniform vec3 wetColor;\n' +
       'uniform float wetRoughDrop;\n' +
@@ -372,6 +404,77 @@ diffuseColor.rgb = mix( diffuseColor.rgb, wetColor, wetGlobal * 0.5 );
 // roughness chunk below (same main() scope; map_fragment runs before it).
 float wetBandF = clamp( ( wetWaterY + wetWaveAmp - vWetWorldPos.y ) / max( wetBand, 1e-3 ), 0.0, 1.0 );
 diffuseColor.rgb *= mix( 1.0, 0.6, wetBandF );
+`,
+        )
+        // ── Animated camo emission (ship_camo_mgn_material.fx chunk024) ──────
+        // ADDITIVE glow on top of the static emissive. Mask + "diffuse" come
+        // from the mat_albedo atlas (.a = coverage/mask, .rgb = painted colour).
+        // This is the CAMO shader's emission — it DIFFERS from the sibling
+        // ship_emissive_material.fx (themed-exterior): colour modes 1↔2 SWAPPED,
+        // mask = camoAlbedo.a (not mg.B), no per-instance tint, no _ao phase,
+        // anim mode 3 combine = sat(tap0·tap1·tap2). Driven by the shared
+        // 'wetTime' clock (engine g_time). Mirrors the Unity URP port
+        // (WgShipCamo.hlsl::ComputeCamoEmission). Gated to mat_albedo regions;
+        // default-off (emissionAnimEnable 0) → no-op for non-emissive skins.
+        .replace(
+          '#include <emissivemap_fragment>',
+          `#include <emissivemap_fragment>
+vec3 exEmStaticForAnim = totalEmissiveRadiance;   // static emissive (diffuse*mgB*power), pre-overlay
+#ifdef USE_MAP
+if ( emissionAnimEnable > 0.5 && matAlbedoEnable > 0.5 ) {
+  vec2 emMatUv = vMapUv * matAlbedoUv.xy + matAlbedoUv.zw;
+  vec4 emTex = texture2D( matAlbedoMap, emMatUv );
+  float emCoverage = emTex.a;          // camoAlbedo.a — emission mask
+  vec3  emAlbedo   = emTex.rgb;         // sRGB tex -> linear on sample
+  vec3  emSpeed    = emissionMaskSpeed;
+  vec3  emScale    = emissionAnimScale;
+  float emT        = wetTime;           // shared animated clock (== g_time)
+  float emScalar = 0.0;
+  if ( emissionAnimMode > 0.5 && emissionAnimMode < 1.5 ) {
+    // Mode 1 — sine pulse x animMap tap.
+    float s   = sin( emSpeed.x * emT * 6.2831853 ) * 0.5 + 0.5;
+    float tap = texture2D( emissionAnimMap, emMatUv * emScale.z ).r;
+    emScalar  = s * tap;
+  } else if ( emissionAnimMode > 1.5 && emissionAnimMode < 2.5 ) {
+    // Mode 2 — 1-D timeline lookup at U = maskSpeed.x*t.
+    float u  = emSpeed.x * emT;
+    emScalar = texture2D( emissionAnimMap, vec2( u, u ) ).r;
+  } else if ( emissionAnimMode > 2.5 ) {
+    // Mode 3 — three scrolling taps, multiplied + saturated.
+    float tap0 = texture2D( emissionAnimMap, vMapUv * emScale.x + emSpeed.xy * emT ).r;
+    float tap1 = texture2D( emissionAnimMap, vMapUv * emScale.y + emSpeed.xy * emT * emSpeed.z ).r;
+    float tap2 = texture2D( emissionAnimMap, emMatUv * emScale.z ).r;
+    emScalar   = clamp( tap0 * tap1 * tap2, 0.0, 1.0 );
+  }
+  float emAnim = pow( clamp( emScalar, 0.0, 1.0 ), max( emissionMaskSmooth, 1e-4 ) );
+  float emR3w  = emAnim * emCoverage;
+  vec3  emColor = vec3( 0.0 );
+  if ( emissionColorMode < 0.5 ) {
+    emColor = emAlbedo * emR3w;                                                       // mode 0
+  } else if ( emissionColorMode < 1.5 ) {
+    emColor = emR3w * mix( emAlbedo, emissionMaskColor2.rgb, emissionMaskColor2.w );  // mode 1
+  } else {
+    float emFactor = ( emissionAnimMode > 2.5 ) ? emR3w : emAnim;                     // mode 2 (cycle)
+    emColor = emR3w * mix( emissionMaskColor1, emissionMaskColor2.rgb, emFactor );
+  }
+  vec3 emStatic = emCoverage * emAlbedo;
+  totalEmissiveRadiance += emStatic * emissionBasePower + emColor * emissionAnimMaxPower;
+}
+#endif
+// Themed-EXTERIOR hull animated emission (ship_emissive_material.fx; mask =
+// mg.B, phase = _ao, anim mode 1 sine, colour mode 0). Distinct from the camo
+// path above — adds ONLY the animated term by modulating the static emissive
+// (captured pre-overlay) with a sine envelope. The static glow itself already
+// ships via the synthesised _emissive map (Three's <emissivemap_fragment>).
+if ( exEmissiveAnimEnable > 0.5 ) {
+  float exEmPhase = 0.0;
+  #ifdef USE_AOMAP
+    exEmPhase = texture2D( aoMap, vAoMapUv ).r;   // per-texel time offset (_ao)
+  #endif
+  float exEmS    = sin( 6.2831853 * ( wetTime * exEmissiveAnimSpeed - exEmPhase ) ) * 0.5 + 0.5;
+  float exEmAnim = pow( clamp( exEmS, 0.0, 1.0 ), max( exEmissiveAnimSmooth, 1e-4 ) );
+  totalEmissiveRadiance += exEmStaticForAnim * ( exEmAnim * exEmissiveAnimGain );
+}
 `,
         )
         // WG-pack metallicRoughness override. WG `_mg.dds` ACTUAL layout

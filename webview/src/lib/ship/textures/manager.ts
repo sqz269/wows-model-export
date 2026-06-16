@@ -27,9 +27,10 @@ import {
   applyTexturesToMaterial,
   buildTextured,
   type DetailParams,
+  type EmissionAnim,
   type MaterialClonePolicy,
 } from './material';
-import { CategoryMaskCache, MatAlbedoCache, MgnTextureCache } from './category_mask';
+import { CategoryMaskCache, MatAlbedoCache, MgnTextureCache, AnimMapCache } from './category_mask';
 import { DecodedTextureCache } from './decode';
 import type { SlotUrls, TextureMeshEntry, TextureSetResolved } from './types';
 
@@ -127,11 +128,17 @@ export class TextureManager {
   // pushed into the camo shader chunk's `detail*` uniforms. Absent
   // entries → detail disabled (`detailMapBound = 0.0`).
   private detailParamsByKey = new Map<string, DetailParams>();
+  // Per-key animated-emission params from the sidecar's
+  // `materials[*].emission_anim` (themed-exterior `ship_emissive_material.fx`
+  // hulls). Read at material-build time and pushed into the camo chunk's
+  // `exEmissive*` uniforms. Absent → animation disabled (enable 0.0).
+  private emissionAnimByKey = new Map<string, EmissionAnim>();
 
   private decodedCache: DecodedTextureCache;
   private categoryMaskCache: CategoryMaskCache;
   private matAlbedoCache: MatAlbedoCache;
   private mgnTextureCache: MgnTextureCache;
+  private animMapCache: AnimMapCache;
 
   private showTexturesActive = false;
   private activeSchemeKey = 'main';
@@ -168,6 +175,7 @@ export class TextureManager {
     this.categoryMaskCache = new CategoryMaskCache(this.renderer, this.repoBaseUrl);
     this.matAlbedoCache = new MatAlbedoCache(this.renderer, this.repoBaseUrl);
     this.mgnTextureCache = new MgnTextureCache(this.renderer, this.repoBaseUrl);
+    this.animMapCache = new AnimMapCache(this.renderer, this.repoBaseUrl);
   }
 
   // ── Bind index ────────────────────────────────────────────────────
@@ -279,6 +287,8 @@ export class TextureManager {
       if (mat.shader_intent === 'cutout') this.cutoutKeys.add(`hull:${matName}`);
       const detail = (mat as { detail_params?: DetailParams }).detail_params;
       if (detail) this.detailParamsByKey.set(`hull:${matName}`, detail);
+      const emisAnim = (mat as { emission_anim?: EmissionAnim }).emission_anim;
+      if (emisAnim) this.emissionAnimByKey.set(`hull:${matName}`, emisAnim);
     }
   }
 
@@ -341,6 +351,8 @@ export class TextureManager {
       if (intent === 'cutout') this.cutoutKeys.add(matKey);
       const detail = (mat as { detail_params?: DetailParams }).detail_params;
       if (detail) this.detailParamsByKey.set(matKey, detail);
+      const emisAnim = (mat as { emission_anim?: EmissionAnim }).emission_anim;
+      if (emisAnim) this.emissionAnimByKey.set(matKey, emisAnim);
     }
 
     // Asset-level fallback. Used when per-material is empty (legacy
@@ -543,6 +555,7 @@ export class TextureManager {
     await this.categoryMaskCache.ensureForSkin(this.activeSkin);
     await this.matAlbedoCache.ensureForSkin(this.activeSkin);
     await this.mgnTextureCache.ensureForSkin(this.activeSkin);
+    await this.animMapCache.ensureForSkin(this.activeSkin);
     this.updateCamoUniforms(this.activeSkin);
     onProgress?.(`Textures: ${this.decodedCache.size} DDS files decoded`);
   }
@@ -571,6 +584,7 @@ export class TextureManager {
     await this.categoryMaskCache.ensureForSkin(this.activeSkin);
     await this.matAlbedoCache.ensureForSkin(this.activeSkin);
     await this.mgnTextureCache.ensureForSkin(this.activeSkin);
+    await this.animMapCache.ensureForSkin(this.activeSkin);
     this.updateCamoUniforms(this.activeSkin);
     onProgress?.(`Active skin: ${skinId}`);
   }
@@ -793,9 +807,11 @@ export class TextureManager {
     this.noCamoKeys.clear();
     this.cutoutKeys.clear();
     this.detailParamsByKey.clear();
+    this.emissionAnimByKey.clear();
     this.categoryMaskCache.clear();
     this.matAlbedoCache.clear();
     this.mgnTextureCache.clear();
+    this.animMapCache.clear();
     this.showTexturesActive = false;
     this.activeSchemeKey = 'main';
     this.activeSkin = null;
@@ -888,6 +904,7 @@ export class TextureManager {
             continue;
           }
           const detailParams = this.detailParamsByKey.get(e.key) ?? null;
+          const emissionAnim = this.emissionAnimByKey.get(e.key) ?? null;
           textured = buildTextured(
             e.untextured,
             tex,
@@ -895,6 +912,7 @@ export class TextureManager {
             this.noCamoKeys.has(e.key),
             detailParams,
             this.cutoutKeys.has(e.key),
+            emissionAnim,
           );
           e.texturedByScheme.set(cloneKey, textured);
         } else {
@@ -1030,6 +1048,18 @@ export class TextureManager {
         matOy = 0.0;
       let matMode = -1.0;
       let matAo = 0.0;
+      // Animated camo emission — rides the mat_albedo paint (gated on matTex).
+      let emiEnable = false;
+      let emiAnimTex: THREE.Texture | null = null;
+      let emiMode = 0.0,
+        emiColorMode = 0.0,
+        emiBase = 1.0,
+        emiMax = 1.0,
+        emiSmooth = 1.0;
+      let emiScale: [number, number, number] = [1, 1, 1];
+      let emiSpeed: [number, number, number] = [0.1, 0.1, 0.5];
+      let emiColor1: [number, number, number] = [1, 0, 0];
+      let emiColor2: [number, number, number, number] = [1, 1, 0, 1];
       if (!noCamo && matTextures && entry.category in matTextures) {
         const matCat = matTextures[entry.category];
         const params = matCat.params ?? null;
@@ -1049,6 +1079,22 @@ export class TextureManager {
           if (params) {
             matMode = params.camo_mode;
             matAo = params.ao_influence;
+          }
+          // Emission params travel with the same mat_textures entry. Enable
+          // only when there's a real glow (active anim mode OR non-zero base
+          // power) — plain camo skins keep emission off (shader no-op).
+          if (params && (params.emission_anim_mode !== 0 || params.emission_base_power > 0)) {
+            emiEnable = true;
+            emiMode = params.emission_anim_mode;
+            emiColorMode = params.emission_color_mode;
+            emiBase = params.emission_base_power;
+            emiMax = params.emission_anim_max_power;
+            emiSmooth = params.mask_smooth > 0 ? params.mask_smooth : 1.0;
+            emiScale = params.anim_scale;
+            emiSpeed = params.mask_speed;
+            emiColor1 = params.mask_color1;
+            emiColor2 = params.mask_color2;
+            if (matCat.anim_map) emiAnimTex = this.animMapCache.get(matCat.anim_map);
           }
         }
       }
@@ -1127,6 +1173,23 @@ export class TextureManager {
           //     here is a no-op for that branch.
           const useGate = (mgnTex && useCamoMaskGlobal) || !!matTex;
           u.catUseCamoMaskGlobal.value = useGate ? 1.0 : 0.0;
+
+          // Animated camo emission (additive glow on the painted atlas).
+          if (emiEnable) {
+            u.emissionAnimEnable.value = 1.0;
+            if (emiAnimTex) u.emissionAnimMap.value = emiAnimTex;
+            u.emissionAnimMode.value = emiMode;
+            u.emissionColorMode.value = emiColorMode;
+            u.emissionBasePower.value = emiBase;
+            u.emissionAnimMaxPower.value = emiMax;
+            u.emissionMaskSmooth.value = emiSmooth;
+            u.emissionAnimScale.value.set(emiScale[0], emiScale[1], emiScale[2]);
+            u.emissionMaskSpeed.value.set(emiSpeed[0], emiSpeed[1], emiSpeed[2]);
+            u.emissionMaskColor1.value.set(emiColor1[0], emiColor1[1], emiColor1[2]);
+            u.emissionMaskColor2.value.set(emiColor2[0], emiColor2[1], emiColor2[2], emiColor2[3]);
+          } else {
+            u.emissionAnimEnable.value = 0.0;
+          }
         }
       }
     }

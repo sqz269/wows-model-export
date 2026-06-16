@@ -63,6 +63,27 @@ export interface SidecarMaterial {
     scale_u: number;
     scale_v: number;
   };
+
+  /**
+   * Animated emission params for themed-exterior hulls using WG's
+   * `ship_emissive_material.fx` (e.g. Azur Kearsarge — shader 0x00060900).
+   * Present only when the material actually animates (`mode != 0`). The
+   * STATIC glow ships separately via the synthesised `_emissive` map; this
+   * drives the ANIMATED term. v1 consumer renders `mode === 1` (sine) +
+   * `color_mode === 0`. See `_materials._emission_anim_from_entry`.
+   */
+  emission_anim?: {
+    mode: number;
+    color_mode: number;
+    anim_power: number;
+    static_power: number;
+    mask_smooth: number;
+    mask_speed: number[];
+    anim_scale: number[];
+    mask_color1: number[];
+    mask_color2: number[];
+    anim_map_stem: string | null;
+  };
 }
 
 /**

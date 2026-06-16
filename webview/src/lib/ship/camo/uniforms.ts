@@ -154,6 +154,60 @@ export interface CamoUniforms {
    * close to the engine's behaviour.
    */
   detailFadeDistance: { value: number };
+
+  // ── Animated camo emission (ship_camo_mgn_material.fx chunk024) ─────
+  //
+  // The camo material adds an animated emissive glow on top of the
+  // mat_albedo paint. Mask + "diffuse" come from the mat_albedo atlas
+  // (.a = coverage/mask, .rgb = painted colour). DIFFERS from the
+  // themed-exterior ship_emissive_material.fx: colour modes 1↔2 swapped,
+  // mask = camoAlbedo.a (not mg.B), no per-instance tint, no _ao phase,
+  // anim mode 3 = sat(tap0·tap1·tap2). Sourced from
+  // `mat_textures[<cat>].params` + `anim_map`. Driven by the shared
+  // `wetTime` clock (== engine g_time). Default-off (enable 0) → no-op.
+  /** 1.0 when the active skin's category carries emission params. */
+  emissionAnimEnable: { value: number };
+  /** Emission curve/atlas (camoAnimMap). LINEAR. 1×1 dummy default. */
+  emissionAnimMap: { value: THREE.Texture };
+  /** camoEmissionAnimationMode: 0 off / 1 sine / 2 timeline / 3 scroll. */
+  emissionAnimMode: { value: number };
+  /** camoEmissionColorMode: 0 diffuse / 1 diff-lerp / 2 colour cycle. */
+  emissionColorMode: { value: number };
+  /** camoEmissionBasePower — static term multiplier. */
+  emissionBasePower: { value: number };
+  /** camoEmissionAnimationMaxPower — animated term multiplier. */
+  emissionAnimMaxPower: { value: number };
+  /** camoMaskSmooth — pow() shaping of the anim scalar. */
+  emissionMaskSmooth: { value: number };
+  /** camoAnimScale (x,y,z) — per-tap UV scale. */
+  emissionAnimScale: { value: THREE.Vector3 };
+  /** camoMaskSpeed (x,y,z) — scroll speed. */
+  emissionMaskSpeed: { value: THREE.Vector3 };
+  /** camoMaskColor1 (rgb, raw linear). */
+  emissionMaskColor1: { value: THREE.Vector3 };
+  /** camoMaskColor2 (rgba, raw linear; .w = lerp factor in colour mode 1). */
+  emissionMaskColor2: { value: THREE.Vector4 };
+
+  // ── Animated emission — themed-EXTERIOR hull (ship_emissive_material.fx) ──
+  //
+  // Distinct from the camo path above (do NOT cross-port — see the
+  // EMISSION_ANIMATION_EXTERIOR handoff). Mask = mg.B, per-texel phase =
+  // _ao, colour modes NOT swapped, per-instance tint (default white). The
+  // STATIC glow already ships via the synthesised `_emissive` map; this
+  // path adds ONLY the animated term, modulating that static emissive by a
+  // sine envelope. v1 = anim mode 1 (sine) + colour mode 0 (diffuse). The
+  // engine animated term (diffuse·mgB·animEmissionPower·envelope) equals
+  // staticEmissive·(animEmissionPower/emissivePower)·envelope because the
+  // synth bakes diffuse·mgB·emissivePower and mg.B is binary. Sourced from
+  // `materials[*].emission_anim`. Default-off (enable 0) → no-op.
+  /** 1.0 when this material carries animated emission (mode 1). */
+  exEmissiveAnimEnable: { value: number };
+  /** maskSpeed.x — sine frequency (cycles per engine-second). */
+  exEmissiveAnimSpeed: { value: number };
+  /** maskSmooth — pow() shaping of the sine envelope. */
+  exEmissiveAnimSmooth: { value: number };
+  /** animEmissionPower / emissivePower — animated:static amplitude ratio. */
+  exEmissiveAnimGain: { value: number };
 }
 
 export function makeCamoUniforms(): CamoUniforms {
@@ -190,6 +244,21 @@ export function makeCamoUniforms(): CamoUniforms {
     detailScale: { value: new THREE.Vector2(1, 1) },
     detailInfluence: { value: new THREE.Vector3(0, 0, 0) },
     detailFadeDistance: { value: 1.0 },
+    emissionAnimEnable: { value: 0.0 },
+    emissionAnimMap: { value: dummyMatAlbedoTexture },
+    emissionAnimMode: { value: 0.0 },
+    emissionColorMode: { value: 0.0 },
+    emissionBasePower: { value: 1.0 },
+    emissionAnimMaxPower: { value: 1.0 },
+    emissionMaskSmooth: { value: 1.0 },
+    emissionAnimScale: { value: new THREE.Vector3(1, 1, 1) },
+    emissionMaskSpeed: { value: new THREE.Vector3(0.1, 0.1, 0.5) },
+    emissionMaskColor1: { value: new THREE.Vector3(1, 0, 0) },
+    emissionMaskColor2: { value: new THREE.Vector4(1, 1, 0, 1) },
+    exEmissiveAnimEnable: { value: 0.0 },
+    exEmissiveAnimSpeed: { value: 0.1 },
+    exEmissiveAnimSmooth: { value: 1.0 },
+    exEmissiveAnimGain: { value: 1.0 },
   };
 }
 

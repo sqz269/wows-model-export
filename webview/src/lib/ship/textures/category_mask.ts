@@ -10,6 +10,7 @@
 // ship swap, the entry cache survives.
 
 import type * as THREE from 'three';
+import { RepeatWrapping } from 'three';
 import { loadDdsMipChain, resolveDdsMipUrls } from '$lib/dds';
 import type { Skin } from '$lib/types';
 
@@ -159,6 +160,73 @@ export class MgnTextureCache {
     if (skin.mat_textures) {
       for (const data of Object.values(skin.mat_textures)) {
         if (data.mgn) tasks.push(this.ensure(data.mgn));
+      }
+    }
+    await Promise.all(tasks);
+  }
+
+  clear(): void {
+    for (const t of this.cache.values()) t.dispose();
+    this.cache.clear();
+  }
+}
+
+/**
+ * Emission-animation curve/atlas cache (`<*_animmap>` → `anim_map`, e.g.
+ * `libraries/camo_mat/KOF_anim.dds`). Sampled at LINEAR colorspace — it's a
+ * 0-1 intensity curve, NOT colour; the `ship_camo_mgn_material.fx` emission
+ * block reads the animMap tap ungammad (no log/mul/exp), so an sRGB decode
+ * would gamma-warp the pulse/cycle envelope. Mirrors `MgnTextureCache`.
+ * Both `categories[<cat>].anim_map` and `mat_textures[<cat>].anim_map` surface
+ * the ref; one cache covers both.
+ */
+export class AnimMapCache {
+  private cache = new Map<string, THREE.Texture>();
+
+  constructor(
+    private renderer: THREE.WebGLRenderer,
+    private repoBaseUrl: string,
+  ) {}
+
+  async ensure(animMap: { dds_mips: string[] }): Promise<THREE.Texture | null> {
+    if (animMap.dds_mips.length === 0) return null;
+    const stemBase = animMap.dds_mips[0].split(/[\\/]/).pop() ?? '';
+    const cacheKey = stemBase.replace(/\.[^.]+$/, '');
+    const cached = this.cache.get(cacheKey);
+    if (cached) return cached;
+
+    const urls = resolveDdsMipUrls(animMap.dds_mips, this.repoBaseUrl);
+    if (urls.length === 0) return null;
+    // sRGB=false: the anim curve is intensity data, not colour.
+    const tex = await loadDdsMipChain(urls, /* sRGB */ false, this.renderer);
+    if (!tex) return null;
+    // The emission shader scrolls the curve UV past [0,1] (timeline lookup +
+    // 3-tap scroll), so it MUST tile — matches the engine/Unity wrap.
+    tex.wrapS = RepeatWrapping;
+    tex.wrapT = RepeatWrapping;
+    tex.needsUpdate = true;
+    this.cache.set(cacheKey, tex);
+    return tex;
+  }
+
+  get(animMap: { dds_mips: string[] }): THREE.Texture | null {
+    if (animMap.dds_mips.length === 0) return null;
+    const stemBase = animMap.dds_mips[0].split(/[\\/]/).pop() ?? '';
+    const cacheKey = stemBase.replace(/\.[^.]+$/, '');
+    return this.cache.get(cacheKey) ?? null;
+  }
+
+  async ensureForSkin(skin: Skin | null): Promise<void> {
+    if (!skin) return;
+    const tasks: Promise<unknown>[] = [];
+    if (skin.categories) {
+      for (const data of Object.values(skin.categories)) {
+        if (data.anim_map) tasks.push(this.ensure(data.anim_map));
+      }
+    }
+    if (skin.mat_textures) {
+      for (const data of Object.values(skin.mat_textures)) {
+        if (data.anim_map) tasks.push(this.ensure(data.anim_map));
       }
     }
     await Promise.all(tasks);

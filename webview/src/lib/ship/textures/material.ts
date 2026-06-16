@@ -50,6 +50,29 @@ export interface DetailParams {
   scale_v: number;
 }
 
+/**
+ * Per-material animated-emission params (sidecar
+ * ``Material.emission_anim``) for themed-exterior hulls using
+ * ``ship_emissive_material.fx`` (e.g. Azur Kearsarge). v1 renders anim
+ * mode 1 (sine) + colour mode 0 by modulating the static ``_emissive``
+ * map with a sine envelope. See ``_materials._emission_anim_from_entry``
+ * for the producer and ``camo/shader.ts`` for the GLSL.
+ */
+export interface EmissionAnim {
+  /** emissionAnimationMode: 1 sine (rendered) / 2 timeline / 3 scroll. */
+  mode: number;
+  /** emissionColorMode: 0 diffuse (rendered) / 1 cycle / 2 diff-lerp. */
+  color_mode: number;
+  /** animEmissionPower — animated-term multiplier. */
+  anim_power: number;
+  /** emissivePower — static-term multiplier (the synth baked this in). */
+  static_power: number;
+  /** maskSmooth — pow() shaping of the sine envelope. */
+  mask_smooth: number;
+  /** maskSpeed (x,y,z,w); x = sine frequency. */
+  mask_speed: number[];
+}
+
 export function applyTexturesToMaterial(
   original: THREE.Material,
   tex: TextureSetResolved,
@@ -57,6 +80,7 @@ export function applyTexturesToMaterial(
   forceTransparentBlend: boolean = false,
   detailParams: DetailParams | null = null,
   forceAlphaTest: boolean = false,
+  emissionAnim: EmissionAnim | null = null,
 ): THREE.Material {
   const std = original as THREE.MeshStandardMaterial;
   if (!('isMeshStandardMaterial' in std) || !std.isMeshStandardMaterial) return original;
@@ -195,6 +219,21 @@ export function applyTexturesToMaterial(
     camoUniforms.detailFadeDistance.value = detailParams.fade_distance;
   }
 
+  // Themed-exterior animated emission (ship_emissive_material.fx). v1
+  // renders anim mode 1 (sine) + colour mode 0 by modulating the static
+  // `_emissive` map with a sine envelope (see camo/shader.ts). Requires a
+  // bound emissive map — that map IS the static glow being animated.
+  // gain = animEmissionPower / emissivePower (the engine's animated:static
+  // power ratio); the synth baked emissivePower into the texture, so this
+  // scales the captured static term back up to the animated amplitude.
+  if (emissionAnim && emissionAnim.mode === 1 && tex.emissive) {
+    const staticPow = emissionAnim.static_power > 1e-4 ? emissionAnim.static_power : 1.0;
+    camoUniforms.exEmissiveAnimEnable.value = 1.0;
+    camoUniforms.exEmissiveAnimSpeed.value = emissionAnim.mask_speed?.[0] ?? 0.1;
+    camoUniforms.exEmissiveAnimSmooth.value = emissionAnim.mask_smooth;
+    camoUniforms.exEmissiveAnimGain.value = emissionAnim.anim_power / staticPow;
+  }
+
   c.userData = { ...(c.userData || {}), camoUniforms, mgTex, origMetalness, origRoughness };
   c.needsUpdate = true;
   return c;
@@ -207,11 +246,14 @@ export function buildTextured(
   forceTransparentBlend: boolean = false,
   detailParams: DetailParams | null = null,
   forceAlphaTest: boolean = false,
+  emissionAnim: EmissionAnim | null = null,
 ): THREE.Material | THREE.Material[] {
   if (Array.isArray(original)) {
     return original.map((m) =>
-      applyTexturesToMaterial(m, tex, policy, forceTransparentBlend, detailParams, forceAlphaTest),
+      applyTexturesToMaterial(m, tex, policy, forceTransparentBlend, detailParams, forceAlphaTest, emissionAnim),
     );
   }
-  return applyTexturesToMaterial(original, tex, policy, forceTransparentBlend, detailParams, forceAlphaTest);
+  return applyTexturesToMaterial(
+    original, tex, policy, forceTransparentBlend, detailParams, forceAlphaTest, emissionAnim,
+  );
 }
