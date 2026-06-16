@@ -66,6 +66,20 @@ def _turret(hp, asset, dead, mf, matrix):
     }
 
 
+def _rider(hp, asset, attach_to, matrix, *, dead=None, mf=None):
+    """A ship-level sub-mount that rides a turret (composite hp_name +
+    ``attach_to`` = host turret instance_id), e.g. a 40 mm Bofors on a main gun."""
+    return {
+        "instance_id": hp.replace("HP_", "INST_"),
+        "asset_id": asset,
+        "dead_asset_id": dead,
+        "hp_name": hp,
+        "transform": {"matrix": list(matrix)},
+        "misc_filter": copy.deepcopy(mf),
+        "attach_to": attach_to,
+    }
+
+
 def _make_base():
     return {
         "turrets": [
@@ -278,6 +292,58 @@ def test_vfs_dir_path_channel():
     assert rec2["swap_table"]["vfs_dir_by_asset_id"] == {}
 
 
+_RIDER_M = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1.2, 3.4, -50.0, 1]
+
+
+def test_rider_rehost_kept_when_host_swapped():
+    """A sub-mount the exterior leaves UNCHANGED but whose host turret it
+    SWAPS must be emitted as a kept rider carrying the host HP, so the consumer
+    re-hosts it onto the variant turret (else it render-hides with the base)."""
+    base = _make_base()
+    base["antiair"] = [_rider("HP_AGM_2_HP_AGA_1", "AGA056_40mm_Bofors", "INST_AGM_2", _RIDER_M)]
+    variant = _make_variant()                       # swaps HP_AGM_1/2/3; AA untouched
+    variant["antiair"] = copy.deepcopy(base["antiair"])
+    rec = build_exterior_record("E", base, variant)
+
+    riders = [m for m in rec["mounts"] if m["hp_name"] == "HP_AGM_2_HP_AGA_1"]
+    assert len(riders) == 1, rec["mounts"]
+    rm = riders[0]
+    assert rm["asset_id"] == rm["base_asset_id"] == "AGA056_40mm_Bofors"
+    assert rm["attach_to"] == "HP_AGM_2"
+    assert rm.get("rehost_kept") is True
+    assert rm["transform"]["matrix"] == _RIDER_M
+    # a kept rider (base asset) stays OUT of camo opt-out + asset-swap table
+    assert "AGA056_40mm_Bofors" not in rec["variant_swapped_asset_ids"]
+    assert "HP_AGM_2_HP_AGA_1" not in rec["swap_table"]["by_hp_name"]
+
+
+def test_rider_not_emitted_when_host_unswapped():
+    """A rider on a turret the exterior does NOT swap is left alone (no emit)."""
+    base = _make_base()
+    base["antiair"] = [_rider("HP_AD_1_HP_AGA_1", "AGA056_40mm_Bofors", "INST_AD_1", _RIDER_M)]
+    variant = _make_variant()                       # swaps only HP_AGM_*; HP_AD_1 kept
+    variant["antiair"] = copy.deepcopy(base["antiair"])
+    rec = build_exterior_record("E", base, variant)
+    assert not [m for m in rec["mounts"] if (m.get("asset_id") or "").startswith("AGA")]
+
+
+def test_swapped_rider_carries_attach_to():
+    """A rider whose OWN model the exterior swaps must still re-host onto the
+    variant turret — it carries attach_to, but is a real swap (not kept)."""
+    base = _make_base()
+    base["antiair"] = [_rider("HP_AGM_2_HP_AGA_1", "AGA056_40mm_Bofors", "INST_AGM_2", _RIDER_M)]
+    variant = _make_variant()
+    v_rider = copy.deepcopy(base["antiair"][0])
+    v_rider["asset_id"] = "AGA554_40mm_Bofors_HW19"
+    variant["antiair"] = [v_rider]
+    rec = build_exterior_record("E", base, variant)
+    rm = next(m for m in rec["mounts"] if m["hp_name"] == "HP_AGM_2_HP_AGA_1")
+    assert rm["asset_id"] == "AGA554_40mm_Bofors_HW19"
+    assert rm["attach_to"] == "HP_AGM_2"
+    assert "rehost_kept" not in rm
+    assert "AGA554_40mm_Bofors_HW19" in rec["variant_swapped_asset_ids"]
+
+
 def _placement_sections(doc):
     return {k: doc.get(k) or [] for k in ("turrets", "secondaries", "antiair", "torpedoes", "accessories")}
 
@@ -346,6 +412,9 @@ if __name__ == "__main__":
         test_reanchor_epsilon_keeps_base_bytes,
         test_reanchor_composes_with_swaps,
         test_vfs_dir_path_channel,
+        test_rider_rehost_kept_when_host_swapped,
+        test_rider_not_emitted_when_host_unswapped,
+        test_swapped_rider_carries_attach_to,
         test_onfile_parity_baltimore,
     ]
     failed = 0

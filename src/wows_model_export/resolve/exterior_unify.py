@@ -107,7 +107,27 @@ def build_exterior_record(
     base_secs = _sections_of(base)
     var_secs = _sections_of(variant)
 
+    # instance_id -> hp_name on the BASE ship, for resolving a rider's host
+    # turret (its `attach_to` is the host's instance_id) back to the host HP.
+    instance_to_hp: dict[str, Any] = {}
+    for sec in PLACEMENT_SECTIONS:
+        for p in base_secs[sec]:
+            iid = p.get("instance_id")
+            if iid:
+                instance_to_hp[iid] = p.get("hp_name")
+
+    def _host_hp(p: Placement) -> str | None:
+        """HP of the turret a rider attaches to (via composite-hp `attach_to`),
+        or None when the placement isn't a rider / its host isn't a placement."""
+        host_iid = p.get("attach_to")
+        if not host_iid or host_iid == "__suppress__":
+            return None
+        host_hp = instance_to_hp.get(host_iid)
+        return host_hp if isinstance(host_hp, str) else None
+
     mounts: list[dict[str, Any]] = []
+    emitted_hps: set[str] = set()
+    swapped_host_hps: set[str] = set()      # HPs whose ASSET this exterior swaps
     for sec in PLACEMENT_SECTIONS:
         base_by_hp = _index_by_hp(base_secs[sec])
         for var_p in var_secs[sec]:
@@ -133,7 +153,52 @@ def build_exterior_record(
             # on transform-only records and pre-path-channel sidecars.
             if isinstance(var_p.get("vfs_dir"), str) and var_p["vfs_dir"]:
                 mount["vfs_dir"] = var_p["vfs_dir"]
+            # A SWAPPED rider (its own model changed, e.g. a themed AA gun on
+            # a swapped turret) must still re-host onto the variant turret it
+            # rides — carry the host HP so the consumer parents it there.
+            host_hp = _host_hp(base_p)
+            if host_hp:
+                mount["attach_to"] = host_hp
             mounts.append(mount)
+            if hp:
+                emitted_hps.add(hp)
+                if var_p.get("asset_id") != base_p.get("asset_id"):
+                    swapped_host_hps.add(hp)
+
+    # KEPT riders (exterior-rehost, WG-faithful per RE 2026-06-16): a ship-level
+    # sub-mount (composite-hp `attach_to`, e.g. a 40 mm Bofors riding a main
+    # turret) whose HOST turret this exterior swaps but which the exterior
+    # leaves UNCHANGED. WG keeps it — the variant turret model retains the
+    # rider's HP_* child node, and the engine re-resolves the AA against the
+    # loaded (swapped) turret's nodes; it is NOT re-declared in the permoflage.
+    # An exterior that wants the rider gone instead routes it to an invisible /
+    # variant model (Sabaton-style) or filters it, which would already have
+    # made it DIFFER above. Without this emit the rider render-hides with the
+    # base turret and vanishes on the variant. Emit the base rider verbatim +
+    # the host HP so the consumer parents it on the VARIANT turret.
+    for sec in PLACEMENT_SECTIONS:
+        for base_p in base_secs[sec]:
+            hp = base_p.get("hp_name")
+            if not hp or hp in emitted_hps:
+                continue
+            host_hp = _host_hp(base_p)
+            if host_hp is None or host_hp not in swapped_host_hps:
+                continue
+            mount = {
+                "hp_name": hp,
+                "base_asset_id": base_p.get("asset_id"),
+                "asset_id": base_p.get("asset_id"),       # unchanged → kept
+                "dead_asset_id": base_p.get("dead_asset_id"),
+                "transform": copy.deepcopy(base_p.get("transform")),
+                "misc_filter": copy.deepcopy(base_p.get("misc_filter")),
+                "attached_y_flip": base_p.get("attached_y_flip", False),
+                "attach_to": host_hp,
+                "rehost_kept": True,
+            }
+            if isinstance(base_p.get("vfs_dir"), str) and base_p["vfs_dir"]:
+                mount["vfs_dir"] = base_p["vfs_dir"]
+            mounts.append(mount)
+            emitted_hps.add(hp)
 
     swap_table = _swap_table_from_mounts(mounts)
     # Camo opt-out set = variant-bespoke assets only. Transform-only
