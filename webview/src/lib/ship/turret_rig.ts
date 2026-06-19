@@ -510,17 +510,48 @@ export function buildStaticArcFan(
   });
   let radius = 5;
   let baseY = 0;
-  // Forward axis (0° of the arc): torpedo GLBs carry no muzzle node to
-  // sample, so infer the launch direction from the tube geometry — the long
-  // horizontal axis, signed toward the end that protrudes furthest from the
-  // pivot (the tubes). Falls back to −Z. yaw_range is rest-relative, so 0°
-  // must equal this rest-forward.
-  let fx = 0;
-  let fz = -1;
   if (!box.isEmpty()) {
     const size = box.getSize(new THREE.Vector3());
     radius = 0.6 * Math.max(size.x, size.z, size.y);
     baseY = (box.min.y + box.max.y) / 2;
+  }
+
+  // Forward axis (0° of the arc) = where the tubes actually launch. Torpedo
+  // GLBs now carry `HP_gunFire*` launch locators (the toolkit emits them via
+  // `has_muzzle_locator`, even though the mount skins no mesh), so sample those
+  // for a robust forward — the same approach the rigged `buildFiringArcFan`
+  // uses with its tip nodes. The pivot is the mount origin, so forward =
+  // direction to the mean launch point flattened to the horizontal plane, and
+  // the pivot→mouth distance gives a truer fan radius (≈ tube reach) than the
+  // bbox. The previous bbox heuristic ("longest protrusion = the tubes")
+  // pointed the arc backwards on every torpedo, because the rotating
+  // pedestal/deck base extends further from the pivot than the stubby tube
+  // mouths. yaw_range is rest-relative, so 0° must equal this rest-forward.
+  let fx = 0;
+  let fz = -1;
+  const muzzleAvg = new THREE.Vector3();
+  const muzzleTmp = new THREE.Vector3();
+  let muzzleCount = 0;
+  root.traverse((o) => {
+    if (!o.name || !o.name.startsWith('HP_gunFire') || o.name === 'HP_gunFireEffect') {
+      return;
+    }
+    o.updateWorldMatrix(true, false);
+    muzzleAvg.add(muzzleTmp.setFromMatrixPosition(o.matrixWorld).applyMatrix4(rootInv));
+    muzzleCount += 1;
+  });
+  if (muzzleCount > 0) muzzleAvg.multiplyScalar(1 / muzzleCount);
+  const fwdLen = muzzleCount > 0 ? Math.hypot(muzzleAvg.x, muzzleAvg.z) : 0;
+  if (fwdLen > 1e-4) {
+    fx = muzzleAvg.x / fwdLen;
+    fz = muzzleAvg.z / fwdLen;
+    radius = fwdLen; // pivot→mouth ≈ tube reach; truer than the bbox span
+  } else if (!box.isEmpty()) {
+    // No launch locator (legacy GLB / loose mod): fall back to the long
+    // horizontal axis, signed toward the end that protrudes furthest from
+    // the pivot. Wrong on torpedoes whose base outruns the tubes, but the
+    // best available guess when there is nothing to sample.
+    const size = box.getSize(new THREE.Vector3());
     if (size.z >= size.x) {
       fx = 0;
       fz = Math.abs(box.max.z) >= Math.abs(box.min.z) ? 1 : -1;
