@@ -635,9 +635,20 @@ class SystemRenderer {
   private scalerGens: ParticleValueGenerator[] = [];
   private scalerGlowGens: ParticleValueGenerator[] = [];
   private scalerScaleXGens: ParticleValueGenerator[] = [];
+  // Per-action `delay` (seconds): force/scaler/dampfer apply is gated until
+  // particleAge >= delay, mirroring stream/jitter/orbitor/magnet/barrier/
+  // velocityField which already honor it. Default 0 = active at spawn, so the
+  // ~99% of systems with no authored delay stay byte-identical. The scaler
+  // delay arrays are index-aligned with the matching gen arrays. (tint/
+  // alphaSetter also decode `delay`, but 0 corpus systems author a nonzero
+  // one, so they are intentionally left ungated — render-neutral.)
+  private scalerDelays: number[] = [];
+  private scalerGlowDelays: number[] = [];
+  private scalerScaleXDelays: number[] = [];
   // dampfer.velocityGenerator — a per-frame drag MULTIPLIER on the velocity's
   // contribution to position (1.0 → ~0). Undefined = no damping.
   private dampGen: ParticleValueGenerator | undefined;
+  private dampDelay = 0;
   // Per-system u8 spawn counter → the particleIndex ramp axis (0..254 wrap).
   private spawnCounter = 0;
   // Creator (PSAT idx=12) — additive secondary burst layer, present on
@@ -665,6 +676,7 @@ class SystemRenderer {
   private forceX: ParticleValueGenerator | undefined;
   private forceY: ParticleValueGenerator | undefined;
   private forceZ: ParticleValueGenerator | undefined;
+  private forceDelay = 0;
   private streamActions: StreamAction[] = [];
   private jitterActions: JitterAction[] = [];
   private orbitorActions: OrbitorAction[] = [];
@@ -915,11 +927,17 @@ class SystemRenderer {
       } else if (c.action === 'alphaSetter') {
         if (body.ramp) this.alphaRamp = body.ramp as ParticleRamp;
       } else if (c.action === 'scaler') {
-        if (body.sizeGenerator) this.scalerGens.push(body.sizeGenerator as ParticleValueGenerator);
-        if (body.sizeGenerator)
+        const scalerDelay = typeof body.delay === 'number' ? body.delay : 0;
+        if (body.sizeGenerator) {
+          this.scalerGens.push(body.sizeGenerator as ParticleValueGenerator);
+          this.scalerDelays.push(scalerDelay);
           this.scalerGlowGens.push(body.sizeGenerator as ParticleValueGenerator);
-        if (body.scaleXGenerator)
+          this.scalerGlowDelays.push(scalerDelay);
+        }
+        if (body.scaleXGenerator) {
           this.scalerScaleXGens.push(body.scaleXGenerator as ParticleValueGenerator);
+          this.scalerScaleXDelays.push(scalerDelay);
+        }
       } else if (c.action === 'resizer') {
         // resizer = interpolate sprite size sizeFrom -> sizeTo over particle
         // life. Producer now emits body.sizeFrom / body.sizeTo (raw BW units).
@@ -931,8 +949,10 @@ class SystemRenderer {
         // after a Frida hook on the resizer per-particle apply callback (sibling
         // of scaler's FUN_140742280) confirms the integrator.
       } else if (c.action === 'dampfer') {
-        if (body.velocityGenerator)
+        if (body.velocityGenerator) {
           this.dampGen = body.velocityGenerator as ParticleValueGenerator;
+          this.dampDelay = typeof body.delay === 'number' ? body.delay : 0;
+        }
       } else if (c.action === 'stream') {
         const v = body.vector;
         if (Array.isArray(v) && v.length === 3) {
@@ -1054,6 +1074,7 @@ class SystemRenderer {
         if (body.forceXGenerator) this.forceX = body.forceXGenerator as ParticleValueGenerator;
         if (body.forceYGenerator) this.forceY = body.forceYGenerator as ParticleValueGenerator;
         if (body.forceZGenerator) this.forceZ = body.forceZGenerator as ParticleValueGenerator;
+        this.forceDelay = typeof body.delay === 'number' ? body.delay : 0;
       }
     }
     // Capture the Emitter sub-struct fields. Used when no creator
@@ -1645,9 +1666,12 @@ class SystemRenderer {
       clocks.systemSpeed = 0;
       clocks.particleIndex = this.pidx[i];
       // Force integration (constants ignore the axis; ramps use parameterType).
-      this.vel[i * 3 + 0] += sampleGenAxis(this.forceX, clocks, 0) * dt;
-      this.vel[i * 3 + 1] += sampleGenAxis(this.forceY, clocks, 0) * dt;
-      this.vel[i * 3 + 2] += sampleGenAxis(this.forceZ, clocks, 0) * dt;
+      // Gated by the force action's delay — inactive until age >= forceDelay.
+      if (age >= this.forceDelay) {
+        this.vel[i * 3 + 0] += sampleGenAxis(this.forceX, clocks, 0) * dt;
+        this.vel[i * 3 + 1] += sampleGenAxis(this.forceY, clocks, 0) * dt;
+        this.vel[i * 3 + 2] += sampleGenAxis(this.forceZ, clocks, 0) * dt;
+      }
       this.applyMagnetActions(i, age, dt);
       this.applyStreamActions(i, age, dt);
       this.applyJitterActions(i, age, dt);
@@ -1659,7 +1683,8 @@ class SystemRenderer {
       // particles at the emitter and stacks their quads into square flashes.
       const dampParticleAge = clocks.particleAge;
       clocks.particleAge = prevAge;
-      const damp = this.dampGen ? sampleGenAxis(this.dampGen, clocks, 1) : 1;
+      const damp =
+        this.dampGen && age >= this.dampDelay ? sampleGenAxis(this.dampGen, clocks, 1) : 1;
       clocks.particleAge = dampParticleAge;
       if (this.applyBarrierActions(i, age, dt * damp, allowChildSpawns)) continue;
       this.pos[i * 3 + 0] += this.vel[i * 3 + 0] * dt * damp;
@@ -1698,14 +1723,17 @@ class SystemRenderer {
       // into the per-particle payload consumed by the GRADIENT_MAP glow path.
       let sizeScale = 1;
       for (let s = 0; s < this.scalerGens.length; s++) {
+        if (age < this.scalerDelays[s]) continue;
         sizeScale *= sampleGenAxis(this.scalerGens[s], clocks, 1);
       }
       let glowScale = 1;
       for (let s = 0; s < this.scalerGlowGens.length; s++) {
+        if (age < this.scalerGlowDelays[s]) continue;
         glowScale *= sampleGenAxis(this.scalerGlowGens[s], clocks, 1);
       }
       let scalerScaleX = 1;
       for (let s = 0; s < this.scalerScaleXGens.length; s++) {
+        if (age < this.scalerScaleXDelays[s]) continue;
         scalerScaleX *= sampleGenAxis(this.scalerScaleXGens[s], clocks, 1);
       }
       let sz = this.psize[i];
@@ -2002,14 +2030,17 @@ class SystemRenderer {
     this.psize[slot] = base * ageScale;
     let sizeScale0 = 1;
     for (let s = 0; s < this.scalerGens.length; s++) {
+      if (this.scalerDelays[s] > 0) continue; // delayed scalers are inactive at spawn (age 0)
       sizeScale0 *= sampleGenAxis(this.scalerGens[s], sc, 1);
     }
     let glowScale0 = 1;
     for (let s = 0; s < this.scalerGlowGens.length; s++) {
+      if (this.scalerGlowDelays[s] > 0) continue;
       glowScale0 *= sampleGenAxis(this.scalerGlowGens[s], sc, 1);
     }
     let scalerScaleX0 = 1;
     for (let s = 0; s < this.scalerScaleXGens.length; s++) {
+      if (this.scalerScaleXDelays[s] > 0) continue;
       scalerScaleX0 *= sampleGenAxis(this.scalerScaleXGens[s], sc, 1);
     }
     let sz0 = this.psize[slot] * sizeScale0;
