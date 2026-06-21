@@ -624,14 +624,29 @@ class SystemRenderer {
   // SIZE model (RE 2026-06-04, build 12506899; memory
   // project-particle-runtime-eval-size-model). Engine:
   //   size = emitter.sizeGenerator (BASE, in METRES, per-particle)
-  //        × ageScaleGenerator (per-particle multiplier)
   //        × Π scaler/resizer.sizeGenerator (per-frame multipliers, own axis)
-  // NO ×15 on size. `psize[i]` caches the per-particle base × ageScale (both
-  // usually linear→random, fixed at spawn); the scaler ramps are evaluated
-  // per-frame on their parameterType axis. The prior code had this INVERTED
-  // (scaler-as-base, sampled at a normalized [0,1] age).
+  // ageScale (Emitter+0x40) / aux (+0x50) are NOT size factors (Ghidra
+  // FUN_14071a990 — pass@10 + pass@5, 2026-06-21): they drive the per-particle
+  // AGE CLOCK instead (see ageScaleAuxGen below). The old `× ageScale` size
+  // multiply was removed once the byte-trace proved +0x40/+0x50 route to the
+  // age records 0x08/0x0c, never the size record 0x20.
+  // NO ×15 on size. `psize[i]` caches the per-particle base (emitter
+  // sizeGenerator, fixed at spawn); the scaler ramps are evaluated per-frame on
+  // their parameterType axis. The prior code had this INVERTED (scaler-as-base,
+  // sampled at a normalized [0,1] age).
   private emitterSizeGen: ParticleValueGenerator | undefined;
   private ageScaleGen: ParticleValueGenerator | undefined;
+  // ageScaleAux (Emitter+0x50). With ageScale (+0x40) these are the per-particle
+  // AGE-CLOCK coefficients, NOT size factors (pass@10 + pass@5 Ghidra,
+  // FUN_14071a990 spawn / FUN_14071b7f0 tick). ageScale scales the age-advance
+  // RATE — so age-keyed ramps reach their tail sooner AND the particle dies
+  // sooner; aux extends the death threshold only (lifetime × aux), without
+  // re-timing the ramp axis. Both default to 1.0 (neutral) → ~98.5% of systems.
+  private ageScaleAuxGen: ParticleValueGenerator | undefined;
+  // Per-particle age-advance rate = sampled ageScale (1.0 neutral). this.age[]
+  // advances by dt × ageRate, so this.age IS the effective/scaled age that every
+  // age-keyed sample (ramps, dampfer, cull, GPU flipbook) reads.
+  private ageRate!: Float32Array;
   private scalerGens: ParticleValueGenerator[] = [];
   private scalerGlowGens: ParticleValueGenerator[] = [];
   private scalerScaleXGens: ParticleValueGenerator[] = [];
@@ -1119,6 +1134,7 @@ class SystemRenderer {
     // multipliers, evaluated on their own parameterType axes in tick(). NO ×15.
     this.emitterSizeGen = system.emitter?.sizeGenerator;
     this.ageScaleGen = system.emitter?.ageScaleGenerator;
+    this.ageScaleAuxGen = system.emitter?.ageScaleAuxGenerator;
     // H5 random-cell cap: the count of frames a randomFrameOnly particle can
     // land on. Engine seeds the frame byte in [0, framesRangeEnd); fall back
     // to the full grid when the range wasn't authored.
@@ -1154,6 +1170,7 @@ class SystemRenderer {
     this.velGpu = new Float32Array(this.capacity * 3);
     this.age = new Float32Array(this.capacity);
     this.lifetime = new Float32Array(this.capacity);
+    this.ageRate = new Float32Array(this.capacity);
     this.colorRGBA = new Float32Array(this.capacity * 4);
     this.sizeArr = new Float32Array(this.capacity);
     this.glowStrengthArr = new Float32Array(this.capacity);
@@ -1644,7 +1661,10 @@ class SystemRenderer {
     for (let i = 0; i < this.capacity; i++) {
       if (this.age[i] < 0) continue;
       const prevAge = this.age[i];
-      this.age[i] += dt;
+      // this.age is the EFFECTIVE (ageScale-folded) age: advances at dt × ageRate
+      // so age-keyed ramps + the cull see the scaled clock (native rec[0x00] +=
+      // dt × ageScaleRate, FUN_14071b7f0). lifetime already carries × aux below.
+      this.age[i] += dt * this.ageRate[i];
       if (this.age[i] >= this.lifetime[i]) {
         this.age[i] = -1;
         this.alive--;
@@ -2044,8 +2064,16 @@ class SystemRenderer {
     sc.systemSpeed = 0;
     sc.particleIndex = this.pidx[slot];
     const base = sampleGenAxis(this.emitterSizeGen, sc, DEFAULT_SIZE);
+    // SIZE = emitter.sizeGenerator × static ONLY (native record 0x20). ageScale/aux
+    // are age-clock coefficients, not size factors: ageScale → per-particle age
+    // RATE; aux → death-threshold extension (lifetime × aux). Native dies when
+    // scaledAge > maxAge × aux (FUN_14071b7f0); here this.age is already scaled, so
+    // the existing `age >= lifetime` cull holds with lifetime = maxAge × aux.
+    this.psize[slot] = base;
     const ageScale = this.ageScaleGen ? sampleGenAxis(this.ageScaleGen, sc, 1) : 1;
-    this.psize[slot] = base * ageScale;
+    const ageAux = this.ageScaleAuxGen ? sampleGenAxis(this.ageScaleAuxGen, sc, 1) : 1;
+    this.ageRate[slot] = ageScale > 0 ? ageScale : 1; // guard div-by-zero / negative
+    this.lifetime[slot] *= ageAux; // base was this.maxAge (set above); aux>1 → lives longer
     let sizeScale0 = 1;
     for (let s = 0; s < this.scalerGens.length; s++) {
       if (this.scalerDelays[s] > 0) continue; // delayed scalers are inactive at spawn (age 0)
