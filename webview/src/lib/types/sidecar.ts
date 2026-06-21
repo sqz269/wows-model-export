@@ -379,6 +379,10 @@ export interface ParticleComponentBody {
   // scaler
   sizeGenerator?: ParticleValueGenerator;
   scaleXGenerator?: ParticleValueGenerator;
+  // resizer (PCAT[4]) — inline 12-byte body, NOT a relptr ValueGenerator.
+  // Size interpolation endpoints; runtime apply semantics still RE-pending.
+  sizeFrom?: number;
+  sizeTo?: number;
   // force
   forceXGenerator?: ParticleValueGenerator;
   forceYGenerator?: ParticleValueGenerator;
@@ -506,7 +510,12 @@ export interface ParticleRenderer {
   softParticleDepthScale?: number;
   /** Renderer +0x60 width multiplier for sprite aspect. */
   scaleX?: number;
-  /** Renderer +0x74 alpha multiplier. */
+  /** Renderer.opacityMultiplier (+0x74 f32). NOT a final-alpha multiplier
+   *  (legacy name). Native FUN_140716f00 packs int(v)<2?0:int(v)-1 into a
+   *  draw-payload byte (ps4.txt:639 `ubfe ...,8,8,v2.w`) that POSTERIZES two
+   *  internal lighting factors (round_ne(f*steps)/steps; steps=0 = no-op).
+   *  ~2% of corpus author v>=2 (the only firing values); 0/0.5/0.7/1.0
+   *  int-cast to 0 steps in native too, so they are no-ops by design. */
   opacityMultiplier?: number;
   /** PS_RRC label (4 values: bottom / corner / center / custom).
    *  Recovered from the binary enum table @ 0x1420bf0d0. */

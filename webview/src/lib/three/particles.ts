@@ -921,7 +921,15 @@ class SystemRenderer {
         if (body.scaleXGenerator)
           this.scalerScaleXGens.push(body.scaleXGenerator as ParticleValueGenerator);
       } else if (c.action === 'resizer') {
-        if (body.sizeGenerator) this.scalerGens.push(body.sizeGenerator as ParticleValueGenerator);
+        // resizer = interpolate sprite size sizeFrom -> sizeTo over particle
+        // life. Producer now emits body.sizeFrom / body.sizeTo (raw BW units).
+        // INTENTIONALLY NOT WIRED: scalerGens is a multiplicative product and
+        // these endpoints are absolute sizes (not ~1.0 multipliers), so feeding
+        // them there would inflate sprite size up to ~1000x. Native folds
+        // resizer into the size path (finding-62) but overwrite-vs-multiply, the
+        // lerp axis, and any normalization are UNRESOLVED statically. Wire only
+        // after a Frida hook on the resizer per-particle apply callback (sibling
+        // of scaler's FUN_140742280) confirms the integrator.
       } else if (c.action === 'dampfer') {
         if (body.velocityGenerator)
           this.dampGen = body.velocityGenerator as ParticleValueGenerator;
@@ -2908,7 +2916,16 @@ interface ParticleMaterialOptions {
   /** Renderer.flipTexcoordU/V (+0x9c/+0x9d): mirror local sprite UVs. */
   flipTexcoordU?: boolean;
   flipTexcoordV?: boolean;
-  /** Renderer.velocityOriented (+0x9a): rotate sprite toward screen-space velocity. */
+  /** Renderer.velocityOriented (+0x9a): orient toward velocity. NATIVE
+   *  FUN_1406d29c0 picks a velocity-aligned BASIS (U,V,N) with the SAME scalar
+   *  size on BOTH axes — there is NO velocity-magnitude stretch (elongation is
+   *  authored in scaleX; the per-axis scaler is Frida open-question #2). The
+   *  current webview only spins the SAMPLED UV footprint inside a fixed
+   *  camera-facing square (FS sprite-rotation block), so rectangular
+   *  (scaleX!=1) sprites don't yet get a velocity-aligned quad. A faithful
+   *  geometry-level basis (screen-2D vs world-3D + axis assignment) is BLOCKED
+   *  on a Frida hook of FUN_1406d29c0 — do NOT guess it from parse offsets
+   *  (DrawRec +8 trap). */
   velocityOriented?: boolean;
   /** Renderer lighting scalars (+0x54, +0x64..+0x6c). Note: renderer
    *  lightingShineness (+0x4c) is deliberately NOT consumed here — DXBC audit
@@ -3462,6 +3479,10 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             // the vertex shader, rotate source geometry by the inverse angle,
             // then sample the unrotated sprite UVs.
             vec2 rel = pointGeom - pivotGeom;
+            // velocityOriented: spins the SAMPLED UV footprint inside the fixed
+            // square (an isotropic approximation of native's velocity-aligned
+            // basis). NOT a geometry rotation and NOT a stretch — see the
+            // velocityOriented field doc. A faithful basis is Frida-blocked.
             float spriteAngle = vRotationPhase + (uVelocityOriented > 0.5 ? vVelocityAngle : 0.0);
             float s = sin(spriteAngle);
             float c = cos(spriteAngle);

@@ -743,8 +743,18 @@ def _decode_action_body(
         out["forceZGenerator"] = _decode_scalar_vg(buf, fa + 0x20, file_end)
         out["delay"] = struct.unpack_from("<f", buf, fa + 0x30)[0]
     elif action_name == "resizer":
-        # 12-byte body, internal layout TBD per spec. Skip for MVP.
-        pass
+        # 12-byte inline body (corpus-verified, 310/310 systems). Layout:
+        #   +0x00 i32 type tag (==0 in all 310; mirrors a linear-VG type)
+        #   +0x04 f32 sizeFrom   +0x08 f32 sizeTo
+        # Either endpoint may be larger (e.g. 1000->250 shrink, 5->1000 grow),
+        # so these are interpolation endpoints, not (rate, target). Raw BW units
+        # (same space as emitter sizeGenerator; consumer applies NATIVE_TO_METRES
+        # at draw). NOTE the i32 tag name is unconfirmed (==0 everywhere) and the
+        # per-particle APPLY semantics (lerp axis / overwrite vs multiply) are
+        # NOT yet RE-resolved — consumer keeps the field inert until then.
+        out["_typeTag"] = struct.unpack_from("<i", buf, fa + 0x00)[0]
+        out["sizeFrom"] = struct.unpack_from("<f", buf, fa + 0x04)[0]
+        out["sizeTo"] = struct.unpack_from("<f", buf, fa + 0x08)[0]
     elif action_name == "plane":
         eff = _read_resource_ref(buf, fa + 0x00, file_end)
         if eff is not None:
@@ -816,8 +826,14 @@ def _decode_action_body(
         out["initialVelocityGenerator"] = _decode_variant_vg(buf, fa + 0x20, file_end)
         (out["systemAgeLimitMin"], out["systemAgeLimitMax"]) = \
             struct.unpack_from("<2f", buf, fa + 0x30)
-        (out["velocityInheritanceFactor"], out["minRandomRateBound"]) = \
-            struct.unpack_from("<2i", buf, fa + 0x38)
+        # +0x38 velocityInheritanceFactor is an IEEE-754 f32, NOT an i32: the
+        # native descriptor tags it 'i' = 4-byte slot, but every corpus value is
+        # a canonical float bit-pattern (0x3F800000=1.0, 0x3E99999A=0.3; reading
+        # as int yields 1065353216 garbage). It mirrors the emitter sibling
+        # inheritVelocityFactor (+0x84, f32). +0x3c minRandomRateBound IS a
+        # genuine i32 (sentinel -1 = unbounded).
+        out["velocityInheritanceFactor"] = struct.unpack_from("<f", buf, fa + 0x38)[0]
+        out["minRandomRateBound"] = struct.unpack_from("<i", buf, fa + 0x3c)[0]
         out["repeated"] = bool(buf[fa + 0x40])
         out["useSmoothRate"] = bool(buf[fa + 0x41])
         out["useWorldCoordinates"] = bool(buf[fa + 0x42])
