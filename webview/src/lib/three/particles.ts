@@ -3528,8 +3528,16 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             vec2 grid = vec2(fx, fy);
             vec2 cell0 = (vec2(mod(n0, fx), floor(n0 / fx)) + local) / grid;
             vec2 cell1 = (vec2(mod(n1, fx), floor(n1 / fx)) + local) / grid;
-            vec2 mv0 = texture2D(mvMap, cell0).gb * 2.0 - 1.0;
-            vec2 mv1 = texture2D(mvMap, cell1).gb * 2.0 - 1.0;
+            // _MVEA warp channels are LIGHTING-GATED (RE ps4.txt:574-576):
+            // sample r3.xyz=t3, then mad r3, r3.zyxy,2,-1, then
+            // movc r3.xy, lightingType, (B,G), (R,G) -- the engine selects
+            // (du,dv)=(B,G) under lightmapping and (R,G) under lambert. This
+            // path previously read (G,B) unconditionally, which transposes the
+            // warp under lightmapping and uses the wrong U source under lambert.
+            // The _MVEA DDS decodes in native RGBA order (dds/index.ts -- no BGRA
+            // swap), so .bg / .rg address the literal blue/green / red/green texels.
+            vec2 mv0 = (uLightingMode > 0.5 ? texture2D(mvMap, cell0).bg : texture2D(mvMap, cell0).rg) * 2.0 - 1.0;
+            vec2 mv1 = (uLightingMode > 0.5 ? texture2D(mvMap, cell1).bg : texture2D(mvMap, cell1).rg) * 2.0 - 1.0;
             vec2 uv0 = cell0 - mv0 * f * mvDistortion;
             vec2 uv1 = cell1 + mv1 * (1.0 - f) * mvDistortion;
             base = mix(texture2D(map, uv0), texture2D(map, uv1), f);
