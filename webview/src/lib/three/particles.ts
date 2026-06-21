@@ -3078,11 +3078,25 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
   const pointExtent = spriteRotation
     ? Math.sqrt(spriteAspectX * spriteAspectX + 1)
     : Math.max(spriteAspectX, 1);
+  const hasExplicitOrientation = vectorHasLength(opts.explicitOrientation);
   const explicitOrientation =
-    vectorHasLength(opts.explicitOrientation) && (opts.hideStartCos ?? 1) < 0.999
+    hasExplicitOrientation && (opts.hideStartCos ?? 1) < 0.999
       ? opts.explicitOrientation
       : undefined;
   const useHideAngle = explicitOrientation ? 1 : 0;
+  // Fixed-orientation quad (RE FUN_1406d29c0 explicit-vector branch, build
+  // 12506899): native builds the billboard basis from the per-particle
+  // orientation vector — seeded from renderer.explicitOrientation via
+  // FUN_1406d2790 — so the quad FACES explicitOrientation instead of the camera.
+  // The default (zero explicitOrientation) keeps the camera-facing basis
+  // (param_2[1] = camera, unanimous in the 5-agent corroboration). ~36% of
+  // systems carry a nonzero explicitOrientation (mostly (0,1,0) ground-flat +
+  // (1,0,0)/(0,0,1) cards). velocityOriented systems use a velocity basis, so
+  // they are excluded here (left camera-facing) rather than guessed at.
+  const fixedOrientationVec =
+    hasExplicitOrientation && !opts.velocityOriented ? opts.explicitOrientation : undefined;
+  const useFixedOrientation = fixedOrientationVec ? 1 : 0;
+  const orientationVec = explicitOrientation ?? fixedOrientationVec;
   const hideSpeed =
     opts.hideSpeed !== undefined && Number.isFinite(opts.hideSpeed) && opts.hideSpeed > 0
       ? opts.hideSpeed
@@ -3172,11 +3186,12 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       // term and flips it for one lightmapping path. Gate to non-default
       // hideStartCos so default-authored explicit orientations stay neutral.
       uUseHideAngle: { value: useHideAngle },
+      uUseFixedOrientation: { value: useFixedOrientation },
       uExplicitOrientation: {
         value: new THREE.Vector3(
-          explicitOrientation?.[0] ?? 0,
-          explicitOrientation?.[1] ?? 0,
-          explicitOrientation?.[2] ?? 1,
+          orientationVec?.[0] ?? 0,
+          orientationVec?.[1] ?? 0,
+          orientationVec?.[2] ?? 1,
         ).normalize(),
       },
       uExplicitOrientationLocal: { value: opts.explicitOrientationLocal ? 1 : 0 },
@@ -3279,6 +3294,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float uUseHideAngle;
       uniform vec3 uExplicitOrientation;
       uniform float uExplicitOrientationLocal;
+      uniform float uUseFixedOrientation;
       uniform float uHideStartCos;
       uniform float uHideSpeed;
       uniform float uHideInvert;
@@ -3329,10 +3345,32 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         // no hardware ALIASED_POINT_SIZE_RANGE cap.
         vec2 cornerUV = position.xy;
         vLocalUV = cornerUV;
-        vec4 mvPosition = modelViewMatrix * vec4(iPosition, 1.0);
         float worldDiam = size * vPointExtent;
-        vec2 viewOffset = vec2(cornerUV.x - 0.5, 0.5 - cornerUV.y) * worldDiam;
-        gl_Position = projectionMatrix * vec4(mvPosition.xyz + vec3(viewOffset, 0.0), 1.0);
+        if (uUseFixedOrientation > 0.5) {
+          // Fixed-orientation quad (RE FUN_1406d29c0 explicit-vector branch): the
+          // quad FACES world explicitOrientation (normal = N) instead of the
+          // camera; U/V span the perpendicular plane (V up-ish). N=(0,1,0) -> the
+          // fallback U yields a flat XZ ground quad; N=(1,0,0) -> a vertical YZ
+          // card. Same world-diameter sizing as the camera-facing path.
+          vec3 N = uExplicitOrientationLocal > 0.5
+            ? normalize(mat3(modelMatrix) * uExplicitOrientation)
+            : normalize(uExplicitOrientation);
+          vec3 U = cross(N, vec3(0.0, 1.0, 0.0));
+          float ulen = length(U);
+          U = (ulen > 1e-4) ? U / ulen : vec3(1.0, 0.0, 0.0);
+          vec3 V = cross(U, N);
+          vec3 centerW = (modelMatrix * vec4(iPosition, 1.0)).xyz;
+          vec3 cornerW = centerW
+            + U * ((cornerUV.x - 0.5) * worldDiam)
+            + V * ((0.5 - cornerUV.y) * worldDiam);
+          gl_Position = projectionMatrix * viewMatrix * vec4(cornerW, 1.0);
+        } else {
+          // INSTANCED camera-facing billboard (default, unchanged): expand the
+          // quad in view space so it always faces the camera.
+          vec4 mvPosition = modelViewMatrix * vec4(iPosition, 1.0);
+          vec2 viewOffset = vec2(cornerUV.x - 0.5, 0.5 - cornerUV.y) * worldDiam;
+          gl_Position = projectionMatrix * vec4(mvPosition.xyz + vec3(viewOffset, 0.0), 1.0);
+        }
       }
     `,
     fragmentShader: /* glsl */ `
