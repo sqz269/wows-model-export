@@ -672,6 +672,15 @@ class SystemRenderer {
   private snapToSeaLevel = false;
   // Per-action driver fields.
   private tintColor: ParticleColor | undefined;
+  // tint period/repeat (PCAT): the curve .time keys are ABSOLUTE SECONDS
+  // spanning [0, period] (corpus: max key time == period for ~99.98% of
+  // curves), so the curve is sampled at raw age with NO /period normalization.
+  // `repeat` (~33% of tint actions) loops the curve every `period` seconds
+  // instead of holding the final key; period==0 disables the wrap. (`delay` is
+  // 0 across the whole tint corpus, and `useVelocity` — 32 systems — is left
+  // unwired pending a ×15 speed-unit check.)
+  private tintPeriod = 0;
+  private tintRepeat = false;
   private alphaRamp: ParticleRamp | undefined;
   private forceX: ParticleValueGenerator | undefined;
   private forceY: ParticleValueGenerator | undefined;
@@ -923,7 +932,11 @@ class SystemRenderer {
           });
         }
       } else if (c.action === 'tint') {
-        if (body.tint) this.tintColor = body.tint as ParticleColor;
+        if (body.tint) {
+          this.tintColor = body.tint as ParticleColor;
+          this.tintPeriod = typeof body.period === 'number' ? body.period : 0;
+          this.tintRepeat = body.repeat === true;
+        }
       } else if (c.action === 'alphaSetter') {
         if (body.ramp) this.alphaRamp = body.ramp as ParticleRamp;
       } else if (c.action === 'scaler') {
@@ -1697,7 +1710,12 @@ class SystemRenderer {
       // targets in FUN_14071a990 (alpha clamped at 0x50), copies that into
       // working color, applies tint/alphaSetter actions, then multiplies the
       // TINT targets in FUN_14071b7f0 and clamps working alpha at 0x40.
-      sampleColor(this.tintColor, age, SystemRenderer.TMP_COL);
+      // repeat=true loops the tint curve every `period` seconds (== the curve's
+      // last key time); repeat=false holds the final key (sampleColor
+      // end-clamps). No /period normalization, no delay subtraction (delay is 0
+      // across the whole tint corpus).
+      const tintT = this.tintRepeat && this.tintPeriod > 0 ? age % this.tintPeriod : age;
+      sampleColor(this.tintColor, tintT, SystemRenderer.TMP_COL);
       const alphaT = this.alphaSetterIsSystemAge ? this.elapsed : age;
       const baseAlpha = clamp01(
         this.intensityColorAlphaMultiplier * this.distanceColorAlphaMultiplier,
