@@ -117,46 +117,6 @@ function particleByteStepCount(value: unknown): number {
   return raw < 2 ? 0 : Math.min(raw - 1, 255);
 }
 
-/** Detect a VESTIGIAL sprite-sheet grid — the only reliable flipbook-vs-single
- *  sprite discriminator. RE (2026-06-21, wf_9fc303df-cab) proved the engine has
- *  NO metadata gate: `FUN_14071cec0` copies framesPerX/Y verbatim and always
- *  samples cell 0 for noAnimation, so a single centered logo mis-authored with a
- *  framesPerX/Y grid (e.g. BA_Logo.dds, 7x7 + noAnimation) samples a transparent
- *  corner and is (near-)invisible in STOCK WoWS too — a WG authoring bug. Since
- *  framesPerX=7+noAnimation is bit-identical to a real 7x7 sheet, the grid can
- *  only be judged vestigial from CONTENT: cell (0,0) over [0,1/fx]x[0,1/fy] is
- *  ~fully transparent while the texture has real opaque coverage elsewhere.
- *  Returns false when decoded pixels are unavailable (GPU-compressed fallback,
- *  no `.image.data`) → the engine-faithful cell-0 crop is kept. */
-function spriteSheetCell0Empty(tex: THREE.Texture, fx: number, fy: number): boolean {
-  const img = (tex as { image?: { data?: ArrayLike<number>; width?: number; height?: number } }).image;
-  const data = img?.data;
-  const W = img?.width ?? 0;
-  const H = img?.height ?? 0;
-  if (!(data instanceof Uint8Array || data instanceof Uint8ClampedArray) || W < fx || H < fy) {
-    return false;
-  }
-  const cw = Math.max(1, Math.floor(W / fx));
-  const ch = Math.max(1, Math.floor(H / fy));
-  const A = 16; // alpha threshold (0..255) for "opaque enough to be content"
-  let cell0 = 0;
-  for (let y = 0; y < ch; y++) {
-    for (let x = 0; x < cw; x++) if (data[(y * W + x) * 4 + 3] > A) cell0++;
-  }
-  if (cell0 / (cw * ch) >= 0.01) return false; // cell 0 has content → a real frame → crop
-  // cell 0 is ~empty; confirm the texture isn't just blank (subsampled scan).
-  const step = Math.max(1, Math.floor(Math.min(W, H) / 128));
-  let full = 0;
-  let tot = 0;
-  for (let y = 0; y < H; y += step) {
-    for (let x = 0; x < W; x += step) {
-      tot++;
-      if (data[(y * W + x) * 4 + 3] > A) full++;
-    }
-  }
-  return full / tot > 0.03; // empty cell 0 + real content elsewhere = vestigial grid
-}
-
 function hasNonZeroNumber(value: unknown, eps = 1e-6): boolean {
   return Math.abs(finiteNumber(value, 0)) > eps;
 }
@@ -3279,12 +3239,6 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       framesPerXY: {
         value: new THREE.Vector2(opts.framesPerX ?? 1, opts.framesPerY ?? 1),
       },
-      // Set to 1 by bindTexture when texture content proves the framesPerX/Y grid
-      // is vestigial (a single sprite mis-authored with a grid; see
-      // spriteSheetCell0Empty) — makes the noAnimation static-cell path sample the
-      // FULL texture instead of the transparent cell-0 corner. Default 0 keeps the
-      // engine-faithful cell-0 crop for genuine sheets.
-      uVestigialGrid: { value: 0 },
       frameRange: {
         value: new THREE.Vector2(framesBegin, framesEnd),
       },
@@ -3522,7 +3476,6 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform vec4 atlasRect;
       uniform float useAtlasRect;
       uniform vec2 framesPerXY;
-      uniform float uVestigialGrid;
       uniform vec2 frameRange;
       uniform float uFrameRate;
       uniform float uUseFramePhase;
@@ -3718,21 +3671,18 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             }
             base = mix(texture2D(map, puv0), texture2D(map, puv1), f);
           } else {
-            // Static cell. H4 (RE doc 63): a noAnimation system on a direct
-            // multi-cell DDS shows CELL 0 only (engine forces the frame byte
-            // to 0, FUN_14071b7f0 @0x14071c5a3) — without this the whole grid
-            // crams into one quad and reads as garbage. Manifest atlas rects
-            // already select one authored TGA sprite inside the packed atlas,
-            // so splitting the rect again samples only its padded corner and
-            // turns soft/glow sprites into hard squares.
+            // Static cell = the noAnimation path. The engine samples the FULL
+            // texture here: FUN_14071ffb0 forces framesPerX/Y to 1x1 when
+            // animationType==noAnimation (CMP [cfg+0x168],0; JZ skips the grid
+            // copy), so the authored framesPerX/Y are VESTIGIAL for noAnimation.
+            // The old "crop to cell 0" (RE doc 63 H4) diverged from the engine and
+            // hid single sprites mis-authored with a grid (e.g. BA_Logo 7x7). The
+            // grid is provably meaningless here: noAnim textures reuse one image
+            // under conflicting grids (water_ring_c at 8x8 AND 9x9; glow_w at
+            // 2x2..32x1) — a single image cannot be two different sheets. So:
+            // sample the full texture (atlas-rect mapping still applies below).
             vec2 puv = local;
-            // uVestigialGrid==1 (set by bindTexture's content test) means the
-            // framesPerX/Y grid is vestigial on a single sprite — sample the full
-            // texture instead of cropping to the (transparent) cell-0 corner.
-            if (fx * fy > 1.0 && useAtlasRect <= 0.5 && uVestigialGrid < 0.5) {
-              puv = puv / vec2(fx, fy);
-            }
-            vec2 gridUv = puv; // pre-atlas-remap cell-0 UV, shared by _MVEA
+            vec2 gridUv = puv; // pre-atlas-remap UV, shared by _MVEA
             if (useAtlasRect > 0.5) {
               puv = mix(atlasRect.xy, atlasRect.zw, puv);
             }
@@ -4421,22 +4371,6 @@ export class ParticleScene {
     if (!tex) return;
     material.uniforms.map.value = tex;
     material.uniforms.useMap.value = 1;
-    // WG-authoring-bug workaround: a single sprite mis-authored with a
-    // framesPerX/Y grid + noAnimation samples a transparent cell-0 corner
-    // (engine-faithful but invisible — see spriteSheetCell0Empty). When the
-    // decoded content proves the grid is vestigial, sample the full texture.
-    // GUARD: WG names genuine flipbook sheets `<name>_CxR` (e.g. Smoke_red_7x7);
-    // a declared sheet keeps its cell-0 crop even if frame 0 is sparse, so never
-    // override one. (Corpus: 0/140 noAnim+grid textures carry the suffix, and many
-    // reuse one texture under conflicting grids — e.g. glow_w as 2x2..32x1 —
-    // confirming the grid is vestigial noise. So in practice the content test
-    // drives it; the suffix guard just future-proofs real _CxR sheets.)
-    const fxy = material.uniforms.framesPerXY?.value as { x: number; y: number } | undefined;
-    const baseName = workspaceRelPath.split('/').pop() ?? '';
-    const declaredSheet = /_\d+x\d+(?:[._]|$)/i.test(baseName);
-    if (!declaredSheet && fxy && fxy.x * fxy.y > 1 && spriteSheetCell0Empty(tex, fxy.x, fxy.y)) {
-      material.uniforms.uVestigialGrid.value = 1;
-    }
     material.needsUpdate = true;
   }
 
