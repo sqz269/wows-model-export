@@ -958,6 +958,19 @@ def autofill_for_hp(
         elif group_key == "torpedoes":
             _fill_torpedo_fields(mount, out)
         # directors / finders / radars / airArmament: display_name + miscFilter only.
+
+        # Per-mount damage state — HP / destructibility / crit / repair from the
+        # mount's nested HitLocation* block (sibling to the arc/deadMesh fields
+        # above). The block's key name varies by mount type, so probe the same
+        # set the hull-side reader uses. Feeds the consumer module-destruction
+        # model; omitted entirely for mounts WG carries no HitLocation* for.
+        for hl_key in _HP_HITLOC_KEYS:
+            hl = mount.get(hl_key)
+            if isinstance(hl, dict):
+                meta = _hit_location_meta(hl)
+                if meta:
+                    out["hit_location"] = meta
+                break
         return out
     return {}
 
@@ -1652,21 +1665,26 @@ _HULL_HITLOC_KEYS: tuple[str, ...] = (
     "OvCit", "Sonar",
 )
 
-# HitLocation* sub-blocks per HP_ mount — survey: ``HitLocationArtillery``,
-# ``HitLocationTorpedo``, ``HitLocationEngine``, ``HitLocationSuo``. CV / SS /
-# DC mounts use parallel names.
+# HitLocation* sub-blocks, by their REAL GameParams key names. Verified by
+# surveying the full GameParams dump (2026-06-21): the only ``HitLocation*``
+# keys that exist are HitLocationAirDefense / HitLocationATBA /
+# HitLocationArtillery / HitLocationTorpedo / HitLocationDepthCharge /
+# HitLocationEngine / HitLocationPingerGun / HitLocationMissileGun /
+# HitLocationWaveGun. The earlier speculative names (HitLocationSecondary,
+# HitLocationAA, HitLocationDC, HitLocation{Director,Finder,Radar,Catapult,Suo})
+# do NOT exist in GameParams and silently never matched — secondaries are
+# ``HitLocationATBA`` and AA is ``HitLocationAirDefense``. Bare ``HitLocation``
+# kept last as a defensive fallback.
 _HP_HITLOC_KEYS: tuple[str, ...] = (
     "HitLocationArtillery",
-    "HitLocationSecondary",
-    "HitLocationAA",
+    "HitLocationATBA",
+    "HitLocationAirDefense",
     "HitLocationTorpedo",
-    "HitLocationDC",
-    "HitLocationDirector",
-    "HitLocationFinder",
-    "HitLocationRadar",
-    "HitLocationCatapult",
+    "HitLocationDepthCharge",
+    "HitLocationMissileGun",
+    "HitLocationPingerGun",
+    "HitLocationWaveGun",
     "HitLocationEngine",
-    "HitLocationSuo",
     "HitLocation",
 )
 
@@ -2274,8 +2292,27 @@ def classify_splash_boxes(
     return {"boxes": boxes, "hit_locations": hit_locations}
 
 
+def _coerce_float_pair(v: Any) -> list[float] | None:
+    """Coerce a GameParams 2-tuple (e.g. ``critProb`` ``[0.05, 0.75]``) to a
+    ``[float, float]`` list, or ``None`` if it isn't a usable pair."""
+    if isinstance(v, (list, tuple)) and len(v) == 2:
+        a = _safe_float(v[0])
+        b = _safe_float(v[1])
+        if a is not None and b is not None:
+            return [a, b]
+    return None
+
+
 def _hit_location_meta(sec: dict[str, Any]) -> dict[str, Any]:
-    """Extract per-section damage-state numbers from a HitLocation* block."""
+    """Extract damage-state numbers from a HitLocation* block.
+
+    Shared by the hull-side sections / engine + fire-control roots AND the
+    per-HP mounts (turrets / secondaries / AA / torpedoes), so it also surfaces
+    the destructibility + crit fields that only mounts carry
+    (``canBeDestroyed``, ``critProb`` / ``critProbHP``, ``autoRepairTimeMin``).
+    Every field is emitted only when present, so hull-section output is
+    unchanged for blocks that omit the mount-only keys.
+    """
     out: dict[str, Any] = {}
     if isinstance(sec.get("hlType"), str) and sec["hlType"]:
         out["hl_type"] = sec["hlType"]
@@ -2284,6 +2321,16 @@ def _hit_location_meta(sec: dict[str, Any]) -> dict[str, Any]:
     max_hp = _safe_float(sec.get("maxHP"))
     if max_hp is not None:
         out["max_hp"] = max_hp
+    # Destructibility — present on per-HP mounts; absent or False on most hull
+    # zones. Emit only when WG carries the key so hull output is unchanged.
+    if isinstance(sec.get("canBeDestroyed"), bool):
+        out["can_be_destroyed"] = sec["canBeDestroyed"]
+    crit_prob = _coerce_float_pair(sec.get("critProb"))
+    if crit_prob is not None:
+        out["crit_prob"] = crit_prob
+    crit_prob_hp = _coerce_float_pair(sec.get("critProbHP"))
+    if crit_prob_hp is not None:
+        out["crit_prob_hp"] = crit_prob_hp
     regen = _safe_float(sec.get("regeneratedHPPart"))
     if regen is not None:
         out["regen_part"] = regen
@@ -2293,6 +2340,9 @@ def _hit_location_meta(sec: dict[str, Any]) -> dict[str, Any]:
     repair = _safe_float(sec.get("autoRepairTime"))
     if repair is not None:
         out["auto_repair_s"] = repair
+    repair_min = _safe_float(sec.get("autoRepairTimeMin"))
+    if repair_min is not None:
+        out["auto_repair_min_s"] = repair_min
     broken = _safe_float(sec.get("brokenRepairTime"))
     if broken is not None:
         out["broken_repair_s"] = broken

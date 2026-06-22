@@ -288,6 +288,12 @@ _PLACEMENT_ORDER: tuple[str, ...] = (
     "traverse_rate",
     "elev_rate",
     "reload_s",
+    # Per-mount damage state — HP / destructibility / crit / repair numbers
+    # read from the mount's nested HitLocation* GameParams block (the same
+    # block the hull-side hitbox.hit_locations reads for sections). Feeds the
+    # consumer module-destruction model (turret incap/destroy + repair).
+    # Absent for mounts WG doesn't make destructible.
+    "hit_location",
     # AA-specific.
     "aa_range_km",
     "aa_dps",
