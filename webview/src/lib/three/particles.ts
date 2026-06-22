@@ -117,6 +117,46 @@ function particleByteStepCount(value: unknown): number {
   return raw < 2 ? 0 : Math.min(raw - 1, 255);
 }
 
+/** Detect a VESTIGIAL sprite-sheet grid — the only reliable flipbook-vs-single
+ *  sprite discriminator. RE (2026-06-21, wf_9fc303df-cab) proved the engine has
+ *  NO metadata gate: `FUN_14071cec0` copies framesPerX/Y verbatim and always
+ *  samples cell 0 for noAnimation, so a single centered logo mis-authored with a
+ *  framesPerX/Y grid (e.g. BA_Logo.dds, 7x7 + noAnimation) samples a transparent
+ *  corner and is (near-)invisible in STOCK WoWS too — a WG authoring bug. Since
+ *  framesPerX=7+noAnimation is bit-identical to a real 7x7 sheet, the grid can
+ *  only be judged vestigial from CONTENT: cell (0,0) over [0,1/fx]x[0,1/fy] is
+ *  ~fully transparent while the texture has real opaque coverage elsewhere.
+ *  Returns false when decoded pixels are unavailable (GPU-compressed fallback,
+ *  no `.image.data`) → the engine-faithful cell-0 crop is kept. */
+function spriteSheetCell0Empty(tex: THREE.Texture, fx: number, fy: number): boolean {
+  const img = (tex as { image?: { data?: ArrayLike<number>; width?: number; height?: number } }).image;
+  const data = img?.data;
+  const W = img?.width ?? 0;
+  const H = img?.height ?? 0;
+  if (!(data instanceof Uint8Array || data instanceof Uint8ClampedArray) || W < fx || H < fy) {
+    return false;
+  }
+  const cw = Math.max(1, Math.floor(W / fx));
+  const ch = Math.max(1, Math.floor(H / fy));
+  const A = 16; // alpha threshold (0..255) for "opaque enough to be content"
+  let cell0 = 0;
+  for (let y = 0; y < ch; y++) {
+    for (let x = 0; x < cw; x++) if (data[(y * W + x) * 4 + 3] > A) cell0++;
+  }
+  if (cell0 / (cw * ch) >= 0.01) return false; // cell 0 has content → a real frame → crop
+  // cell 0 is ~empty; confirm the texture isn't just blank (subsampled scan).
+  const step = Math.max(1, Math.floor(Math.min(W, H) / 128));
+  let full = 0;
+  let tot = 0;
+  for (let y = 0; y < H; y += step) {
+    for (let x = 0; x < W; x += step) {
+      tot++;
+      if (data[(y * W + x) * 4 + 3] > A) full++;
+    }
+  }
+  return full / tot > 0.03; // empty cell 0 + real content elsewhere = vestigial grid
+}
+
 function hasNonZeroNumber(value: unknown, eps = 1e-6): boolean {
   return Math.abs(finiteNumber(value, 0)) > eps;
 }
@@ -3239,6 +3279,12 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       framesPerXY: {
         value: new THREE.Vector2(opts.framesPerX ?? 1, opts.framesPerY ?? 1),
       },
+      // Set to 1 by bindTexture when texture content proves the framesPerX/Y grid
+      // is vestigial (a single sprite mis-authored with a grid; see
+      // spriteSheetCell0Empty) — makes the noAnimation static-cell path sample the
+      // FULL texture instead of the transparent cell-0 corner. Default 0 keeps the
+      // engine-faithful cell-0 crop for genuine sheets.
+      uVestigialGrid: { value: 0 },
       frameRange: {
         value: new THREE.Vector2(framesBegin, framesEnd),
       },
@@ -3476,6 +3522,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform vec4 atlasRect;
       uniform float useAtlasRect;
       uniform vec2 framesPerXY;
+      uniform float uVestigialGrid;
       uniform vec2 frameRange;
       uniform float uFrameRate;
       uniform float uUseFramePhase;
@@ -3679,7 +3726,10 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             // so splitting the rect again samples only its padded corner and
             // turns soft/glow sprites into hard squares.
             vec2 puv = local;
-            if (fx * fy > 1.0 && useAtlasRect <= 0.5) {
+            // uVestigialGrid==1 (set by bindTexture's content test) means the
+            // framesPerX/Y grid is vestigial on a single sprite — sample the full
+            // texture instead of cropping to the (transparent) cell-0 corner.
+            if (fx * fy > 1.0 && useAtlasRect <= 0.5 && uVestigialGrid < 0.5) {
               puv = puv / vec2(fx, fy);
             }
             vec2 gridUv = puv; // pre-atlas-remap cell-0 UV, shared by _MVEA
@@ -4371,6 +4421,14 @@ export class ParticleScene {
     if (!tex) return;
     material.uniforms.map.value = tex;
     material.uniforms.useMap.value = 1;
+    // WG-authoring-bug workaround: a single sprite mis-authored with a
+    // framesPerX/Y grid + noAnimation samples a transparent cell-0 corner
+    // (engine-faithful but invisible — see spriteSheetCell0Empty). When the
+    // decoded content proves the grid is vestigial, sample the full texture.
+    const fxy = material.uniforms.framesPerXY?.value as { x: number; y: number } | undefined;
+    if (fxy && fxy.x * fxy.y > 1 && spriteSheetCell0Empty(tex, fxy.x, fxy.y)) {
+      material.uniforms.uVestigialGrid.value = 1;
+    }
     material.needsUpdate = true;
   }
 
