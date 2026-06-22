@@ -100,6 +100,33 @@
   let hasArmor = $state(false);
   let hasHitbox = $state(false);
   let hitboxCats = $state<Array<{ label: string; hex: string }>>([]);
+  // Module damage: destructible mounts + their live/dead state.
+  // Reset per ship; toggles drive viewer.setMountDestroyed (the dead-mesh swap).
+  type ModuleRow = {
+    instanceId: string;
+    assetId: string;
+    hpName: string | null;
+    section: string;
+    dead: boolean;
+  };
+  let hasModules = $state(false);
+  let modules = $state<ModuleRow[]>([]);
+  const modulesBySection = $derived.by(() => {
+    const by = new Map<string, ModuleRow[]>();
+    for (const m of modules) {
+      let arr = by.get(m.section);
+      if (!arr) {
+        arr = [];
+        by.set(m.section, arr);
+      }
+      arr.push(m);
+    }
+    return [...by.entries()].map(([section, rows]) => ({
+      section,
+      rows,
+      deadCount: rows.filter((r) => r.dead).length,
+    }));
+  });
   // WG bones & VFX-points overlay. Per-ship inspection state (reset on swap,
   // not persisted) — mirrors the armor/aim sections.
   let hasNodes = $state(false);
@@ -267,6 +294,11 @@
         catMap.set(s.label, s.hex);
       }
       hitboxCats = [...catMap].map(([label, hex]) => ({ label, hex }));
+
+      // Module damage: destructible mounts (turret/secondary/AA with a
+      // glb_dead or standalone _dead model). Reset per ship.
+      modules = viewer.getDestructibleMounts();
+      hasModules = modules.length > 0;
 
       // Bones & VFX overlay state (per-ship; not persisted). Re-read the
       // overlay's current visibility + per-category state + counts.
@@ -476,6 +508,20 @@
     viewer.resetSeamStates();
     seamStates = { ...viewer.getSeamStates() };
     onSeamStatesChange?.(seamStates);
+  }
+
+  // ── Module damage — per-mount dead-mesh swap ────────────────
+  async function setModuleDead(instanceId: string, dead: boolean) {
+    await viewer.setMountDestroyed(instanceId, dead);
+    modules = viewer.getDestructibleMounts();
+  }
+  async function setSectionDead(section: string, dead: boolean) {
+    for (const m of modules) {
+      if (m.section === section && m.dead !== dead) {
+        await viewer.setMountDestroyed(m.instanceId, dead);
+      }
+    }
+    modules = viewer.getDestructibleMounts();
   }
 
   async function toggleShowTextures(v: boolean) {
@@ -815,6 +861,60 @@
             Hide ship (armor only)
           </label>
         {/if}
+      </div>
+    </details>
+  {/if}
+
+  {#if hasModules}
+    <details
+      open={panelOpen['module-damage'] ?? true}
+      ontoggle={(e) => togglePanel('module-damage', e.currentTarget.open)}
+      class="group {detailsCls}"
+    >
+      <summary class={summaryCls}>Module damage</summary>
+      <div class={bodyCls}>
+        <p class="text-muted-foreground/70 text-[9px] leading-snug">
+          Swaps a mount to its destroyed (<code>glb_dead</code>) model — a destroyed-state reference,
+          visual only. Click a mount to toggle.
+        </p>
+        {#each modulesBySection as grp (grp.section)}
+          <div class="mt-1.5">
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-[11px] font-medium">
+                {grp.section}
+                <span class="text-muted-foreground">({grp.deadCount}/{grp.rows.length})</span>
+              </span>
+              <span class="flex gap-1">
+                <Button size="sm" variant="outline" onclick={() => setSectionDead(grp.section, true)}>
+                  Destroy all
+                </Button>
+                <Button size="sm" variant="outline" onclick={() => setSectionDead(grp.section, false)}>
+                  Restore
+                </Button>
+              </span>
+            </div>
+            {#if grp.rows.length <= 16}
+              <div class="mt-1 flex flex-wrap gap-1">
+                {#each grp.rows as m (m.instanceId)}
+                  <button
+                    type="button"
+                    title={m.assetId}
+                    onclick={() => setModuleDead(m.instanceId, !m.dead)}
+                    class="rounded-sm border px-1.5 py-0.5 text-[10px] {m.dead
+                      ? 'border-red-500 bg-red-500/20 text-red-300'
+                      : 'border-border text-muted-foreground hover:bg-muted'}"
+                  >
+                    {m.hpName ?? m.instanceId}
+                  </button>
+                {/each}
+              </div>
+            {:else}
+              <p class="text-muted-foreground/70 mt-1 text-[9px]">
+                {grp.rows.length} mounts — use Destroy all / Restore.
+              </p>
+            {/if}
+          </div>
+        {/each}
       </div>
     </details>
   {/if}

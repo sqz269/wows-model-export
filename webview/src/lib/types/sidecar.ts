@@ -133,6 +133,13 @@ export interface SidecarMount {
   dispersion?: SidecarMountDispersion;
   misc_filter?: string[];
   /**
+   * Per-mount damage state — HP / destructibility / crit / repair, from the
+   * mount's nested GameParams `HitLocation<Type>` block. Drives the module
+   * destruction model (turret incap/destroy + repair). Absent on mounts WG
+   * doesn't make destructible. Same shape as the hull-side `hit_locations`.
+   */
+  hit_location?: SidecarHitLocation;
+  /**
    * Yaw traverse limits `[min, max]` in degrees, in the mount's rest-relative
    * frame (0° = bind/rest heading — the rig's `Rotate_Y` bind). The arc the
    * mount can physically rotate through. Absent on AA (omnidirectional) and
@@ -228,6 +235,18 @@ export interface SidecarHitLocation {
   enhanced_regen_part?: number;
   auto_repair_s?: number;
   broken_repair_s?: number;
+  /**
+   * Module destructibility + crit/repair (per-mount HitLocation blocks, and
+   * destructible hull sections like SteeringGear). `can_be_destroyed` gates
+   * the BROKEN/DEAD states; `crit_prob` `[min, max]` is the incapacitation
+   * chance lerped by `crit_prob_hp`; `auto_repair_min_s` is the floor of the
+   * crit auto-repair timer. Sourced from GameParams `canBeDestroyed` /
+   * `critProb` / `critProbHP` / `autoRepairTimeMin`. Absent when WG omits them.
+   */
+  can_be_destroyed?: boolean;
+  crit_prob?: [number, number];
+  crit_prob_hp?: [number, number];
+  auto_repair_min_s?: number;
 }
 
 export interface SidecarHitbox {

@@ -33,6 +33,15 @@ export interface LibraryAsset {
   glb_dead?: string;
   glb_dead_bytes?: number;
   /**
+   * Producer `dead_variant_audit` verdict comparing the dead mesh's bbox to
+   * the alive mesh: "SAME" | "Z-MIRRORED" | "X-MIRRORED" | "AMBIGUOUS" |
+   * "NO_DEAD". Diagnostic — alive + dead share ONE placement matrix, so a
+   * "Z-MIRRORED" dead model renders 180° off unless the consumer corrects it
+   * (the OI-7 fix in the ship viewer's dead-swap). Absent on entries with no
+   * dead variant.
+   */
+  dead_orientation?: string;
+  /**
    * Variant → slot → mip-chain paths (relative to `accessories/`).
    * Variants include "main", "dead", "camo_<name>", "dead_camo_<name>".
    *

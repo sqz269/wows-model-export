@@ -396,6 +396,13 @@ interface AssetBundle {
   tpl: THREE.Object3D;
   attachedDoc: Awaited<ReturnType<AttachedDocCache['load']>>;
   attachedChildTpls: Map<string, THREE.Object3D | null>;
+  /** True when loaded as a mount's DESTROYED variant (`glb_dead` +
+   *  `attachments_dead`). `instantiateMount` walks the dead attachment list
+   *  and applies the dead-orientation (OI-7) correction. */
+  dead: boolean;
+  /** Producer `dead_orientation` verdict (SAME | Z-MIRRORED | …); only
+   *  meaningful when `dead`. Drives the OI-7 placement correction. */
+  deadOrientation?: string;
 }
 
 /** Per-placement instancing stats, accumulated into `ShipLoadStats`. */
@@ -498,6 +505,10 @@ export class ShipViewer {
   private hpByInstanceId = new Map<string, string>();
   private hitboxEntries: HitboxMeshEntry[] | null = null;
   private hitboxViewEnabled = false;
+  /** Mounts currently swapped to their destroyed model (module
+   *  damage). Source of truth for the control panel's per-mount toggles;
+   *  cleared per ship and pruned when a mount is disposed/rebuilt. */
+  private destroyedMounts = new Set<string>();
 
   // Exterior switching (ship-exterior unification). `mountRecords` mirrors
   // every live placement so `setActiveExterior` can tear down + rebuild the
@@ -951,15 +962,23 @@ export class ShipViewer {
     assetId: string,
     ctx: ShipLoadContext,
     unresolved?: Map<string, number>,
+    dead = false,
   ): Promise<AssetBundle | null> {
     const libEntry = ctx.library.assets[assetId];
     if (!libEntry) return null;
+
+    // Dead variant: the destroyed mesh is the live entry's `glb_dead`
+    // sibling (turrets/guns carry it inline). Standalone `_dead` assets
+    // (gun decks) are loaded as ordinary entries with dead=false by the
+    // caller. Bail when this entry has no dead mesh.
+    const glbPath = dead ? libEntry.glb_dead : libEntry.glb;
+    if (!glbPath) return null;
 
     // Load host template + attached_accessories.json in parallel.
     // For hosts without a bundle (~most assets) the doc resolves to
     // null; instantiateMount's inner loop short-circuits.
     const [tpl, attachedDoc] = await Promise.all([
-      this.accessoryCache.load(libEntry.glb),
+      this.accessoryCache.load(glbPath),
       this.attachedDocCache.load(libEntry),
     ]);
     if (!tpl) return null;
@@ -973,10 +992,15 @@ export class ShipViewer {
     // child bundled by N main turrets is fetched once. Resolved
     // templates are stashed so instantiateMount can clone them
     // synchronously.
+    // Dead bundles draw children from `attachments_dead`, live ones from
+    // `attachments_live`. The accessoryCache dedupes across hosts so a
+    // child bundled by N mounts is fetched once.
+    const attList =
+      (dead ? attachedDoc?.attachments_dead : attachedDoc?.attachments_live) ?? [];
     const attachedChildTpls = new Map<string, THREE.Object3D | null>();
-    if (attachedDoc && attachedDoc.attachments_live.length > 0) {
+    if (attList.length > 0) {
       const childIds = new Set<string>();
-      for (const att of attachedDoc.attachments_live) childIds.add(att.asset_id);
+      for (const att of attList) childIds.add(att.asset_id);
       const childPromises = Array.from(childIds).map(async (cid) => {
         const childLib = ctx.library.assets[cid];
         if (!childLib) {
@@ -991,7 +1015,14 @@ export class ShipViewer {
       await Promise.all(childPromises);
     }
 
-    return { assetId, tpl, attachedDoc, attachedChildTpls };
+    return {
+      assetId,
+      tpl,
+      attachedDoc,
+      attachedChildTpls,
+      dead,
+      deadOrientation: libEntry.dead_orientation,
+    };
   }
 
   /**
@@ -1018,6 +1049,16 @@ export class ShipViewer {
     // every turret's yaw to the same `Rotate_Y` instance.
     const inst = cloneAccessoryInstance(bundle.tpl);
     applyPlacementMatrix(inst, placement.transform.matrix);
+    // OI-7: a destroyed mount reuses the LIVE placement matrix (alive + dead
+    // share one transform), but the producer's dead_variant_audit only
+    // DIAGNOSES a Z-mirror — it does not correct it — so a "Z-MIRRORED" dead
+    // mesh faces 180° off on the shared placement. Spin it about the mount's
+    // local up to face the right way. SAME / X-MIRRORED / AMBIGUOUS need no
+    // yaw correction. NOTE: the Z-MIRRORED branch is unverified against a real
+    // Z-mirrored asset (Montana's turret is SAME) — validate before relying.
+    if (bundle.dead && bundle.deadOrientation === 'Z-MIRRORED') {
+      inst.rotateY(Math.PI);
+    }
     // Particle/effects anchor maps (gun-effect attachments resolve their
     // host mount by hp_name / instance_id). Re-registered on exterior
     // switch so anchors always point at the LIVE mount root.
@@ -1049,7 +1090,11 @@ export class ShipViewer {
     inst.traverse((obj) => {
       const m = obj as THREE.Mesh;
       if (!m.isMesh) return;
-      this.textures.registerAccessoryMesh(m, placement);
+      // A destroyed mount (glb_dead sibling) textures with its own `*_dead_*`
+      // set, not the alive scheme. Standalone `_dead` assets (gun decks) and
+      // the dead-attachment children below load as ordinary assets whose own
+      // `main` scheme already IS the dead look, so they stay deadVariant=false.
+      this.textures.registerAccessoryMesh(m, placement, bundle.dead);
     });
     // Look for WG rig nodes (`Rotate_Y` / `Rotate_X`). Most
     // gun/main and gun/secondary mounts have them; AA and static
@@ -1091,11 +1136,13 @@ export class ShipViewer {
 
     // Attached accessories, gated by the resolved miscFilter whitelist.
     const attachedDoc = bundle.attachedDoc;
-    if (attachedDoc && attachedDoc.attachments_live.length > 0) {
+    const attList =
+      (bundle.dead ? attachedDoc?.attachments_dead : attachedDoc?.attachments_live) ?? [];
+    if (attList.length > 0) {
       const filterSet = miscFilter && miscFilter.length > 0 ? new Set(miscFilter) : null;
       const dropAll = miscFilter !== null && miscFilter.length === 0;
 
-      for (const att of attachedDoc.attachments_live) {
+      for (const att of attList) {
         if (dropAll) {
           stats.attachmentsFilteredByMisc++;
           continue;
@@ -1202,6 +1249,7 @@ export class ShipViewer {
           if (i >= 0) list.splice(i, 1);
         }
       }
+      this.destroyedMounts.delete(rec.instanceId);
       this.turretRigs.unregister(rec.instanceId);
       if (rec.armorRecord) {
         disposeArmorView(rec.armorRecord.entries, null);
@@ -1221,6 +1269,83 @@ export class ShipViewer {
       );
     }
     this.textures.unregisterMeshes(union);
+  }
+
+  /**
+   * Toggle ONE mount between its live and destroyed (`glb_dead`) model,
+   * reusing the placement transform — the per-mount analogue of an exterior
+   * swap (dispose → reload bundle → instantiate → re-sync state). The dead
+   * mesh resolves as either a standalone `dead_asset_id` library entry
+   * (gun decks) or the live entry's `glb_dead` sibling (turrets/guns), with
+   * `attachments_dead` swapped in for `attachments_live`. Returns false (and
+   * leaves the live mount untouched) when no dead model is available.
+   *
+   * Reference-consumer scope: the VISUAL swap only —
+   * no HP/crit/repair simulation. Downstream consumers port the swap and drive it from their
+   * own module-destruction model.
+   */
+  async setMountDestroyed(instanceId: string, dead: boolean): Promise<boolean> {
+    const ctx = this.shipCtx;
+    if (!ctx) return false;
+    const rec = this.mountRecords.get(instanceId);
+    if (!rec) return false;
+    // Capture before disposeMounts deletes the record.
+    const { section, placement } = rec;
+    const miscFilter =
+      ctx.miscFilterByInstanceId.get(instanceId) ?? placement.misc_filter ?? null;
+
+    let bundle: AssetBundle | null;
+    if (dead) {
+      const deadId = placement.dead_asset_id;
+      if (deadId && ctx.library.assets[deadId]) {
+        // Standalone `_dead` library entry (gun decks) — an ordinary load.
+        bundle = await this.loadAssetBundle(deadId, ctx);
+      } else if (ctx.library.assets[placement.asset_id]?.glb_dead) {
+        // Sibling `glb_dead` on the live entry (turrets/guns).
+        bundle = await this.loadAssetBundle(placement.asset_id, ctx, undefined, true);
+      } else {
+        console.warn(
+          `[module] ${instanceId} (${placement.asset_id}): no dead model — keeping live`,
+        );
+        return false;
+      }
+    } else {
+      bundle = await this.loadAssetBundle(placement.asset_id, ctx);
+    }
+    if (!bundle) return false;
+
+    this.disposeMounts([instanceId]); // also prunes it from destroyedMounts
+    this.instantiateMount(section, placement, bundle, miscFilter);
+    if (dead) this.destroyedMounts.add(instanceId);
+
+    // Re-sync the rebuilt mount (mirror setActiveExterior's tail): re-push
+    // textures onto the fresh entries, the visibility/LOD cascade, and the
+    // armor X-ray if it's on.
+    if (this.textures.isShowingTextures()) {
+      await this.textures.setShowTextures(true);
+      this.textures.reapplyWetness();
+    }
+    this.applyAllStates();
+    if (this.armorViewEnabled) this.setArmorView(true);
+
+    // Cascade to turret RIDERS. A sub-mount whose hp_name nests under this
+    // one (composite `<hostHp>_<subHp>`, e.g. an AA gun `HP_AGM_3_HP_AGA_4`
+    // bolted to turret `HP_AGM_3`) physically rides this mount. The destroyed
+    // model carries no hardpoint for it (the wreck's geometry differs), so the
+    // rider would float over the wreck — hide it on death, show it on restore.
+    // Hiding the rider ROOT is robust against the LOD/section cascade above:
+    // an invisible parent hides its whole subtree regardless of child flags.
+    // The trailing '_' in the prefix prevents `HP_AGM_3` matching `HP_AGM_30`.
+    const hostHp = placement.hp_name;
+    if (hostHp) {
+      const prefix = `${hostHp}_`;
+      for (const rrec of this.mountRecords.values()) {
+        if (rrec.placement?.hp_name?.startsWith(prefix)) {
+          rrec.inst.visible = !dead;
+        }
+      }
+    }
+    return true;
   }
 
   /**
@@ -1264,6 +1389,7 @@ export class ShipViewer {
     }
     this.hitboxEntries = null;
     this.hitboxViewEnabled = false;
+    this.destroyedMounts.clear();
     this.placementsByMesh.clear();
     this.placementColorEntries.length = 0;
     this.placementMeshesByLodLevel.clear();
@@ -1426,6 +1552,49 @@ export class ShipViewer {
 
   getHitboxViewEnabled(): boolean {
     return this.hitboxViewEnabled;
+  }
+
+  /** Loaded mounts that have a destroyed-state model (a standalone
+   *  `dead_asset_id` library entry, or the live entry's `glb_dead` sibling),
+   *  each tagged with its current live/dead toggle state. Drives the control
+   *  panel's per-mount module-damage controls. */
+  getDestructibleMounts(): Array<{
+    instanceId: string;
+    assetId: string;
+    hpName: string | null;
+    section: ShipSectionKey;
+    dead: boolean;
+  }> {
+    const ctx = this.shipCtx;
+    const out: Array<{
+      instanceId: string;
+      assetId: string;
+      hpName: string | null;
+      section: ShipSectionKey;
+      dead: boolean;
+    }> = [];
+    if (!ctx) return out;
+    this.mountRecords.forEach((rec, id) => {
+      const p = rec.placement;
+      const deadId = p.dead_asset_id;
+      const hasDead =
+        (!!deadId && !!ctx.library.assets[deadId]) ||
+        !!ctx.library.assets[p.asset_id]?.glb_dead;
+      if (!hasDead) return;
+      out.push({
+        instanceId: id,
+        assetId: p.asset_id,
+        hpName: p.hp_name ?? null,
+        section: rec.section,
+        dead: this.destroyedMounts.has(id),
+      });
+    });
+    out.sort((a, b) =>
+      (a.section + (a.hpName ?? a.instanceId)).localeCompare(
+        b.section + (b.hpName ?? b.instanceId),
+      ),
+    );
+    return out;
   }
 
   // ── Bones & VFX-points overlay ────────────────────────────────────────

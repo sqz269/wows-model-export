@@ -190,6 +190,7 @@ export class TextureManager {
     key: string,
     isAccessoryEntry: boolean,
     placement?: ShipPlacement,
+    deadVariant = false,
   ): void {
     const existing = this.schemesByKey.get(key);
     const stem = key.startsWith('asset:')
@@ -209,6 +210,7 @@ export class TextureManager {
       texturedByScheme: new Map(),
       maskTextureByScheme: new Map(),
       isAccessoryEntry,
+      deadVariant,
       assetId: placement?.asset_id ?? null,
       category,
       key,
@@ -250,12 +252,16 @@ export class TextureManager {
    * many library entries carry only the asset-level `texture_sets`, so
    * per-material would dead-end into a key with no schemes.
    */
-  registerAccessoryMesh(mesh: THREE.Mesh, placement: ShipPlacement): void {
+  registerAccessoryMesh(
+    mesh: THREE.Mesh,
+    placement: ShipPlacement,
+    deadVariant = false,
+  ): void {
     const matName = !Array.isArray(mesh.material) ? mesh.material?.name : '';
     const perMatKey = matName ? `asset:${placement.asset_id}:material:${matName}` : '';
     const perMatBound = !!perMatKey && (this.schemesByKey.get(perMatKey)?.size ?? 0) > 0;
     const key = perMatBound ? perMatKey : `asset:${placement.asset_id}`;
-    this.registerMesh(mesh, key, true, placement);
+    this.registerMesh(mesh, key, true, placement, deadVariant);
   }
 
   /**
@@ -872,6 +878,22 @@ export class TextureManager {
     return tex;
   }
 
+  /**
+   * Resolve the texture scheme for a DESTROYED mount: prefer the
+   * dead variant of the active scheme (`dead_<scheme>`), then plain `dead`,
+   * else the active scheme itself (no dead set bound). Destroyed mounts ship
+   * their own `*_dead_*` texture sets, so they must NOT reuse the alive scheme.
+   */
+  private deadSchemeFor(activeScheme: string, entry: TextureMeshEntry): string {
+    const candidates =
+      activeScheme === 'main' ? ['dead'] : [`dead_${activeScheme}`, 'dead'];
+    for (const c of candidates) {
+      const s = entry.slotUrlsByScheme.get(c);
+      if (s && (s.baseColor?.length ?? 0) > 0) return c;
+    }
+    return activeScheme;
+  }
+
   private async applyTextureState(
     schemeKey: string,
     onProgress?: (msg: string) => void,
@@ -889,10 +911,13 @@ export class TextureManager {
           continue;
         }
 
+        // A destroyed mount resolves to its dead texture scheme; everything
+        // else uses the global active scheme.
+        const wantScheme = e.deadVariant ? this.deadSchemeFor(schemeKey, e) : schemeKey;
         const hasOwnBase =
-          e.slotUrlsByScheme.has(schemeKey) &&
-          (e.slotUrlsByScheme.get(schemeKey)!.baseColor?.length ?? 0) > 0;
-        const cloneKey = hasOwnBase ? schemeKey : 'main';
+          e.slotUrlsByScheme.has(wantScheme) &&
+          (e.slotUrlsByScheme.get(wantScheme)!.baseColor?.length ?? 0) > 0;
+        const cloneKey = hasOwnBase ? wantScheme : 'main';
 
         let textured = e.texturedByScheme.get(cloneKey) ?? null;
         if (!textured && cloneKey === 'main') textured = e.textured;
@@ -920,7 +945,7 @@ export class TextureManager {
         }
         if (cloneKey === 'main') e.textured = textured;
 
-        await this.ensureMaskTexture(e, schemeKey);
+        await this.ensureMaskTexture(e, wantScheme);
 
         if (!this.showTexturesActive || this.activeSchemeKey !== schemeKey) return;
         e.mesh.material = textured;

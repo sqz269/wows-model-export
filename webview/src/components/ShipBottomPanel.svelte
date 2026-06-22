@@ -525,6 +525,41 @@
   const pickLibEntry = $derived(
     pickInfo && library ? (library.assets[pickInfo.asset_id] ?? null) : null,
   );
+  // Per-mount damage state for the picked mount (or, for an attached child,
+  // its host mount). Matched by instance_id against the sidecar's typed mount
+  // arrays. Drives the Pick-tab HP/crit/repair readout (module damage).
+  const pickHitLocation = $derived.by(() => {
+    void revision;
+    const id = pickInfo?.instance_id ?? pickInfo?.attached_to_instance_id;
+    if (!id) return null;
+    const sc = viewer?.getSidecar() as SidecarDoc | null;
+    if (!sc) return null;
+    for (const arr of [sc.turrets, sc.secondaries, sc.antiair, sc.torpedoes]) {
+      const m = arr?.find((x) => x.instance_id === id);
+      if (m?.hit_location) return m.hit_location;
+    }
+    return null;
+  });
+
+  // Per-mount destroyed-state (Pick-tab toggle, module-damage
+  // reference). Panel-local; the viewer owns the actual mesh swap
+  // (setMountDestroyed). Reset on ship swap.
+  let destroyedMounts = $state(new Set<string>());
+  $effect(() => {
+    void ship; // ship-identity change ⇒ clear (revision also bumps on skin/exterior)
+    destroyedMounts = new Set();
+  });
+  async function toggleMountDestroyed() {
+    const id = pickInfo?.instance_id ?? pickInfo?.attached_to_instance_id;
+    if (!id || !viewer) return;
+    const next = !destroyedMounts.has(id);
+    const ok = await viewer.setMountDestroyed(id, next);
+    if (!ok) return;
+    const updated = new Set(destroyedMounts);
+    if (next) updated.add(id);
+    else updated.delete(id);
+    destroyedMounts = updated;
+  }
 
   function openPickInLibrary() {
     if (!pickInfo) return;
@@ -1246,7 +1281,46 @@
                 <dt>library</dt>
                 <dd class="text-amber-300">unresolved</dd>
               {/if}
+              {#if pickHitLocation}
+                <dt>module HP</dt>
+                <dd>
+                  {pickHitLocation.max_hp ?? '—'}
+                  <span class="text-muted-foreground">
+                    ({pickHitLocation.can_be_destroyed ? 'destructible' : 'indestructible'})
+                  </span>
+                </dd>
+                {#if pickHitLocation.crit_prob && (pickHitLocation.crit_prob[0] > 0 || pickHitLocation.crit_prob[1] > 0)}
+                  <dt>crit chance</dt>
+                  <dd>
+                    {(pickHitLocation.crit_prob[0] * 100).toFixed(0)}–{(
+                      pickHitLocation.crit_prob[1] * 100
+                    ).toFixed(0)}%
+                  </dd>
+                {/if}
+                {#if pickHitLocation.auto_repair_s != null}
+                  <dt>repair</dt>
+                  <dd>
+                    {pickHitLocation.auto_repair_s}s crit{pickHitLocation.broken_repair_s != null
+                      ? ` / ${pickHitLocation.broken_repair_s}s broken`
+                      : ''}
+                  </dd>
+                {/if}
+              {/if}
             </dl>
+            {#if pickInfo.instance_id && pickLibEntry?.glb_dead}
+              <div class="mt-3 flex items-center gap-2">
+                <Button
+                  variant={destroyedMounts.has(pickInfo.instance_id) ? 'destructive' : 'outline'}
+                  size="sm"
+                  onclick={toggleMountDestroyed}
+                >
+                  {destroyedMounts.has(pickInfo.instance_id) ? 'Restore mount' : 'Destroy mount'}
+                </Button>
+                <span class="text-muted-foreground text-[11px]">
+                  swaps to the destroyed (glb_dead) model
+                </span>
+              </div>
+            {/if}
           </div>
         {:else}
           <div class="text-muted-foreground">

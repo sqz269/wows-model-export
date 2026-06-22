@@ -40,6 +40,13 @@ export interface TextureMeshEntry {
   maskTextureByScheme: Map<string, THREE.Texture>;
   isAccessoryEntry: boolean;
   /**
+   * True when this entry belongs to a mount swapped to its DESTROYED model
+   * Makes `applyTextureState` resolve the dead texture scheme
+   * (`dead` / `dead_camo_<name>`) instead of the global active scheme, so a
+   * destroyed mount uses its own `*_dead_*` textures, not the alive set.
+   */
+  deadVariant?: boolean;
+  /**
    * Library asset_id when known. Used at uniform-update time to skip
    * the variant mat-overlay fold for accessories carrying bespoke
    * variant albedos (e.g. `GGM3003_..._Azur_a.dds`). Null for hull

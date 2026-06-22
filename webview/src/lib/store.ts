@@ -26,6 +26,7 @@ export type PanelSection =
   | 'sections'
   | 'hull-groups'
   | 'armor-hitbox'
+  | 'module-damage'
   | 'bones-vfx'
   | 'particles'
   | 'damage'
@@ -107,6 +108,7 @@ export function defaultState(): PersistedState {
       sections: true,
       'hull-groups': false,
       'armor-hitbox': false,
+      'module-damage': true,
       'bones-vfx': false,
       particles: false,
       damage: false,
