@@ -4425,8 +4425,16 @@ export class ParticleScene {
     // framesPerX/Y grid + noAnimation samples a transparent cell-0 corner
     // (engine-faithful but invisible — see spriteSheetCell0Empty). When the
     // decoded content proves the grid is vestigial, sample the full texture.
+    // GUARD: WG names genuine flipbook sheets `<name>_CxR` (e.g. Smoke_red_7x7);
+    // a declared sheet keeps its cell-0 crop even if frame 0 is sparse, so never
+    // override one. (Corpus: 0/140 noAnim+grid textures carry the suffix, and many
+    // reuse one texture under conflicting grids — e.g. glow_w as 2x2..32x1 —
+    // confirming the grid is vestigial noise. So in practice the content test
+    // drives it; the suffix guard just future-proofs real _CxR sheets.)
     const fxy = material.uniforms.framesPerXY?.value as { x: number; y: number } | undefined;
-    if (fxy && fxy.x * fxy.y > 1 && spriteSheetCell0Empty(tex, fxy.x, fxy.y)) {
+    const baseName = workspaceRelPath.split('/').pop() ?? '';
+    const declaredSheet = /_\d+x\d+(?:[._]|$)/i.test(baseName);
+    if (!declaredSheet && fxy && fxy.x * fxy.y > 1 && spriteSheetCell0Empty(tex, fxy.x, fxy.y)) {
       material.uniforms.uVestigialGrid.value = 1;
     }
     material.needsUpdate = true;
