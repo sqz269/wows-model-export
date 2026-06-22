@@ -811,20 +811,20 @@ class SystemRenderer {
    *  playback. WG advances flipbooks by integrating FPS over particle age. */
   private framePhase: Float32Array;
   private framePhaseAttr: THREE.BufferAttribute;
-  /** Integrated sprite yaw, in radians. The angular RATE is the
-   *  Renderer.yawRateRamp (small signed rad/s, typically +/-0.5), SCALED
-   *  per-particle by `spinRate` (= spinRateBase + random*range, default
-   *  1.0). Seeded at spawn with the initialOrientation start angle. A
-   *  flat-zero yawRateRamp ⇒ NO continuous spin regardless of
-   *  spinRateBase — see tick(). */
+  /** Integrated sprite yaw, in radians. Byte-proven native model
+   *  (FUN_14071b7f0, RE 2026-06-21):
+   *    angle = (∫yawRateRamp·dt)·spinRateBase            // product: base SCALES the ramp
+   *          + (spinSeed−0.5)·spinRateRange·age          // standalone random drift
+   *          + initialOrientation                        // fixed spawn offset
+   *  spinRateBase is a ramp COEFFICIENT (corpus default 1.0 = identity);
+   *  spinRateRange is a SEPARATE per-particle constant rate, NOT a ramp
+   *  scale. A flat ramp + spinRateRange 0 ⇒ no spin (e.g. BA_Logo). */
   private rotationPhase: Float32Array;
   private rotationPhaseAttr: THREE.BufferAttribute;
-  /** Per-particle spin-rate COEFFICIENT that scales the yawRateRamp,
-   *  sampled at spawn from spinRateBase + random[0,1) * spinRateRange.
-   *  Default 1.0 = identity (corpus-wide default, 12694/13737 renderers);
-   *  explicit 0.0 force-disables spin. NOT a standalone rad/s rate — that
-   *  reading spun ~every textured particle (RE 2026-06-21). */
-  private spinRate: Float32Array;
+  /** Per-particle random in [0,1) sampled at spawn; drives the standalone
+   *  spinRateRange drift term `(spinSeed−0.5)·spinRateRange·age` (native
+   *  record+0x10 ← RNG; centred by −0.5 / DAT_1425565dc). */
+  private spinSeed: Float32Array;
   /** Number of cells a randomFrameOnly particle can land on (framesRangeEnd,
    *  falling back to framesPerX*framesPerY). 0 ⇒ feature inert. */
   private framesRangeEnd = 0;
@@ -1192,7 +1192,7 @@ class SystemRenderer {
     this.frameSeed = new Float32Array(this.capacity);
     this.framePhase = new Float32Array(this.capacity);
     this.rotationPhase = new Float32Array(this.capacity);
-    this.spinRate = new Float32Array(this.capacity);
+    this.spinSeed = new Float32Array(this.capacity);
     this.psize = new Float32Array(this.capacity);
     this.pidx = new Float32Array(this.capacity);
     for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
@@ -1681,21 +1681,24 @@ class SystemRenderer {
         const fps1 = sampleRamp(this.frameRateRamp, age, 0);
         this.framePhase[i] += Math.max(0, 0.5 * (fps0 + fps1) * dt);
       }
-      // Continuous sprite spin: the angular RATE is the yawRateRamp
-      // (rad/s, on the particle age clock), SCALED by the per-particle
-      // coefficient `spinRate` (= spinRateBase + random*range, default
-      // 1.0). A flat-zero yawRateRamp ⇒ NO spin, regardless of
-      // spinRateBase — which is why BA_Logo (flat ramp, spinRateBase=1.0
-      // default) is static in-game even though 92% of the corpus carries
-      // that same 1.0 default. (RE 2026-06-21: the old standalone
-      // `+= spinRate*dt` treated the 1.0 default as +1 rad/s and spun
-      // ~every textured particle — invisible on radial smoke, glaring on
-      // a recognizable logo.) initialOrientation supplies the fixed start
-      // angle at spawn.
-      if (this.yawRateRamp && this.spinRate[i] !== 0) {
+      // Continuous sprite spin — byte-proven native model (FUN_14071b7f0,
+      // RE 2026-06-21). TWO independent terms:
+      //  1. yawRateRamp integral SCALED by spinRateBase (product). The 1.0
+      //     corpus default (92%) is an identity scale, so a flat ramp ⇒ no
+      //     ramp spin regardless of spinRateBase. (The old `spinRateBase=1.0
+      //     → +1 rad/s standalone` reading spun ~every textured particle.)
+      //  2. spinRateRange is a SEPARATE per-particle constant rate
+      //     `(spinSeed−0.5)·spinRateRange` (NOT a ramp scale) — 35.7% of the
+      //     corpus authors this; it spins even with a flat ramp.
+      // initialOrientation (set at spawn) is the fixed start offset. BA_Logo
+      // (flat ramp + spinRateRange 0) ⇒ both terms 0 ⇒ static.
+      if (this.yawRateRamp && this.spinRateBase !== 0) {
         const yaw0 = sampleRamp(this.yawRateRamp, prevAge, 0);
         const yaw1 = sampleRamp(this.yawRateRamp, age, 0);
-        this.rotationPhase[i] += 0.5 * (yaw0 + yaw1) * this.spinRate[i] * dt;
+        this.rotationPhase[i] += 0.5 * (yaw0 + yaw1) * this.spinRateBase * dt;
+      }
+      if (this.spinRateRange !== 0) {
+        this.rotationPhase[i] += (this.spinSeed[i] - 0.5) * this.spinRateRange * dt;
       }
       // Per-particle clocks for the parameterType axis (RE 2026-06-04): ramps
       // are sampled on their own clock in SECONDS (or m/s, or the u8 index) —
@@ -2065,9 +2068,12 @@ class SystemRenderer {
     this.frameSeed[slot] =
       this.framesRangeEnd > 0 ? Math.floor(Math.random() * this.framesRangeEnd) : 0;
     this.framePhase[slot] = 0;
+    // Start angle = (rand−0.5)·range + base (native FUN_14071a710 centres
+    // the random by −0.5 / DAT_1425565dc). spinSeed feeds the standalone
+    // spinRateRange drift term in tick().
     this.rotationPhase[slot] =
-      this.initialOrientationBase + Math.random() * this.initialOrientationRange;
-    this.spinRate[slot] = this.spinRateBase + Math.random() * this.spinRateRange;
+      (Math.random() - 0.5) * this.initialOrientationRange + this.initialOrientationBase;
+    this.spinSeed[slot] = Math.random();
     const sc = SystemRenderer.TMP_CLOCKS;
     sc.particleAge = 0;
     sc.systemAge = this.elapsed;
@@ -4161,13 +4167,14 @@ export class ParticleScene {
       const useAtlas = !r?.textureUrl0 && !!r?.textureAtlas0;
       const useLut = !!r?.blendType && PS_RBT_LUT_MODES.has(r.blendType) && !!r?.textureUrl1;
       const useMv = anim?.animationType === 'motionVectors' && !!anim?.motionVectorsTextureUrl;
-      // Continuous spin needs a nonzero yawRateRamp (the rate source);
-      // spinRateBase/Range only SCALE that ramp (default 1.0 identity, so
-      // a nonzero spinRateBase alone must NOT enable spin — see tick()).
-      // A fixed start angle (initialOrientation) or velocityOriented also
-      // require the rotated-UV path.
+      // Sprite rotation has two byte-proven sources (see tick()): a
+      // yawRateRamp scaled by spinRateBase, and a standalone spinRateRange
+      // drift. spinRateBase alone is NOT a source (default 1.0 only scales
+      // the ramp), so it's excluded; spinRateRange IS. A fixed start angle
+      // (initialOrientation) or velocityOriented also need the rotated-UV path.
       const hasAuthoredRotation =
         rampHasNonZeroValue(r?.yawRateRamp) ||
+        hasNonZeroNumber(r?.spinRateRange) ||
         hasNonZeroNumber(r?.initialOrientationBase) ||
         hasNonZeroNumber(r?.initialOrientationRange) ||
         !!r?.velocityOriented;
