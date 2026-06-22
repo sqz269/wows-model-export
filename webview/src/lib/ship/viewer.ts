@@ -449,6 +449,29 @@ function detachAccessoryArmor(
   return { parent, group, meshes };
 }
 
+/** Detach an accessory's `Hitboxes` group (per-mount splash-box AABBs baked
+ *  into the GLB by the toolkit) so the normal texture / LOD registration skips
+ *  the cube meshes. Mirrors `detachAccessoryArmor`; the caller re-adds the
+ *  group hidden so the boxes ride the placement and the hitbox overlay can
+ *  reveal them. */
+function detachAccessoryHitboxes(
+  inst: THREE.Object3D,
+): { parent: THREE.Object3D; group: THREE.Object3D; meshes: THREE.Mesh[] } | null {
+  const groups: THREE.Object3D[] = [];
+  inst.traverse((o) => {
+    if (o.name === 'Hitboxes') groups.push(o);
+  });
+  const group = groups[0];
+  if (!group || !group.parent) return null;
+  const meshes: THREE.Mesh[] = [];
+  group.traverse((o) => {
+    if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh);
+  });
+  const parent = group.parent;
+  parent.remove(group);
+  return { parent, group, meshes };
+}
+
 export class ShipViewer {
   private env: SceneEnvironment;
   private stopLoop: () => void;
@@ -509,6 +532,10 @@ export class ShipViewer {
    *  damage). Source of truth for the control panel's per-mount toggles;
    *  cleared per ship and pruned when a mount is disposed/rebuilt. */
   private destroyedMounts = new Set<string>();
+  /** Per-mount accessory hitbox cube meshes (secondary/AA/torpedo splash boxes
+   *  baked into the accessory GLB). Detached from texturing, hidden by default,
+   *  revealed by the hitbox overlay. Keyed by mount instance_id for teardown. */
+  private mountHitboxRecords: { instanceId: string; meshes: THREE.Mesh[] }[] = [];
 
   // Exterior switching (ship-exterior unification). `mountRecords` mirrors
   // every live placement so `setActiveExterior` can tear down + rebuild the
@@ -1068,6 +1095,10 @@ export class ShipViewer {
     // out before registration so it isn't textured / colored / LOD-
     // bucketed as normal turret geometry. Re-added hidden below.
     const armorDetached = detachAccessoryArmor(inst);
+    // Per-mount splash hitboxes (secondary/AA/torpedo). Detach before texture/
+    // LOD registration so the cube meshes aren't treated as render geometry;
+    // re-added hidden below so they ride the placement + feed the overlay.
+    const hitboxDetached = detachAccessoryHitboxes(inst);
     const { colorEntries, meshesByLodLevel } = tagAndIndexInstance(
       inst,
       {
@@ -1131,6 +1162,18 @@ export class ShipViewer {
         thicknessOf: null,
       };
       this.mountArmorRecords.push(armorRecord);
+    }
+
+    // Re-add the detached hitbox group (hidden) so the boxes ride the placement
+    // transform; the hitbox overlay toggles them. They keep the toolkit's
+    // translucent `hitbox_*` material — no sidecar styling needed.
+    if (hitboxDetached && hitboxDetached.meshes.length > 0) {
+      hitboxDetached.parent.add(hitboxDetached.group);
+      for (const m of hitboxDetached.meshes) m.visible = this.hitboxViewEnabled;
+      this.mountHitboxRecords.push({
+        instanceId: placement.instance_id,
+        meshes: hitboxDetached.meshes,
+      });
     }
     this.sectionGroups[section].add(inst);
 
@@ -1250,6 +1293,8 @@ export class ShipViewer {
         }
       }
       this.destroyedMounts.delete(rec.instanceId);
+      const hbi = this.mountHitboxRecords.findIndex((r) => r.instanceId === rec.instanceId);
+      if (hbi >= 0) this.mountHitboxRecords.splice(hbi, 1);
       this.turretRigs.unregister(rec.instanceId);
       if (rec.armorRecord) {
         disposeArmorView(rec.armorRecord.entries, null);
@@ -1390,6 +1435,7 @@ export class ShipViewer {
     this.hitboxEntries = null;
     this.hitboxViewEnabled = false;
     this.destroyedMounts.clear();
+    this.mountHitboxRecords = [];
     this.placementsByMesh.clear();
     this.placementColorEntries.length = 0;
     this.placementMeshesByLodLevel.clear();
@@ -1441,7 +1487,10 @@ export class ShipViewer {
   /** True when the loaded ship has a `Hitboxes` group. Box tinting degrades
    *  gracefully (flat "Other" colour) when the sidecar `hitbox` is absent. */
   hasHitboxData(): boolean {
-    return this.classified.groups.some((g) => g.name === 'Hitboxes');
+    return (
+      this.classified.groups.some((g) => g.name === 'Hitboxes') ||
+      this.mountHitboxRecords.length > 0
+    );
   }
 
   /** Toggle the per-vertex armor-thickness heat-map across the hull `Armor`
@@ -1513,17 +1562,23 @@ export class ShipViewer {
 
   /** Toggle the translucent hitbox / damage-module overlay. */
   setHitboxView(on: boolean): void {
+    // Hull hitboxes: the hull GLB's "Hitboxes" group, styled per sidecar.
     const group = this.classified.groups.find((g) => g.name === 'Hitboxes');
-    if (!group) return;
-    if (on && !this.hitboxEntries) {
-      const boxes = this.sidecar?.hitbox?.boxes ?? {};
-      this.hitboxEntries = prepareHitboxMeshes(group.node, boxes);
+    if (group) {
+      if (on && !this.hitboxEntries) {
+        const boxes = this.sidecar?.hitbox?.boxes ?? {};
+        this.hitboxEntries = prepareHitboxMeshes(group.node, boxes);
+      }
+      if (this.hitboxEntries) applyHitboxView(this.hitboxEntries, on);
+      group.node.visible = on;
+    }
+    // Per-mount accessory hitboxes (secondary/AA/torpedo splash boxes baked into
+    // the accessory GLB). They keep the toolkit's translucent `hitbox_*`
+    // material, so just toggle visibility — no sidecar metadata to style by.
+    for (const rec of this.mountHitboxRecords) {
+      for (const m of rec.meshes) m.visible = on;
     }
     this.hitboxViewEnabled = on;
-    if (this.hitboxEntries) {
-      applyHitboxView(this.hitboxEntries, on);
-    }
-    group.node.visible = on;
   }
 
   /**
