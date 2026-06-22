@@ -658,6 +658,27 @@ def _extract_material_manifest(
             textures_dds_dir=dds_dir if dds_dir.is_dir() else None,
             material_mappings_json=mm_path,
         )
+        # Fold in the destroyed-mesh's own materials. The dead GLB references a
+        # DEDICATED dead material (e.g. a "*Dead" identifier) that the live GLB
+        # never uses, bound to the `_dead_*` texture stems — without this, the
+        # manifest carries only live materials and the dead material can't be
+        # built by a consumer. Dedup by material_id so materials shared between
+        # the live + dead meshes (armour, hitbox cubes) aren't duplicated.
+        dead_glb = out_dir / f"{rec.key.asset_id}_dead.glb"
+        dead_mm = out_dir / f"{rec.key.asset_id}_dead_material_mappings.json"
+        if dead_glb.is_file():
+            dead_mats = resolve_sidecar.materials_from_glb(
+                dead_glb,
+                textures_dir=png_dir if png_dir.is_dir() else None,
+                textures_dds_dir=dds_dir if dds_dir.is_dir() else None,
+                material_mappings_json=dead_mm if dead_mm.is_file() else None,
+            )
+            seen = {m["material_id"] for m in rec.materials if m.get("material_id")}
+            for m in dead_mats:
+                mid = m.get("material_id")
+                if mid and mid not in seen:
+                    rec.materials.append(m)
+                    seen.add(mid)
         rec.texture_sets = (
             resolve_sidecar.texture_sets_from_dir(dds_dir)
             if dds_dir.is_dir() else {}
