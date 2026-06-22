@@ -1676,10 +1676,18 @@ class SystemRenderer {
         continue;
       }
       const age = this.age[i];
+      // Ramps integrate over the AGE-SCALED clock, not wall time: native
+      // fx_ParticleSystem_tick feeds rec+0x00 (age += dt*ageScaleRate) as the
+      // fx_Ramp_integrate limit for BOTH frameRateRamp (@0x14071c5d0) and
+      // yawRateRamp (@0x14071c575). Raw dt ran the MV-warp + spin ~1/ageScale too
+      // fast (jittery) for low-ageScale outliers (e.g. Smoke_big_D_Day_Custom,
+      // ageScale=0.005 -> 64fps becomes ~0.32/s). Producer-proven 2026-06-22; raw-dt
+      // was the ~98.5% ageScale~=1 approximation.
+      const dAge = age - prevAge; // == dt * this.ageRate[i]
       if (this.frameRateRamp) {
         const fps0 = sampleRamp(this.frameRateRamp, prevAge, 0);
         const fps1 = sampleRamp(this.frameRateRamp, age, 0);
-        this.framePhase[i] += Math.max(0, 0.5 * (fps0 + fps1) * dt);
+        this.framePhase[i] += Math.max(0, 0.5 * (fps0 + fps1) * dAge);
       }
       // Continuous sprite spin — byte-proven native model (FUN_14071b7f0,
       // RE 2026-06-21). TWO independent terms:
@@ -1695,10 +1703,10 @@ class SystemRenderer {
       if (this.yawRateRamp && this.spinRateBase !== 0) {
         const yaw0 = sampleRamp(this.yawRateRamp, prevAge, 0);
         const yaw1 = sampleRamp(this.yawRateRamp, age, 0);
-        this.rotationPhase[i] += 0.5 * (yaw0 + yaw1) * this.spinRateBase * dt;
+        this.rotationPhase[i] += 0.5 * (yaw0 + yaw1) * this.spinRateBase * dAge;
       }
       if (this.spinRateRange !== 0) {
-        this.rotationPhase[i] += (this.spinSeed[i] - 0.5) * this.spinRateRange * dt;
+        this.rotationPhase[i] += (this.spinSeed[i] - 0.5) * this.spinRateRange * dAge;
       }
       // Per-particle clocks for the parameterType axis (RE 2026-06-04): ramps
       // are sampled on their own clock in SECONDS (or m/s, or the u8 index) —
