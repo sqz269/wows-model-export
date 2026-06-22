@@ -811,14 +811,19 @@ class SystemRenderer {
    *  playback. WG advances flipbooks by integrating FPS over particle age. */
   private framePhase: Float32Array;
   private framePhaseAttr: THREE.BufferAttribute;
-  /** Integrated sprite yaw, in radians. Renderer.yawRateRamp values are small
-   *  signed angular rates in the corpus (typically +/-0.5), matching radians/s
-   *  rather than degrees/s. Renderer spinRateBase/Range contributes a per-
-   *  particle constant angular rate on top of the yaw ramp. */
+  /** Integrated sprite yaw, in radians. The angular RATE is the
+   *  Renderer.yawRateRamp (small signed rad/s, typically +/-0.5), SCALED
+   *  per-particle by `spinRate` (= spinRateBase + random*range, default
+   *  1.0). Seeded at spawn with the initialOrientation start angle. A
+   *  flat-zero yawRateRamp ⇒ NO continuous spin regardless of
+   *  spinRateBase — see tick(). */
   private rotationPhase: Float32Array;
   private rotationPhaseAttr: THREE.BufferAttribute;
-  /** Per-particle authored spin rate, sampled at spawn from
-   *  spinRateBase + random[0,1) * spinRateRange. */
+  /** Per-particle spin-rate COEFFICIENT that scales the yawRateRamp,
+   *  sampled at spawn from spinRateBase + random[0,1) * spinRateRange.
+   *  Default 1.0 = identity (corpus-wide default, 12694/13737 renderers);
+   *  explicit 0.0 force-disables spin. NOT a standalone rad/s rate — that
+   *  reading spun ~every textured particle (RE 2026-06-21). */
   private spinRate: Float32Array;
   /** Number of cells a randomFrameOnly particle can land on (framesRangeEnd,
    *  falling back to framesPerX*framesPerY). 0 ⇒ feature inert. */
@@ -1676,13 +1681,21 @@ class SystemRenderer {
         const fps1 = sampleRamp(this.frameRateRamp, age, 0);
         this.framePhase[i] += Math.max(0, 0.5 * (fps0 + fps1) * dt);
       }
-      if (this.yawRateRamp) {
+      // Continuous sprite spin: the angular RATE is the yawRateRamp
+      // (rad/s, on the particle age clock), SCALED by the per-particle
+      // coefficient `spinRate` (= spinRateBase + random*range, default
+      // 1.0). A flat-zero yawRateRamp ⇒ NO spin, regardless of
+      // spinRateBase — which is why BA_Logo (flat ramp, spinRateBase=1.0
+      // default) is static in-game even though 92% of the corpus carries
+      // that same 1.0 default. (RE 2026-06-21: the old standalone
+      // `+= spinRate*dt` treated the 1.0 default as +1 rad/s and spun
+      // ~every textured particle — invisible on radial smoke, glaring on
+      // a recognizable logo.) initialOrientation supplies the fixed start
+      // angle at spawn.
+      if (this.yawRateRamp && this.spinRate[i] !== 0) {
         const yaw0 = sampleRamp(this.yawRateRamp, prevAge, 0);
         const yaw1 = sampleRamp(this.yawRateRamp, age, 0);
-        this.rotationPhase[i] += 0.5 * (yaw0 + yaw1) * dt;
-      }
-      if (this.spinRate[i] !== 0) {
-        this.rotationPhase[i] += this.spinRate[i] * dt;
+        this.rotationPhase[i] += 0.5 * (yaw0 + yaw1) * this.spinRate[i] * dt;
       }
       // Per-particle clocks for the parameterType axis (RE 2026-06-04): ramps
       // are sampled on their own clock in SECONDS (or m/s, or the u8 index) —
@@ -4148,10 +4161,13 @@ export class ParticleScene {
       const useAtlas = !r?.textureUrl0 && !!r?.textureAtlas0;
       const useLut = !!r?.blendType && PS_RBT_LUT_MODES.has(r.blendType) && !!r?.textureUrl1;
       const useMv = anim?.animationType === 'motionVectors' && !!anim?.motionVectorsTextureUrl;
+      // Continuous spin needs a nonzero yawRateRamp (the rate source);
+      // spinRateBase/Range only SCALE that ramp (default 1.0 identity, so
+      // a nonzero spinRateBase alone must NOT enable spin — see tick()).
+      // A fixed start angle (initialOrientation) or velocityOriented also
+      // require the rotated-UV path.
       const hasAuthoredRotation =
         rampHasNonZeroValue(r?.yawRateRamp) ||
-        hasNonZeroNumber(r?.spinRateBase) ||
-        hasNonZeroNumber(r?.spinRateRange) ||
         hasNonZeroNumber(r?.initialOrientationBase) ||
         hasNonZeroNumber(r?.initialOrientationRange) ||
         !!r?.velocityOriented;
