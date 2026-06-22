@@ -147,7 +147,7 @@
                       ? 'bg-amber-900/40 text-amber-200'
                       : 'bg-cyan-900/40 text-cyan-200'}"
                     title={r.kind === 'atlas'
-                      ? 'Flat /mat_camo/ atlas — overlay multiplied over base albedo'
+                      ? 'Flat /mat_camo/ atlas — masked replace (lerp to camo color by paint mask), per ship_camo_mgn_material.fx:94'
                       : 'Per-zone R/G/B mask — palette-composited per colorScheme'}>{r.kind}</span
                   >
                   <code class="text-muted-foreground font-mono text-[10px]" title={r.libPath}>{r.stem}</code>
