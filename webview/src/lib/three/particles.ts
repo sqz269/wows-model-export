@@ -3596,6 +3596,19 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           // flipbook on a real authored frame rate + range end instead.
           bool hasGrid = (useFrameGrid > 0.5 && fx * fy > 1.0);
           bool animated = (hasGrid && uFramesEnd > 0.0 && (uUseFramePhase > 0.5 || uFrameRate > 0.0));
+          // The MV flow-warp is NOT gated on the cell-grid count in native
+          // (producer-traced 2026-06-22): fx_ParticleSystem_tick (0x14071b7f0) writes
+          // frac(integral of frameRateRamp) to the per-particle phase independent of
+          // framesPerX*Y, and ps4.txt:574-588 warps + cross-fades on that phase
+          // unconditionally. So a single-cell (1x1) motionVectors sprite -- the base +
+          // separate _MV texture pattern, e.g. Smoke_big_D_Day_Custom -- still billows
+          // in-game. Drive the MV branch on the frame clock + MV path alone (drop the
+          // hasGrid / fx*fy>1 requirement), still excluding frozen/random frames. The old
+          // animated gate froze EVERY 1x1 motionVectors particle. At 1x1 the cell math
+          // below degenerates correctly (cell0 == cell1 == full texture); only the gate
+          // was wrong.
+          bool mvAnimated = (useMv > 0.5 && uFramesEnd > 0.0
+            && (uUseFramePhase > 0.5 || uFrameRate > 0.0) && uRandomFrame <= 0.5);
           // H5 (RE doc 63): a randomFrameOnly system is NOT animated — each
           // particle freezes on its spawn-seeded cell. Takes precedence.
           bool randomCell = (hasGrid && uRandomFrame > 0.5);
@@ -3626,7 +3639,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
               mvEmissionSample = e.r;
               if (useMvAlpha) base.a = e.a;
             }
-          } else if (animated && useMv > 0.5) {
+          } else if (mvAnimated) {
             // Motion-vector flipbook blend (WG _MVEA): sample the two
             // adjacent frames, warp each along the per-pixel optical-flow
             // field stored in the MV texture's (G,B) channels, and cross-
