@@ -53,6 +53,17 @@ tmp/
 # local-only context, never published.
 /reference/
 
+# Claude Code local diagnostics (session-termination investigation)
+.claude/settings.local.json
+.claude/hooks/
+.claude/*.log
+.claude/repro-capture.ps1
+.claude/repro-result.log
+.claude/*HANDOFF*.md
+
+# Claude Code project MCP config (machine-specific absolute paths; local-only)
+/.mcp.json
+
 # Webview build artifacts (webview/.gitignore handles its own subtree;
 # this catches in case a build leaks up).
 /webview/dist/

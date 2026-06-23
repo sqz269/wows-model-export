@@ -214,6 +214,14 @@ export interface SceneEnvironment {
    *  inspector between a night sky and a daylit sky so occluding,
    *  alpha-blended smoke is actually visible). */
   setBackground(color: number): void;
+  /** Show/hide the faux animated water surface. DEFORM_WATER_SURFACE
+   *  particles (ship wakes, splashes) author a water DISTORTION, not a
+   *  sprite — with no ocean to refract they read as flat squares. Enabling
+   *  this drops a structured, animated water plane at y=0 that the
+   *  screen-space distortion pass can warp, so the wake reads as ripples.
+   *  Hidden by default; the particle inspector turns it on only for records
+   *  that contain a DEFORM_WATER_SURFACE system. */
+  setWaterPlaneVisible(on: boolean): void;
   /** Dispose every resource created here. Idempotent. */
   dispose(): void;
 }
@@ -311,6 +319,105 @@ export function createSceneEnvironment(
   (grid.material as THREE.Material).opacity = 0.4;
   const axes = new THREE.AxesHelper(axesSize);
   scene.add(grid, axes);
+
+  // ── Faux water surface (opt-in; particle inspector) ───────────────────
+  // DEFORM_WATER_SURFACE particles only EXIST in-game as a refraction of the
+  // ocean surface. The inspector has no ocean, so the screen-space distortion
+  // approximation (particles.ts uDistortion path) has nothing to bend and the
+  // wake cards read as faint flat squares. This plane gives the refraction a
+  // structured, animated surface to warp. The waves live entirely in the
+  // fragment shader (procedural from world XZ) so a single quad suffices.
+  //
+  // depthTest:false + depthWrite:false + renderOrder -1 make it a pure
+  // background layer: it IS captured into the scene-color RTT (the cards
+  // refract it) but it neither occludes the cards nor feeds the soft-particle
+  // depth snapshot (shouldHideForOpaqueDepth hides depthWrite:false meshes),
+  // so the wake sprites do not soft-fade against the surface they sit on.
+  const waterUniforms = {
+    uTime: { value: 0 },
+    uSunDir: { value: sunDirectionState.clone() },
+  };
+  const waterMaterial = new THREE.ShaderMaterial({
+    uniforms: waterUniforms,
+    transparent: false,
+    depthWrite: false,
+    depthTest: false,
+    vertexShader: /* glsl */ `
+      varying vec3 vWorld;
+      void main() {
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorld = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      precision highp float;
+      uniform float uTime;
+      uniform vec3 uSunDir;
+      varying vec3 vWorld;
+
+      // Summed directional sines -> a cheap, structured wave height field.
+      // Mixed wavelengths give both broad swell and fine sparkle ripples;
+      // the high-frequency terms are what make the screen-space refraction
+      // legible at the small warp magnitude the distortion pass applies.
+      float waveH(vec2 p, float t) {
+        float h = 0.0;
+        // Mid swells (wavelength ~15-30 m) — the legible ripples at the
+        // inspector's ~40 m scale.
+        h += sin(p.x * 0.28 + t * 1.30) * 0.40;
+        h += sin((p.x * 0.19 + p.y * 0.33) + t * 1.00) * 0.34;
+        h += sin((p.x * 0.41 - p.y * 0.22) + t * 1.70) * 0.26;
+        // Finer chop (~6-10 m).
+        h += sin((p.x * 0.75 + p.y * 0.62) + t * 2.40) * 0.16;
+        h += sin((p.x * 0.60 - p.y * 1.05) + t * 2.90) * 0.12;
+        // Sparkle detail.
+        h += sin((p.x * 1.50 + p.y * 1.20) + t * 3.60) * 0.06;
+        return h;
+      }
+
+      void main() {
+        vec2 p = vWorld.xz;
+        float t = uTime;
+        float e = 0.6;
+        float h0 = waveH(p, t);
+        // Slope gain -> steeper normals so the screen-space refraction has
+        // strong, legible gradients to bend (the wake reads as ripples).
+        float hx = (waveH(p + vec2(e, 0.0), t) - h0) * 4.5;
+        float hz = (waveH(p + vec2(0.0, e), t) - h0) * 4.5;
+        vec3 n = normalize(vec3(-hx / e, 1.0, -hz / e));
+
+        vec3 viewDir = normalize(cameraPosition - vWorld);
+        vec3 sun = normalize(uSunDir);
+
+        // Daylit sea: teal body graded by facing, sky reflection toward
+        // grazing angles.
+        vec3 deep = vec3(0.02, 0.10, 0.14);
+        vec3 shallow = vec3(0.06, 0.24, 0.30);
+        vec3 col = mix(deep, shallow, clamp(n.y, 0.0, 1.0));
+        float fres = pow(1.0 - clamp(viewDir.y, 0.0, 1.0), 4.0);
+        col = mix(col, vec3(0.34, 0.46, 0.58), fres * 0.7);
+
+        // Sun-slope shading -> visible crest/trough banding (the structure the
+        // refraction bends) + sharp specular glints on the crests.
+        float diff = clamp(dot(n, sun) * 0.5 + 0.5, 0.0, 1.0);
+        col *= 0.7 + 0.6 * diff;
+        // Tight, dim glints — fine sparkle that stays under the bloom
+        // threshold so the wake disturbance is not lost in a sea of bloom.
+        vec3 halfv = normalize(sun + viewDir);
+        float spec = pow(clamp(dot(n, halfv), 0.0, 1.0), 140.0);
+        col += vec3(1.0, 0.97, 0.88) * spec * 0.4;
+
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `,
+  });
+  const waterPlane = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), waterMaterial);
+  waterPlane.rotation.x = -Math.PI / 2;
+  waterPlane.renderOrder = -1;
+  waterPlane.frustumCulled = false;
+  waterPlane.visible = false;
+  waterPlane.name = 'FauxWaterSurface';
+  scene.add(waterPlane);
 
   // ── Post-FX (always-on composer) ──────────────────────────────────
   // The composer is the SOLE render path: RenderPass -> UnrealBloomPass
@@ -525,6 +632,13 @@ export function createSceneEnvironment(
     grid,
     axes,
     render() {
+      if (waterPlane.visible) {
+        // Ambient surface animation, independent of the sim transport so the
+        // ocean keeps moving even when the effect is paused. Keep the sun in
+        // sync with the scene key light so the glints match the lighting.
+        waterUniforms.uTime.value = performance.now() * 0.001;
+        waterUniforms.uSunDir.value.copy(sunDirectionState);
+      }
       renderOpaqueDepthSnapshot(collectSoftDepthConsumers());
       renderDistortionSceneColor(collectDistortionConsumers());
       if (!postprocessEnabled && !bloomEnabled) {
@@ -615,6 +729,9 @@ export function createSceneEnvironment(
         scene.background = new THREE.Color(color);
       }
     },
+    setWaterPlaneVisible(on: boolean) {
+      waterPlane.visible = on;
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -623,6 +740,8 @@ export function createSceneEnvironment(
       (grid.material as THREE.Material).dispose();
       axes.geometry.dispose();
       (axes.material as THREE.Material).dispose();
+      waterPlane.geometry.dispose();
+      waterMaterial.dispose();
       envRT.dispose();
       pmrem.dispose();
       opaqueDepthMaterial.dispose();

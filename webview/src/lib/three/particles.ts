@@ -382,7 +382,10 @@ function decodeVelocityField(buffer: ArrayBuffer): VelocityFieldData | null {
   return decodeLegacyVelocityField(view, buffer.byteLength);
 }
 
-function decodeProductionVelocityField(view: DataView, byteLength: number): VelocityFieldData | null {
+function decodeProductionVelocityField(
+  view: DataView,
+  byteLength: number,
+): VelocityFieldData | null {
   const sizeX = view.getUint32(0, true);
   const sizeY = view.getUint32(4, true);
   const sizeZ = view.getUint32(8, true);
@@ -869,6 +872,7 @@ class SystemRenderer {
   private static readonly TMP_REL2 = new THREE.Vector3();
   private static readonly TMP_WORLD = new THREE.Vector3();
   private static readonly TMP_SCALE = new THREE.Vector3();
+  private static readonly TMP_BOUNDS_VEC = new THREE.Vector3();
   private static readonly TMP_VIEW_SORT = new THREE.Matrix4();
   private static readonly TMP_QUAT = new THREE.Quaternion();
   private static readonly TMP_COL = new Float32Array(4);
@@ -903,6 +907,32 @@ class SystemRenderer {
   /** Configured per-particle max age, in seconds. */
   get particleMaxAge(): number {
     return this.maxAge;
+  }
+
+  /** World-space AABB enclosing this system's live particles (their sprite
+   *  footprints), written into `target`. Returns false (leaving `target`
+   *  untouched) when nothing is currently drawn. Drives the inspector's
+   *  per-system bounding-box overlay. Reads the packed draw buffers (already
+   *  in the ×15 metre frame), transforms them by the points mesh's world
+   *  matrix, then inflates by the largest sprite radius so the box covers the
+   *  visible footprint, not just particle centres. */
+  computeWorldBounds(target: THREE.Box3): boolean {
+    const n = this.instGeom.instanceCount;
+    if (n <= 0) return false;
+    this.points.updateWorldMatrix(true, false);
+    const m = this.points.matrixWorld;
+    const v = SystemRenderer.TMP_BOUNDS_VEC;
+    target.makeEmpty();
+    let maxRadius = 0;
+    for (let i = 0; i < n; i++) {
+      const i3 = i * 3;
+      v.set(this.drawPos[i3], this.drawPos[i3 + 1], this.drawPos[i3 + 2]).applyMatrix4(m);
+      target.expandByPoint(v);
+      const r = this.drawSizeArr[i] * 0.5;
+      if (r > maxRadius) maxRadius = r;
+    }
+    if (maxRadius > 0) target.expandByScalar(maxRadius);
+    return true;
   }
 
   get isFinished(): boolean {
@@ -1010,7 +1040,9 @@ class SystemRenderer {
         const p = body.point;
         const axis = body.axis;
         this.orbitorActions.push({
-          angularVelocityGenerator: body.angularVelocityGenerator as ParticleValueGenerator | undefined,
+          angularVelocityGenerator: body.angularVelocityGenerator as
+            | ParticleValueGenerator
+            | undefined,
           point:
             Array.isArray(p) && p.length === 3
               ? new THREE.Vector3(p[0], p[1], p[2])
@@ -1080,7 +1112,8 @@ class SystemRenderer {
       } else if (c.action === 'velocityField') {
         const top = body.topLeftFront;
         const bottom = body.bottomRightBack;
-        const fieldSourceName = typeof body.fieldSourceName === 'string' ? body.fieldSourceName : '';
+        const fieldSourceName =
+          typeof body.fieldSourceName === 'string' ? body.fieldSourceName : '';
         const action: VelocityFieldAction = {
           topLeftFront:
             Array.isArray(top) && top.length === 3
@@ -1149,7 +1182,9 @@ class SystemRenderer {
       PS_RBT_DEPTH_SORT_MODES.has(renderer?.blendType ?? '') &&
       finiteNumber(renderer?.sortType, 2) < 2;
     this.frameRateRamp = anim?.frameRateRamp;
-    this.yawRateRamp = rampHasNonZeroValue(renderer?.yawRateRamp) ? renderer?.yawRateRamp : undefined;
+    this.yawRateRamp = rampHasNonZeroValue(renderer?.yawRateRamp)
+      ? renderer?.yawRateRamp
+      : undefined;
     this.spinRateBase = finiteNumber(renderer?.spinRateBase, 0);
     this.spinRateRange = finiteNumber(renderer?.spinRateRange, 0);
     this.initialOrientationBase = finiteNumber(renderer?.initialOrientationBase, 0);
@@ -1397,10 +1432,7 @@ class SystemRenderer {
       0.001,
       Math.abs(this.intensityScaleYMultiplier * this.distanceScaleYMultiplier),
     );
-    const aspect = Math.max(
-      0.001,
-      Math.abs((this.baseSpriteAspectX * scaleX) / scaleY),
-    );
+    const aspect = Math.max(0.001, Math.abs((this.baseSpriteAspectX * scaleX) / scaleY));
     const aspectUniform = this.material.uniforms.uSpriteAspectX?.value;
     if (typeof aspectUniform === 'number') this.material.uniforms.uSpriteAspectX.value = aspect;
     const pointExtent = this.material.uniforms.uPointExtent?.value;
@@ -1812,8 +1844,9 @@ class SystemRenderer {
         this.barrierScaleMultiplier;
       this.sizeArr[i] = Math.max(0, sz);
       this.glowStrengthArr[i] = Number.isFinite(glowScale) ? glowScale : 1;
-      this.spriteScaleXArr[i] =
-        Number.isFinite(scalerScaleX) ? Math.max(0.001, Math.abs(scalerScaleX)) : 1;
+      this.spriteScaleXArr[i] = Number.isFinite(scalerScaleX)
+        ? Math.max(0.001, Math.abs(scalerScaleX))
+        : 1;
     }
 
     // Emit from BOTH sources (RE-aligned, 2026-05-29): the always-on emitter
@@ -1910,10 +1943,7 @@ class SystemRenderer {
     const y = this.pos[ix + 1];
     const z = this.pos[ix + 2];
     return (
-      matrixElements[2] * x +
-      matrixElements[6] * y +
-      matrixElements[10] * z +
-      matrixElements[14]
+      matrixElements[2] * x + matrixElements[6] * y + matrixElements[10] * z + matrixElements[14]
     );
   }
 
@@ -2128,8 +2158,9 @@ class SystemRenderer {
       this.distanceAgeAuxScaleMultiplier;
     this.sizeArr[slot] = Math.max(0, sz0);
     this.glowStrengthArr[slot] = Number.isFinite(glowScale0) ? glowScale0 : 1;
-    this.spriteScaleXArr[slot] =
-      Number.isFinite(scalerScaleX0) ? Math.max(0.001, Math.abs(scalerScaleX0)) : 1;
+    this.spriteScaleXArr[slot] = Number.isFinite(scalerScaleX0)
+      ? Math.max(0.001, Math.abs(scalerScaleX0))
+      : 1;
     this.alive++;
   }
 
@@ -2266,12 +2297,7 @@ class SystemRenderer {
     }
   }
 
-  private applyOrbitorActions(
-    slot: number,
-    clocks: ParticleClocks,
-    age: number,
-    dt: number,
-  ): void {
+  private applyOrbitorActions(slot: number, clocks: ParticleClocks, age: number, dt: number): void {
     if (this.orbitorActions.length === 0) return;
     const ix = slot * 3;
     for (const action of this.orbitorActions) {
@@ -2593,7 +2619,8 @@ class SystemRenderer {
 
   private reflectVelocity(ix: number, normal: THREE.Vector3): void {
     if (normal.lengthSq() <= 1e-10) return;
-    const dot = this.vel[ix + 0] * normal.x + this.vel[ix + 1] * normal.y + this.vel[ix + 2] * normal.z;
+    const dot =
+      this.vel[ix + 0] * normal.x + this.vel[ix + 1] * normal.y + this.vel[ix + 2] * normal.z;
     this.vel[ix + 0] -= 2 * dot * normal.x;
     this.vel[ix + 1] -= 2 * dot * normal.y;
     this.vel[ix + 2] -= 2 * dot * normal.z;
@@ -2601,7 +2628,8 @@ class SystemRenderer {
 
   private cancelVelocityAlongNormal(ix: number, normal: THREE.Vector3): void {
     if (normal.lengthSq() <= 1e-10) return;
-    const dot = this.vel[ix + 0] * normal.x + this.vel[ix + 1] * normal.y + this.vel[ix + 2] * normal.z;
+    const dot =
+      this.vel[ix + 0] * normal.x + this.vel[ix + 1] * normal.y + this.vel[ix + 2] * normal.z;
     this.vel[ix + 0] -= dot * normal.x;
     this.vel[ix + 1] -= dot * normal.y;
     this.vel[ix + 2] -= dot * normal.z;
@@ -2649,11 +2677,10 @@ class SystemRenderer {
       return;
     }
     if (action.shape === 'plane' && this.barrierInsideNext) {
-      const side = action.planeNormal.dot(SystemRenderer.TMP_POS.set(
-        this.pos[ix + 0],
-        this.pos[ix + 1],
-        this.pos[ix + 2],
-      )) - action.planeConstant;
+      const side =
+        action.planeNormal.dot(
+          SystemRenderer.TMP_POS.set(this.pos[ix + 0], this.pos[ix + 1], this.pos[ix + 2]),
+        ) - action.planeConstant;
       this.pos[ix + 0] -= action.planeNormal.x * side;
       this.pos[ix + 1] -= action.planeNormal.y * side;
       this.pos[ix + 2] -= action.planeNormal.z * side;
@@ -2728,6 +2755,10 @@ function getParticleLightSpriteTexture(): THREE.DataTexture {
 class LightRenderer {
   readonly group: THREE.Group;
   readonly sprite: THREE.Sprite;
+  /** Index of the system that authored this light's `light` component.
+   *  -1 when unknown. Lets the inspector hide a system's lights along with
+   *  its sprites when that system is toggled off. */
+  ownerSystemIndex = -1;
   pointLight: THREE.PointLight | null = null;
   readonly score: number;
   private elapsed = 0;
@@ -2888,10 +2919,7 @@ class LightRenderer {
     } else {
       this.material.color.setRGB(0, 0, 0);
     }
-    this.material.opacity = Math.max(
-      0,
-      Math.min(1, color[3] * LightRenderer.SPRITE_OPACITY_SCALE),
-    );
+    this.material.opacity = Math.max(0, Math.min(1, color[3] * LightRenderer.SPRITE_OPACITY_SCALE));
     // The decoded radius is a point-light influence distance, not the diameter
     // of a visible billboard. Keep the preview flare compact so light metadata
     // does not mask the authored smoke/fire/debris systems.
@@ -3140,10 +3168,7 @@ function rotationPivotForCenter(
     case 'corner':
       return new THREE.Vector2(0.0, 0.0);
     case 'custom':
-      return new THREE.Vector2(
-        0.5 + (customOffset?.[0] ?? 0),
-        0.5 + (customOffset?.[1] ?? 0),
-      );
+      return new THREE.Vector2(0.5 + (customOffset?.[0] ?? 0), 0.5 + (customOffset?.[1] ?? 0));
     case 'center':
     default:
       return new THREE.Vector2(0.5, 0.5);
@@ -3230,7 +3255,9 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       : 0;
   const distortionMode =
     opts.blendType === 'DEFORM_WATER_SURFACE' ? 1 : opts.blendType === 'SHIMMER' ? 2 : 0;
-  const distortionStrength = distortionMode === 1 ? 0.018 : distortionMode === 2 ? 0.012 : 0;
+  // mode 1 = DEFORM_WATER_SURFACE (steady warp), 2 = SHIMMER (heat haze, a
+  // touch stronger so the boiling chromatic refraction reads as a lens).
+  const distortionStrength = distortionMode === 1 ? 0.018 : distortionMode === 2 ? 0.02 : 0;
   const lightingAmbient = Math.max(0, finiteNumber(opts.lightingAmbient, 0.06));
   const lightingDiffuse = Math.max(0, finiteNumber(opts.lightingDiffuse, 1));
   const lightingTransmission = Math.max(0, finiteNumber(opts.lightingTransmission, 0));
@@ -3884,15 +3911,43 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             normalOffset = (vLocalUV - vec2(0.5)) * 2.0;
           }
           if (uDistortionSceneSize.x > 1.0 && uDistortionSceneSize.y > 1.0) {
-            vec2 warpedUv = clamp(
-              screenUv + normalOffset * uDistortionStrength * clamp(outA, 0.0, 1.0),
-              vec2(0.001),
-              vec2(0.999)
-            );
-            vec3 refracted = texture2D(uDistortionSceneTexture, warpedUv).rgb;
-            float foam = uDistortionMode < 1.5 ? 0.10 * clamp(outA, 0.0, 1.0) : 0.0;
-            outRgb = refracted + vec3(foam) + emissionBody;
-            outA *= (uDistortionMode < 1.5) ? 0.45 : 0.55;
+            bool isShimmer = uDistortionMode > 1.5;
+            // SHIMMER (heat haze) BOILS: ride the per-particle age + a random
+            // per-particle phase (vFrameSeed) so the warp field wobbles and the
+            // lens looks alive rather than a frozen glass pane. RE doc 63 (M1):
+            // SHIMMER is a background warp with no opaque colour, so we only
+            // perturb the refraction here — never add a body. DEFORM (water)
+            // keeps its steady authored-normal warp untouched.
+            if (isShimmer) {
+              float t = vAge * 3.0 + vFrameSeed * 6.28318;
+              normalOffset += vec2(
+                sin(t + vLocalUV.y * 12.0),
+                cos(t * 1.13 + vLocalUV.x * 12.0)
+              ) * 0.30;
+            }
+            vec2 warp = normalOffset * uDistortionStrength * clamp(outA, 0.0, 1.0);
+            if (isShimmer) {
+              // Chromatic refraction: sample R/G/B across slightly different
+              // warp offsets (dispersion through hot air). The per-channel
+              // split makes the heat lens read even over a near-flat
+              // background, while preserving SHIMMER's no-opaque-colour rule —
+              // only the warped scene, no foam / white body.
+              vec2 c0 = clamp(screenUv + warp * 1.30, vec2(0.001), vec2(0.999));
+              vec2 c1 = clamp(screenUv + warp, vec2(0.001), vec2(0.999));
+              vec2 c2 = clamp(screenUv + warp * 0.70, vec2(0.001), vec2(0.999));
+              outRgb = vec3(
+                texture2D(uDistortionSceneTexture, c0).r,
+                texture2D(uDistortionSceneTexture, c1).g,
+                texture2D(uDistortionSceneTexture, c2).b
+              ) + emissionBody;
+              outA *= 0.55;
+            } else {
+              vec2 warpedUv = clamp(screenUv + warp, vec2(0.001), vec2(0.999));
+              vec3 refracted = texture2D(uDistortionSceneTexture, warpedUv).rgb;
+              float foam = 0.10 * clamp(outA, 0.0, 1.0);
+              outRgb = refracted + vec3(foam) + emissionBody;
+              outA *= 0.45;
+            }
           } else if (useEmissionAlphaFromMV > 0.5) {
             // No scene-colour RTT (the inspector's normal state): keep the
             // emissive flash core visible instead of the faint placeholder.
@@ -4257,11 +4312,8 @@ export class ParticleScene {
       systems.push(renderer);
       for (const c of sys.components ?? []) {
         if (c.kind !== 'light' || !c.body) continue;
-        const light = new LightRenderer(
-          c.body,
-          sys.intensities?.channels ?? [],
-          intensityDefaults,
-        );
+        const light = new LightRenderer(c.body, sys.intensities?.channels ?? [], intensityDefaults);
+        light.ownerSystemIndex = systems.length - 1;
         if (intensityValues) light.setIntensityValues(intensityValues);
         light.setActive(active);
         if (systemParent !== group) {
@@ -4537,7 +4589,10 @@ export class ParticleScene {
     }
   }
 
-  setAttachmentParentVelocity(handle: ParticleAttachmentHandle, velocityWorld: THREE.Vector3): void {
+  setAttachmentParentVelocity(
+    handle: ParticleAttachmentHandle,
+    velocityWorld: THREE.Vector3,
+  ): void {
     for (const s of handle.systems) s.setParentVelocityWorld(velocityWorld);
     for (const effect of this.spawnedEffects) {
       if (effect.parent !== handle) continue;

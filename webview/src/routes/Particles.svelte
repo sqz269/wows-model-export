@@ -83,12 +83,23 @@
   let scene: ParticleScene | null = null;
   let stopResize: (() => void) | null = null;
   let stopLoop: (() => void) | null = null;
+  /** Per-system AABB helpers (non-reactive; managed in the render loop). */
+  let boundsGroup: THREE.Group | null = null;
+  let boundsHelpers: Array<{ box: THREE.Box3; helper: THREE.Box3Helper }> = [];
 
   /** Per-handle stats updated on the render loop. Drives the readouts
    *  in the centre overlay (alive count + elapsed time). */
   let aliveCount = $state(0);
   let elapsedS = $state(0);
   let playing = $state(true);
+
+  // Per-system bounding-box overlay (inspector diagnostic — wraps each
+  // system's live particles in a coloured AABB).
+  let showBounds = $state(false);
+  /** Indices of systems toggled OFF (hidden) in the inspector. */
+  let hiddenSystems = $state<Set<number>>(new Set());
+  /** Per-system panel rows (rebuilt each frame: live count + hidden flag). */
+  let systemRows = $state<Array<{ i: number; alive: number; hidden: boolean }>>([]);
 
   // Inspector backdrop. Occluding / alpha-blended smoke (flak bursts, fire
   // smoke — the GRADIENT_MAP + lightmapping path) is near-invisible against a
@@ -108,6 +119,24 @@
     // when the SKY/NIGHT toggle changed it.
     const color = BACKDROPS[backdrop];
     env?.setBackground(color);
+  });
+
+  /** True when a record has at least one DEFORM_WATER_SURFACE system — a
+   *  water-surface distortion (ship wake / splash) that authors a refraction
+   *  of the ocean, not a sprite. Without a surface to bend, the distortion
+   *  pass has nothing to warp and the wake cards read as flat squares. */
+  function recordHasDeformWater(rec: ParticleRecord | null): boolean {
+    for (const s of rec?.systems ?? []) {
+      if (s.renderer?.blendType === 'DEFORM_WATER_SURFACE') return true;
+    }
+    return false;
+  }
+  $effect(() => {
+    // Read `activeRecord` UNCONDITIONALLY before the optional-chained env call
+    // so it is tracked as a dependency (see the backdrop effect above). The
+    // initial state is also applied in mountViewer since `env` is not state.
+    const showWater = recordHasDeformWater(activeRecord);
+    env?.setWaterPlaneVisible(showWater);
   });
 
   // ── List fetch ──────────────────────────────────────────────────────
@@ -221,6 +250,7 @@
     env.setBloomEnabled(true);
     env.setBloomParams({ strength: 0.28, radius: 0.25, threshold: 1.35 });
     env.setBackground(BACKDROPS[backdrop]);
+    env.setWaterPlaneVisible(recordHasDeformWater(activeRecord));
     // Every inspected effect spawns at the origin, so the axes helper sits
     // right inside the effect — and its bright-green Y axis blooms into a beam
     // that reads as part of the particle. Hide it (the grid still gives scale).
@@ -232,6 +262,10 @@
     scene.setSunLighting(sun.direction, sun.color);
     env.scene.add(scene.root);
 
+    boundsGroup = new THREE.Group();
+    boundsGroup.name = 'ParticleSystemBounds';
+    env.scene.add(boundsGroup);
+
     stopResize = observeResize({
       container,
       renderer: env.renderer,
@@ -242,6 +276,7 @@
     stopLoop = startRenderLoop(() => {
       env!.controls.update();
       scene!.tick();
+      syncSystems();
       env!.render();
       // Mirror the simulator's alive count + elapsed time into reactive
       // state so the overlay readouts update without a manual ping.
@@ -271,6 +306,83 @@
     scene = null;
     env = null;
     currentHandle = null;
+    for (const { helper } of boundsHelpers) {
+      helper.geometry.dispose();
+      (helper.material as THREE.Material).dispose();
+    }
+    boundsHelpers = [];
+    boundsGroup = null;
+    systemRows = [];
+    hiddenSystems = new Set();
+  }
+
+  // ── Per-system bounds overlay ───────────────────────────────────────
+  const BOUNDS_HUE_STEP = 0.618033988749895; // golden-ratio hue spread
+
+  function boundsColor(i: number): THREE.Color {
+    return new THREE.Color().setHSL((0.08 + i * BOUNDS_HUE_STEP) % 1, 0.85, 0.6);
+  }
+  function boundsColorHex(i: number): string {
+    return '#' + boundsColor(i).getHexString();
+  }
+
+  /** Toggle a system's visibility (its sprites, its lights, and its AABB).
+   *  Reassigns the Set so Svelte re-renders the panel. */
+  function toggleSystem(i: number): void {
+    const next = new Set(hiddenSystems);
+    if (next.has(i)) next.delete(i);
+    else next.add(i);
+    hiddenSystems = next;
+  }
+
+  /** Apply per-system visibility (sprite mesh + the lights that system
+   *  authored), refresh the AABB helpers, and publish the panel rows. Called
+   *  each frame BEFORE render so visibility + Box3Helper matrices are fresh.
+   *  The helper pool is sized to the system count; a box draws only when the
+   *  overlay is on, the system is visible, and it has live particles. */
+  function syncSystems() {
+    const systems = currentHandle ? currentHandle.systems : [];
+    // 1. Visibility — sprite mesh + the lights that system authored.
+    for (let i = 0; i < systems.length; i++) {
+      systems[i].points.visible = !hiddenSystems.has(i);
+    }
+    if (currentHandle) {
+      for (const l of currentHandle.lights) {
+        l.group.visible = l.ownerSystemIndex < 0 || !hiddenSystems.has(l.ownerSystemIndex);
+      }
+    }
+    // 2. Size the AABB helper pool to the system count.
+    if (boundsGroup) {
+      while (boundsHelpers.length < systems.length) {
+        const idx = boundsHelpers.length;
+        const box = new THREE.Box3();
+        const helper = new THREE.Box3Helper(box, boundsColor(idx));
+        const mat = helper.material as THREE.LineBasicMaterial;
+        mat.depthTest = false;
+        mat.transparent = true;
+        helper.renderOrder = 999;
+        helper.visible = false;
+        boundsGroup.add(helper);
+        boundsHelpers.push({ box, helper });
+      }
+      while (boundsHelpers.length > systems.length) {
+        const last = boundsHelpers.pop()!;
+        boundsGroup.remove(last.helper);
+        last.helper.geometry.dispose();
+        (last.helper.material as THREE.Material).dispose();
+      }
+    }
+    // 3. Per-frame box update + panel rows.
+    const rows: Array<{ i: number; alive: number; hidden: boolean }> = [];
+    for (let i = 0; i < systems.length; i++) {
+      const hidden = hiddenSystems.has(i);
+      const slot = boundsHelpers[i];
+      if (slot) {
+        slot.helper.visible = showBounds && !hidden && systems[i].computeWorldBounds(slot.box);
+      }
+      rows.push({ i, alive: systems[i].aliveCount, hidden });
+    }
+    systemRows = rows;
   }
 
   // ── Per-record viewer state ─────────────────────────────────────────
@@ -283,6 +395,7 @@
     if (!scene) return;
     scene.clear();
     currentHandle = null;
+    hiddenSystems = new Set();
     if (!rec || !selectedPath) return;
     const synthetic: ParticleAttachment = {
       group: 'inspector',
@@ -609,6 +722,16 @@
             </button>
           {/each}
         </div>
+        <button
+          type="button"
+          onclick={() => (showBounds = !showBounds)}
+          title="Toggle per-system bounding boxes"
+          class="rounded border border-border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider {showBounds
+            ? 'bg-primary text-primary-foreground'
+            : 'bg-popover text-muted-foreground hover:text-foreground'}"
+        >
+          boxes
+        </button>
         {#if availableQualities.length > 1}
           <div class="flex rounded border border-border overflow-hidden">
             {#each availableQualities as q (q)}
@@ -686,6 +809,47 @@
               >{activeRecord.systems?.length ?? 0}</span
             >
           </div>
+        </div>
+      {/if}
+
+      <!-- Per-system panel: click a row to show/hide that system (its sprites,
+           its lights, and its AABB). Swatch ↔ the system's bounding-box colour. -->
+      {#if selectedPath && activeRecord && !recordError && systemRows.length > 0}
+        <div
+          class="bg-popover/85 border-border absolute left-3 top-20 flex max-h-[60%] flex-col overflow-auto rounded border px-1.5 py-1 font-mono text-[10px] backdrop-blur"
+        >
+          <div class="flex items-center justify-between gap-3 px-0.5 pb-1">
+            <span class="text-muted-foreground text-[9px] uppercase tracking-wider">systems</span>
+            {#if hiddenSystems.size > 0}
+              <button
+                type="button"
+                class="text-muted-foreground hover:text-foreground text-[9px] uppercase tracking-wider"
+                onclick={() => (hiddenSystems = new Set())}
+                title="Show all systems"
+              >
+                show all
+              </button>
+            {/if}
+          </div>
+          {#each systemRows as s (s.i)}
+            <button
+              type="button"
+              onclick={() => toggleSystem(s.i)}
+              title={s.hidden ? `Show system #${s.i}` : `Hide system #${s.i}`}
+              class="hover:bg-muted/40 flex items-center gap-1.5 rounded px-0.5 py-[1px] text-left {s.hidden
+                ? 'opacity-40'
+                : ''}"
+            >
+              <span
+                class="border-border inline-block size-2.5 flex-none rounded-[2px] border"
+                style={s.hidden
+                  ? ''
+                  : `background:${boundsColorHex(s.i)};border-color:${boundsColorHex(s.i)}`}
+              ></span>
+              <span class="text-foreground">#{s.i}</span>
+              <span class="text-muted-foreground ml-auto pl-3 tabular-nums">{s.alive}</span>
+            </button>
+          {/each}
         </div>
       {/if}
     </div>
