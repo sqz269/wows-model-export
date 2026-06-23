@@ -3803,48 +3803,47 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           // to black. lightingShineness never reaches the GPU (it stops in
           // a CPU draw descriptor, FUN_140716f00 +0x24), so no pow here.
           if (uLightingMode > 0.5) {
-            // _LM directional lightmap (PS_RLT lightmapping4Way/HL2):
-            // base.rgb are 3 grayscale renders of the same sprite baked-lit
-            // from 3 fixed HL2-basis directions; base.a is the opacity mask.
-            // Showing rgb directly reads as a wrong rainbow — instead blend
-            // the 3 directional renders by how strongly each basis direction
-            // faces the sun, recovering "the sprite lit from the sun".
+            // _LM = a 4-WAY directional lightmap (PS_RLT lightmapping4Way).
+            // base.RGBA are FOUR grayscale renders of the same puff baked-lit
+            // from the billboard tangent frame's signed axes — NOT albedo and
+            // NOT 3 HL2 lobes. Engine-exact decode (ps4.txt:769-794, cross-
+            // validated across all 7 shader permutations + the _LM texture
+            // content by 3 independent agents, 2026-06-23):
+            //   R = +tangent   G = -tangent   A = +bitangent   B = -bitangent
+            // Dot each billboard axis with the (toward-)sun, sign-select that
+            // axis' channel, weight by (axis.sun)^2, saturate — NO normalize
+            // (RE doc 63 H6). The billboard-normal axis has no baked render: it
+            // uses a derived brightness (front) / soft fade (back). The native
+            // also reuses base.a as the opacity source (kept below as base.a),
+            // so A is BOTH the +bitangent render AND the alpha.
             //
-            // Point sprites are screen-aligned, so the sprite tangent frame
-            // is the view-space axes (tangent +X, bitangent +Y, normal +Z
-            // toward camera). viewMatrix is auto-injected by three.js and
-            // updates every frame, so transforming the world sun dir into
-            // view space gives a live relight with no per-frame uniform
-            // plumbing.
+            // Camera-facing billboards: the tangent frame is the view axes
+            // (+X tangent, +Y bitangent, +Z normal toward camera), so dotting
+            // each with the view-space (toward-)sun reduces to the sun's view
+            // components. (Velocity/explicit-oriented sprites still use this
+            // camera-frame approximation, as the prior decode did; a fully
+            // exact basis needs per-particle world axes as varyings.)
             vec3 sunV = normalize((viewMatrix * vec4(uSunDirWorld, 0.0)).xyz);
-            // Half-Life-2 radiosity-normal-map basis (tangent space).
-            const vec3 B0 = vec3(-0.40824829, -0.70710678, 0.57735027);
-            const vec3 B1 = vec3(-0.40824829,  0.70710678, 0.57735027);
-            const vec3 B2 = vec3( 0.81649658,  0.0,        0.57735027);
-            float wrap = max(0.0, uLightWrapAmount);
-            float wrapDenom = max(0.0001, 1.0 + wrap);
-            vec3 basisDot = vec3(dot(B0, sunV), dot(B1, sunV), dot(B2, sunV));
-            vec3 w = max(vec3(0.0), (basisDot + vec3(wrap)) / wrapDenom);
-            w *= w;                       // HL2 weighting is dot^2
-            vec3 tw = max(vec3(0.0), (-basisDot + vec3(wrap)) / wrapDenom);
-            tw *= tw;
-            float flatLum = (base.r + base.g + base.b) / 3.0;
-            // RE doc 63 H6: the engine does NOT energy-normalize (no /wsum) and
-            // has no 30% flat mix — lit = saturate(Σ LMi·(axisi·sun)²) via
-            // mad_sat (ps4.txt:789-794). The old /wsum cancelled the directional
-            // magnitude (constant flat shade) and the 0.30 mix washed it out.
-            // Renderer carries authored ambient/diffuse/transmission/wrap
-            // scalars in the same 0xa0-byte native struct. Apply them here to
-            // avoid the old hardcoded ambient-only approximation while keeping
-            // the unknown per-particle glow scalar separate below.
-            float ambient = uLightingAmbient * flatLum;
-            float direct = uLightingDiffuse * dot(w, base.rgb);
-            float transmitted = uLightingTransmission * dot(tw, base.rgb);
-            // Colored Reinhard-normalized sun term (RE doc 63 M2). A white sun
-            // produces the historical 0.5 attenuation; weather-tinted suns now
-            // tint the relit smoke/explosion body instead of staying grayscale.
+            float d1 = sunV.x; // +tangent   . toward-sun
+            float d2 = sunV.y; // +bitangent . toward-sun
+            float d3 = sunV.z; // +normal    . toward-sun
+            float ch1 = d1 > 0.0 ? base.r : base.g;
+            float ch2 = d2 > 0.0 ? base.a : base.b;
+            // Billboard-normal axis: native picks a gamma-curved average of the
+            // 4 renders (front) vs a per-particle soft fade (back). The soft
+            // scalars (v6.w / v10.z) are not plumbed; approximate the back as
+            // the attenuated front term.
+            float avg4 = (base.r + base.g + base.b + base.a) * 0.25;
+            float frontTerm = min(pow(max(avg4, 0.0), 0.625), 1.0);
+            float ch3 = d3 > 0.0 ? frontTerm : frontTerm * 0.5;
+            // Squared-cosine weights, saturate, NO energy-normalize
+            // (ps4.txt:789-794 mul/mul/mad/mad_sat).
+            float lit = clamp(d1 * d1 * ch1 + d2 * d2 * ch2 + d3 * d3 * ch3, 0.0, 1.0);
+            // Ambient floor so fully-shadowed smoke isn't pure black; colored
+            // sun term (RE doc 63 M2) tints the relit body by the weather sun.
+            float ambient = uLightingAmbient * frontTerm;
             base = vec4(
-              clamp(vec3(ambient) + (direct + transmitted) * uSunColorNorm, 0.0, 1.0),
+              clamp(vec3(ambient) + lit * uLightingDiffuse * uSunColorNorm, 0.0, 1.0),
               base.a
             );
           }
