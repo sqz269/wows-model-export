@@ -2654,6 +2654,14 @@ export class ShipViewer {
         this.particleAnchorObjects.set(h, obj);
         this.copyParticleAnchorTransform(h, obj);
       }
+      // Caliber-scaled muzzle blast: feed the pipeline's per-mount shotEffect
+      // intensity as the effect's channel-0 value (drives PARTICLE_SIZE), so a
+      // 16" gun's muzzle reads bigger than a 5" secondary's. Absent => the
+      // effect's own default intensity (1.0). See ParticleAttachment.intensity.
+      const inten = h.attachment.intensity;
+      if (typeof inten === 'number' && Number.isFinite(inten)) {
+        scene.setAttachmentIntensityValues(h, [inten]);
+      }
       scene.setAttachmentActive(h, false);
     }
     scene.root.visible = this.particleLayerEnabled;

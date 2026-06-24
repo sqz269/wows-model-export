@@ -1808,6 +1808,52 @@ _GUN_EFFECT_SLOTS: tuple[str, ...] = (
     "lensEffect",
 )
 
+# Caliber-scaled muzzle-blast intensity. At runtime WG's gun shooter
+# (ClientShots.ClientShooterEffects) computes the shot effect's intensity from
+# the mount's caliber + barrel count and feeds it to EffectManager.setIntensity,
+# which drives the effect's PARTICLE_SIZE intensity channel -> bigger guns emit
+# bigger muzzle blasts. We replicate it here (channel-0 scalar on the shotEffect
+# row) so consumers render each mount at the right size instead of the effect's
+# default intensity. Constants are the game's EffectsConstants (build 12506899);
+# formula RE'd in wows-re-notes shot-effects (m30eb35be.ClientShooterEffects).
+_FX_MIN_BARREL_DIAMETER = 0.05
+_FX_MAX_BARREL_DIAMETER = 0.55
+_FX_MIN_INTENSITY = 0.0
+_FX_MAX_INTENSITY = 10.0
+_FX_NUMBER_BARRELS_MODIFIER = 0.6
+_FX_MIN_NUMBER_INTENSITY_MODIFIER = 1.0
+_FX_MAX_NUMBER_INTENSITY_MODIFIER = 2.5
+# Gun groups whose muzzle blast is caliber-scaled (ShotType.ARTILLERY = main +
+# secondary). airDefense keeps the effect default (its AACShot path scales the
+# tracer, not the muzzle particle).
+_FX_CALIBER_SCALED_GROUPS = frozenset({"artillery", "atba"})
+
+
+def _clampf(v: float, lo: float, hi: float) -> float:
+    return lo if v < lo else hi if v > hi else v
+
+
+def gun_shot_intensity(mount: dict[str, Any]) -> float | None:
+    """Caliber-scaled muzzle-blast intensity for a gun mount, replicating
+    ``ClientShooterEffects.__init__`` (artillery shotType). Returns ``None``
+    when the caliber is unknown — the consumer then falls back to the effect's
+    own default intensity."""
+    cal = _safe_float(mount.get("barrelDiameter"))
+    if cal is None:
+        return None
+    span = _FX_MAX_BARREL_DIAMETER - _FX_MIN_BARREL_DIAMETER
+    norm = (cal - _FX_MIN_BARREL_DIAMETER) / span * _FX_MAX_INTENSITY
+    barrels = _safe_int(mount.get("numBarrels")) or 1
+    n_mod = _clampf(
+        barrels * _FX_NUMBER_BARRELS_MODIFIER,
+        _FX_MIN_NUMBER_INTENSITY_MODIFIER,
+        _FX_MAX_NUMBER_INTENSITY_MODIFIER,
+    )
+    mod = _safe_float(mount.get("effectIntensityModifier"))
+    if mod is None:
+        mod = 1.0
+    return round(_clampf(norm * n_mod * mod, _FX_MIN_INTENSITY, _FX_MAX_INTENSITY), 4)
+
 # Per-aura slots inside ``hull.<X>_AirDefense.<Aura...>``. Both single-string
 # fields and list-valued fields appear — we normalise to one row per path.
 _AA_AURA_SCALAR_SLOTS: tuple[str, ...] = ("missDetonationEffect",)
@@ -1869,6 +1915,7 @@ def _emit_particle(
     group: str,
     node: str,
     particle: Any,
+    intensity: float | None = None,
 ) -> None:
     """Append a normalised attachment row to ``out`` if ``particle`` is a
     non-empty, non-placeholder XML path. ``Empty_FX.xml`` is silently
@@ -1882,6 +1929,7 @@ def _emit_particle(
                 out,
                 source=source, source_id=source_id,
                 group=group, node=node, particle=item,
+                intensity=intensity,
             )
         return
     if not isinstance(particle, str):
@@ -1893,13 +1941,18 @@ def _emit_particle(
     # list inflates the inspector with empty entries that never render.
     if p == "particles/Empty_FX.xml":
         return
-    out.append({
+    row: dict[str, Any] = {
         "source": source,
         "source_id": source_id,
         "group": group,
         "node": node,
         "particle_path": p,
-    })
+    }
+    # Caliber-scaled muzzle intensity (channel-0 scalar). Consumers feed it as
+    # the effect's intensity value; absent => the effect's own default.
+    if intensity is not None:
+        row["intensity"] = intensity
+    out.append(row)
 
 
 def collect_gun_effects(
@@ -1931,12 +1984,19 @@ def collect_gun_effects(
             mount = group[hp_name]
             if not isinstance(mount, dict):
                 continue
+            shot_intensity = (
+                gun_shot_intensity(mount)
+                if source in _FX_CALIBER_SCALED_GROUPS
+                else None
+            )
             for slot in _GUN_EFFECT_SLOTS:
                 _emit_particle(
                     out,
                     source=source, source_id=hp_name,
                     group=slot, node=hp_name,
                     particle=mount.get(slot),
+                    # Only the muzzle blast is caliber-scaled at runtime.
+                    intensity=shot_intensity if slot == "shotEffect" else None,
                 )
     return out
 
