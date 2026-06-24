@@ -32,6 +32,7 @@ import type {
   ExteriorRecord,
   LibraryIndex,
   ParticleAttachment,
+  ParticleRecord,
   SeamKey,
   SeamState,
   ShipPlacement,
@@ -258,7 +259,6 @@ function muzzleIndex(name: string): number {
 }
 
 const SHIP_AMBIENT_PARTICLE_GROUPS = new Set(['idleport', 'smoke']);
-const SHIP_PARTICLE_EVENT_PREVIEW_MS = 3000;
 const SHIP_PARTICLE_SOURCE_ORDER = new Map<string, number>([
   ['hull', 0],
   ['artillery', 1],
@@ -272,6 +272,23 @@ const SHIP_PARTICLE_SOURCE_ORDER = new Map<string, number>([
 function isWakeParticleGroup(group: string): boolean {
   const g = group.toLowerCase();
   return g.startsWith('waketrace') || g.startsWith('propeller');
+}
+
+// Screen-space distortion blend modes (heat-haze / water-deform): they refract
+// the scene-color snapshot rather than painting a sprite, so with no ocean
+// behind them they read as flat squares. The ship view drops the faux water
+// surface when a ship's particles include one of these (see SHIMMER funnel
+// haze, DEFORM_WATER_SURFACE wakes/splashes). Mirrors Particles.svelte's
+// recordHasDeformWater, broadened to SHIMMER.
+const PARTICLE_DISTORTION_BLEND_MODES = new Set(['SHIMMER', 'DEFORM_WATER_SURFACE']);
+
+function recordsHaveWaterDistortion(records: Record<string, ParticleRecord>): boolean {
+  for (const rec of Object.values(records)) {
+    for (const s of rec.systems ?? []) {
+      if (PARTICLE_DISTORTION_BLEND_MODES.has(s.renderer?.blendType ?? '')) return true;
+    }
+  }
+  return false;
 }
 
 function shipParticleEventKey(a: ParticleAttachment): string {
@@ -565,10 +582,20 @@ export class ShipViewer {
   private particleAnchorMotion = new Map<ParticleAttachmentHandle, ParticleAnchorMotion>();
   private particleAttachmentAnchors = new WeakMap<ParticleAttachment, THREE.Object3D>();
   private particleLayerEnabled = false;
+  // True when the loaded ship particles include a screen-space distortion
+  // (SHIMMER / DEFORM_WATER_SURFACE) — the default for whether to drop the
+  // ocean surface (so those effects have something to refract).
+  private particleHasWaterDistortion = false;
+  // User override for the ocean surface (the ShipControls "Water surface"
+  // checkbox). null = auto (follow particleHasWaterDistortion); true/false =
+  // explicit. Reset per ship so each starts at its sensible default.
+  private shipWaterEnabled: boolean | null = null;
   private particleMode: ShipParticleMode = 'ambient';
   private particleEventOptions: ShipParticleEventOption[] = [];
-  private particlePreviewKeys = new Set<string>();
-  private particlePreviewTimers = new Map<string, number>();
+  // Event groups the user has enabled to LOOP (re-burst continuously) via the
+  // ShipControls per-event checkboxes. Persistent per ship; cleared on ship
+  // change. Replaces the old one-shot "trigger" preview model.
+  private particleLoopKeys = new Set<string>();
   private particleBuildPromise: Promise<ShipParticleStats> | null = null;
   private particleBuildToken = 0;
   private particleStats: ShipParticleStats = emptyShipParticleStats();
@@ -1751,48 +1778,62 @@ export class ShipViewer {
     return this.particleStats;
   }
 
-  async triggerShipParticleEvent(
-    key: string,
-    durationMs = SHIP_PARTICLE_EVENT_PREVIEW_MS,
-  ): Promise<ShipParticleStats> {
+  /** Which event groups are currently set to loop (the ShipControls per-event
+   *  checkboxes read this). 'all' mode loops every event implicitly. */
+  getShipParticleEventLoops(): ReadonlySet<string> {
+    return this.particleLoopKeys;
+  }
+
+  /** Toggle whether an event group's particles LOOP (re-burst continuously)
+   *  instead of staying idle until triggered. Persistent per ship; the layer
+   *  must be on for it to take visible effect (the checkbox UI is gated on
+   *  that). Enabling restarts the group for a crisp, immediate first burst. */
+  async setShipParticleEventLoop(key: string, on: boolean): Promise<ShipParticleStats> {
     if (!key) return this.particleStats;
-    if (!this.particleLayerEnabled || !this.particleScene) {
-      await this.setShipParticlesVisible(true);
-    } else if (this.particleBuildPromise) {
-      await this.particleBuildPromise;
+    if (on) this.particleLoopKeys.add(key);
+    else this.particleLoopKeys.delete(key);
+    if (this.particleBuildPromise) await this.particleBuildPromise;
+    if (!this.particleScene || !this.particleLayerEnabled) return this.particleStats;
+    if (on) {
+      const handles = this.particleHandles.filter((h) => shipParticleEventKey(h.attachment) === key);
+      for (const h of handles) this.particleScene.restartAttachment(h);
+      this.updateParticleAttachmentTransforms();
     }
-    if (!this.particleScene) return this.particleStats;
-    const handles = this.particleHandles.filter((h) => shipParticleEventKey(h.attachment) === key);
-    if (handles.length === 0) return this.particleStats;
-
-    this.particlePreviewKeys.add(key);
-    const oldTimer = this.particlePreviewTimers.get(key);
-    if (oldTimer != null) window.clearTimeout(oldTimer);
-
-    for (const h of handles) this.particleScene.restartAttachment(h);
-    this.updateParticleAttachmentTransforms();
-    this.particleStats = {
-      ...this.particleStats,
-      activeAttachments: this.countActiveParticleHandles(),
-    };
-
-    if (durationMs > 0) {
-      const timer = window.setTimeout(() => {
-        this.particlePreviewTimers.delete(key);
-        this.particlePreviewKeys.delete(key);
-        this.applyShipParticleActivation();
-      }, durationMs);
-      this.particlePreviewTimers.set(key, timer);
-    }
+    this.applyShipParticleActivation();
     return this.particleStats;
+  }
+
+  /** Show the faux ocean surface while the ship particle layer is on and water
+   *  is wanted — either the user's explicit choice (the "Water surface"
+   *  checkbox) or, when unset, the auto-default (ships whose particles include
+   *  a SHIMMER / DEFORM_WATER distortion that needs an ocean to refract). The
+   *  plane (scene.ts) is non-occluding and animates inside env.render(), which
+   *  the ship render loop already drives. */
+  private updateParticleWaterPlane(): void {
+    const want = this.shipWaterEnabled ?? this.particleHasWaterDistortion;
+    this.env.setWaterPlaneVisible(this.particleLayerEnabled && want);
+  }
+
+  /** Effective ocean-surface state (explicit override, else the auto-default).
+   *  Drives the ShipControls "Water surface" checkbox. */
+  isShipWaterEnabled(): boolean {
+    return this.shipWaterEnabled ?? this.particleHasWaterDistortion;
+  }
+
+  /** User toggle for the ocean surface (overrides the auto-default). */
+  setShipWaterEnabled(on: boolean): void {
+    this.shipWaterEnabled = on;
+    this.updateParticleWaterPlane();
   }
 
   async setShipParticlesVisible(on: boolean): Promise<ShipParticleStats> {
     this.particleLayerEnabled = on;
     if (!on) {
-      this.clearShipParticleEventPreviews();
+      // Keep the per-event loop choices — toggling the layer off then on
+      // resumes the same looping events (they're cleared only on ship change).
       this.particleScene?.setAllActive(false);
       if (this.particleScene) this.particleScene.root.visible = false;
+      this.updateParticleWaterPlane();
       this.particleStats = { ...this.particleStats, activeAttachments: 0 };
       return this.particleStats;
     }
@@ -1803,6 +1844,7 @@ export class ShipViewer {
     }
     if (this.particleScene) {
       this.particleScene.root.visible = true;
+      this.updateParticleWaterPlane();
       this.applyShipParticleActivation();
       return this.particleStats;
     }
@@ -2588,6 +2630,7 @@ export class ShipViewer {
     if (token !== this.particleBuildToken) return this.particleStats;
 
     this.disposeParticleLayer({ preserveEnabled: true, preserveToken: true });
+    this.particleHasWaterDistortion = recordsHaveWaterDistortion(result.records);
     const expanded = this.expandParticleAttachments(renderable);
     const scene = new ParticleScene(this.env.renderer);
     scene.root.name = 'ShipParticleEffects';
@@ -2595,12 +2638,12 @@ export class ShipViewer {
     this.syncParticleSunLighting(scene);
     this.env.scene.add(scene.root);
 
-    // Ambient hull loops (smoke/wake/fire) keep re-bursting; event effects
-    // (muzzle/explosion) fire ONCE per trigger and finish — their lifetime is
-    // the trigger's, like the native fire-and-forget EffectManager one-shots.
-    // restartAttachment() in triggerShipParticleEvent re-fires them.
+    // Every attachment is built to LOOP when active so the per-event loop
+    // checkboxes (and 'all' mode) re-burst event effects continuously. Ambient
+    // groups are active by default; event groups stay idle until their loop
+    // checkbox is ticked (applyShipParticleActivation gates activation).
     const handles = scene.build(expanded, result.records, (a) => this.resolveParticleAnchor(a), {
-      loopOneShot: (a) => this.isAmbientParticleAttachment(a),
+      loopOneShot: () => true,
     });
     this.particleScene = scene;
     this.particleHandles = handles;
@@ -2614,6 +2657,7 @@ export class ShipViewer {
       scene.setAttachmentActive(h, false);
     }
     scene.root.visible = this.particleLayerEnabled;
+    this.updateParticleWaterPlane();
 
     let systems = 0;
     for (const h of handles) systems += h.systems.length;
@@ -2653,13 +2697,18 @@ export class ShipViewer {
     opts: { preserveEnabled?: boolean; preserveToken?: boolean } = {},
   ): void {
     if (!opts.preserveToken) this.particleBuildToken++;
-    if (!opts.preserveEnabled) this.particleLayerEnabled = false;
-    this.clearShipParticleEventPreviews();
+    if (!opts.preserveEnabled) {
+      this.particleLayerEnabled = false;
+      this.clearShipParticleEventLoops();
+    }
     if (this.particleScene) {
       this.env.scene.remove(this.particleScene.root);
       this.particleScene.dispose();
     }
     this.particleScene = null;
+    this.particleHasWaterDistortion = false;
+    this.shipWaterEnabled = null;
+    this.env.setWaterPlaneVisible(false);
     this.particleHandles = [];
     this.particleAnchorObjects.clear();
     this.particleAnchorMotion.clear();
@@ -2714,16 +2763,9 @@ export class ShipViewer {
     });
   }
 
-  private countActiveParticleHandles(): number {
-    let active = 0;
-    for (const h of this.particleHandles) if (h.active) active++;
-    return active;
-  }
 
-  private clearShipParticleEventPreviews(): void {
-    for (const timer of this.particlePreviewTimers.values()) window.clearTimeout(timer);
-    this.particlePreviewTimers.clear();
-    this.particlePreviewKeys.clear();
+  private clearShipParticleEventLoops(): void {
+    this.particleLoopKeys.clear();
   }
 
   private applyShipParticleActivation(): number {
@@ -2734,7 +2776,7 @@ export class ShipViewer {
       const on =
         this.particleLayerEnabled &&
         (this.particleMode === 'all' ||
-          this.particlePreviewKeys.has(key) ||
+          this.particleLoopKeys.has(key) ||
           this.isAmbientParticleAttachment(h.attachment));
       this.particleScene.setAttachmentActive(h, on);
       if (on) active++;

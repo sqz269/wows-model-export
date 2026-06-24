@@ -358,12 +358,11 @@ export function createSceneEnvironment(
 
       // Summed directional sines -> a cheap, structured wave height field.
       // Mixed wavelengths give both broad swell and fine sparkle ripples;
-      // the high-frequency terms are what make the screen-space refraction
-      // legible at the small warp magnitude the distortion pass applies.
+      // the high-frequency terms also keep the screen-space refraction legible
+      // at the small warp magnitude the distortion pass applies.
       float waveH(vec2 p, float t) {
         float h = 0.0;
-        // Mid swells (wavelength ~15-30 m) — the legible ripples at the
-        // inspector's ~40 m scale.
+        // Broad swell (wavelength ~22-33 m).
         h += sin(p.x * 0.28 + t * 1.30) * 0.40;
         h += sin((p.x * 0.19 + p.y * 0.33) + t * 1.00) * 0.34;
         h += sin((p.x * 0.41 - p.y * 0.22) + t * 1.70) * 0.26;
@@ -372,7 +371,22 @@ export function createSceneEnvironment(
         h += sin((p.x * 0.60 - p.y * 1.05) + t * 2.90) * 0.12;
         // Sparkle detail.
         h += sin((p.x * 1.50 + p.y * 1.20) + t * 3.60) * 0.06;
+        h += sin((p.x * 2.30 - p.y * 1.90) + t * 4.50) * 0.035;
         return h;
+      }
+
+      // Procedural daytime sky used as the reflection probe — gives the surface
+      // a real horizon-graded reflection + sun glow WITHOUT a planar reflector
+      // (which would not compose with the depth/distortion snapshot passes).
+      vec3 skyColor(vec3 dir, vec3 sun) {
+        float up = clamp(dir.y, 0.0, 1.0);
+        vec3 horizon = vec3(0.62, 0.74, 0.88);
+        vec3 zenith = vec3(0.13, 0.33, 0.60);
+        vec3 sky = mix(horizon, zenith, pow(up, 0.55));
+        float s = clamp(dot(dir, sun), 0.0, 1.0);
+        sky += vec3(1.0, 0.92, 0.74) * pow(s, 90.0) * 1.1;   // sun reflection
+        sky += vec3(1.0, 0.85, 0.65) * pow(s, 6.0) * 0.06;   // broad glare
+        return sky;
       }
 
       void main() {
@@ -380,32 +394,36 @@ export function createSceneEnvironment(
         float t = uTime;
         float e = 0.6;
         float h0 = waveH(p, t);
-        // Slope gain -> steeper normals so the screen-space refraction has
-        // strong, legible gradients to bend (the wake reads as ripples).
-        float hx = (waveH(p + vec2(e, 0.0), t) - h0) * 4.5;
-        float hz = (waveH(p + vec2(0.0, e), t) - h0) * 4.5;
+        float hx = (waveH(p + vec2(e, 0.0), t) - h0) * 3.0;
+        float hz = (waveH(p + vec2(0.0, e), t) - h0) * 3.0;
         vec3 n = normalize(vec3(-hx / e, 1.0, -hz / e));
 
         vec3 viewDir = normalize(cameraPosition - vWorld);
         vec3 sun = normalize(uSunDir);
 
-        // Daylit sea: teal body graded by facing, sky reflection toward
-        // grazing angles.
-        vec3 deep = vec3(0.02, 0.10, 0.14);
-        vec3 shallow = vec3(0.06, 0.24, 0.30);
-        vec3 col = mix(deep, shallow, clamp(n.y, 0.0, 1.0));
-        float fres = pow(1.0 - clamp(viewDir.y, 0.0, 1.0), 4.0);
-        col = mix(col, vec3(0.34, 0.46, 0.58), fres * 0.7);
+        // Deep-ocean body: dark teal-blue near the viewer, slightly lifted on
+        // the wave faces that catch the sky.
+        vec3 deep = vec3(0.004, 0.045, 0.072);
+        vec3 shallow = vec3(0.02, 0.13, 0.17);
+        vec3 body = mix(deep, shallow, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
 
-        // Sun-slope shading -> visible crest/trough banding (the structure the
-        // refraction bends) + sharp specular glints on the crests.
-        float diff = clamp(dot(n, sun) * 0.5 + 0.5, 0.0, 1.0);
-        col *= 0.7 + 0.6 * diff;
-        // Tight, dim glints — fine sparkle that stays under the bloom
-        // threshold so the wake disturbance is not lost in a sea of bloom.
+        // Sky reflection off the perturbed surface, blended by Schlick fresnel
+        // (mostly body looking straight down, mostly sky toward the horizon).
+        vec3 refl = reflect(-viewDir, n);
+        refl.y = abs(refl.y);
+        vec3 sky = skyColor(refl, sun);
+        float fres = 0.02 + 0.98 * pow(1.0 - clamp(dot(viewDir, n), 0.0, 1.0), 5.0);
+        vec3 col = mix(body, sky, fres);
+
+        // Sharp sun specular on the crests.
         vec3 halfv = normalize(sun + viewDir);
-        float spec = pow(clamp(dot(n, halfv), 0.0, 1.0), 140.0);
-        col += vec3(1.0, 0.97, 0.88) * spec * 0.4;
+        float spec = pow(clamp(dot(n, halfv), 0.0, 1.0), 220.0);
+        col += vec3(1.0, 0.96, 0.85) * spec * 0.5;
+
+        // A hint of foam on the steepest crests (kept low so it stays under the
+        // bloom threshold and the wake disturbance still reads).
+        float crest = smoothstep(0.55, 0.95, h0 * 0.5 + 0.5);
+        col = mix(col, vec3(0.78, 0.86, 0.92), crest * 0.06);
 
         gl_FragColor = vec4(col, 1.0);
       }

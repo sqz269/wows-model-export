@@ -143,7 +143,8 @@
   let particlesLoading = $state(false);
   let particleStats = $state<Readonly<ShipParticleStats> | null>(null);
   let particleEvents = $state<readonly ShipParticleEventOption[]>([]);
-  let selectedParticleEvent = $state('');
+  let particleLoops = $state<ReadonlySet<string>>(new Set());
+  let waterEnabled = $state(false);
   const PARTICLE_MODES: Array<{ value: ShipParticleMode; label: string }> = [
     { value: 'ambient', label: 'Ambient' },
     { value: 'all', label: 'All' },
@@ -312,6 +313,7 @@
       particlesView = viewer.getShipParticlesVisible();
       particleMode = viewer.getShipParticleMode();
       particleStats = viewer.getShipParticleStats();
+      waterEnabled = viewer.isShipWaterEnabled();
       refreshParticleEvents();
 
       // Honor the persisted Show-textures choice. Each ship's viewer
@@ -448,15 +450,14 @@
   }
   function refreshParticleEvents() {
     particleEvents = viewer.getShipParticleEventOptions();
-    if (!particleEvents.some((event) => event.key === selectedParticleEvent)) {
-      selectedParticleEvent = particleEvents[0]?.key ?? '';
-    }
+    particleLoops = new Set(viewer.getShipParticleEventLoops());
   }
   async function toggleParticlesView(v: boolean) {
     particlesView = v;
     particlesLoading = true;
     try {
       particleStats = await viewer.setShipParticlesVisible(v);
+      waterEnabled = viewer.isShipWaterEnabled();
       refreshParticleEvents();
     } catch (err) {
       particlesView = viewer.getShipParticlesVisible();
@@ -465,6 +466,10 @@
     } finally {
       particlesLoading = false;
     }
+  }
+  function toggleWater(v: boolean) {
+    waterEnabled = v;
+    viewer.setShipWaterEnabled(v);
   }
   async function setParticleMode(mode: ShipParticleMode) {
     particleMode = mode;
@@ -480,18 +485,19 @@
       particlesLoading = false;
     }
   }
-  async function triggerParticleEvent() {
-    if (!selectedParticleEvent) return;
+  async function toggleEventLoop(key: string, on: boolean) {
+    const next = new Set(particleLoops);
+    if (on) next.add(key);
+    else next.delete(key);
+    particleLoops = next;
     particlesLoading = true;
     try {
-      particleStats = await viewer.triggerShipParticleEvent(selectedParticleEvent);
-      particlesView = viewer.getShipParticlesVisible();
-      particleMode = viewer.getShipParticleMode();
-      refreshParticleEvents();
+      particleStats = await viewer.setShipParticleEventLoop(key, on);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      toast.error('Particle event failed', { description: msg, duration: 8000 });
+      toast.error('Particle loop failed', { description: msg, duration: 8000 });
     } finally {
+      particleLoops = new Set(viewer.getShipParticleEventLoops());
       particlesLoading = false;
     }
   }
@@ -999,27 +1005,32 @@
             </button>
           {/each}
         </div>
-        {#if particleEvents.length > 0}
-          <div class="ml-5 flex items-center gap-1 text-[10px]">
-            <select
-              class="h-6 min-w-0 max-w-[11rem] rounded border border-border bg-background px-1 text-[10px] text-foreground disabled:opacity-50"
-              value={selectedParticleEvent}
+        {#if particlesView}
+          <label class={`${rowCls} ml-5`}>
+            <input
+              type="checkbox"
+              checked={waterEnabled}
               disabled={particlesLoading}
-              onchange={(e) => (selectedParticleEvent = e.currentTarget.value)}
-              aria-label="Particle event"
-            >
-              {#each particleEvents as event}
-                <option value={event.key}>{event.label} ({event.handles})</option>
-              {/each}
-            </select>
-            <button
-              type="button"
-              class="h-6 rounded border border-border px-2 text-[10px] text-foreground transition-colors hover:bg-muted disabled:opacity-50"
-              disabled={particlesLoading || !selectedParticleEvent}
-              onclick={() => void triggerParticleEvent()}
-            >
-              Trigger
-            </button>
+              onchange={(e) => toggleWater(e.currentTarget.checked)}
+            />
+            Water surface
+          </label>
+        {/if}
+        {#if particlesView && particleEvents.length > 0}
+          <div class="ml-5 flex flex-col gap-0.5">
+            <span class="text-muted-foreground text-[10px]">Loop event particles</span>
+            {#each particleEvents as event}
+              <label class="flex items-center gap-1.5 text-[10px]" title={event.key}>
+                <input
+                  type="checkbox"
+                  checked={particleMode === 'all' || particleLoops.has(event.key)}
+                  disabled={particlesLoading || particleMode === 'all'}
+                  onchange={(e) => void toggleEventLoop(event.key, e.currentTarget.checked)}
+                />
+                <span class="truncate">{event.label}</span>
+                <span class="text-muted-foreground/60 tabular-nums">({event.handles})</span>
+              </label>
+            {/each}
           </div>
         {/if}
         {#if particleStats}
