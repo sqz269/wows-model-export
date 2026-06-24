@@ -3159,20 +3159,20 @@ const PS_RBT_LUT_MODES = new Set(['GRADIENT_MAP', 'UNDERWATER_GRADIENT_MAP']);
 const PS_RLT_LIGHTMAP_MODES = new Set(['lightmapping4Way', 'lightmappingHL2']);
 
 function rotationPivotForCenter(
-  label: string | undefined,
-  customOffset: [number, number] | undefined,
+  _label: string | undefined,
+  _customOffset: [number, number] | undefined,
 ): THREE.Vector2 {
-  switch (label) {
-    case 'bottom':
-      return new THREE.Vector2(0.5, 0.0);
-    case 'corner':
-      return new THREE.Vector2(0.0, 0.0);
-    case 'custom':
-      return new THREE.Vector2(0.5 + (customOffset?.[0] ?? 0), 0.5 + (customOffset?.[1] ?? 0));
-    case 'center':
-    default:
-      return new THREE.Vector2(0.5, 0.5);
-  }
+  // RESOLVED 2026-06-23 (RE on the LIVE build 12668706 + a 39,663-sprite buildQuad hook test):
+  // the native engine spins sprites about their CENTER and ignores rotationCenter /
+  // customCenterOffset entirely. fx_Sprite_buildQuad rotates the U/V basis about the quad center
+  // (the spin math has no pivot input) and writes a quad symmetric about the particle position
+  // (the position formula has no customCenterOffset term — byte-identical across 12506899/12668706).
+  // rotationCenter + customCenterOffset are DECODE-ONLY: the producer parses and emits them for
+  // schema stability, but no native draw-path code reads them. The earlier bottom/corner/custom
+  // pivots were a faithful-looking but SPURIOUS addition; the spin pivot is always centered.
+  // Empirical confirmation: every rendered sprite's quad reconstructs to its worldPos within snorm16
+  // quantization (max relative residual 6e-4). See memory project_particle_billboard_orientation_re.
+  return new THREE.Vector2(0.5, 0.5);
 }
 
 /**
