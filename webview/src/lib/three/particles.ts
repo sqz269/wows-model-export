@@ -599,6 +599,8 @@ function samplePosFromPrototype(proto: ParticleVgtPrototype, out: THREE.Vector3)
  */
 class SystemRenderer {
   readonly points: THREE.Mesh;
+  /** Per-system author name (System+0x198), `''` for pre-`name` records. */
+  readonly name: string;
   private instGeom: THREE.InstancedBufferGeometry;
   private capacity: number;
   private maxAge: number;
@@ -720,6 +722,8 @@ class SystemRenderer {
   private readonly depthSortParticles: boolean;
   private sortCamera: THREE.Camera | null = null;
   private distanceConfigs: ParticleSystemIntensityConfig[] = [];
+  /** DEV ONLY: raw authored system, kept for debugConfig() property-parity. */
+  private dbgSystem: ParticleSystem | null = null;
   private intensityChannels: ParticleSystemIntensityChannel[] = [];
   private intensityDefaults: number[] = [];
   private intensityValues: number[] = [];
@@ -946,6 +950,7 @@ class SystemRenderer {
     options: SystemRendererOptions = {},
   ) {
     this.material = material;
+    this.name = system.name ?? '';
     this.maxEmittingDuration = maxEmittingDuration;
     this.spawnEffect = options.spawnEffect;
     this.loopOneShot = options.loopOneShot ?? true;
@@ -1282,6 +1287,7 @@ class SystemRenderer {
     this.points.frustumCulled = false;
     this.intensityChannels = system.intensities?.channels ?? [];
     this.intensityDefaults = Array.from(options.intensityDefaults ?? []);
+    this.dbgSystem = system;
     this.baseSpriteAspectX = finiteNumber(this.material.uniforms.uSpriteAspectX?.value, 1);
     const tiling = this.material.uniforms.uUvTiling?.value;
     if (tiling instanceof THREE.Vector2) {
@@ -1349,6 +1355,91 @@ class SystemRenderer {
         rotPhase: this.rotationPhase[i],
         alpha: this.colorRGBA[i * 4 + 3],
       });
+    }
+    return out;
+  }
+
+  /** DEV ONLY: the system's CONSUMED property set, keyed by the producer's
+   *  dotted property paths (matching tmp/pfx_re/route2/particle_props.py), with
+   *  the webview's EFFECTIVE value. A property present here = the renderer
+   *  consumes it; a producer property ABSENT here = a coverage gap (the renderer
+   *  ignores it — e.g. `components.resizer`, intentionally not wired). Used by
+   *  particle_full_compare.py to diff ALL properties producer↔webview and make
+   *  non-consumption explicit instead of silently omitted. */
+  debugConfig(): Record<string, unknown> {
+    const s = this.dbgSystem;
+    if (!s) return {};
+    const r = s.renderer ?? {};
+    const a = s.animation ?? {};
+    const e = s.emitter ?? {};
+    const r4 = (n: number) => Math.round(n * 1e4) / 1e4;
+    const nv = (v: unknown): unknown => {
+      if (typeof v === 'number') return r4(v);
+      if (v && typeof v === 'object') {
+        const o = v as Record<string, unknown>;
+        if (Array.isArray((o as { points?: unknown }).points) && 'count' in o) {
+          return {
+            _ramp: ((o.points as Array<{ time?: number; value?: number }>) ?? []).map((p) => [
+              r4(p.time ?? 0),
+              r4(p.value ?? 0),
+            ]),
+          };
+        }
+        if (Array.isArray(v)) return v.map(nv);
+        const out2: Record<string, unknown> = {};
+        for (const k of Object.keys(o)) out2[k] = nv(o[k]);
+        return out2;
+      }
+      return v;
+    };
+    const out: Record<string, unknown> = {};
+    const put = (k: string, v: unknown) => {
+      if (v !== undefined) out[k] = nv(v);
+    };
+    put('name', this.name || undefined); // System+0x198 per-system author name
+    const g = s.general ?? {};
+    put('general.maxParticleAge', this.maxAge);
+    put('general.capacity', this.capacity);
+    put('general.prewarm', (g as Record<string, unknown>).prewarm); // -> authoredPrewarm/runPrewarm
+    put('general.coordinateStyle', (g as Record<string, unknown>).coordinateStyle); // stream/detached frame
+    for (const k of [
+      'blendType', 'lightingType', 'tilingU', 'tilingV', 'flipTexcoordU', 'flipTexcoordV',
+      'velocityOriented', 'explicitOrientation', 'explicitOrientationLocal', 'billboard',
+      'scaleX', 'opacityMultiplier', 'lightingAmbient', 'lightingDiffuse', 'lightingTransmission',
+      'lightWrapAmount', 'shadowsStrength', 'hideStartCos', 'hideSpeed', 'softParticleDepthScale',
+      'rotationCenter', 'customCenterOffset', 'sortType', 'textureName0', 'textureName1',
+    ]) put(`renderer.${k}`, (r as Record<string, unknown>)[k]);
+    put('renderer.spinRateBase', this.spinRateBase);
+    put('renderer.spinRateRange', this.spinRateRange);
+    put('renderer.initialOrientationBase', this.initialOrientationBase);
+    put('renderer.initialOrientationRange', this.initialOrientationRange);
+    put('renderer.yawRateRamp', this.yawRateRamp ?? null);
+    for (const k of [
+      'animationType', 'framesPerX', 'framesPerY', 'framesRangeBegin', 'animationPeriod',
+      'motionVectorsDistortion', 'motionVectorsTexture', 'randomFrameOnly', 'useEmissionAlphaFromMV',
+    ]) put(`animation.${k}`, (a as Record<string, unknown>)[k]);
+    put('animation.frameRateRamp', this.frameRateRamp ?? null);
+    put('animation.framesRangeEnd', this.framesRangeEnd);
+    for (const k of [
+      'sizeGenerator', 'ageScaleGenerator', 'ageScaleAuxGenerator', 'delayGenerator',
+      'sleepPeriodGenerator', 'rateGenerator', 'activePeriod', 'inheritVelocityFactor',
+      'snapToSeaLevel', 'initialPositionGenerator', 'initialVelocityGenerator',
+      'particleDistributionStrength',
+    ]) put(`emitter.${k}`, (e as Record<string, unknown>)[k]);
+    put('distance.maxDistance', (s.distance as Record<string, unknown> | undefined)?.maxDistance);
+    if (this.distanceConfigs.length) put('distance.configs', this.distanceConfigs);
+    s.intensities?.channels?.forEach((ch, ci) => {
+      for (const cfg of ch.configs ?? []) {
+        for (const fn of cfg.flagNames ?? []) put(`intensities.ch${ci}.${fn}`, cfg.ramp);
+      }
+    });
+    if (s.intensities) put('intensities.channelCount', s.intensities.channelCount);
+    const HANDLED = new Set([
+      'creator', 'spawner', 'tint', 'alphaSetter', 'scaler', 'dampfer', 'stream',
+      'jitter', 'orbitor', 'magnet', 'sphere', 'cylinder', 'box', 'plane', 'light',
+    ]);
+    for (const c of s.components ?? []) {
+      if (c.action && HANDLED.has(c.action)) put(`components.${c.action}`, c.body);
     }
     return out;
   }

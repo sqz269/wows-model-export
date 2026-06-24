@@ -609,6 +609,12 @@ export interface ParticleAnimation {
 }
 
 export interface ParticleSystem {
+  /**
+   * Per-system author name decoded from the System+0x198 ResourceRef
+   * (`"main_big_0"`, `"sparks_1"`, `"fire_big"`, …). Present for every system
+   * in the corpus; `undefined` only for records from a pre-`name` producer.
+   */
+  name?: string;
   renderer?: ParticleRenderer;
   animation?: ParticleAnimation;
   emitter?: ParticleEmitter;

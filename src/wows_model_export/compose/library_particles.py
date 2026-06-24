@@ -46,8 +46,10 @@ INDEX_FILE = LIBRARY_ROOT / "index.json"
 # velocityOriented), per-system ``intensities`` + ``distance`` configs,
 # coordinate-style byte fix. A library built before these landed carries a
 # truncated schema that the mtime gate alone accepts forever (assets.bin
-# predates the parser change).
-SCHEMA_VERSION = 2
+# predates the parser change). v3: 2026-06-24 — per-system ``name`` decoded
+# from the System+0x198 ResourceRef (previously the one fully-dropped field;
+# present in 100% of systems).
+SCHEMA_VERSION = 3
 
 
 def library_paths(workspace: Path) -> dict[str, Path]:

@@ -99,7 +99,9 @@
   /** Indices of systems toggled OFF (hidden) in the inspector. */
   let hiddenSystems = $state<Set<number>>(new Set());
   /** Per-system panel rows (rebuilt each frame: live count + hidden flag). */
-  let systemRows = $state<Array<{ i: number; alive: number; hidden: boolean }>>([]);
+  let systemRows = $state<
+    Array<{ i: number; name: string; alive: number; hidden: boolean }>
+  >([]);
 
   // Inspector backdrop. Occluding / alpha-blended smoke (flak bursts, fire
   // smoke — the GRADIENT_MAP + lightmapping path) is near-invisible against a
@@ -373,14 +375,14 @@
       }
     }
     // 3. Per-frame box update + panel rows.
-    const rows: Array<{ i: number; alive: number; hidden: boolean }> = [];
+    const rows: Array<{ i: number; name: string; alive: number; hidden: boolean }> = [];
     for (let i = 0; i < systems.length; i++) {
       const hidden = hiddenSystems.has(i);
       const slot = boundsHelpers[i];
       if (slot) {
         slot.helper.visible = showBounds && !hidden && systems[i].computeWorldBounds(slot.box);
       }
-      rows.push({ i, alive: systems[i].aliveCount, hidden });
+      rows.push({ i, name: systems[i].name, alive: systems[i].aliveCount, hidden });
     }
     systemRows = rows;
   }
@@ -835,7 +837,7 @@
             <button
               type="button"
               onclick={() => toggleSystem(s.i)}
-              title={s.hidden ? `Show system #${s.i}` : `Hide system #${s.i}`}
+              title={`${s.hidden ? 'Show' : 'Hide'} ${s.name ? `"${s.name}" (#${s.i})` : `system #${s.i}`}`}
               class="hover:bg-muted/40 flex items-center gap-1.5 rounded px-0.5 py-[1px] text-left {s.hidden
                 ? 'opacity-40'
                 : ''}"
@@ -846,7 +848,10 @@
                   ? ''
                   : `background:${boundsColorHex(s.i)};border-color:${boundsColorHex(s.i)}`}
               ></span>
-              <span class="text-foreground">#{s.i}</span>
+              <span class="text-muted-foreground flex-none">#{s.i}</span>
+              {#if s.name}
+                <span class="text-foreground max-w-[130px] truncate">{s.name}</span>
+              {/if}
               <span class="text-muted-foreground ml-auto pl-3 tabular-nums">{s.alive}</span>
             </button>
           {/each}

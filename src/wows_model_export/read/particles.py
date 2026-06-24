@@ -1195,10 +1195,18 @@ def _decode_system_intensities(
 def _decode_system(
     buf: bytes | mmap.mmap, sys_off: int, file_end: int,
 ) -> dict:
-    """One 0x1c8-byte System slot. Includes Emitter, General, and
-    Component[componentsCount] but skips Renderer/Animation internals
-    (per-field byte offsets not mapped — see spec doc's "open items").
+    """One 0x1c8-byte System slot — Renderer, Animation, Emitter, General,
+    Distance, Intensities, the per-system ``name``, and the
+    Component[componentsCount] array.
+
+    ``name`` lives in the 16-byte section at System+0x198 — a ResourceRef
+    (``{u32 length, u32 pad, i64 relptr}``, same shape as the renderer
+    texture refs) holding the author's system name (``"main_big_0"``,
+    ``"sparks_1"``, …). Present in 100% of the corpus; previously dropped.
     """
+    # Per-system name at +0x198 (ResourceRef → OOL string). Returns None if
+    # the slot is empty / malformed; non-null for every system in the corpus.
+    name = _read_texture_ref(buf, sys_off + 0x198, file_end)
     comp_count = struct.unpack_from("<i", buf, sys_off + 0x1b8)[0]
     comp_rp = struct.unpack_from("<q", buf, sys_off + 0x1c0)[0]
     components: list[dict] = []
@@ -1227,6 +1235,7 @@ def _decode_system(
                 components.append(rec)
 
     return {
+        "name": name,
         "renderer": _decode_renderer(buf, sys_off, file_end),
         "animation": _decode_animation(buf, sys_off, file_end),
         "emitter": _decode_emitter(buf, sys_off, file_end),
