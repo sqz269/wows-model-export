@@ -1315,6 +1315,44 @@ class SystemRenderer {
     this.sortCamera = camera;
   }
 
+  /** DEV ONLY (native↔webview temporal-envelope parity; see
+   *  tmp/pfx_re/route2/particle_envelope*). Snapshot every live particle's
+   *  cooked per-slot sim state. Reads the SLOT-INDEXED sim arrays (consistent
+   *  with age[i]) — NOT the sort-permuted draw* copies. `size` is pre-
+   *  NATIVE_TO_METRES, matching the engine's cooked sim+0x04; `rotPhase` is the
+   *  raw spin accumulator (radians, un-rewrapped, == engine sim+0x30);
+   *  `framePhase` is the cumulative frame count (engine cell = floor(framePhase)
+   *  % framesRangeEnd + begin). */
+  debugSnapshot(): {
+    age: number;
+    size: number;
+    scaleX: number;
+    framePhase: number;
+    rotPhase: number;
+    alpha: number;
+  }[] {
+    const out: {
+      age: number;
+      size: number;
+      scaleX: number;
+      framePhase: number;
+      rotPhase: number;
+      alpha: number;
+    }[] = [];
+    for (let i = 0; i < this.capacity; i++) {
+      if (this.age[i] < 0) continue;
+      out.push({
+        age: this.age[i],
+        size: this.sizeArr[i],
+        scaleX: this.spriteScaleXArr[i],
+        framePhase: this.framePhase[i],
+        rotPhase: this.rotationPhase[i],
+        alpha: this.colorRGBA[i * 4 + 3],
+      });
+    }
+    return out;
+  }
+
   setIntensityValues(values: readonly number[] | undefined): void {
     const count = Math.max(this.intensityChannels.length, this.intensityDefaults.length);
     this.intensityValues = [];
@@ -4089,6 +4127,21 @@ export class ParticleScene {
     this.root = new THREE.Group();
     this.root.name = 'ParticleEffects';
     if (renderer) this.renderer = renderer;
+    // DEV ONLY: expose the live scene to the native↔webview particle parity
+    // harness (tmp/pfx_re/route2/particle_webview_envelope.*). Reads per-slot
+    // cooked state via debugAllSystems()[i].debugSnapshot().
+    if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) {
+      (globalThis as { __particleScene?: ParticleScene }).__particleScene = this;
+    }
+  }
+
+  /** DEV ONLY: flat list of every live SystemRenderer (attachments + spawned
+   *  effects), in record-system order so index i ↔ engine cfgIndex i. */
+  debugAllSystems(): SystemRenderer[] {
+    const out: SystemRenderer[] = [];
+    for (const h of this.attachments.values()) out.push(...h.systems);
+    for (const e of this.spawnedEffects) out.push(...e.systems);
+    return out;
   }
 
   /** Provide the WebGL renderer used to upload DDS textures. Safe to
