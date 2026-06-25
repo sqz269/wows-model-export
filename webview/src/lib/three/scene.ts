@@ -19,6 +19,8 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 
+import type { ColorGrade } from './env_ibl';
+
 export interface BloomParams {
   /** Overall bloom contribution (UnrealBloomPass.strength). */
   strength: number;
@@ -115,6 +117,28 @@ const GTTonemapShader = {
     uBlack: { value: DEFAULT_TONEMAP_PARAMS.black },
     uMaxBright: { value: 1.0 }, // Uchimura P (fixed)
     uPedestal: { value: 0.0 }, // Uchimura b (fixed)
+    // WG PostFX color grade (off by default; driven from the env manifest).
+    // Indices: 0=global 1=shadows 2=midtones 3=highlights.
+    uGradeEnabled: { value: 0 },
+    uGradeLum: { value: new THREE.Vector2(0.09, 0.5) }, // shadowsMax, highlightsMin
+    uGradeSat: { value: [1, 1, 1, 1] },
+    uGradeCon: { value: [1, 1, 1, 1] },
+    uGradeGain: {
+      value: [
+        new THREE.Vector3(1, 1, 1),
+        new THREE.Vector3(1, 1, 1),
+        new THREE.Vector3(1, 1, 1),
+        new THREE.Vector3(1, 1, 1),
+      ],
+    },
+    uGradeOff: {
+      value: [
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, 0),
+      ],
+    },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -127,6 +151,12 @@ const GTTonemapShader = {
     varying vec2 vUv;
     uniform sampler2D tDiffuse;
     uniform float uExposure, uContrast, uLinearStart, uLinearLength, uBlack, uMaxBright, uPedestal;
+    uniform float uGradeEnabled;
+    uniform vec2 uGradeLum;       // shadowsMaxRelLum, highlightsMinRelLum
+    uniform float uGradeSat[4];   // 0=global 1=shadows 2=midtones 3=highlights
+    uniform float uGradeCon[4];
+    uniform vec3 uGradeGain[4];
+    uniform vec3 uGradeOff[4];
 
     // Uchimura "Gran Turismo" curve. x is linear scene-referred; returns [0,P].
     float uchimura(float x) {
@@ -150,9 +180,34 @@ const GTTonemapShader = {
       return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
     }
 
+    // WG PostFX color grade — UE4-style per-luminance-range CDL, in linear HDR
+    // after exposure, BEFORE the tonemap (see reference/engine/
+    // wg_render_color_grading.md). Per range: saturation -> contrast -> gain ->
+    // offset; the three ranges blended by pixel luminance. (The engine's 0.18
+    // mid-grey anchor is folded out — the inline curve keeps mid-grey at the
+    // exposure scale, so neutral params = identity here.)
+    const vec3 GLW = vec3(0.2126, 0.7152, 0.0722);
+    vec3 cdl(vec3 col, float sat, float con, vec3 gain, vec3 off) {
+      float luma = dot(col, GLW);
+      vec3 c = mix(vec3(luma), col, sat);
+      return c * con * gain + off;
+    }
+    vec3 colorGrade(vec3 col) {
+      col = cdl(col, uGradeSat[0], uGradeCon[0], uGradeGain[0], uGradeOff[0]); // global
+      float luma = dot(col, GLW);
+      float wS = 1.0 - smoothstep(0.0, max(uGradeLum.x, 1e-4), luma);
+      float wH = smoothstep(uGradeLum.y, 1.0, luma);
+      float wM = max(1.0 - wS - wH, 0.0);
+      vec3 cS = cdl(col, uGradeSat[1], uGradeCon[1], uGradeGain[1], uGradeOff[1]);
+      vec3 cM = cdl(col, uGradeSat[2], uGradeCon[2], uGradeGain[2], uGradeOff[2]);
+      vec3 cH = cdl(col, uGradeSat[3], uGradeCon[3], uGradeGain[3], uGradeOff[3]);
+      return cS * wS + cM * wM + cH * wH;
+    }
+
     void main() {
       vec4 texel = texture2D(tDiffuse, vUv);
       vec3 c = max(texel.rgb, 0.0) * uExposure;               // keyed exposure
+      c = mix(c, max(colorGrade(c), 0.0), uGradeEnabled);     // WG PostFX color grade
       c = vec3(uchimura(c.r), uchimura(c.g), uchimura(c.b));   // GT curve (linear)
       gl_FragColor = vec4(linearToSRGB(c), texel.a);          // sRGB OETF
     }
@@ -188,6 +243,9 @@ export interface SceneEnvironment {
   /** Patch any subset of the GT tonemap params (curve + keyed exposure);
    *  missing keys keep their current value. */
   setTonemapParams(p: Partial<GTTonemapParams>): void;
+  /** Apply WG's PostFX color grade (per-luminance-range CDL, run before the
+   *  tonemap), or pass `null` to disable it. Driven from the env manifest. */
+  setColorGrade(grade: ColorGrade | null): void;
   /** Replace `scene.environment` with a WG PMREM (from `env_ibl`), or restore
    *  the default procedural RoomEnvironment when passed `null`. The caller
    *  owns the passed texture's lifecycle. */
@@ -471,6 +529,27 @@ export function createSceneEnvironment(
     u.uBlack.value = tonemapParams.black;
   };
 
+  // WG PostFX color grade state (null = off). Re-pushed whenever the composer
+  // (re)builds so it survives a bloom toggle, mirroring applyTonemapParams.
+  let colorGradeState: ColorGrade | null = null;
+  const applyColorGrade = () => {
+    if (!gtPass) return;
+    const u = gtPass.uniforms;
+    if (!colorGradeState) {
+      u.uGradeEnabled.value = 0;
+      return;
+    }
+    u.uGradeEnabled.value = 1;
+    (u.uGradeLum.value as THREE.Vector2).set(
+      colorGradeState.shadowsMax,
+      colorGradeState.highlightsMin,
+    );
+    u.uGradeSat.value = colorGradeState.sat.slice();
+    u.uGradeCon.value = colorGradeState.con.slice();
+    u.uGradeGain.value = colorGradeState.gain.map((g) => new THREE.Vector3(g[0], g[1], g[2]));
+    u.uGradeOff.value = colorGradeState.off.map((o) => new THREE.Vector3(o[0], o[1], o[2]));
+  };
+
   const buildComposer = () => {
     if (composer) return;
     // MSAA-capable target so bloom doesn't kill the edge AA that the
@@ -499,6 +578,7 @@ export function createSceneEnvironment(
     gtPass.renderToScreen = true;
     composer.addPass(gtPass);
     applyTonemapParams();
+    applyColorGrade();
   };
 
   const collectSoftDepthConsumers = (): THREE.ShaderMaterial[] => {
@@ -703,6 +783,10 @@ export function createSceneEnvironment(
       if (p.linearLength !== undefined) tonemapParams.linearLength = p.linearLength;
       if (p.black !== undefined) tonemapParams.black = p.black;
       applyTonemapParams();
+    },
+    setColorGrade(grade: ColorGrade | null) {
+      colorGradeState = grade;
+      applyColorGrade();
     },
     setSize(w: number, h: number) {
       lastSize = { w, h };

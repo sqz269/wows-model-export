@@ -2515,6 +2515,11 @@ export class ShipViewer {
     if (typeof hdr.gtBlack === 'number') curve.black = hdr.gtBlack;
     this.env.setTonemapParams(curve);
 
+    // WG PostFX color grade (UE4-style per-luminance-range CDL) for this
+    // weather, applied in the tonemap pass before the GT curve. Null when the
+    // weather authors a neutral/absent grade.
+    this.env.setColorGrade(env.colorGrading);
+
     // Drive the key directional from the per-weather WG sun (replacing the flat
     // stand-in). The cube owns ambient + specular, so kill the hemisphere fill.
     this.env.setFillLights(WG_FILL_HEMI);
@@ -2569,6 +2574,7 @@ export class ShipViewer {
       linearLength: DEFAULT_TONEMAP_PARAMS.linearLength,
       black: DEFAULT_TONEMAP_PARAMS.black,
     });
+    this.env.setColorGrade(null);
     this.env.setFillLights(PROCEDURAL_FILL_HEMI, PROCEDURAL_FILL_DIR);
     this.env.setSunLight({ direction: PROCEDURAL_SUN_DIR.clone(), color: 0xffffff });
     this.syncParticleSunLighting();
