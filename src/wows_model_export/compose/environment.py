@@ -52,7 +52,10 @@ LIBRARY_ROOT = Path("library") / "environment"
 MANIFEST_FILE = LIBRARY_ROOT / "manifest.json"
 # v2 (2026-06-05): per-weather "wetness" block (puddles/ripples/fallout
 # intensities + overallWetness/wetnessColor) added alongside "sun".
-SCHEMA_VERSION = 2
+# v3 (2026-06-25): per-weather "color_grading" block (UE4-style per-lum-range
+# Saturation/Contrast/Gain/Offset) — the PostFX grade applied pre-tonemap; a
+# consumer that skips it renders darker/less-warm than the game.
+SCHEMA_VERSION = 3
 
 # The one shared split-sum BRDF LUT (packed only — not in res_unpack).
 ENV_BRDF_LUT_VFS = "system/maps/env_brdf_lut.dds"
@@ -437,6 +440,7 @@ def build(
                 "cube": cube_info,
                 "cubemaps_path": cp,
                 "hdr": w.get("hdr") or {},
+                "color_grading": w.get("color_grading") or {},
                 "sh": w.get("sh"),
                 "pbs_extras": w.get("pbs_extras") or {},
                 "sun": w.get("sun"),
