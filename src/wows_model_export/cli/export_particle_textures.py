@@ -38,8 +38,10 @@ already-DX10 files are left untouched.
 
 The HDR fire ramps (``particles/ramps/*_HDR.dds``) ship as BC6H_UF16, which
 Unity's native importer MIS-DECODES (constant garbage -> particle glow renders
-pink). This command also software-decodes those to a ``<name>.png`` sibling the
-consumer loads instead (the webview software-decodes BC6H for the same reason).
+pink). This command software-decodes those to a TRUE-HDR ``<name>.exr`` sibling
+(float16, full HDR range) the consumer loads instead — or an 8-bit ``<name>.png``
+when ``imagecodecs`` is absent (the webview software-decodes BC6H for the same
+reason).
 
 NOTE: this extracts RAW WG DDS (no UV-normalize pass). For an additive
 camera-facing tracer strip that's fine (V-orientation is invisible across the
@@ -156,37 +158,60 @@ def _modernize_legacy_dds(path: Path) -> bool:
 
 
 def _transcode_bc6h_ramp(path: Path) -> bool:
-    """Software-decode a BC6H_UF16 HDR ramp to a PNG sibling.
+    """Decode a BC6H HDR ramp to a TRUE-HDR ``.exr`` sibling (lossless float16).
 
     Unity's native ``.dds`` importer MIS-DECODES BC6H_UF16 — it returns constant
     garbage, so the WG fire/HDR ramps (``particles/ramps/*_HDR.dds``) render
     wrong (a particle GRADIENT_MAP glow goes constant-red -> pink smoke). The
     webview already software-decodes BC6H (``lib/dds/bc6h.ts``); do the same here
-    so the ``--dest`` tree carries a decode-correct ``<name>.png`` the consumer
-    loads instead of the raw ``.dds``. Idempotent (skips when the PNG is newer).
+    so the ``--dest`` tree carries a decode-correct sibling the consumer loads
+    instead of the raw ``.dds``.
 
-    NOTE: ``texture2ddecoder`` returns 8-bit tonemapped pixels — the ramp COLOURS
-    are correct, HDR brightness is clamped. A fully-HDR path would decode to EXR.
-    Returns ``True`` when a sibling was written.
+    ``imagecodecs.dds_decode`` returns float16 RGB carrying the FULL HDR range
+    (bit-exact vs the webview ``bcdec_bc6h_half`` reference; one ramp peaks at
+    ~240), and ``imagecodecs.exr_encode`` writes an ``.exr`` Unity imports as a
+    linear-HDR RGBAHalf texture (via the real TextureImporter, not the IHV one).
+    Falls back to the legacy 8-bit ``.png`` (texture2ddecoder — colours correct,
+    HDR clamped to 1.0) when ``imagecodecs`` is absent. Idempotent; returns
+    ``True`` when a sibling was written.
     """
     data = path.read_bytes()
     if len(data) < 148 or data[:4] != b"DDS ":
         return False
     if data[_PF_FOURCC:_PF_FOURCC + 4] != b"DX10":
         return False
-    if struct.unpack_from("<I", data, _DX10_DXGI)[0] != _DXGI_BC6H_UF16:
+    if struct.unpack_from("<I", data, _DX10_DXGI)[0] not in (95, 96):  # BC6H UF16/SF16
         return False
-    out = path.with_suffix(".png")
-    if out.is_file() and out.stat().st_mtime >= path.stat().st_mtime:
-        return False
+
+    # Primary: TRUE-HDR EXR (decode float16 + encode EXR, one dependency).
+    try:
+        import numpy as np  # noqa: PLC0415
+        import imagecodecs as ic  # noqa: PLC0415
+    except ImportError:
+        ic = None
+    if ic is not None:
+        out = path.with_suffix(".exr")
+        if out.is_file() and out.stat().st_mtime >= path.stat().st_mtime:
+            return False
+        rgb = np.asarray(ic.dds_decode(data))             # (h, w, 3) float16, HDR
+        h, w = rgb.shape[:2]
+        rgba = np.ones((h, w, 4), dtype=np.float16)        # BC6H has no alpha -> 1.0
+        rgba[..., :3] = rgb[..., :3]
+        out.write_bytes(ic.exr_encode(rgba, compression="zip"))
+        return True
+
+    # Fallback: legacy 8-bit PNG (colours correct, HDR clamped to 1.0).
     try:
         import texture2ddecoder  # noqa: PLC0415
         from PIL import Image  # noqa: PLC0415
     except ImportError:
         print(
-            f"  BC6H transcode skipped (texture2ddecoder/PIL not installed): {path.name}",
+            f"  BC6H transcode skipped (imagecodecs/texture2ddecoder absent): {path.name}",
             file=sys.stderr,
         )
+        return False
+    out = path.with_suffix(".png")
+    if out.is_file() and out.stat().st_mtime >= path.stat().st_mtime:
         return False
     height, width = struct.unpack_from("<II", data, 12)
     bgra = bytes(texture2ddecoder.decode_bc6(data[148:], width, height))
