@@ -36,6 +36,11 @@ DX10 ``R8G8B8A8_UNORM`` (or ``B8G8R8A8_UNORM``) form — a header-only,
 lossless transform that every modern DDS loader accepts; compressed /
 already-DX10 files are left untouched.
 
+The HDR fire ramps (``particles/ramps/*_HDR.dds``) ship as BC6H_UF16, which
+Unity's native importer MIS-DECODES (constant garbage -> particle glow renders
+pink). This command also software-decodes those to a ``<name>.png`` sibling the
+consumer loads instead (the webview software-decodes BC6H for the same reason).
+
 NOTE: this extracts RAW WG DDS (no UV-normalize pass). For an additive
 camera-facing tracer strip that's fine (V-orientation is invisible across the
 ribbon); if a future textured effect needs the consumer's normalized layout,
@@ -105,6 +110,8 @@ _PF_FLAGS = 80
 _PF_FOURCC = 84
 _PF_BITCOUNT = 88
 _PF_MASKS = 92  # R, G, B, A — four uint32
+_DX10_DXGI = 128  # dxgiFormat: first u32 of the DDS_HEADER_DXT10 (after the 128-byte header)
+_DXGI_BC6H_UF16 = 95  # DXGI_FORMAT_BC6H_UF16 (unsigned HDR)
 
 
 def _modernize_legacy_dds(path: Path) -> bool:
@@ -148,6 +155,50 @@ def _modernize_legacy_dds(path: Path) -> bool:
     return True
 
 
+def _transcode_bc6h_ramp(path: Path) -> bool:
+    """Software-decode a BC6H_UF16 HDR ramp to a PNG sibling.
+
+    Unity's native ``.dds`` importer MIS-DECODES BC6H_UF16 — it returns constant
+    garbage, so the WG fire/HDR ramps (``particles/ramps/*_HDR.dds``) render
+    wrong (a particle GRADIENT_MAP glow goes constant-red -> pink smoke). The
+    webview already software-decodes BC6H (``lib/dds/bc6h.ts``); do the same here
+    so the ``--dest`` tree carries a decode-correct ``<name>.png`` the consumer
+    loads instead of the raw ``.dds``. Idempotent (skips when the PNG is newer).
+
+    NOTE: ``texture2ddecoder`` returns 8-bit tonemapped pixels — the ramp COLOURS
+    are correct, HDR brightness is clamped. A fully-HDR path would decode to EXR.
+    Returns ``True`` when a sibling was written.
+    """
+    data = path.read_bytes()
+    if len(data) < 148 or data[:4] != b"DDS ":
+        return False
+    if data[_PF_FOURCC:_PF_FOURCC + 4] != b"DX10":
+        return False
+    if struct.unpack_from("<I", data, _DX10_DXGI)[0] != _DXGI_BC6H_UF16:
+        return False
+    out = path.with_suffix(".png")
+    if out.is_file() and out.stat().st_mtime >= path.stat().st_mtime:
+        return False
+    try:
+        import texture2ddecoder  # noqa: PLC0415
+        from PIL import Image  # noqa: PLC0415
+    except ImportError:
+        print(
+            f"  BC6H transcode skipped (texture2ddecoder/PIL not installed): {path.name}",
+            file=sys.stderr,
+        )
+        return False
+    height, width = struct.unpack_from("<II", data, 12)
+    bgra = bytes(texture2ddecoder.decode_bc6(data[148:], width, height))
+    rgba = bytearray(len(bgra))
+    rgba[0::4] = bgra[2::4]  # R
+    rgba[1::4] = bgra[1::4]  # G
+    rgba[2::4] = bgra[0::4]  # B
+    rgba[3::4] = bgra[3::4]  # A
+    Image.frombytes("RGBA", (width, height), bytes(rgba)).save(out)
+    return True
+
+
 def _select_globs(args: argparse.Namespace) -> tuple[str, ...]:
     if args.glob:
         return tuple(args.glob)
@@ -177,19 +228,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nunexpected error: {type(e).__name__}: {e}", file=sys.stderr)
         return EXIT_UNEXPECTED
 
-    # Modernize legacy uncompressed DDS headers -> DX10 so downstream loaders
-    # accept them (idempotent; compressed / already-DX10 files are skipped).
-    converted = 0
+    # Post-extract passes (idempotent):
+    #  - modernize legacy uncompressed DDS headers -> DX10 so loaders accept them
+    #  - transcode BC6H_UF16 HDR ramps -> PNG sibling (Unity mis-decodes BC6H)
+    converted = bc6h = 0
     for dds in dest.glob("particles/**/*.dds"):
         if _modernize_legacy_dds(dds):
             converted += 1
+        if _transcode_bc6h_ramp(dds):
+            bc6h += 1
 
     # vfs.extract returns only the out_dir (the glob match size isn't known up
     # front), so count what actually landed for the summary.
     n = sum(1 for _ in dest.glob("particles/**/*.dds"))
     print(
         f"export-particle-textures -> {dest}  globs={list(globs)}  "
-        f"dds_on_disk={n}  dx10_rewritten={converted}",
+        f"dds_on_disk={n}  dx10_rewritten={converted}  bc6h_transcoded={bc6h}",
         file=sys.stderr,
     )
     return EXIT_OK
