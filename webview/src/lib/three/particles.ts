@@ -1961,15 +1961,15 @@ class SystemRenderer {
       }
       let sz = this.psize[i];
       sz *= sizeScale;
+      // AGE_SCALE/AGE_AUX (intensity + distance-LOD) channels feed the AGE CLOCK,
+      // NOT size — applied at spawn into ageRate/lifetime (see spawnParticle).
+      // Byte-proven build 12506899: rec[0x20] size reads ONLY block[23]
+      // (PARTICLE_SIZE); the age slots block[8]/block[14] go to rec[0x08]/rec[0x0c].
       sz *=
         this.intensitySizeMultiplier *
         this.distanceSizeMultiplier *
         this.intensityScaleYMultiplier *
         this.distanceScaleYMultiplier *
-        this.intensityAgeScaleMultiplier *
-        this.distanceAgeScaleMultiplier *
-        this.intensityAgeAuxScaleMultiplier *
-        this.distanceAgeAuxScaleMultiplier *
         this.barrierScaleMultiplier;
       this.sizeArr[i] = Math.max(0, sz);
       this.glowStrengthArr[i] = Number.isFinite(glowScale) ? glowScale : 1;
@@ -2258,8 +2258,22 @@ class SystemRenderer {
     this.psize[slot] = base;
     const ageScale = this.ageScaleGen ? sampleGenAxis(this.ageScaleGen, sc, 1) : 1;
     const ageAux = this.ageScaleAuxGen ? sampleGenAxis(this.ageScaleAuxGen, sc, 1) : 1;
-    this.ageRate[slot] = ageScale > 0 ? ageScale : 1; // guard div-by-zero / negative
-    this.lifetime[slot] *= ageAux; // base was this.maxAge (set above); aux>1 → lives longer
+    // PS_IC AGE_SCALE/AGE_AUX intensity (+ distance-LOD twin) channels feed the AGE
+    // CLOCK, not size (byte-proven, build 12506899). Spawn FUN_14071a990:
+    //   rec[0x08] age-rate   = ageScaleGen ÷ block[8]        (0x14071ab64 divss)
+    //   rec[0x0c] 1/lifetime = 1 ÷ (auxGen × block[14])      (0x14071ab90 divss)
+    //   rec[0x20] size       = sizeGen × block[23]           (0x14071ac37 mulss)
+    // where block[i] = Π intensity-ramp × Π distance-ramp for PS_IC target i
+    // (apply FUN_1406c9d01: accum[idx] *= factor; out[i] = accum[i] × distBlock[i]).
+    // So AGE_SCALE DIVIDES the age rate (factor<1 ⇒ ages faster) and AGE_AUX
+    // MULTIPLIES lifetime; neither scales size. Mirrors the emitter-generator
+    // ageScale fix (2d21bb2) — both factors land on the same age-clock fields.
+    const ageScaleBlock = this.intensityAgeScaleMultiplier * this.distanceAgeScaleMultiplier;
+    const ageAuxBlock = this.intensityAgeAuxScaleMultiplier * this.distanceAgeAuxScaleMultiplier;
+    const ageRate = ageScale / (ageScaleBlock > 0 ? ageScaleBlock : 1);
+    this.ageRate[slot] = ageRate > 0 ? ageRate : 1; // guard div-by-zero / negative
+    // base was this.maxAge (set above); aux>1 and/or AGE_AUX intensity>1 → lives longer
+    this.lifetime[slot] *= ageAux * (ageAuxBlock > 0 ? ageAuxBlock : 1);
     let sizeScale0 = 1;
     for (let s = 0; s < this.scalerGens.length; s++) {
       if (this.scalerDelays[s] > 0) continue; // delayed scalers are inactive at spawn (age 0)
@@ -2276,15 +2290,12 @@ class SystemRenderer {
       scalerScaleX0 *= sampleGenAxis(this.scalerScaleXGens[s], sc, 1);
     }
     let sz0 = this.psize[slot] * sizeScale0;
+    // AGE_SCALE/AGE_AUX folded into the age clock above, not size (byte-proven).
     sz0 *=
       this.intensitySizeMultiplier *
       this.distanceSizeMultiplier *
       this.intensityScaleYMultiplier *
-      this.distanceScaleYMultiplier *
-      this.intensityAgeScaleMultiplier *
-      this.distanceAgeScaleMultiplier *
-      this.intensityAgeAuxScaleMultiplier *
-      this.distanceAgeAuxScaleMultiplier;
+      this.distanceScaleYMultiplier;
     this.sizeArr[slot] = Math.max(0, sz0);
     this.glowStrengthArr[slot] = Number.isFinite(glowScale0) ? glowScale0 : 1;
     this.spriteScaleXArr[slot] = Number.isFinite(scalerScaleX0)
