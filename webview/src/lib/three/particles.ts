@@ -2355,8 +2355,18 @@ class SystemRenderer {
     if (!source || !target || source === target) return;
     source.updateWorldMatrix(true, false);
     target.updateWorldMatrix(true, false);
+    // localToWorld/worldToLocal operate in THREE world units (METRES), but the
+    // sim — and `this.pos` — are native BW units (writeDrawSlot scales the
+    // OUTPUT ×NATIVE_TO_METRES). The source→target hop injects the source
+    // group's world translation, a world-frame INPUT, so it must be divided
+    // back into native units just like sea-level snap / parent velocity (see
+    // writeDrawSlot). Without this, a detached hull effect (e.g. floodLight,
+    // coordinateStyle=3) keeps the group's metre offset as if it were native
+    // units, then gets ×15 again at draw → ~15× too far from the ship.
+    pos.multiplyScalar(NATIVE_TO_METRES);
     source.localToWorld(pos);
     target.worldToLocal(pos);
+    pos.multiplyScalar(1 / NATIVE_TO_METRES);
     source.getWorldQuaternion(SystemRenderer.TMP_QUAT);
     vel.applyQuaternion(SystemRenderer.TMP_QUAT);
     target.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
@@ -2370,8 +2380,13 @@ class SystemRenderer {
     if (!source || !simulation || source === simulation) return;
     simulation.updateWorldMatrix(true, false);
     source.updateWorldMatrix(true, false);
+    // Same native↔metre unit bridge as convertSpawnToSimulationFrame: the
+    // localToWorld/worldToLocal hop runs in metres, but `pos` is a native-unit
+    // sim position and the caller re-scales the result ×NATIVE_TO_METRES.
+    pos.multiplyScalar(NATIVE_TO_METRES);
     simulation.localToWorld(pos);
     source.worldToLocal(pos);
+    pos.multiplyScalar(1 / NATIVE_TO_METRES);
   }
 
   private streamVectorForSimulationFrame(action: StreamAction, out: THREE.Vector3): THREE.Vector3 {
