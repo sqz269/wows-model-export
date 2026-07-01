@@ -665,6 +665,15 @@ class SystemRenderer {
   private scalerDelays: number[] = [];
   private scalerGlowDelays: number[] = [];
   private scalerScaleXDelays: number[] = [];
+  // resizer (PCAT typeId 4): a fixed-RATE approach of the per-particle SIZE BASE
+  // toward an absolute target, clamped. RE-confirmed at native apply
+  // fx::ActionResizer::apply @0x140742190 (2026-07-01): sizeTo = the target size,
+  // sizeFrom = the approach rate (size-units/sec), integrated over the substep dt.
+  // NOT a sizeFrom→sizeTo life tween, NOT a scaler multiplier — it writes rec[0x20]
+  // (the SIZE BASE, = psize[]) directly and INDEPENDENTLY of the scaler product, so
+  // they compose at draw. Multiple resizers apply in sequence, each pulling the base
+  // toward its own target. (perComponentStatic ≈ 1.0; folded into psize at spawn.)
+  private resizerActions: { sizeFrom: number; sizeTo: number }[] = [];
   // dampfer.velocityGenerator — a per-frame drag MULTIPLIER on the velocity's
   // contribution to position (1.0 → ~0). Undefined = no damping.
   private dampGen: ParticleValueGenerator | undefined;
@@ -1007,15 +1016,16 @@ class SystemRenderer {
           this.scalerScaleXDelays.push(scalerDelay);
         }
       } else if (c.action === 'resizer') {
-        // resizer = interpolate sprite size sizeFrom -> sizeTo over particle
-        // life. Producer now emits body.sizeFrom / body.sizeTo (raw BW units).
-        // INTENTIONALLY NOT WIRED: scalerGens is a multiplicative product and
-        // these endpoints are absolute sizes (not ~1.0 multipliers), so feeding
-        // them there would inflate sprite size up to ~1000x. Native folds
-        // resizer into the size path (finding-62) but overwrite-vs-multiply, the
-        // lerp axis, and any normalization are UNRESOLVED statically. Wire only
-        // after a Frida hook on the resizer per-particle apply callback (sibling
-        // of scaler's FUN_140742280) confirms the integrator.
+        // resizer = fixed-RATE approach of the SIZE BASE toward an absolute target,
+        // clamped (RE-confirmed 2026-07-01, fx::ActionResizer::apply @0x140742190):
+        //   step = dt × sizeFrom;  base → clamp(base ± step, target = sizeTo)
+        // sizeTo is the TARGET size, sizeFrom the RATE — NOT a sizeFrom→sizeTo tween
+        // and NOT the scaler product (that earlier "would inflate 1000×" concern was
+        // the wrong model). Applied per substep into psize[] (the size base), so 35→1000
+        // etc. converge to and clamp at the target rather than blowing up.
+        if (typeof body.sizeFrom === 'number' && typeof body.sizeTo === 'number') {
+          this.resizerActions.push({ sizeFrom: body.sizeFrom, sizeTo: body.sizeTo });
+        }
       } else if (c.action === 'dampfer') {
         if (body.velocityGenerator) {
           this.dampGen = body.velocityGenerator as ParticleValueGenerator;
@@ -1944,6 +1954,17 @@ class SystemRenderer {
       // psize at spawn) × Π scaler multipliers, each on its own axis. Metres.
       // Native scaler callback FUN_140742280 also writes this first multiplier
       // into the per-particle payload consumed by the GRADIENT_MAP glow path.
+      // resizer: integrate the SIZE BASE toward each action's target at its rate,
+      // clamped (native fx::ActionResizer::apply, per substep). Mutates psize[i] in
+      // place BEFORE the scaler product below reads it, matching the native order
+      // (resizer writes rec[0x20], the scaler multiplies rec[0x54/0x58]).
+      for (let s = 0; s < this.resizerActions.length; s++) {
+        const { sizeFrom, sizeTo } = this.resizerActions[s];
+        const cur = this.psize[i];
+        const step = dt * sizeFrom;
+        this.psize[i] =
+          cur < sizeTo ? Math.min(cur + step, sizeTo) : Math.max(cur - step, sizeTo);
+      }
       let sizeScale = 1;
       for (let s = 0; s < this.scalerGens.length; s++) {
         if (age < this.scalerDelays[s]) continue;
