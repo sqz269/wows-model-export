@@ -106,8 +106,9 @@ interface ParticleMaterialOptions {
    *  on a Frida hook of FUN_1406d29c0 — do NOT guess it from parse offsets
    *  (DrawRec +8 trap). */
   velocityOriented?: boolean;
-  /** Renderer.billboard — with eo=(0,±y,0) selects the AXIAL billboard
-   *  (vertical card yawing about ±Y to face the camera); see uAxialSign. */
+  /** Renderer.billboard — with a nonzero eo selects the AXIAL billboard
+   *  (card whose long axis = eo, yawing about it to face the camera); see
+   *  uUseAxialBillboard. */
   billboard?: boolean;
   /** Renderer lighting scalars (+0x54, +0x64..+0x6c). Note: renderer
    *  lightingShineness (+0x4c) is deliberately NOT consumed here — DXBC audit
@@ -289,30 +290,31 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
   // systems carry a nonzero explicitOrientation (mostly (0,1,0) ground-flat +
   // (1,0,0)/(0,0,1) cards). velocityOriented systems use a velocity basis, so
   // they are excluded here (left camera-facing) rather than guessed at.
-  // Axial (cylindrical) billboard: billboard=true + eo=(0,±y,0) — eo is the
-  // card's UP AXIS, not its normal. The card stands VERTICAL and yaws about
-  // ±Y to face the camera. Native: fx_Particle_emitUpdate @0x14071b231 bakes
-  // the camera azimuth at spawn for exactly this authored pattern; ground
-  // truth = ThisIsFine's meme cards are readable from the SIDE in game — a
-  // flat +Y card at their 55-80 m altitude would be edge-on/invisible from
-  // any ship-level camera. Takes precedence over the fixed-card path.
-  const eoAx = opts.explicitOrientation;
-  const axialSign =
-    opts.billboard === true &&
-    !opts.velocityOriented &&
-    hasExplicitOrientation &&
-    eoAx !== undefined &&
-    (eoAx[0] ?? 0) === 0 &&
-    (eoAx[2] ?? 0) === 0 &&
-    (eoAx[1] ?? 0) !== 0
-      ? Math.sign(eoAx[1])
-      : 0;
+  // Axial (cylindrical) billboard: billboard=true + ANY nonzero eo — eo is
+  // the card's LONG/UP AXIS, not its normal (world frame, or the attachment's
+  // local frame per explicitOrientationLocal). The card contains the axis and
+  // yaws about it to face the camera. Shipped for eo=(0,±y,0) (ThisIsFine
+  // memes — readable from the SIDE in game, where a flat +Y card would be
+  // edge-on), generalized 2026-07-02 to arbitrary axes:
+  // Laser_Charge_Shot_H2020 RAY authors eo=(0,0,1) LOCAL + billboard +
+  // LaserRay.dds on a gun muzzle — the beam must run ALONG the barrel, which
+  // the ⊥N fixed card cannot do (it rendered the ray orthogonal to its own
+  // sparks). Native corroboration: the spawn path (fx_Particle_emitUpdate)
+  // world-transforms X/Z-bearing LOCAL eo by the node matrix — axis machinery
+  // the flat-card path never needs — and the instanced fx_Sprite_buildQuad
+  // never reads billboard (the axial basis lives in the second, strip-vertex
+  // draw path, still untraced). Takes precedence over the fixed-card path.
+  const useAxialBillboard =
+    opts.billboard === true && !opts.velocityOriented && hasExplicitOrientation ? 1 : 0;
   const fixedOrientationVec =
-    hasExplicitOrientation && !opts.velocityOriented && axialSign === 0
+    hasExplicitOrientation && !opts.velocityOriented && !useAxialBillboard
       ? opts.explicitOrientation
       : undefined;
   const useFixedOrientation = fixedOrientationVec ? 1 : 0;
-  const orientationVec = explicitOrientation ?? fixedOrientationVec;
+  const orientationVec =
+    explicitOrientation ??
+    fixedOrientationVec ??
+    (useAxialBillboard ? opts.explicitOrientation : undefined);
   const hideSpeed =
     opts.hideSpeed !== undefined && Number.isFinite(opts.hideSpeed) && opts.hideSpeed > 0
       ? opts.hideSpeed
@@ -410,8 +412,8 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       // hideStartCos so default-authored explicit orientations stay neutral.
       uUseHideAngle: { value: useHideAngle },
       uUseFixedOrientation: { value: useFixedOrientation },
-      // ±1 = axial billboard about world ±Y (billboard + eo=(0,±y,0)); 0 = off.
-      uAxialSign: { value: axialSign },
+      // 1 = axial billboard about uExplicitOrientation (billboard + nonzero eo); 0 = off.
+      uUseAxialBillboard: { value: useAxialBillboard },
       uExplicitOrientation: {
         value: new THREE.Vector3(
           orientationVec?.[0] ?? 0,
@@ -522,7 +524,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uniform float uUseHideAngle;
       uniform vec3 uExplicitOrientation;
       uniform float uExplicitOrientationLocal;
-      uniform float uAxialSign;
+      uniform float uUseAxialBillboard;
       uniform float uUseFixedOrientation;
       uniform float uHideStartCos;
       uniform float uHideSpeed;
@@ -557,14 +559,15 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
             ? normalize(mat3(modelMatrix) * uExplicitOrientation)
             : normalize(uExplicitOrientation);
           vec3 viewDirW = normalize(worldPos - cameraPosition);
-          // Axial billboards face the camera azimuth, so their hide test is
-          // against that horizontal normal: |dot| = the horizontal fraction of
-          // the view direction (≈1 from the side ⇒ visible, ≈0 straight down
-          // ⇒ edge-on, hidden). Testing against eo=(0,±1,0) — the card's UP
-          // axis — inverted this and blanked the ThisIsFine memes from the
-          // side while native shows them there.
-          float hAlign = (abs(uAxialSign) > 0.5)
-            ? length(viewDirW.xz)
+          // Axial billboards face the camera around their axis, so their hide
+          // test is against that swept normal: the axis-PERPENDICULAR fraction
+          // of the view direction (≈1 viewing across the axis ⇒ visible, ≈0
+          // looking straight down the axis ⇒ edge-on, hidden). For eo=(0,±y,0)
+          // this reduces to length(viewDirW.xz), the shipped meme behavior;
+          // testing against the axis itself inverted it and blanked the
+          // ThisIsFine memes from the side while native shows them there.
+          float hAlign = (uUseAxialBillboard > 0.5)
+            ? length(viewDirW - orientW * dot(viewDirW, orientW))
             : abs(dot(viewDirW, orientW));
           float h = clamp((hAlign - uHideStartCos) * uHideSpeed, 0.0, 1.0);
           vHideFade = (uHideInvert > 0.5) ? (1.0 - h) : h;
@@ -584,26 +587,31 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
         vec2 cornerUV = position.xy;
         vLocalUV = cornerUV;
         float worldDiam = size * vPointExtent;
-        if (abs(uAxialSign) > 0.5) {
-          // AXIAL (cylindrical) billboard — billboard=true + eo=(0,±y,0): the
-          // card stands VERTICAL (up axis = world ±Y from eo.y) and yaws about
-          // it to face the camera; texture-up = the axis, front toward the
-          // viewer (readable — e.g. ThisIsFine capitano/text_cloud, which are
-          // visible from the side in game). Native bakes the camera azimuth at
-          // spawn (fx_Particle_emitUpdate @0x14071b231); the inspector tracks
-          // per frame — equivalent for short-lived cards, friendlier for
-          // orbiting an effect.
-          vec3 V = vec3(0.0, uAxialSign, 0.0);
+        if (uUseAxialBillboard > 0.5) {
+          // AXIAL (cylindrical) billboard — billboard=true + nonzero eo: the
+          // card's long/up axis = eo (world, or the attachment frame when
+          // explicitOrientationLocal), and it yaws about that axis to face
+          // the camera; texture-up = the axis, front toward the viewer.
+          // eo=(0,±y,0): upright memes readable from the side (ThisIsFine
+          // capitano/text_cloud — the shipped case, math identical here).
+          // eo=(0,0,1) local: a muzzle beam running along the barrel
+          // (Laser_Charge_Shot_H2020 RAY). Native bakes the camera azimuth at
+          // spawn for the world-Y subset (fx_Particle_emitUpdate); the
+          // inspector tracks per frame — equivalent for short-lived cards,
+          // friendlier for orbiting an effect.
+          vec3 axisW = uExplicitOrientationLocal > 0.5
+            ? normalize(mat3(modelMatrix) * uExplicitOrientation)
+            : normalize(uExplicitOrientation);
           vec3 centerW = (modelMatrix * vec4(iPosition, 1.0)).xyz;
           vec3 toCam = cameraPosition - centerW;
-          vec2 tc = vec2(toCam.x, toCam.z);
-          vec3 Nc = (dot(tc, tc) > 1e-8)
-            ? normalize(vec3(tc.x, 0.0, tc.y))
-            : vec3(0.0, 0.0, 1.0);
-          vec3 U = normalize(cross(V, Nc));
+          vec3 U = cross(axisW, toCam);
+          float uLen = length(U);
+          U = (uLen > 1e-6)
+            ? U / uLen
+            : normalize(cross(axisW, abs(axisW.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
           vec3 cornerW = centerW
             + U * ((cornerUV.x - 0.5) * worldDiam)
-            + V * ((0.5 - cornerUV.y) * worldDiam);
+            + axisW * ((0.5 - cornerUV.y) * worldDiam);
           gl_Position = projectionMatrix * viewMatrix * vec4(cornerW, 1.0);
         } else if (uUseFixedOrientation > 0.5) {
           // Fixed-orientation quad (fx_Sprite_buildQuad fixed-card branch, RE

@@ -729,10 +729,11 @@ export class SystemRenderer {
     this.spinRateRange = finiteNumber(renderer?.spinRateRange, 0);
     this.initialOrientationBase = finiteNumber(renderer?.initialOrientationBase, 0);
     this.initialOrientationRange = finiteNumber(renderer?.initialOrientationRange, 0);
-    // billboard + eo=(0,±y,0) = the AXIAL billboard (vertical card yawing to
-    // the camera) — handled entirely in the vertex shader via uAxialSign; the
-    // native camera-azimuth spawn bake (fx_Particle_emitUpdate @0x14071b231)
-    // is that same facing, so no sim-side rotation term is needed here.
+    // billboard + nonzero eo = the AXIAL billboard (card long axis = eo,
+    // yawing about it to the camera) — handled entirely in the vertex shader
+    // via uUseAxialBillboard; the native camera-azimuth spawn bake
+    // (fx_Particle_emitUpdate, world-Y subset) is that same facing, so no
+    // sim-side rotation term is needed here.
     const fx = anim?.framesPerX ?? 1;
     const fy = anim?.framesPerY ?? 1;
     this.framesRangeEnd = Math.max(0, anim?.framesRangeEnd ?? fx * fy);
