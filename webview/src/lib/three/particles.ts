@@ -728,10 +728,6 @@ class SystemRenderer {
   private spinRateRange = 0;
   private initialOrientationBase = 0;
   private initialOrientationRange = 0;
-  /** ±1 when the native flat-card camera-azimuth spawn yaw applies
-   *  (billboard + eo=(0,±y,0), sign = sign(eo.y)); 0 = off. See the
-   *  constructor note (fx_Particle_emitUpdate @0x14071b231). */
-  private spawnCameraYawSign = 0;
   private readonly depthSortParticles: boolean;
   private sortCamera: THREE.Camera | null = null;
   private distanceConfigs: ParticleSystemIntensityConfig[] = [];
@@ -1216,26 +1212,10 @@ class SystemRenderer {
     this.spinRateRange = finiteNumber(renderer?.spinRateRange, 0);
     this.initialOrientationBase = finiteNumber(renderer?.initialOrientationBase, 0);
     this.initialOrientationRange = finiteNumber(renderer?.initialOrientationRange, 0);
-    // Native fx_Particle_emitUpdate @0x14071b231 special case: a mode-2 system
-    // with billboard=true, velocityOriented=false and explicitOrientation =
-    // (0, ±y, 0) bakes the CAMERA AZIMUTH (atan2f of the camera forward's XZ,
-    // negated when eo.y < 0) into each particle's spawn orientation — so flat
-    // water cards keep their texture-up reading toward the viewer
-    // (ThisIsFine capitano/text_cloud/cartoon fire). Without it the cards sit
-    // at a fixed world orientation and read sideways from most azimuths.
-    {
-      const eo = renderer?.explicitOrientation;
-      this.spawnCameraYawSign =
-        this.coordinateStyle === 2 &&
-        renderer?.billboard === true &&
-        renderer?.velocityOriented !== true &&
-        Array.isArray(eo) &&
-        (eo[0] ?? 0) === 0 &&
-        (eo[2] ?? 0) === 0 &&
-        (eo[1] ?? 0) !== 0
-          ? Math.sign(eo[1] as number)
-          : 0;
-    }
+    // billboard + eo=(0,±y,0) = the AXIAL billboard (vertical card yawing to
+    // the camera) — handled entirely in the vertex shader via uAxialSign; the
+    // native camera-azimuth spawn bake (fx_Particle_emitUpdate @0x14071b231)
+    // is that same facing, so no sim-side rotation term is needed here.
     const fx = anim?.framesPerX ?? 1;
     const fy = anim?.framesPerY ?? 1;
     this.framesRangeEnd = Math.max(0, anim?.framesRangeEnd ?? fx * fy);
@@ -2337,15 +2317,6 @@ class SystemRenderer {
     // spinRateRange drift term in tick().
     this.rotationPhase[slot] =
       (Math.random() - 0.5) * this.initialOrientationRange + this.initialOrientationBase;
-    // Flat-card camera-azimuth spawn yaw (native fx_Particle_emitUpdate
-    // @0x14071b231): add atan2(−fwd.x, fwd.z) of the camera forward, sign
-    // per eo.y — bakes the viewer's azimuth at THIS particle's spawn moment.
-    if (this.spawnCameraYawSign !== 0 && this.sortCamera) {
-      this.sortCamera.getWorldDirection(SystemRenderer.TMP_POS2);
-      this.rotationPhase[slot] +=
-        this.spawnCameraYawSign *
-        Math.atan2(-SystemRenderer.TMP_POS2.x, SystemRenderer.TMP_POS2.z);
-    }
     this.spinSeed[slot] = Math.random();
     const sc = SystemRenderer.TMP_CLOCKS;
     sc.particleAge = 0;
@@ -3324,6 +3295,9 @@ interface ParticleMaterialOptions {
    *  on a Frida hook of FUN_1406d29c0 — do NOT guess it from parse offsets
    *  (DrawRec +8 trap). */
   velocityOriented?: boolean;
+  /** Renderer.billboard — with eo=(0,±y,0) selects the AXIAL billboard
+   *  (vertical card yawing about ±Y to face the camera); see uAxialSign. */
+  billboard?: boolean;
   /** Renderer lighting scalars (+0x54, +0x64..+0x6c). Note: renderer
    *  lightingShineness (+0x4c) is deliberately NOT consumed here — DXBC audit
    *  2026-06-09 showed the native body pow exponent is the PerFrame global
@@ -3504,8 +3478,28 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
   // systems carry a nonzero explicitOrientation (mostly (0,1,0) ground-flat +
   // (1,0,0)/(0,0,1) cards). velocityOriented systems use a velocity basis, so
   // they are excluded here (left camera-facing) rather than guessed at.
+  // Axial (cylindrical) billboard: billboard=true + eo=(0,±y,0) — eo is the
+  // card's UP AXIS, not its normal. The card stands VERTICAL and yaws about
+  // ±Y to face the camera. Native: fx_Particle_emitUpdate @0x14071b231 bakes
+  // the camera azimuth at spawn for exactly this authored pattern; ground
+  // truth = ThisIsFine's meme cards are readable from the SIDE in game — a
+  // flat +Y card at their 55-80 m altitude would be edge-on/invisible from
+  // any ship-level camera. Takes precedence over the fixed-card path.
+  const eoAx = opts.explicitOrientation;
+  const axialSign =
+    opts.billboard === true &&
+    !opts.velocityOriented &&
+    hasExplicitOrientation &&
+    eoAx !== undefined &&
+    (eoAx[0] ?? 0) === 0 &&
+    (eoAx[2] ?? 0) === 0 &&
+    (eoAx[1] ?? 0) !== 0
+      ? Math.sign(eoAx[1])
+      : 0;
   const fixedOrientationVec =
-    hasExplicitOrientation && !opts.velocityOriented ? opts.explicitOrientation : undefined;
+    hasExplicitOrientation && !opts.velocityOriented && axialSign === 0
+      ? opts.explicitOrientation
+      : undefined;
   const useFixedOrientation = fixedOrientationVec ? 1 : 0;
   const orientationVec = explicitOrientation ?? fixedOrientationVec;
   const hideSpeed =
@@ -3605,6 +3599,8 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       // hideStartCos so default-authored explicit orientations stay neutral.
       uUseHideAngle: { value: useHideAngle },
       uUseFixedOrientation: { value: useFixedOrientation },
+      // ±1 = axial billboard about world ±Y (billboard + eo=(0,±y,0)); 0 = off.
+      uAxialSign: { value: axialSign },
       uExplicitOrientation: {
         value: new THREE.Vector3(
           orientationVec?.[0] ?? 0,
@@ -3715,6 +3711,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float uUseHideAngle;
       uniform vec3 uExplicitOrientation;
       uniform float uExplicitOrientationLocal;
+      uniform float uAxialSign;
       uniform float uUseFixedOrientation;
       uniform float uHideStartCos;
       uniform float uHideSpeed;
@@ -3749,7 +3746,16 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             ? normalize(mat3(modelMatrix) * uExplicitOrientation)
             : normalize(uExplicitOrientation);
           vec3 viewDirW = normalize(worldPos - cameraPosition);
-          float h = clamp((abs(dot(viewDirW, orientW)) - uHideStartCos) * uHideSpeed, 0.0, 1.0);
+          // Axial billboards face the camera azimuth, so their hide test is
+          // against that horizontal normal: |dot| = the horizontal fraction of
+          // the view direction (≈1 from the side ⇒ visible, ≈0 straight down
+          // ⇒ edge-on, hidden). Testing against eo=(0,±1,0) — the card's UP
+          // axis — inverted this and blanked the ThisIsFine memes from the
+          // side while native shows them there.
+          float hAlign = (abs(uAxialSign) > 0.5)
+            ? length(viewDirW.xz)
+            : abs(dot(viewDirW, orientW));
+          float h = clamp((hAlign - uHideStartCos) * uHideSpeed, 0.0, 1.0);
           vHideFade = (uHideInvert > 0.5) ? (1.0 - h) : h;
         }
         float spriteAspectX = max(0.001, abs(uSpriteAspectX * spriteScaleX));
@@ -3767,7 +3773,28 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         vec2 cornerUV = position.xy;
         vLocalUV = cornerUV;
         float worldDiam = size * vPointExtent;
-        if (uUseFixedOrientation > 0.5) {
+        if (abs(uAxialSign) > 0.5) {
+          // AXIAL (cylindrical) billboard — billboard=true + eo=(0,±y,0): the
+          // card stands VERTICAL (up axis = world ±Y from eo.y) and yaws about
+          // it to face the camera; texture-up = the axis, front toward the
+          // viewer (readable — e.g. ThisIsFine capitano/text_cloud, which are
+          // visible from the side in game). Native bakes the camera azimuth at
+          // spawn (fx_Particle_emitUpdate @0x14071b231); the inspector tracks
+          // per frame — equivalent for short-lived cards, friendlier for
+          // orbiting an effect.
+          vec3 V = vec3(0.0, uAxialSign, 0.0);
+          vec3 centerW = (modelMatrix * vec4(iPosition, 1.0)).xyz;
+          vec3 toCam = cameraPosition - centerW;
+          vec2 tc = vec2(toCam.x, toCam.z);
+          vec3 Nc = (dot(tc, tc) > 1e-8)
+            ? normalize(vec3(tc.x, 0.0, tc.y))
+            : vec3(0.0, 0.0, 1.0);
+          vec3 U = normalize(cross(V, Nc));
+          vec3 cornerW = centerW
+            + U * ((cornerUV.x - 0.5) * worldDiam)
+            + V * ((0.5 - cornerUV.y) * worldDiam);
+          gl_Position = projectionMatrix * viewMatrix * vec4(cornerW, 1.0);
+        } else if (uUseFixedOrientation > 0.5) {
           // Fixed-orientation quad (fx_Sprite_buildQuad fixed-card branch, RE
           // 2026-07-02): the quad FACES world explicitOrientation (normal = N).
           // The in-plane frame is the NATIVE tangent/bitangent pair from
@@ -4576,23 +4603,11 @@ export class ParticleScene {
       // drift. spinRateBase alone is NOT a source (default 1.0 only scales
       // the ramp), so it's excluded; spinRateRange IS. A fixed start angle
       // (initialOrientation) or velocityOriented also need the rotated-UV path.
-      const eoArr = r?.explicitOrientation;
-      // Flat-card camera-azimuth spawn yaw (fx_Particle_emitUpdate
-      // @0x14071b231): billboard + eo=(0,±y,0) systems get a non-authored
-      // per-particle rotation, so they need the rotated-UV path too.
-      const hasCameraYawCard =
-        r?.billboard === true &&
-        r?.velocityOriented !== true &&
-        Array.isArray(eoArr) &&
-        (eoArr[0] ?? 0) === 0 &&
-        (eoArr[2] ?? 0) === 0 &&
-        (eoArr[1] ?? 0) !== 0;
       const hasAuthoredRotation =
         rampHasNonZeroValue(r?.yawRateRamp) ||
         hasNonZeroNumber(r?.spinRateRange) ||
         hasNonZeroNumber(r?.initialOrientationBase) ||
         hasNonZeroNumber(r?.initialOrientationRange) ||
-        hasCameraYawCard ||
         !!r?.velocityOriented;
       const useSpriteRotation = (!!r?.textureUrl0 || useAtlas) && hasAuthoredRotation;
       const mat = buildParticleMaterial({
@@ -4624,6 +4639,7 @@ export class ParticleScene {
         flipTexcoordU: r?.flipTexcoordU,
         flipTexcoordV: r?.flipTexcoordV,
         velocityOriented: r?.velocityOriented,
+        billboard: r?.billboard,
         lightingAmbient: r?.lightingAmbient,
         lightingDiffuse: r?.lightingDiffuse,
         lightingTransmission: r?.lightingTransmission,
