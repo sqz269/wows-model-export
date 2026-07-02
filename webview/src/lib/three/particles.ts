@@ -855,11 +855,16 @@ class SystemRenderer {
   private emitAccum = 0;
   private creatorAccum = 0;
   private elapsed = 0;
-  /** Tail-end of the alphaSetter ramp's time domain. Used to detect
-   *  ramps that are keyed by system age (extending into 10s of seconds)
-   *  vs particle age (within the particle's lifetime). When the tail
-   *  is significantly > maxAge we drive the ramp by `elapsed` instead. */
-  private alphaSetterIsSystemAge = false;
+  /** alphaSetter is a SPATIAL fade, not a time envelope: native
+   *  fx_Action_alphaSpatialRamp (@0x1407423c0, RE 2026-07-01) samples the ramp
+   *  at the particle's camera-view-space DEPTH in metres (viewMatrix col-2 ·
+   *  particlePos × world scale) and multiplies the working alpha (rec+0x40).
+   *  The authored keys are near/far camera fades — e.g. GK_Shot dust
+   *  0.75→3→27→29 m matches its maxDistance 29 — NOT fade-in seconds (the old
+   *  system-age heuristic zeroed the whole muzzle-flash window). Row vector
+   *  mapping sim-space pos → +forward metre depth, rebuilt each advance();
+   *  null when no sort camera is set (ramp then inert, factor 1). */
+  private alphaDepthRow: Float32Array | null = null;
   private active = true;
   private finished = false;
   private readonly spawnEffect?: ParticleEffectSpawnCallback;
@@ -1209,16 +1214,9 @@ class SystemRenderer {
     this.framesRangeEnd = Math.max(0, anim?.framesRangeEnd ?? fx * fy);
     this.distanceConfigs = system.distance?.configs ?? [];
 
-    // Decide whether the alphaSetter ramp is keyed by particle age or
-    // system age. Heuristic: if the last keyframe is well past the
-    // particle's lifetime, the curve is in system-age seconds (fade-in/
-    // out over the whole system lifetime — typical fire/flood DoT
-    // pattern at 60s / 500s tails). Otherwise it's particle-age (e.g.
-    // the alphaSetter for short impact sparks).
-    if (this.alphaRamp?.points && this.alphaRamp.points.length > 0) {
-      const last = this.alphaRamp.points[this.alphaRamp.points.length - 1].time;
-      this.alphaSetterIsSystemAge = last > this.maxAge * 2;
-    }
+    // alphaSetter ramp keys are camera-depth METRES (see alphaDepthRow) — the
+    // old "long tail ⇒ system-age seconds" heuristic misread 60/500-key fire/
+    // flood curves that are really 60 m / 500 m visibility fades.
 
     this.pos = new Float32Array(this.capacity * 3);
     this.vel = new Float32Array(this.capacity * 3);
@@ -1796,6 +1794,26 @@ class SystemRenderer {
   private advance(dt: number, allowChildSpawns: boolean): void {
     this.elapsed += dt;
 
+    // alphaSetter = camera-depth fade (fx_Action_alphaSpatialRamp): rebuild the
+    // sim-space→view-depth row for this step. GPU pos = points.matrixWorld ×
+    // (simPos × NATIVE_TO_METRES); three's view looks down −Z, so negate for a
+    // +forward metre depth matching the authored keys (e.g. 0.75/3/27/29 m).
+    if (this.alphaRamp && this.sortCamera) {
+      this.sortCamera.updateMatrixWorld(true);
+      this.points.updateWorldMatrix(true, false);
+      const e = SystemRenderer.TMP_VIEW_SORT.multiplyMatrices(
+        this.sortCamera.matrixWorldInverse,
+        this.points.matrixWorld,
+      ).elements;
+      const row = (this.alphaDepthRow ??= new Float32Array(4));
+      row[0] = -e[2] * NATIVE_TO_METRES;
+      row[1] = -e[6] * NATIVE_TO_METRES;
+      row[2] = -e[10] * NATIVE_TO_METRES;
+      row[3] = -e[14];
+    } else {
+      this.alphaDepthRow = null;
+    }
+
     // One-shot emission window + re-burst cycle (RE 2026-05-29). The record's
     // `maxEmittingDuration` bounds how long the effect emits; WoWS flak/
     // explosion effects burst ONCE (e.g. 1.1 s) then their particles fade over
@@ -1940,13 +1958,23 @@ class SystemRenderer {
       // across the whole tint corpus).
       const tintT = this.tintRepeat && this.tintPeriod > 0 ? age % this.tintPeriod : age;
       sampleColor(this.tintColor, tintT, SystemRenderer.TMP_COL);
-      const alphaT = this.alphaSetterIsSystemAge ? this.elapsed : age;
+      const aRow = this.alphaDepthRow;
+      const alphaSetterFactor = aRow
+        ? sampleRamp(
+            this.alphaRamp,
+            aRow[0] * this.pos[i * 3 + 0] +
+              aRow[1] * this.pos[i * 3 + 1] +
+              aRow[2] * this.pos[i * 3 + 2] +
+              aRow[3],
+            1,
+          )
+        : 1;
       const baseAlpha = clamp01(
         this.intensityColorAlphaMultiplier * this.distanceColorAlphaMultiplier,
       );
       const alpha = clamp01(
         baseAlpha *
-          sampleRamp(this.alphaRamp, alphaT, 1) *
+          alphaSetterFactor *
           SystemRenderer.TMP_COL[3] *
           this.intensityTintAlphaMultiplier *
           this.distanceTintAlphaMultiplier *
@@ -2236,13 +2264,23 @@ class SystemRenderer {
     this.age[slot] = 0;
     this.lifetime[slot] = this.maxAge;
     sampleColor(this.tintColor, 0, SystemRenderer.TMP_COL);
-    const alphaT0 = this.alphaSetterIsSystemAge ? this.elapsed : 0;
+    const aRow = this.alphaDepthRow;
+    const alphaSetterFactor = aRow
+      ? sampleRamp(
+          this.alphaRamp,
+          aRow[0] * this.pos[slot * 3 + 0] +
+            aRow[1] * this.pos[slot * 3 + 1] +
+            aRow[2] * this.pos[slot * 3 + 2] +
+            aRow[3],
+          1,
+        )
+      : 1;
     const baseAlpha = clamp01(
       this.intensityColorAlphaMultiplier * this.distanceColorAlphaMultiplier,
     );
     const alpha = clamp01(
       baseAlpha *
-        sampleRamp(this.alphaRamp, alphaT0, 1) *
+        alphaSetterFactor *
         SystemRenderer.TMP_COL[3] *
         this.intensityTintAlphaMultiplier *
         this.distanceTintAlphaMultiplier,
