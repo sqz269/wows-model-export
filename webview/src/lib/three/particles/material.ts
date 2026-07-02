@@ -310,8 +310,11 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
   // The default (zero explicitOrientation) keeps the camera-facing basis
   // (param_2[1] = camera, unanimous in the 5-agent corroboration). ~36% of
   // systems carry a nonzero explicitOrientation (mostly (0,1,0) ground-flat +
-  // (1,0,0)/(0,0,1) cards). velocityOriented systems use a velocity basis, so
-  // they are excluded here (left camera-facing) rather than guessed at.
+  // (1,0,0)/(0,0,1) cards). velocityOriented splits by billboard: WITH
+  // billboard it is the velocity-axial mode below; WITHOUT billboard, native
+  // is a mode-0 card with a spawn-baked in-plane velocity angle — the webview
+  // still approximates that population as camera-facing + FS UV velocity spin
+  // (the frame algebra + shared sign bit are open; see handoff §13).
   // Axial (cylindrical) billboard: billboard=true + ANY nonzero eo — eo is
   // the card's LONG/UP AXIS, not its normal (world frame, or the attachment's
   // local frame per explicitOrientationLocal). The card contains the axis and
@@ -328,8 +331,20 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
   // when velocityOriented), texture-right = normalize(cross(orientVec,
   // camEye − particlePos)) — per draw with the live eye, so the per-frame
   // tracking below is native-exact. Takes precedence over the fixed-card path.
+  // velocityOriented + billboard = VELOCITY-AXIAL (native buildQuad mode 1
+  // with a velocity-seeded orientation vector): fx_Particle_buildSpawnRecord
+  // @0x14071a990 gates on billboard(+0x99) && velocityOriented(+0x9a) and
+  // seeds sim+0x70 from the particle VELOCITY direction, falling back to the
+  // authored eo when |vel| is tiny — so velocityOriented WINS over eo (matches
+  // the Unity consumer, render-confirmed on PROJ_AP_Explo_Water). Corpus:
+  // 234 systems / 109 effects — torpedo/shell/bomb splash columns, rocket
+  // launches. The old UV-spin treatment left these camera-facing with a
+  // view-plane texture spin. Caveat: native seeds the axis at SPAWN; the
+  // shader reads the live per-frame velocity (same as Unity) — equivalent for
+  // the short-lived spark/splash population unless velocity curves hard.
+  const useVelocityAxial = opts.billboard === true && opts.velocityOriented === true ? 1 : 0;
   const useAxialBillboard =
-    opts.billboard === true && !opts.velocityOriented && hasExplicitOrientation ? 1 : 0;
+    opts.billboard === true && (opts.velocityOriented === true || hasExplicitOrientation) ? 1 : 0;
   const fixedOrientationVec =
     hasExplicitOrientation && !opts.velocityOriented && !useAxialBillboard
       ? opts.explicitOrientation
@@ -452,6 +467,9 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uUseFixedOrientation: { value: useFixedOrientation },
       // 1 = axial billboard about uExplicitOrientation (billboard + nonzero eo); 0 = off.
       uUseAxialBillboard: { value: useAxialBillboard },
+      // 1 = the axial axis is the per-particle VELOCITY direction (billboard +
+      // velocityOriented), eo as the degenerate-velocity fallback.
+      uVelocityAxial: { value: useVelocityAxial },
       uExplicitOrientation: {
         value: new THREE.Vector3(
           orientationVec?.[0] ?? 0,
@@ -565,6 +583,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uniform float uExplicitOrientationLocal;
       uniform float uUseAxialBillboard;
       uniform float uUseFixedOrientation;
+      uniform float uVelocityAxial;
       uniform vec2 uAnchorShift;
       uniform float uHideFadeBase;
       uniform float uHideSpeed;
@@ -593,11 +612,22 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           ? atan(viewVel.y, viewVel.x)
           : 0.0;
         vec3 worldPos = (modelMatrix * vec4(iPosition, 1.0)).xyz;
+        // Velocity-axial axis (billboard + velocityOriented): the particle's
+        // live velocity direction in world space, eo as the degenerate
+        // fallback (native buildSpawnRecord seeds sim+0x70 the same way).
+        vec3 eoAxisW = uExplicitOrientationLocal > 0.5
+          ? normalize(mat3(modelMatrix) * uExplicitOrientation)
+          : normalize(uExplicitOrientation);
+        vec3 velW = mat3(modelMatrix) * velocity;
+        float velWLen = length(velW);
+        vec3 orientAxisW = (uVelocityAxial > 0.5 && velWLen > 1e-5)
+          ? velW / velWLen
+          : eoAxisW;
         vHideFade = 1.0;
         if (uUseHideAngle > 0.5) {
-          vec3 orientW = uExplicitOrientationLocal > 0.5
-            ? normalize(mat3(modelMatrix) * uExplicitOrientation)
-            : normalize(uExplicitOrientation);
+          // Native fx_Sprite_hideAngleFade tests the per-particle orientVec —
+          // the velocity-seeded axis for velocity-axial systems.
+          vec3 orientW = orientAxisW;
           vec3 viewDirW = normalize(worldPos - cameraPosition);
           // Byte-exact native law (fx_Sprite_hideAngleFade, RE 2026-07-02):
           // fade = clamp01((|dot(viewDir, orientVec)| - base) * hideSpeed),
@@ -642,9 +672,9 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           // mode 1, byte-proven 2026-07-02): up = orientVec, right =
           // normalize(cross(orientVec, camEye - particlePos)), evaluated per
           // draw with the live eye — same as the per-frame tracking here.
-          vec3 axisW = uExplicitOrientationLocal > 0.5
-            ? normalize(mat3(modelMatrix) * uExplicitOrientation)
-            : normalize(uExplicitOrientation);
+          // velocityOriented+billboard: the axis is the VELOCITY direction
+          // (orientAxisW above) — splash columns/sparks align to their motion.
+          vec3 axisW = orientAxisW;
           vec3 centerW = (modelMatrix * vec4(iPosition, 1.0)).xyz;
           vec3 toCam = cameraPosition - centerW;
           vec3 U = cross(axisW, toCam);
@@ -725,6 +755,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uniform vec2 uRotationPivot;
       uniform float uVelocityOriented;
       uniform float uUseFixedOrientation;
+      uniform float uVelocityAxial;
       uniform float uSpriteAspectX;
       uniform float uPointExtent;
       uniform vec2 uUvTiling;
@@ -803,11 +834,14 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
             // the vertex shader, rotate source geometry by the inverse angle,
             // then sample the unrotated sprite UVs.
             vec2 rel = pointGeom - pivotGeom;
-            // velocityOriented: spins the SAMPLED UV footprint inside the fixed
-            // square (an isotropic approximation of native's velocity-aligned
-            // basis). NOT a geometry rotation and NOT a stretch — see the
-            // velocityOriented field doc. A faithful basis is Frida-blocked.
-            float spriteAngle = vRotationPhase + (uVelocityOriented > 0.5 ? vVelocityAngle : 0.0);
+            // velocityOriented UV spin: only for the NON-billboard population
+            // (mode-0 cards) — an approximation of native's spawn-baked
+            // card-plane velocity angle (fx_Particle_initSpinAngle). The
+            // billboard+velocityOriented systems are VELOCITY-AXIAL: their
+            // geometry aligns to velocity in the VS, so the UV term would
+            // double-apply.
+            float spriteAngle = vRotationPhase
+              + ((uVelocityOriented > 0.5 && uVelocityAxial < 0.5) ? vVelocityAngle : 0.0);
             float s = sin(spriteAngle);
             float c = cos(spriteAngle);
             spriteGeom = pivotGeom + vec2(c * rel.x + s * rel.y, -s * rel.x + c * rel.y);
