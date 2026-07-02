@@ -857,13 +857,16 @@ class SystemRenderer {
   private elapsed = 0;
   /** alphaSetter is a SPATIAL fade, not a time envelope: native
    *  fx_Action_alphaSpatialRamp (@0x1407423c0, RE 2026-07-01) samples the ramp
-   *  at the particle's camera-view-space DEPTH in metres (viewMatrix col-2 ·
-   *  particlePos × world scale) and multiplies the working alpha (rec+0x40).
+   *  at the particle's camera-view-space DEPTH (viewMatrix col-2 · particlePos)
+   *  and multiplies the working alpha (rec+0x40). The axis is NATIVE (BW)
+   *  units, like the distance-LOD ramp axis (one scale-free native frame —
+   *  ÷NATIVE_TO_METRES from our metre world, same as updateDistanceState).
    *  The authored keys are near/far camera fades — e.g. GK_Shot dust
-   *  0.75→3→27→29 m matches its maxDistance 29 — NOT fade-in seconds (the old
-   *  system-age heuristic zeroed the whole muzzle-flash window). Row vector
-   *  mapping sim-space pos → +forward metre depth, rebuilt each advance();
-   *  null when no sort camera is set (ramp then inert, factor 1). */
+   *  0.75→3→27→29 BW (≈11→45→405→435 m) matches its maxDistance 29 — NOT
+   *  fade-in seconds (the old system-age heuristic zeroed the whole
+   *  muzzle-flash window). Row vector mapping sim-space pos → +forward BW view
+   *  depth, rebuilt each advance(); null when no sort camera is set (ramp then
+   *  inert, factor 1). */
   private alphaDepthRow: Float32Array | null = null;
   private active = true;
   private finished = false;
@@ -1214,9 +1217,10 @@ class SystemRenderer {
     this.framesRangeEnd = Math.max(0, anim?.framesRangeEnd ?? fx * fy);
     this.distanceConfigs = system.distance?.configs ?? [];
 
-    // alphaSetter ramp keys are camera-depth METRES (see alphaDepthRow) — the
-    // old "long tail ⇒ system-age seconds" heuristic misread 60/500-key fire/
-    // flood curves that are really 60 m / 500 m visibility fades.
+    // alphaSetter ramp keys are camera-depth NATIVE (BW) units (see
+    // alphaDepthRow) — the old "long tail ⇒ system-age seconds" heuristic
+    // misread 60/500-key fire/flood curves that are really ~0.9 km / 7.5 km
+    // visibility fades.
 
     this.pos = new Float32Array(this.capacity * 3);
     this.vel = new Float32Array(this.capacity * 3);
@@ -1795,9 +1799,10 @@ class SystemRenderer {
     this.elapsed += dt;
 
     // alphaSetter = camera-depth fade (fx_Action_alphaSpatialRamp): rebuild the
-    // sim-space→view-depth row for this step. GPU pos = points.matrixWorld ×
-    // (simPos × NATIVE_TO_METRES); three's view looks down −Z, so negate for a
-    // +forward metre depth matching the authored keys (e.g. 0.75/3/27/29 m).
+    // sim-space→view-depth row for this step. World pos (metres) =
+    // points.matrixWorld × (simPos × NATIVE_TO_METRES); the ramp axis is
+    // NATIVE (BW) units, so ÷NATIVE_TO_METRES — the two 15s cancel on the
+    // linear part. Three's view looks down −Z, so negate for +forward depth.
     if (this.alphaRamp && this.sortCamera) {
       this.sortCamera.updateMatrixWorld(true);
       this.points.updateWorldMatrix(true, false);
@@ -1806,10 +1811,10 @@ class SystemRenderer {
         this.points.matrixWorld,
       ).elements;
       const row = (this.alphaDepthRow ??= new Float32Array(4));
-      row[0] = -e[2] * NATIVE_TO_METRES;
-      row[1] = -e[6] * NATIVE_TO_METRES;
-      row[2] = -e[10] * NATIVE_TO_METRES;
-      row[3] = -e[14];
+      row[0] = -e[2];
+      row[1] = -e[6];
+      row[2] = -e[10];
+      row[3] = -e[14] / NATIVE_TO_METRES;
     } else {
       this.alphaDepthRow = null;
     }
