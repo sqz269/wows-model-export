@@ -299,11 +299,13 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
   // Laser_Charge_Shot_H2020 RAY authors eo=(0,0,1) LOCAL + billboard +
   // LaserRay.dds on a gun muzzle — the beam must run ALONG the barrel, which
   // the ⊥N fixed card cannot do (it rendered the ray orthogonal to its own
-  // sparks). Native corroboration: the spawn path (fx_Particle_emitUpdate)
-  // world-transforms X/Z-bearing LOCAL eo by the node matrix — axis machinery
-  // the flat-card path never needs — and the instanced fx_Sprite_buildQuad
-  // never reads billboard (the axial basis lives in the second, strip-vertex
-  // draw path, still untraced). Takes precedence over the fixed-card path.
+  // sparks). BYTE-PROVEN 2026-07-02 (closes handoff §9): fx_DrawCfg_cook maps
+  // billboard(+0x99) → orientation mode 1, and fx_Sprite_buildQuad's mode-1
+  // branch (ex-"velocity-stretched") builds exactly this basis — texture-up =
+  // the spawn-baked orientVec (node-matrix-rotated when eoLocal; velocity dir
+  // when velocityOriented), texture-right = normalize(cross(orientVec,
+  // camEye − particlePos)) — per draw with the live eye, so the per-frame
+  // tracking below is native-exact. Takes precedence over the fixed-card path.
   const useAxialBillboard =
     opts.billboard === true && !opts.velocityOriented && hasExplicitOrientation ? 1 : 0;
   const fixedOrientationVec =
@@ -595,10 +597,10 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           // eo=(0,±y,0): upright memes readable from the side (ThisIsFine
           // capitano/text_cloud — the shipped case, math identical here).
           // eo=(0,0,1) local: a muzzle beam running along the barrel
-          // (Laser_Charge_Shot_H2020 RAY). Native bakes the camera azimuth at
-          // spawn for the world-Y subset (fx_Particle_emitUpdate); the
-          // inspector tracks per frame — equivalent for short-lived cards,
-          // friendlier for orbiting an effect.
+          // (Laser_Charge_Shot_H2020 RAY). Native-exact (fx_Sprite_buildQuad
+          // mode 1, byte-proven 2026-07-02): up = orientVec, right =
+          // normalize(cross(orientVec, camEye - particlePos)), evaluated per
+          // draw with the live eye — same as the per-frame tracking here.
           vec3 axisW = uExplicitOrientationLocal > 0.5
             ? normalize(mat3(modelMatrix) * uExplicitOrientation)
             : normalize(uExplicitOrientation);
