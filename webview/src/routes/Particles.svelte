@@ -16,7 +16,7 @@
   // on the first slash only, so embedded `/`s in the path pass through
   // without URL-encoding.
 
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import * as THREE from 'three';
   import Search from '@lucide/svelte/icons/search';
   import Play from '@lucide/svelte/icons/play';
@@ -75,6 +75,15 @@
   let recordError = $state<string | null>(null);
   let recordLoading = $state(false);
   let qualityChoice = $state<'high' | 'low' | 'shared'>('high');
+
+  // ── Intensity channels ──────────────────────────────────────────────
+  // Effect intensity is a GAMEPLAY input (EffectManager.setIntensity), not
+  // authored data — the record only carries per-channel defaults. Muzzle
+  // effects in particular never play at the authored default 1.0: the shot
+  // code drives channel 0 from the gun's caliber (see caliberLawIntensity).
+  let intensityValues = $state<number[]>([]);
+  let intensityPreset = $state<'authored' | 'caliber' | 'custom'>('authored');
+  let caliberMm = $state(420);
 
   // ── Three.js scene ──────────────────────────────────────────────────
 
@@ -209,6 +218,7 @@
         return;
       }
       activeRecord = res.record ?? null;
+      initIntensityForRecord(activeRecord, path);
       availableQualities = res.qualities ?? [];
       qualityUsed = res.quality_used ?? null;
       textureCount = {
@@ -221,6 +231,81 @@
     } finally {
       recordLoading = false;
     }
+  }
+
+  // ── Intensity presets ───────────────────────────────────────────────
+
+  /** Authored per-channel defaults (record.intensityChannels[].defaultIntensity). */
+  function authoredIntensityDefaults(rec: ParticleRecord | null): number[] {
+    return (rec?.intensityChannels ?? []).map((c) =>
+      Number.isFinite(c.defaultIntensity) ? Number(c.defaultIntensity) : 1,
+    );
+  }
+
+  /** ClientShooterEffects muzzle intensity law (decompiled m30eb35be.py,
+   *  build 12506899): ((barrelDiameter − 0.05) / (0.55 − 0.05)) × 10,
+   *  clamped to [0, 10] (EffectsConstants MIN/MAX_BARREL_DIAMETER +
+   *  MIN/MAX_INTENSITY). The numBarrels term
+   *  clamp(n × 0.6, 1.0, −30.0) degenerates to 1.0 (authored max is
+   *  negative), so it is omitted. 420 mm → 7.4. */
+  function caliberLawIntensity(mm: number): number {
+    const raw = ((mm / 1000 - 0.05) / (0.55 - 0.05)) * 10;
+    return Math.min(10, Math.max(0, raw));
+  }
+
+  /** The shot code sets ONE effect-level value —
+   *  EffectManager.setIntensity(effectId, shotIntensity) with no channel
+   *  arg (→ channel 0); the other channels keep their authored defaults. */
+  function caliberPresetValues(rec: ParticleRecord | null, mm: number): number[] {
+    const values = authoredIntensityDefaults(rec);
+    if (values.length > 0) values[0] = caliberLawIntensity(mm);
+    return values;
+  }
+
+  /** Gun-shot records default to the caliber-law preset: in game the muzzle
+   *  effect is ALWAYS re-intensified from the firing gun's caliber, so the
+   *  authored default 1.0 is a state the engine never renders. */
+  function initIntensityForRecord(rec: ParticleRecord | null, path: string): void {
+    if (path.startsWith('particles/guns/')) {
+      intensityPreset = 'caliber';
+      intensityValues = caliberPresetValues(rec, caliberMm);
+    } else {
+      intensityPreset = 'authored';
+      intensityValues = authoredIntensityDefaults(rec);
+    }
+  }
+
+  function applyIntensity(): void {
+    if (scene && currentHandle) scene.setAttachmentIntensityValues(currentHandle, intensityValues);
+  }
+
+  function setPresetAuthored(): void {
+    intensityPreset = 'authored';
+    intensityValues = authoredIntensityDefaults(activeRecord);
+    applyIntensity();
+  }
+
+  function setPresetCaliber(): void {
+    intensityPreset = 'caliber';
+    intensityValues = caliberPresetValues(activeRecord, caliberMm);
+    applyIntensity();
+  }
+
+  function onCaliberInput(mm: number): void {
+    if (!Number.isFinite(mm)) return;
+    caliberMm = mm;
+    if (intensityPreset === 'caliber') {
+      intensityValues = caliberPresetValues(activeRecord, caliberMm);
+      applyIntensity();
+    }
+  }
+
+  function onChannelSlider(i: number, v: number): void {
+    const next = intensityValues.slice();
+    next[i] = v;
+    intensityValues = next;
+    intensityPreset = 'custom';
+    applyIntensity();
   }
 
   // Auto-refetch whenever the path or quality changes.
@@ -413,12 +498,16 @@
     if (handles.length === 0) return;
     const h = handles[0];
     scene.setAttachmentActive(h, playing);
+    scene.setAttachmentIntensityValues(h, intensityValues);
     currentHandle = h;
   }
 
-  // Rebuild whenever the active record changes.
+  // Rebuild whenever the active record changes. The rebuild also reads
+  // `playing` and `intensityValues` — untracked, so toggling play/pause or
+  // dragging an intensity slider never resets the simulator.
   $effect(() => {
-    rebuildSceneFromRecord(activeRecord);
+    const rec = activeRecord;
+    untrack(() => rebuildSceneFromRecord(rec));
   });
 
   // Toggle live activity when `playing` changes (without rebuilding the
@@ -494,12 +583,12 @@
     return path.replace(/^particles\//, '').replace(/\.xml$/, '');
   }
 
-  /** Set of action names the WEBVIEW emitter (`particles.ts`) actually
-   *  consumes today. Anything else in a record is silently ignored —
-   *  the inspector flags these so the user knows render fidelity is
-   *  limited there.
+  /** Set of action names the WEBVIEW emitter (`$lib/three/particles`)
+   *  actually consumes today. Anything else in a record is silently
+   *  ignored — the inspector flags these so the user knows render
+   *  fidelity is limited there.
    *
-   *  Source: `webview/src/lib/three/particles.ts` — the
+   *  Source: `webview/src/lib/three/particles/system-renderer.ts` — the
    *  `SystemRenderer` constructor's switch on `c.action`.
    */
   const RENDERED_ACTIONS = new Set([
@@ -534,7 +623,7 @@
    *  Note: `framesPerX/Y` (animation grid) and `blendType` (PS_RBT, 10
    *  values) ARE decoded by the parser (`read/particles.py`
    *  _decode_animation / _decode_renderer) and consumed by the renderer
-   *  (`three/particles.ts` `blendConfigForPsRbt` + the flipbook-UV shader
+   *  (`three/particles/material.ts` `blendConfigForPsRbt` + the flipbook-UV shader
    *  math) since the 2026-05-23 gap-closing pass — they are no longer gaps.
    *  What remains:
    *    - a few PS_RBT modes (SHIMMER / DEFORM_WATER_SURFACE) use a
@@ -884,6 +973,74 @@
                 <li>· {g}</li>
               {/each}
             </ul>
+          </section>
+        {/if}
+
+        <!-- Intensity channels (gameplay input, not authored data) -->
+        {#if (activeRecord.intensityChannels ?? []).length > 0}
+          <section class="border-border bg-muted/20 mb-3 rounded border p-2">
+            <div class="mb-1.5 flex items-center justify-between">
+              <span class="text-muted-foreground text-[9px] uppercase tracking-wider">
+                intensity
+              </span>
+              <span class="text-muted-foreground text-[9px]">{intensityPreset}</span>
+            </div>
+            <div class="mb-2 flex items-center gap-1.5 font-mono text-[10px]">
+              <button
+                type="button"
+                class="rounded border px-1.5 py-0.5 {intensityPreset === 'authored'
+                  ? 'border-primary/60 bg-primary/15 text-foreground'
+                  : 'border-border text-muted-foreground hover:text-foreground'}"
+                onclick={setPresetAuthored}
+                title="Authored per-channel defaults (record.intensityChannels[].defaultIntensity)"
+              >
+                authored
+              </button>
+              <button
+                type="button"
+                class="rounded border px-1.5 py-0.5 {intensityPreset === 'caliber'
+                  ? 'border-primary/60 bg-primary/15 text-foreground'
+                  : 'border-border text-muted-foreground hover:text-foreground'}"
+                onclick={setPresetCaliber}
+                title="ClientShooterEffects caliber law: ((d − 0.05) / 0.5) × 10, clamped to [0, 10]"
+              >
+                gun shot
+              </button>
+              <input
+                type="number"
+                min="50"
+                max="550"
+                step="1"
+                value={caliberMm}
+                oninput={(e) => onCaliberInput(Number(e.currentTarget.value))}
+                class="border-border bg-background w-14 rounded border px-1 py-0.5 text-right tabular-nums"
+                aria-label="Gun caliber in millimetres"
+              />
+              <span class="text-muted-foreground">
+                mm → {caliberLawIntensity(caliberMm).toFixed(1)}
+              </span>
+            </div>
+            <div class="flex flex-col gap-1 font-mono text-[10px]">
+              {#each activeRecord.intensityChannels ?? [] as ch, i (i)}
+                <label class="flex items-center gap-2">
+                  <span class="text-muted-foreground w-20 flex-none truncate" title={ch.name}>
+                    {ch.name}
+                  </span>
+                  <input
+                    type="range"
+                    min={ch.minIntensity ?? 0}
+                    max={ch.maxIntensity ?? 10}
+                    step="0.1"
+                    value={intensityValues[i] ?? 1}
+                    oninput={(e) => onChannelSlider(i, Number(e.currentTarget.value))}
+                    class="min-w-0 flex-1"
+                  />
+                  <span class="text-foreground w-8 flex-none text-right tabular-nums">
+                    {(intensityValues[i] ?? 1).toFixed(1)}
+                  </span>
+                </label>
+              {/each}
+            </div>
           </section>
         {/if}
 
