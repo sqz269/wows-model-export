@@ -3247,6 +3247,10 @@ interface ParticleMaterialOptions {
   /** animation.useEmissionAlphaFromMV — when set, the `_MVEA` texture's R
    *  channel drives emission and its A channel drives opacity. */
   useEmissionAlphaFromMV?: boolean;
+  /** DEFORM_WATER_SURFACE per-texel strength encoding: true when the base
+   *  texture is a `particles/deform16f/` float field (signed height around
+   *  R=0.5); false ⇒ RGB foam mask (DXT1 alpha-less). Drives uDeformSigned. */
+  deformSigned?: boolean;
   /** animation.randomFrameOnly — when set, each particle shows ONE fixed
    *  random atlas cell for its whole life (no flipbook). Engine
    *  FUN_14071b7f0 @0x14071c5b6 leaves the spawn-seeded random frame byte
@@ -3639,6 +3643,9 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
         value: distortionMode > 0 ? 1 : 0,
       },
       uDistortionMode: { value: distortionMode },
+      // DEFORM per-texel strength encoding: 1 = deform16f signed field
+      // (R centred 0.5), 0 = RGB foam mask. See the mode-1 shader branch.
+      uDeformSigned: { value: opts.deformSigned ? 1 : 0 },
       uDistortionStrength: { value: distortionStrength },
       uDistortionSceneTexture: { value: null as THREE.Texture | null },
       uDistortionSceneSize: { value: new THREE.Vector2(1, 1) },
@@ -3797,6 +3804,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
       uniform float uPremultiply;
       uniform float uDistortion;
       uniform float uDistortionMode;
+      uniform float uDeformSigned;
       uniform float uDistortionStrength;
       uniform sampler2D uDistortionSceneTexture;
       uniform vec2 uDistortionSceneSize;
@@ -4192,11 +4200,24 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
               ) + emissionBody;
               outA *= 0.55;
             } else {
-              vec2 warpedUv = clamp(screenUv + warp, vec2(0.001), vec2(0.999));
+              // DEFORM_WATER_SURFACE quads natively write the water-sim RT
+              // (signed height + foam accumulation) — they are never visible
+              // billboards, and their fields feather to NEUTRAL at the quad
+              // borders (probed: water_spray_wave_UD border deviation ~0.003
+              // vs centre ~0.13). The flat 0.45-alpha refraction rendered the
+              // whole quad as a glassy square (FX_HELPER foam/deform family) —
+              // scale warp/foam/alpha by the per-texel deviation instead.
+              // deform16f/* = float RG field, R centred 0.5 (signed height),
+              // G≈0; other deform-blend textures are RGB foam MASKS (DXT1,
+              // alpha-less, black = nothing).
+              float deformMag = uDeformSigned > 0.5
+                ? clamp((abs(base.r - 0.5) * 2.0 + abs(base.g)) * 2.0, 0.0, 1.0)
+                : clamp(max(base.r, max(base.g, base.b)), 0.0, 1.0);
+              vec2 warpedUv = clamp(screenUv + warp * deformMag, vec2(0.001), vec2(0.999));
               vec3 refracted = texture2D(uDistortionSceneTexture, warpedUv).rgb;
-              float foam = 0.10 * clamp(outA, 0.0, 1.0);
+              float foam = 0.10 * clamp(outA, 0.0, 1.0) * deformMag;
               outRgb = refracted + vec3(foam) + emissionBody;
-              outA *= 0.45;
+              outA *= 0.45 * deformMag;
             }
           } else if (useEmissionAlphaFromMV > 0.5) {
             // No scene-colour RTT (the inspector's normal state): keep the
@@ -4536,6 +4557,7 @@ export class ParticleScene {
         // SHIMMER emission-body composite (which falls back to the lit _LM
         // when no _MVEA is loaded). All mvMap samples are guarded on useMv.
         useEmissionAlphaFromMV: anim?.useEmissionAlphaFromMV,
+        deformSigned: r?.textureName0?.startsWith('particles/deform16f/'),
         randomFrameOnly: anim?.randomFrameOnly,
         frameRateRamp: anim?.frameRateRamp,
         spriteRotation: useSpriteRotation,
