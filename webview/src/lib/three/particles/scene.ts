@@ -493,6 +493,25 @@ export class ParticleScene {
     }
   }
 
+  /** Native particle samplers CLAMP (byte-proven consequence of the DXBC ramp
+   *  law): GRADIENT_MAP samples the LUT at U = 1 − key, which is exactly 1.0
+   *  on every zero-emission texel — with the DDS loader's default
+   *  RepeatWrapping, bilinear filtering at U=1.0 wraps and blends in texel 0,
+   *  the ramp's HOT HDR end, tinting the whole quad rectangle a faint glow
+   *  (squareish sprites: GK_Shot_Gouden_Leeuw_KOTS cyan dust). Sheet/MVEA
+   *  cell UVs and the slightly-overshooting MV warp likewise must clamp at
+   *  the sheet edge, not wrap to the opposite frame. Local-UV tiling
+   *  (uUvTiling) is fract()-applied in the shader, so clamp loses nothing.
+   *  The texture cache is particles-private, so this never affects ship
+   *  materials (which do tile via texture wrap). */
+  private static clampParticleTexture<T extends THREE.Texture | null>(tex: T): T {
+    if (tex) {
+      tex.wrapS = THREE.ClampToEdgeWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+    }
+    return tex;
+  }
+
   /** Resolve a workspace-relative DDS path through the texture cache
    *  and bind it onto `material.uniforms.map`. Idempotent per URL. */
   private async bindTexture(
@@ -510,7 +529,8 @@ export class ParticleScene {
         .catch((err) => {
           console.warn('[particles] DDS load failed', workspaceRelPath, err);
           return null;
-        });
+        })
+        .then((tex) => ParticleScene.clampParticleTexture(tex));
       this.textureCache.set(url, pending);
     }
     const tex = await pending;
@@ -532,10 +552,12 @@ export class ParticleScene {
     const url = repoUrl(workspaceRelPath);
     let pending = this.textureCache.get(url);
     if (!pending) {
-      pending = loadDdsMipChain([url], false, r).catch((err) => {
-        console.warn('[particles] LUT DDS load failed', workspaceRelPath, err);
-        return null;
-      });
+      pending = loadDdsMipChain([url], false, r)
+        .catch((err) => {
+          console.warn('[particles] LUT DDS load failed', workspaceRelPath, err);
+          return null;
+        })
+        .then((tex) => ParticleScene.clampParticleTexture(tex));
       this.textureCache.set(url, pending);
     }
     const tex = await pending;
@@ -564,7 +586,8 @@ export class ParticleScene {
         .catch((err) => {
           console.warn('[particles] MV DDS load failed', workspaceRelPath, err);
           return null;
-        });
+        })
+        .then((tex) => ParticleScene.clampParticleTexture(tex));
       this.textureCache.set(url, pending);
     }
     const tex = await pending;
