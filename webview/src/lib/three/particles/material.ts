@@ -343,6 +343,18 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
     opts.hideSpeed !== undefined && Number.isFinite(opts.hideSpeed) && opts.hideSpeed > 0
       ? opts.hideSpeed
       : 1;
+  // Hide-angle fade law, byte-exact (fx_Sprite_hideAngleFade + fx_DrawCfg_cook,
+  // RE 2026-07-02): fade = clamp01((|dot(viewDir, orientVec)| − base) × hideSpeed),
+  // INVERTED iff orientation mode 1 (billboard/axial) — NOT iff lightingType==
+  // lightmapping4Way (that gate was a +8-shift aliasing artifact: the cooked
+  // mode byte sits at the parse-layout lightingType offset). The base is cooked
+  // per mode: billboard → hideStartCos raw; flat → (1 − hideStartCos) − 1/hideSpeed.
+  // Dominant corpus authoring (start=0, speed=1): flat cards fade ∝ |cos| to the
+  // normal (soft edge-on fade), axial cards fade ∝ 1−|cos| to the axis (fade
+  // looking down the axis). At the defaults (start=1) both forms are neutral.
+  const hideIsAxialMode = opts.billboard === true ? 1 : 0;
+  const hideStartCos = opts.hideStartCos ?? 1;
+  const hideFadeBase = hideIsAxialMode ? hideStartCos : 1 - hideStartCos - 1 / hideSpeed;
   // Soft-particle fade slope: authored against NATIVE (BW) depth deltas
   // (fade = saturate(Δdepth_bw × k)); the shader computes Δdepth in eye METRES,
   // so divide by NATIVE_TO_METRES. Raw-authored (pre-2026-07-01) made the fade
@@ -448,9 +460,10 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
         ).normalize(),
       },
       uExplicitOrientationLocal: { value: opts.explicitOrientationLocal ? 1 : 0 },
-      uHideStartCos: { value: opts.hideStartCos ?? 1 },
+      uHideFadeBase: { value: hideFadeBase },
       uHideSpeed: { value: hideSpeed },
-      uHideInvert: { value: opts.lightingType === 'lightmapping4Way' ? 1 : 0 },
+      // 1 = orientation mode 1 (billboard): the fade term is inverted.
+      uHideIsAxial: { value: hideIsAxialMode },
       // Native uses an opaque-only depth copy for soft particles/fog. The
       // scene environment binds a WebGL DepthTexture here before each render;
       // when absent, uSoftDepthSize stays 1x1 and the shader skips the fade.
@@ -553,9 +566,9 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uniform float uUseAxialBillboard;
       uniform float uUseFixedOrientation;
       uniform vec2 uAnchorShift;
-      uniform float uHideStartCos;
+      uniform float uHideFadeBase;
       uniform float uHideSpeed;
-      uniform float uHideInvert;
+      uniform float uHideIsAxial;
       varying vec4 vColor;
       varying float vAge;
       varying float vFrameSeed;
@@ -586,18 +599,15 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
             ? normalize(mat3(modelMatrix) * uExplicitOrientation)
             : normalize(uExplicitOrientation);
           vec3 viewDirW = normalize(worldPos - cameraPosition);
-          // Axial billboards face the camera around their axis, so their hide
-          // test is against that swept normal: the axis-PERPENDICULAR fraction
-          // of the view direction (≈1 viewing across the axis ⇒ visible, ≈0
-          // looking straight down the axis ⇒ edge-on, hidden). For eo=(0,±y,0)
-          // this reduces to length(viewDirW.xz), the shipped meme behavior;
-          // testing against the axis itself inverted it and blanked the
-          // ThisIsFine memes from the side while native shows them there.
-          float hAlign = (uUseAxialBillboard > 0.5)
-            ? length(viewDirW - orientW * dot(viewDirW, orientW))
-            : abs(dot(viewDirW, orientW));
-          float h = clamp((hAlign - uHideStartCos) * uHideSpeed, 0.0, 1.0);
-          vHideFade = (uHideInvert > 0.5) ? (1.0 - h) : h;
+          // Byte-exact native law (fx_Sprite_hideAngleFade, RE 2026-07-02):
+          // fade = clamp01((|dot(viewDir, orientVec)| - base) * hideSpeed),
+          // inverted for orientation mode 1 (billboard/axial). Axial cards
+          // thus fade out looking DOWN the axis (|dot|->1 => 1-fade->0, e.g.
+          // ThisIsFine memes seen top-down) and show from the side; flat
+          // cards fade out edge-on (|dot|->0). The base is pre-cooked per
+          // mode on the CPU (uHideFadeBase).
+          float h = clamp((abs(dot(viewDirW, orientW)) - uHideFadeBase) * uHideSpeed, 0.0, 1.0);
+          vHideFade = (uHideIsAxial > 0.5) ? (1.0 - h) : h;
         }
         float spriteAspectX = max(0.001, abs(uSpriteAspectX * spriteScaleX));
         vSpriteAspectX = spriteAspectX;
