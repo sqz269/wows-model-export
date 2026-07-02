@@ -3886,10 +3886,19 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
           // engine's r5.x is the t3/g_particleMVTexture sample, NOT the _LM
           // body texel). Sample it wherever the texture is available; -1
           // sentinel = no sample this fragment (texture missing/not loaded).
-          bool useMvAlpha = (useEmissionAlphaFromMV > 0.5 && uGradientMapMode <= 0.5);
-          bool useMvEmissionBody = useMvAlpha;
+          // ALPHA substitution is NOT gradient-gated (ps4.txt &8 branch: the
+          // cross-faded MVEA.A lands in r2.x and the final alpha is
+          // r2.x * v7.w in BOTH permutations — the &4 LUT test only routes
+          // COLOR). Gating it on non-gradient rendered opaque squares for
+          // GRADIENT_MAP systems whose _LM alpha is authored junk-opaque
+          // because the flag redirects opacity (Moray First/Second_Explosion,
+          // FlagExplosion_LM.dds ~76% alpha=1). Only the BODY substitution
+          // stays non-gradient (gradient takes the ramp/KEY branch instead).
+          bool useMvAlpha = (useEmissionAlphaFromMV > 0.5);
+          bool useMvEmissionBody = (useMvAlpha && uGradientMapMode <= 0.5);
           bool wantMvEmission = (useMvAlpha || uGradientMapMode > 0.5);
           float mvEmissionSample = -1.0;
+          float mvAlphaSample = -1.0;
 
           if (randomCell) {
             // Fixed per-particle random cell (no time advance, no cross-fade).
@@ -3905,7 +3914,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
               // the atlas-rect remap applies to the packed page only).
               vec4 e = texture2D(mvMap, gridUv);
               mvEmissionSample = e.r;
-              if (useMvAlpha) base.a = e.a;
+              if (useMvAlpha) mvAlphaSample = e.a;
             }
           } else if (mvAnimated) {
             // Motion-vector flipbook blend (WG _MVEA): sample the two
@@ -3942,13 +3951,13 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             if (wantMvEmission) {
               // _MVEA.R = emission, .A = opacity — sampled at the warped UVs,
               // lerped by f. Non-gradient permutation: emission substitutes
-              // the body and .A is the opacity (M4). GRADIENT_MAP permutation:
-              // the emission is the glow-ramp KEY (ps4.txt:597-618) while the
-              // _LM body keeps its own alpha.
+              // the body (M4). GRADIENT_MAP permutation: the emission is the
+              // glow-ramp KEY (ps4.txt:597-618). The .A opacity substitution
+              // applies in BOTH when the flag is authored (see useMvAlpha).
               vec4 e0 = texture2D(mvMap, uv0);
               vec4 e1 = texture2D(mvMap, uv1);
               mvEmissionSample = mix(e0.r, e1.r, f);
-              if (useMvAlpha) base.a = mix(e0.a, e1.a, f);
+              if (useMvAlpha) mvAlphaSample = mix(e0.a, e1.a, f);
             }
           } else if (animated) {
             // Age-driven flipbook (framesPlayback / no MV texture), composed
@@ -3990,7 +3999,7 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             if (useMv > 0.5 && wantMvEmission) {
               vec4 e = texture2D(mvMap, gridUv);
               mvEmissionSample = e.r;
-              if (useMvAlpha) base.a = e.a;
+              if (useMvAlpha) mvAlphaSample = e.a;
             }
           }
           // M4 (RE doc 63, ps4.txt:595-606): when MVEA.R is selected as
@@ -4079,6 +4088,15 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
               clamp(vec3(ambient) + lit * uLightingDiffuse * uSunColorNorm, 0.0, 1.0),
               base.a
             );
+          }
+          // useEmissionAlphaFromMV opacity substitution — applied AFTER the
+          // 4-way relight so the decode's +bitangent lobe / avg4 read the
+          // ORIGINAL LM.A (native keeps the LM sample r4 intact for lighting;
+          // the cross-faded MVEA.A rides a separate register r2.x and only
+          // feeds the FINAL alpha, in BOTH gradient and non-gradient
+          // permutations — ps4 &8 branch, final mul r1.w = r2.x * v7.w).
+          if (useMvAlpha && mvAlphaSample >= 0.0) {
+            base.a = mvAlphaSample;
           }
           if (useLut > 0.5) {
             if (uLightingMode > 0.5) {
