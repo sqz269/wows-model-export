@@ -27,6 +27,8 @@ classifiers = [
 #   numpy   — bw_geometry, rig_normalize_bones, compare_skin_meshes, synth_emission
 #   pillow  — synth_emission (DDS round-trip via numpy + PIL)
 #   ijson   — compare_exterior_swaps (streams the 2.8 GB GameParams cache)
+#   imagecodecs — BC6H_UF16 HDR ramp float-decode + EXR encode in
+#                 export_particle_textures (Unity mis-decodes BC6H; emit .exr)
 #
 # scipy was previously listed for its KD-tree in resolve/mesh_compare.py; we
 # replaced it with an in-house numpy KD-tree (resolve/_kdtree.py) to drop
@@ -40,6 +42,7 @@ dependencies = [
     "numpy>=1.26",
     "pillow>=10.0",
     "ijson>=3.2",
+    "imagecodecs>=2026.6.6",
 ]
 
 [project.optional-dependencies]
@@ -72,6 +75,7 @@ wows-build-projectile-library = "wows_model_export.cli.build_projectile_library:
 wows-build-decal-library     = "wows_model_export.cli.build_decal_library:main"
 wows-build-environment-library = "wows_model_export.cli.build_environment_library:main"
 wows-build-ammo-profiles     = "wows_model_export.cli.build_ammo_profiles:main"
+wows-export-particle-textures = "wows_model_export.cli.export_particle_textures:main"
 wows-dedup-textures          = "wows_model_export.cli.dedup_textures:main"
 wows-rig-normalize-bones     = "wows_model_export.cli.rig_normalize_bones:main"
 wows-webview-serve           = "wows_model_export.cli.webview_serve:main"

@@ -63,6 +63,7 @@
     | 'damage'
     | 'textures'
     | 'nodes'
+    | 'particles'
     | 'pick';
 
   // PBR-read slot order for the Textures tab, matching the AssetDetail
@@ -169,6 +170,7 @@
     'damage',
     'textures',
     'nodes',
+    'particles',
   ];
 
   onMount(() => {
@@ -179,12 +181,12 @@
         if (Number.isFinite(n) && n >= COLLAPSED_HEIGHT) height = n;
       }
       const stored_t = localStorage.getItem(TAB_KEY);
-      // Pre-2026-05-16 sidecars stored `effects` here; later renamed to
-      // `particles`. As of the Particles-page split (2026-05-16 evening)
-      // particles live on their own top-level tab and the in-ship row
-      // is gone — quietly redirect both legacy keys to `overview`.
+      // Pre-2026-05-16 sidecars persisted an `effects` tab here that never
+      // existed in the bottom panel — quietly redirect it to `overview`.
+      // (`particles` is a real bottom-panel tab again: the per-ship list of
+      // attached particle ids — see the Particles tab below.)
       let t = stored_t as ShipBottomTab | null;
-      if (stored_t === 'effects' || stored_t === 'particles') t = 'overview';
+      if (stored_t === 'effects') t = 'overview';
       if (t && PERSISTABLE.includes(t)) activeTab = t;
     } catch {
       /* localStorage may be unavailable */
@@ -469,10 +471,65 @@
   function fmtEnvScalar(n: number): string {
     if (!Number.isFinite(n)) return '—';
     if (Math.abs(n) > 0 && Math.abs(n) < 0.001) return n.toExponential(2);
-    return n
-      .toFixed(3)
-      .replace(/0+$/, '')
-      .replace(/\.$/, '');
+    return n.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+  }
+
+  // ── Particles tab (effect attachments) ───────────────────────────────
+  // Lists every particle effect this ship attaches, keyed by its VFS
+  // `particle_path` (the `.xml` id). Read straight off the sidecar's
+  // `effects.attachments`, so the list is available whether or not the
+  // live particle layer is toggled on. Bumped by `revision` for ship
+  // swaps. Each id deep-links to the standalone `#/particles/<path>`
+  // inspector for lookup.
+  interface ShipParticleRow {
+    /** Full VFS id, e.g. `particles/vehicles/Fire_small.xml`. */
+    path: string;
+    /** Distinct source categories (hull / artillery / aa_aura / …). */
+    sources: string[];
+    /** Distinct effect groups (smoke / shotEffect / waketracefront / …). */
+    groups: string[];
+    /** Distinct anchor nodes (EP_*, HP_*) — fallback label when no group. */
+    nodes: string[];
+    /** Total attachment rows referencing this id. */
+    count: number;
+  }
+  const shipParticleRows: ShipParticleRow[] = $derived.by(() => {
+    void revision;
+    const attachments = (viewer?.getSidecar() as SidecarDoc | null)?.effects?.attachments ?? [];
+    const byPath = new Map<
+      string,
+      { sources: Set<string>; groups: Set<string>; nodes: Set<string>; count: number }
+    >();
+    for (const a of attachments) {
+      const path = a.particle_path;
+      if (!path) continue;
+      let row = byPath.get(path);
+      if (!row) {
+        row = { sources: new Set(), groups: new Set(), nodes: new Set(), count: 0 };
+        byPath.set(path, row);
+      }
+      row.count += 1;
+      if (a.source) row.sources.add(a.source);
+      if (a.group) row.groups.add(a.group);
+      if (a.node) row.nodes.add(a.node);
+    }
+    return Array.from(byPath.entries())
+      .map(([path, r]) => ({
+        path,
+        sources: [...r.sources].sort(),
+        groups: [...r.groups].sort(),
+        nodes: [...r.nodes].sort(),
+        count: r.count,
+      }))
+      .sort((a, b) => a.path.localeCompare(b.path));
+  });
+  const hasParticlesTab = $derived(shipParticleRows.length > 0);
+
+  /** Open this particle in the standalone `#/particles` inspector. The
+   *  router preserves embedded slashes after the first segment, so the
+   *  full VFS path passes through without encoding. */
+  function openParticleInInspector(path: string) {
+    navigate(`#/particles/${path}`);
   }
 
   const tabs: Array<{ id: ShipBottomTab; label: string; hide?: boolean; badge?: number }> =
@@ -492,6 +549,7 @@
       { id: 'damage', label: 'Damage' },
       { id: 'textures', label: 'Textures', hide: !hasHullTextures },
       { id: 'nodes', label: 'Nodes', hide: !hasNodesTab },
+      { id: 'particles', label: 'Particles', hide: !hasParticlesTab },
       { id: 'pick', label: 'Pick', hide: !selectedPick },
     ]);
 
@@ -516,8 +574,11 @@
     return Array.from(by.entries())
       .map(([peculiarity, records]) => ({ peculiarity, records }))
       .sort((a, b) =>
-        a.peculiarity === 'default' ? -1 : b.peculiarity === 'default' ? 1
-          : a.peculiarity.localeCompare(b.peculiarity),
+        a.peculiarity === 'default'
+          ? -1
+          : b.peculiarity === 'default'
+            ? 1
+            : a.peculiarity.localeCompare(b.peculiarity),
       );
   });
 
@@ -985,15 +1046,17 @@
           <div class="text-muted-foreground max-w-[64ch] text-[11px]">
             Mesh-swap permoflages (WG <code class="font-mono text-[10px]">Exterior</code> records).
             Selecting one swaps the affected mounts to the variant models and applies the matching
-            camo. Entries marked <span class="text-amber-500">hull differs</span> also swap the
-            hull: when the HullDelta export exists the ship reloads on the variant hull and mounts
-            re-anchor to its HP nodes (WG hides unused base accessories by parking their nodes
-            inside the hull); otherwise mounts render on the base hull until the ship is
-            re-extracted with exterior hulls on.
+            camo. Entries marked <span class="text-amber-500">hull differs</span> also swap the hull:
+            when the HullDelta export exists the ship reloads on the variant hull and mounts re-anchor
+            to its HP nodes (WG hides unused base accessories by parking their nodes inside the hull);
+            otherwise mounts render on the base hull until the ship is re-extracted with exterior hulls
+            on.
           </div>
           {#each exteriorGroups as group (group.peculiarity)}
             <div>
-              <div class="text-muted-foreground mb-1 text-[10px] font-medium uppercase tracking-wider">
+              <div
+                class="text-muted-foreground mb-1 text-[10px] font-medium uppercase tracking-wider"
+              >
                 {group.peculiarity}
               </div>
               <div class="flex flex-col gap-1">
@@ -1022,7 +1085,9 @@
                       </span>
                     </span>
                     {#if ext.is_native && ext.exterior_id !== 'default'}
-                      <span class="flex-none rounded bg-primary/15 px-1 text-[9px] uppercase tracking-wider text-primary">
+                      <span
+                        class="flex-none rounded bg-primary/15 px-1 text-[9px] uppercase tracking-wider text-primary"
+                      >
                         native
                       </span>
                     {/if}
@@ -1196,6 +1261,77 @@
             {/each}
           </div>
         </div>
+      {:else if activeTab === 'particles'}
+        {#if shipParticleRows.length === 0}
+          <div class="text-muted-foreground">
+            This ship attaches no particle effects — no
+            <code class="font-mono text-[11px]">effects.attachments</code> in the sidecar.
+          </div>
+        {:else}
+          <div class="flex flex-col gap-2">
+            <div class="text-muted-foreground max-w-[72ch] text-[11px]">
+              Particle effects attached to this ship, by their VFS id (the
+              <code class="font-mono text-[10px]">.xml</code> path). Click an id to open it in the
+              <button
+                type="button"
+                class="text-primary hover:underline"
+                onclick={() => navigate('#/particles')}
+              >
+                Particles inspector
+              </button>, or copy it to look up there.
+            </div>
+            <table
+              class="text-[11px] [&_th]:text-muted-foreground [&_th]:font-normal [&_th]:uppercase [&_th]:tracking-wider [&_th]:text-[10px] [&_th]:pr-6 [&_td]:pr-6 [&_th]:py-0.5 [&_td]:py-0.5"
+            >
+              <thead>
+                <tr>
+                  <th class="text-left">particle id</th>
+                  <th class="text-left">source</th>
+                  <th class="text-left">attached at</th>
+                  <th class="text-right">count</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each shipParticleRows as row (row.path)}
+                  <tr>
+                    <td>
+                      <button
+                        type="button"
+                        class="text-primary font-mono text-[11px] hover:underline"
+                        title={`Open ${row.path} in the Particles inspector`}
+                        onclick={() => openParticleInInspector(row.path)}
+                      >
+                        {row.path}
+                      </button>
+                      <button
+                        type="button"
+                        class="text-muted-foreground hover:text-foreground ml-1.5 align-middle text-[10px]"
+                        title="Copy full VFS id to clipboard"
+                        onclick={() => navigator.clipboard?.writeText(row.path)}
+                      >
+                        copy
+                      </button>
+                    </td>
+                    <td class="text-muted-foreground">{row.sources.join(', ') || '—'}</td>
+                    <td class="text-muted-foreground">
+                      {(row.groups.length ? row.groups : row.nodes).join(', ') || '—'}
+                    </td>
+                    <td class="text-right tabular-nums">{row.count}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+            <div class="text-muted-foreground/70 text-[10px]">
+              {shipParticleRows.length} unique particle{shipParticleRows.length === 1 ? '' : 's'} ·
+              {shipParticleRows.reduce((a, r) => a + r.count, 0)} attachment{shipParticleRows.reduce(
+                (a, r) => a + r.count,
+                0,
+              ) === 1
+                ? ''
+                : 's'}
+            </div>
+          </div>
+        {/if}
       {:else if activeTab === 'pick'}
         {#if pickInfo}
           <div class="flex flex-col gap-2">

@@ -746,12 +746,21 @@ def _decode_action_body(
         # 12-byte inline body (corpus-verified, 310/310 systems). Layout:
         #   +0x00 i32 type tag (==0 in all 310; mirrors a linear-VG type)
         #   +0x04 f32 sizeFrom   +0x08 f32 sizeTo
-        # Either endpoint may be larger (e.g. 1000->250 shrink, 5->1000 grow),
-        # so these are interpolation endpoints, not (rate, target). Raw BW units
-        # (same space as emitter sizeGenerator; consumer applies NATIVE_TO_METRES
-        # at draw). NOTE the i32 tag name is unconfirmed (==0 everywhere) and the
-        # per-particle APPLY semantics (lerp axis / overwrite vs multiply) are
-        # NOT yet RE-resolved — consumer keeps the field inert until then.
+        # APPLY semantics RE-RESOLVED 2026-07-01 (native fx::ActionResizer::apply
+        # @0x140742190, static decompile — see wows-re-notes resizer_re_handoff.md):
+        # this is a fixed-RATE approach of the SIZE BASE toward an absolute target,
+        # clamped, integrated over the substep dt:
+        #     target = sizeTo * perComponentStatic(~1.0)
+        #     base(rec[0x20]) -> clamp(base +/- dt*sizeFrom, target)
+        # so **sizeTo = the target size, sizeFrom = the approach RATE** (units/sec) —
+        # NOT a sizeFrom->sizeTo life tween, and NOT a scaler multiply. That is why
+        # 1000->250 / 5->1000 don't blow up (they converge+clamp to the target). It
+        # writes the size BASE directly and INDEPENDENTLY of the scaler action (which
+        # multiplies rec[0x54/0x58]); the two compose at draw. Raw BW units (same
+        # space as emitter sizeGenerator; consumer applies NATIVE_TO_METRES at draw).
+        # Wired in the reference webview consumer (particles.ts resizerActions);
+        # downstream consumers integrate identically. The i32 tag name stays
+        # unconfirmed (==0 everywhere) and is moot for the corpus.
         out["_typeTag"] = struct.unpack_from("<i", buf, fa + 0x00)[0]
         out["sizeFrom"] = struct.unpack_from("<f", buf, fa + 0x04)[0]
         out["sizeTo"] = struct.unpack_from("<f", buf, fa + 0x08)[0]
@@ -1195,10 +1204,18 @@ def _decode_system_intensities(
 def _decode_system(
     buf: bytes | mmap.mmap, sys_off: int, file_end: int,
 ) -> dict:
-    """One 0x1c8-byte System slot. Includes Emitter, General, and
-    Component[componentsCount] but skips Renderer/Animation internals
-    (per-field byte offsets not mapped — see spec doc's "open items").
+    """One 0x1c8-byte System slot — Renderer, Animation, Emitter, General,
+    Distance, Intensities, the per-system ``name``, and the
+    Component[componentsCount] array.
+
+    ``name`` lives in the 16-byte section at System+0x198 — a ResourceRef
+    (``{u32 length, u32 pad, i64 relptr}``, same shape as the renderer
+    texture refs) holding the author's system name (``"main_big_0"``,
+    ``"sparks_1"``, …). Present in 100% of the corpus; previously dropped.
     """
+    # Per-system name at +0x198 (ResourceRef → OOL string). Returns None if
+    # the slot is empty / malformed; non-null for every system in the corpus.
+    name = _read_texture_ref(buf, sys_off + 0x198, file_end)
     comp_count = struct.unpack_from("<i", buf, sys_off + 0x1b8)[0]
     comp_rp = struct.unpack_from("<q", buf, sys_off + 0x1c0)[0]
     components: list[dict] = []
@@ -1227,6 +1244,7 @@ def _decode_system(
                 components.append(rec)
 
     return {
+        "name": name,
         "renderer": _decode_renderer(buf, sys_off, file_end),
         "animation": _decode_animation(buf, sys_off, file_end),
         "emitter": _decode_emitter(buf, sys_off, file_end),

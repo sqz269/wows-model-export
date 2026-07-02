@@ -19,6 +19,8 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 
+import type { ColorGrade } from './env_ibl';
+
 export interface BloomParams {
   /** Overall bloom contribution (UnrealBloomPass.strength). */
   strength: number;
@@ -115,6 +117,28 @@ const GTTonemapShader = {
     uBlack: { value: DEFAULT_TONEMAP_PARAMS.black },
     uMaxBright: { value: 1.0 }, // Uchimura P (fixed)
     uPedestal: { value: 0.0 }, // Uchimura b (fixed)
+    // WG PostFX color grade (off by default; driven from the env manifest).
+    // Indices: 0=global 1=shadows 2=midtones 3=highlights.
+    uGradeEnabled: { value: 0 },
+    uGradeLum: { value: new THREE.Vector2(0.09, 0.5) }, // shadowsMax, highlightsMin
+    uGradeSat: { value: [1, 1, 1, 1] },
+    uGradeCon: { value: [1, 1, 1, 1] },
+    uGradeGain: {
+      value: [
+        new THREE.Vector3(1, 1, 1),
+        new THREE.Vector3(1, 1, 1),
+        new THREE.Vector3(1, 1, 1),
+        new THREE.Vector3(1, 1, 1),
+      ],
+    },
+    uGradeOff: {
+      value: [
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, 0),
+      ],
+    },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -127,6 +151,12 @@ const GTTonemapShader = {
     varying vec2 vUv;
     uniform sampler2D tDiffuse;
     uniform float uExposure, uContrast, uLinearStart, uLinearLength, uBlack, uMaxBright, uPedestal;
+    uniform float uGradeEnabled;
+    uniform vec2 uGradeLum;       // shadowsMaxRelLum, highlightsMinRelLum
+    uniform float uGradeSat[4];   // 0=global 1=shadows 2=midtones 3=highlights
+    uniform float uGradeCon[4];
+    uniform vec3 uGradeGain[4];
+    uniform vec3 uGradeOff[4];
 
     // Uchimura "Gran Turismo" curve. x is linear scene-referred; returns [0,P].
     float uchimura(float x) {
@@ -150,9 +180,34 @@ const GTTonemapShader = {
       return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
     }
 
+    // WG PostFX color grade — UE4-style per-luminance-range CDL, in linear HDR
+    // after exposure, BEFORE the tonemap (see reference/engine/
+    // wg_render_color_grading.md). Per range: saturation -> contrast -> gain ->
+    // offset; the three ranges blended by pixel luminance. (The engine's 0.18
+    // mid-grey anchor is folded out — the inline curve keeps mid-grey at the
+    // exposure scale, so neutral params = identity here.)
+    const vec3 GLW = vec3(0.2126, 0.7152, 0.0722);
+    vec3 cdl(vec3 col, float sat, float con, vec3 gain, vec3 off) {
+      float luma = dot(col, GLW);
+      vec3 c = mix(vec3(luma), col, sat);
+      return c * con * gain + off;
+    }
+    vec3 colorGrade(vec3 col) {
+      col = cdl(col, uGradeSat[0], uGradeCon[0], uGradeGain[0], uGradeOff[0]); // global
+      float luma = dot(col, GLW);
+      float wS = 1.0 - smoothstep(0.0, max(uGradeLum.x, 1e-4), luma);
+      float wH = smoothstep(uGradeLum.y, 1.0, luma);
+      float wM = max(1.0 - wS - wH, 0.0);
+      vec3 cS = cdl(col, uGradeSat[1], uGradeCon[1], uGradeGain[1], uGradeOff[1]);
+      vec3 cM = cdl(col, uGradeSat[2], uGradeCon[2], uGradeGain[2], uGradeOff[2]);
+      vec3 cH = cdl(col, uGradeSat[3], uGradeCon[3], uGradeGain[3], uGradeOff[3]);
+      return cS * wS + cM * wM + cH * wH;
+    }
+
     void main() {
       vec4 texel = texture2D(tDiffuse, vUv);
       vec3 c = max(texel.rgb, 0.0) * uExposure;               // keyed exposure
+      c = mix(c, max(colorGrade(c), 0.0), uGradeEnabled);     // WG PostFX color grade
       c = vec3(uchimura(c.r), uchimura(c.g), uchimura(c.b));   // GT curve (linear)
       gl_FragColor = vec4(linearToSRGB(c), texel.a);          // sRGB OETF
     }
@@ -188,6 +243,9 @@ export interface SceneEnvironment {
   /** Patch any subset of the GT tonemap params (curve + keyed exposure);
    *  missing keys keep their current value. */
   setTonemapParams(p: Partial<GTTonemapParams>): void;
+  /** Apply WG's PostFX color grade (per-luminance-range CDL, run before the
+   *  tonemap), or pass `null` to disable it. Driven from the env manifest. */
+  setColorGrade(grade: ColorGrade | null): void;
   /** Replace `scene.environment` with a WG PMREM (from `env_ibl`), or restore
    *  the default procedural RoomEnvironment when passed `null`. The caller
    *  owns the passed texture's lifecycle. */
@@ -214,6 +272,14 @@ export interface SceneEnvironment {
    *  inspector between a night sky and a daylit sky so occluding,
    *  alpha-blended smoke is actually visible). */
   setBackground(color: number): void;
+  /** Show/hide the faux animated water surface. DEFORM_WATER_SURFACE
+   *  particles (ship wakes, splashes) author a water DISTORTION, not a
+   *  sprite — with no ocean to refract they read as flat squares. Enabling
+   *  this drops a structured, animated water plane at y=0 that the
+   *  screen-space distortion pass can warp, so the wake reads as ripples.
+   *  Hidden by default; the particle inspector turns it on only for records
+   *  that contain a DEFORM_WATER_SURFACE system. */
+  setWaterPlaneVisible(on: boolean): void;
   /** Dispose every resource created here. Idempotent. */
   dispose(): void;
 }
@@ -312,6 +378,123 @@ export function createSceneEnvironment(
   const axes = new THREE.AxesHelper(axesSize);
   scene.add(grid, axes);
 
+  // ── Faux water surface (opt-in; particle inspector) ───────────────────
+  // DEFORM_WATER_SURFACE particles only EXIST in-game as a refraction of the
+  // ocean surface. The inspector has no ocean, so the screen-space distortion
+  // approximation (particles.ts uDistortion path) has nothing to bend and the
+  // wake cards read as faint flat squares. This plane gives the refraction a
+  // structured, animated surface to warp. The waves live entirely in the
+  // fragment shader (procedural from world XZ) so a single quad suffices.
+  //
+  // depthTest:false + depthWrite:false + renderOrder -1 make it a pure
+  // background layer: it IS captured into the scene-color RTT (the cards
+  // refract it) but it neither occludes the cards nor feeds the soft-particle
+  // depth snapshot (shouldHideForOpaqueDepth hides depthWrite:false meshes),
+  // so the wake sprites do not soft-fade against the surface they sit on.
+  const waterUniforms = {
+    uTime: { value: 0 },
+    uSunDir: { value: sunDirectionState.clone() },
+  };
+  const waterMaterial = new THREE.ShaderMaterial({
+    uniforms: waterUniforms,
+    transparent: false,
+    depthWrite: false,
+    depthTest: false,
+    vertexShader: /* glsl */ `
+      varying vec3 vWorld;
+      void main() {
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorld = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      precision highp float;
+      uniform float uTime;
+      uniform vec3 uSunDir;
+      varying vec3 vWorld;
+
+      // Summed directional sines -> a cheap, structured wave height field.
+      // Mixed wavelengths give both broad swell and fine sparkle ripples;
+      // the high-frequency terms also keep the screen-space refraction legible
+      // at the small warp magnitude the distortion pass applies.
+      float waveH(vec2 p, float t) {
+        float h = 0.0;
+        // Broad swell (wavelength ~22-33 m).
+        h += sin(p.x * 0.28 + t * 1.30) * 0.40;
+        h += sin((p.x * 0.19 + p.y * 0.33) + t * 1.00) * 0.34;
+        h += sin((p.x * 0.41 - p.y * 0.22) + t * 1.70) * 0.26;
+        // Finer chop (~6-10 m).
+        h += sin((p.x * 0.75 + p.y * 0.62) + t * 2.40) * 0.16;
+        h += sin((p.x * 0.60 - p.y * 1.05) + t * 2.90) * 0.12;
+        // Sparkle detail.
+        h += sin((p.x * 1.50 + p.y * 1.20) + t * 3.60) * 0.06;
+        h += sin((p.x * 2.30 - p.y * 1.90) + t * 4.50) * 0.035;
+        return h;
+      }
+
+      // Procedural daytime sky used as the reflection probe — gives the surface
+      // a real horizon-graded reflection + sun glow WITHOUT a planar reflector
+      // (which would not compose with the depth/distortion snapshot passes).
+      vec3 skyColor(vec3 dir, vec3 sun) {
+        float up = clamp(dir.y, 0.0, 1.0);
+        vec3 horizon = vec3(0.62, 0.74, 0.88);
+        vec3 zenith = vec3(0.13, 0.33, 0.60);
+        vec3 sky = mix(horizon, zenith, pow(up, 0.55));
+        float s = clamp(dot(dir, sun), 0.0, 1.0);
+        sky += vec3(1.0, 0.92, 0.74) * pow(s, 90.0) * 1.1;   // sun reflection
+        sky += vec3(1.0, 0.85, 0.65) * pow(s, 6.0) * 0.06;   // broad glare
+        return sky;
+      }
+
+      void main() {
+        vec2 p = vWorld.xz;
+        float t = uTime;
+        float e = 0.6;
+        float h0 = waveH(p, t);
+        float hx = (waveH(p + vec2(e, 0.0), t) - h0) * 3.0;
+        float hz = (waveH(p + vec2(0.0, e), t) - h0) * 3.0;
+        vec3 n = normalize(vec3(-hx / e, 1.0, -hz / e));
+
+        vec3 viewDir = normalize(cameraPosition - vWorld);
+        vec3 sun = normalize(uSunDir);
+
+        // Deep-ocean body: dark teal-blue near the viewer, slightly lifted on
+        // the wave faces that catch the sky.
+        vec3 deep = vec3(0.004, 0.045, 0.072);
+        vec3 shallow = vec3(0.02, 0.13, 0.17);
+        vec3 body = mix(deep, shallow, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
+
+        // Sky reflection off the perturbed surface, blended by Schlick fresnel
+        // (mostly body looking straight down, mostly sky toward the horizon).
+        vec3 refl = reflect(-viewDir, n);
+        refl.y = abs(refl.y);
+        vec3 sky = skyColor(refl, sun);
+        float fres = 0.02 + 0.98 * pow(1.0 - clamp(dot(viewDir, n), 0.0, 1.0), 5.0);
+        vec3 col = mix(body, sky, fres);
+
+        // Sharp sun specular on the crests.
+        vec3 halfv = normalize(sun + viewDir);
+        float spec = pow(clamp(dot(n, halfv), 0.0, 1.0), 220.0);
+        col += vec3(1.0, 0.96, 0.85) * spec * 0.5;
+
+        // A hint of foam on the steepest crests (kept low so it stays under the
+        // bloom threshold and the wake disturbance still reads).
+        float crest = smoothstep(0.55, 0.95, h0 * 0.5 + 0.5);
+        col = mix(col, vec3(0.78, 0.86, 0.92), crest * 0.06);
+
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `,
+  });
+  const waterPlane = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), waterMaterial);
+  waterPlane.rotation.x = -Math.PI / 2;
+  waterPlane.renderOrder = -1;
+  waterPlane.frustumCulled = false;
+  waterPlane.visible = false;
+  waterPlane.name = 'FauxWaterSurface';
+  scene.add(waterPlane);
+
   // ── Post-FX (always-on composer) ──────────────────────────────────
   // The composer is the SOLE render path: RenderPass -> UnrealBloomPass
   // (enabled-toggled) -> GTTonemapPass (renderToScreen). The GT pass owns
@@ -346,6 +529,27 @@ export function createSceneEnvironment(
     u.uBlack.value = tonemapParams.black;
   };
 
+  // WG PostFX color grade state (null = off). Re-pushed whenever the composer
+  // (re)builds so it survives a bloom toggle, mirroring applyTonemapParams.
+  let colorGradeState: ColorGrade | null = null;
+  const applyColorGrade = () => {
+    if (!gtPass) return;
+    const u = gtPass.uniforms;
+    if (!colorGradeState) {
+      u.uGradeEnabled.value = 0;
+      return;
+    }
+    u.uGradeEnabled.value = 1;
+    (u.uGradeLum.value as THREE.Vector2).set(
+      colorGradeState.shadowsMax,
+      colorGradeState.highlightsMin,
+    );
+    u.uGradeSat.value = colorGradeState.sat.slice();
+    u.uGradeCon.value = colorGradeState.con.slice();
+    u.uGradeGain.value = colorGradeState.gain.map((g) => new THREE.Vector3(g[0], g[1], g[2]));
+    u.uGradeOff.value = colorGradeState.off.map((o) => new THREE.Vector3(o[0], o[1], o[2]));
+  };
+
   const buildComposer = () => {
     if (composer) return;
     // MSAA-capable target so bloom doesn't kill the edge AA that the
@@ -374,6 +578,7 @@ export function createSceneEnvironment(
     gtPass.renderToScreen = true;
     composer.addPass(gtPass);
     applyTonemapParams();
+    applyColorGrade();
   };
 
   const collectSoftDepthConsumers = (): THREE.ShaderMaterial[] => {
@@ -525,6 +730,13 @@ export function createSceneEnvironment(
     grid,
     axes,
     render() {
+      if (waterPlane.visible) {
+        // Ambient surface animation, independent of the sim transport so the
+        // ocean keeps moving even when the effect is paused. Keep the sun in
+        // sync with the scene key light so the glints match the lighting.
+        waterUniforms.uTime.value = performance.now() * 0.001;
+        waterUniforms.uSunDir.value.copy(sunDirectionState);
+      }
       renderOpaqueDepthSnapshot(collectSoftDepthConsumers());
       renderDistortionSceneColor(collectDistortionConsumers());
       if (!postprocessEnabled && !bloomEnabled) {
@@ -572,6 +784,10 @@ export function createSceneEnvironment(
       if (p.black !== undefined) tonemapParams.black = p.black;
       applyTonemapParams();
     },
+    setColorGrade(grade: ColorGrade | null) {
+      colorGradeState = grade;
+      applyColorGrade();
+    },
     setSize(w: number, h: number) {
       lastSize = { w, h };
       composer?.setSize(w, h);
@@ -615,6 +831,9 @@ export function createSceneEnvironment(
         scene.background = new THREE.Color(color);
       }
     },
+    setWaterPlaneVisible(on: boolean) {
+      waterPlane.visible = on;
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -623,6 +842,8 @@ export function createSceneEnvironment(
       (grid.material as THREE.Material).dispose();
       axes.geometry.dispose();
       (axes.material as THREE.Material).dispose();
+      waterPlane.geometry.dispose();
+      waterMaterial.dispose();
       envRT.dispose();
       pmrem.dispose();
       opaqueDepthMaterial.dispose();

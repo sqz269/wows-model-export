@@ -609,6 +609,12 @@ export interface ParticleAnimation {
 }
 
 export interface ParticleSystem {
+  /**
+   * Per-system author name decoded from the System+0x198 ResourceRef
+   * (`"main_big_0"`, `"sparks_1"`, `"fire_big"`, …). Present for every system
+   * in the corpus; `undefined` only for records from a pre-`name` producer.
+   */
+  name?: string;
   renderer?: ParticleRenderer;
   animation?: ParticleAnimation;
   emitter?: ParticleEmitter;
@@ -719,6 +725,18 @@ export interface ParticleAttachment {
    * and on `EP_*` rows the pipeline couldn't resolve (no `_ep` data).
    */
   position?: [number, number, number];
+  /**
+   * Caliber-scaled muzzle-blast intensity (gun `shotEffect` rows only).
+   * The pipeline replicates WG's gun shooter: at runtime
+   * `ClientShooterEffects` sets the muzzle effect's intensity from the
+   * mount's caliber + barrel count and feeds it to the effect's
+   * `PARTICLE_SIZE` intensity channel — bigger guns emit bigger blasts.
+   * Consumers feed this as the effect's channel-0 intensity value
+   * (`setAttachmentIntensityValues(h, [intensity])`). Range 0–10; absent =>
+   * use the effect's own default intensity (1.0). Only `artillery` / `atba`
+   * shotEffect rows carry it (airDefense scales the tracer, not the muzzle).
+   */
+  intensity?: number;
   /**
    * Identifier of the owning entity within the source category.
    *  - hull: omitted (the `group` field is the identifier).

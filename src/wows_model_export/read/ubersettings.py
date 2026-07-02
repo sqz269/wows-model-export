@@ -19,6 +19,13 @@ final color + IBL (see ``reference/engine/wg_render_hdr_tonemap.md`` and
   bloom set, the eye-adaptation set, and the environment multipliers. (The
   Uchimura ``P`` / ``b`` params are not authored anywhere — fixed ``P=1,
   b=0``.)
+* ``PostFX/ColorGrading`` — WG's port of UE4 per-luminance-range color grading
+  (Saturation / Contrast / RGB Gain / RGB Offset for Global / Shadows /
+  Midtones / Highlights, blended by the ``shadowsMaxRelLuminance`` /
+  ``highlightsMinRelLuminance`` thresholds). Applied in linear HDR **after
+  exposure, before the GT tonemap LUT** (RE'd in ``shaders/post_processing/
+  hdr_resolve``). A consumer that skips this renders darker / less warm than
+  the game (e.g. ``00_CO_ocean`` lifts highlights with a 5.2× red gain).
 * ``PBS/settings/cubemapsPath`` — the directory holding the prefiltered PMREM
   reflection cube (conventionally ``main_probe.dds``; a few old docks use a
   numbered ``<n>/PMREM.dds``). The cube is a single-file 6-face DDS with a
@@ -136,6 +143,31 @@ def _parse_hdr(weather: ET.Element) -> dict[str, Any]:
         if sub_elem is not None:
             out.update(_settings_dict(sub_elem.find("settings")))
     return out
+
+
+def _parse_color_grading(weather: ET.Element) -> dict[str, Any]:
+    """Flatten the ``<PostFX><ColorGrading><settings>`` block.
+
+    This is WG's port of UE4's per-luminance-range color grading (the engine
+    binds it as ``g_colorGradingShadows`` / ``g_colorGradingMidtones`` /
+    ``g_colorGradingHighlights`` / ``g_colorGradingLumRanges`` — confirmed in
+    ``shaders/post_processing/hdr_resolve``). Per range (Global / Shadows /
+    Midtones / Highlights) it authors a scalar ``Saturation`` + scalar
+    ``Contrast`` + RGB ``Gain`` + RGB ``Offset`` (UE4's model **minus Gamma**),
+    plus the ``shadowsMaxRelLuminance`` / ``highlightsMinRelLuminance`` /
+    ``maxLogLuminance`` range thresholds and a ``highlightsExposureOffset`` band.
+
+    The grade runs in **linear HDR after exposure and BEFORE the GT tonemap
+    LUT** — a consumer must apply it pre-tonemap to match. Returns ``{}`` when
+    the weather authors no ColorGrading block. Values arrive coerced (RGB
+    triples become 3-float lists).
+    """
+    cg = weather.find("PostFX/ColorGrading")
+    if cg is None:
+        cg = weather.find(".//ColorGrading")  # tolerate a moved/flat layout
+    if cg is None:
+        return {}
+    return _settings_dict(cg.find("settings"))
 
 
 def _parse_pbs(weather: ET.Element) -> dict[str, Any]:
@@ -299,6 +331,7 @@ def parse_ubersettings_text(xml_text: str) -> dict[str, Any]:
         weathers[name] = {
             "cubemaps_path": pbs["cubemaps_path"],
             "hdr": _parse_hdr(weather),
+            "color_grading": _parse_color_grading(weather),
             "sh": pbs["sh"],
             "pbs_extras": pbs["pbs_extras"],
             "sun": _parse_sun(weather),
@@ -341,11 +374,78 @@ def gt_tonemap(weather: dict[str, Any]) -> dict[str, float]:
     return out
 
 
+# The four luminance ranges WG grades independently (Global applies to all).
+COLOR_GRADE_RANGES: tuple[str, ...] = ("Global", "Shadows", "Midtones", "Highlights")
+
+
+def color_grade(weather: dict[str, Any]) -> dict[str, Any] | None:
+    """Group the flat ``color_grading`` params into per-range CDL for consumers.
+
+    Returns ``None`` when the weather authors no grade. Otherwise::
+
+        {
+          "ranges": {maxLogLuminance, shadowsMaxRelLuminance,
+                     highlightsMinRelLuminance},
+          "global":     {saturation, contrast, gain: [r,g,b], offset: [r,g,b]},
+          "shadows":    {...}, "midtones": {...}, "highlights": {...},
+          "highlightsExposure": {offset, minLum, maxLum},
+        }
+
+    Apply order (per the ``hdr_resolve`` RE) is **linear HDR, after exposure,
+    before the GT tonemap LUT**: for each pixel, weight Shadows/Midtones/
+    Highlights from the pixel luminance via the ``ranges`` thresholds, run the
+    UE4 ``ColorCorrect`` (saturation → contrast about 0.18 → gain → offset) per
+    active range plus Global, then tonemap. WG omits UE4's per-range Gamma.
+    """
+    cg = weather.get("color_grading") or {}
+    if not cg:
+        return None
+
+    def _f(key: str) -> float:
+        v = cg.get(key)
+        return float(v) if isinstance(v, (int, float)) else 0.0
+
+    def _rgb(key: str, default: float) -> list[float]:
+        v = cg.get(key)
+        if isinstance(v, list):
+            return [float(c) for c in (v + [default, default, default])[:3]]
+        if isinstance(v, (int, float)):
+            return [float(v)] * 3
+        return [default, default, default]
+
+    def _range(suffix: str) -> dict[str, Any]:
+        return {
+            "saturation": _f(f"colorSaturation{suffix}"),
+            "contrast": _f(f"colorContrast{suffix}"),
+            "gain": _rgb(f"colorGain{suffix}", 1.0),
+            "offset": _rgb(f"colorOffset{suffix}", 0.0),
+        }
+
+    return {
+        "ranges": {
+            "maxLogLuminance": _f("maxLogLuminance"),
+            "shadowsMaxRelLuminance": _f("shadowsMaxRelLuminance"),
+            "highlightsMinRelLuminance": _f("highlightsMinRelLuminance"),
+        },
+        "global": _range("Global"),
+        "shadows": _range("Shadows"),
+        "midtones": _range("Midtones"),
+        "highlights": _range("Highlights"),
+        "highlightsExposure": {
+            "offset": _f("highlightsExposureOffset"),
+            "minLum": _f("highlightsExposureOffsetMinLum"),
+            "maxLum": _f("highlightsExposureOffsetMaxLum"),
+        },
+    }
+
+
 __all__ = [
     "GT_PARAM_KEYS",
+    "COLOR_GRADE_RANGES",
     "SH_COEFF_COUNT",
     "decode_harmonics",
     "parse_ubersettings",
     "parse_ubersettings_text",
     "gt_tonemap",
+    "color_grade",
 ]

@@ -16,7 +16,7 @@
   // on the first slash only, so embedded `/`s in the path pass through
   // without URL-encoding.
 
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import * as THREE from 'three';
   import Search from '@lucide/svelte/icons/search';
   import Play from '@lucide/svelte/icons/play';
@@ -76,6 +76,15 @@
   let recordLoading = $state(false);
   let qualityChoice = $state<'high' | 'low' | 'shared'>('high');
 
+  // ── Intensity channels ──────────────────────────────────────────────
+  // Effect intensity is a GAMEPLAY input (EffectManager.setIntensity), not
+  // authored data — the record only carries per-channel defaults. Muzzle
+  // effects in particular never play at the authored default 1.0: the shot
+  // code drives channel 0 from the gun's caliber (see caliberLawIntensity).
+  let intensityValues = $state<number[]>([]);
+  let intensityPreset = $state<'authored' | 'caliber' | 'custom'>('authored');
+  let caliberMm = $state(420);
+
   // ── Three.js scene ──────────────────────────────────────────────────
 
   let canvasContainer: HTMLElement | null = $state(null);
@@ -83,12 +92,25 @@
   let scene: ParticleScene | null = null;
   let stopResize: (() => void) | null = null;
   let stopLoop: (() => void) | null = null;
+  /** Per-system AABB helpers (non-reactive; managed in the render loop). */
+  let boundsGroup: THREE.Group | null = null;
+  let boundsHelpers: Array<{ box: THREE.Box3; helper: THREE.Box3Helper }> = [];
 
   /** Per-handle stats updated on the render loop. Drives the readouts
    *  in the centre overlay (alive count + elapsed time). */
   let aliveCount = $state(0);
   let elapsedS = $state(0);
   let playing = $state(true);
+
+  // Per-system bounding-box overlay (inspector diagnostic — wraps each
+  // system's live particles in a coloured AABB).
+  let showBounds = $state(false);
+  /** Indices of systems toggled OFF (hidden) in the inspector. */
+  let hiddenSystems = $state<Set<number>>(new Set());
+  /** Per-system panel rows (rebuilt each frame: live count + hidden flag). */
+  let systemRows = $state<
+    Array<{ i: number; name: string; alive: number; hidden: boolean }>
+  >([]);
 
   // Inspector backdrop. Occluding / alpha-blended smoke (flak bursts, fire
   // smoke — the GRADIENT_MAP + lightmapping path) is near-invisible against a
@@ -108,6 +130,24 @@
     // when the SKY/NIGHT toggle changed it.
     const color = BACKDROPS[backdrop];
     env?.setBackground(color);
+  });
+
+  /** True when a record has at least one DEFORM_WATER_SURFACE system — a
+   *  water-surface distortion (ship wake / splash) that authors a refraction
+   *  of the ocean, not a sprite. Without a surface to bend, the distortion
+   *  pass has nothing to warp and the wake cards read as flat squares. */
+  function recordHasDeformWater(rec: ParticleRecord | null): boolean {
+    for (const s of rec?.systems ?? []) {
+      if (s.renderer?.blendType === 'DEFORM_WATER_SURFACE') return true;
+    }
+    return false;
+  }
+  $effect(() => {
+    // Read `activeRecord` UNCONDITIONALLY before the optional-chained env call
+    // so it is tracked as a dependency (see the backdrop effect above). The
+    // initial state is also applied in mountViewer since `env` is not state.
+    const showWater = recordHasDeformWater(activeRecord);
+    env?.setWaterPlaneVisible(showWater);
   });
 
   // ── List fetch ──────────────────────────────────────────────────────
@@ -178,6 +218,7 @@
         return;
       }
       activeRecord = res.record ?? null;
+      initIntensityForRecord(activeRecord, path);
       availableQualities = res.qualities ?? [];
       qualityUsed = res.quality_used ?? null;
       textureCount = {
@@ -190,6 +231,81 @@
     } finally {
       recordLoading = false;
     }
+  }
+
+  // ── Intensity presets ───────────────────────────────────────────────
+
+  /** Authored per-channel defaults (record.intensityChannels[].defaultIntensity). */
+  function authoredIntensityDefaults(rec: ParticleRecord | null): number[] {
+    return (rec?.intensityChannels ?? []).map((c) =>
+      Number.isFinite(c.defaultIntensity) ? Number(c.defaultIntensity) : 1,
+    );
+  }
+
+  /** ClientShooterEffects muzzle intensity law (decompiled m30eb35be.py,
+   *  build 12506899): ((barrelDiameter − 0.05) / (0.55 − 0.05)) × 10,
+   *  clamped to [0, 10] (EffectsConstants MIN/MAX_BARREL_DIAMETER +
+   *  MIN/MAX_INTENSITY). The numBarrels term
+   *  clamp(n × 0.6, 1.0, −30.0) degenerates to 1.0 (authored max is
+   *  negative), so it is omitted. 420 mm → 7.4. */
+  function caliberLawIntensity(mm: number): number {
+    const raw = ((mm / 1000 - 0.05) / (0.55 - 0.05)) * 10;
+    return Math.min(10, Math.max(0, raw));
+  }
+
+  /** The shot code sets ONE effect-level value —
+   *  EffectManager.setIntensity(effectId, shotIntensity) with no channel
+   *  arg (→ channel 0); the other channels keep their authored defaults. */
+  function caliberPresetValues(rec: ParticleRecord | null, mm: number): number[] {
+    const values = authoredIntensityDefaults(rec);
+    if (values.length > 0) values[0] = caliberLawIntensity(mm);
+    return values;
+  }
+
+  /** Gun-shot records default to the caliber-law preset: in game the muzzle
+   *  effect is ALWAYS re-intensified from the firing gun's caliber, so the
+   *  authored default 1.0 is a state the engine never renders. */
+  function initIntensityForRecord(rec: ParticleRecord | null, path: string): void {
+    if (path.startsWith('particles/guns/')) {
+      intensityPreset = 'caliber';
+      intensityValues = caliberPresetValues(rec, caliberMm);
+    } else {
+      intensityPreset = 'authored';
+      intensityValues = authoredIntensityDefaults(rec);
+    }
+  }
+
+  function applyIntensity(): void {
+    if (scene && currentHandle) scene.setAttachmentIntensityValues(currentHandle, intensityValues);
+  }
+
+  function setPresetAuthored(): void {
+    intensityPreset = 'authored';
+    intensityValues = authoredIntensityDefaults(activeRecord);
+    applyIntensity();
+  }
+
+  function setPresetCaliber(): void {
+    intensityPreset = 'caliber';
+    intensityValues = caliberPresetValues(activeRecord, caliberMm);
+    applyIntensity();
+  }
+
+  function onCaliberInput(mm: number): void {
+    if (!Number.isFinite(mm)) return;
+    caliberMm = mm;
+    if (intensityPreset === 'caliber') {
+      intensityValues = caliberPresetValues(activeRecord, caliberMm);
+      applyIntensity();
+    }
+  }
+
+  function onChannelSlider(i: number, v: number): void {
+    const next = intensityValues.slice();
+    next[i] = v;
+    intensityValues = next;
+    intensityPreset = 'custom';
+    applyIntensity();
   }
 
   // Auto-refetch whenever the path or quality changes.
@@ -221,6 +337,7 @@
     env.setBloomEnabled(true);
     env.setBloomParams({ strength: 0.28, radius: 0.25, threshold: 1.35 });
     env.setBackground(BACKDROPS[backdrop]);
+    env.setWaterPlaneVisible(recordHasDeformWater(activeRecord));
     // Every inspected effect spawns at the origin, so the axes helper sits
     // right inside the effect — and its bright-green Y axis blooms into a beam
     // that reads as part of the particle. Hide it (the grid still gives scale).
@@ -232,6 +349,10 @@
     scene.setSunLighting(sun.direction, sun.color);
     env.scene.add(scene.root);
 
+    boundsGroup = new THREE.Group();
+    boundsGroup.name = 'ParticleSystemBounds';
+    env.scene.add(boundsGroup);
+
     stopResize = observeResize({
       container,
       renderer: env.renderer,
@@ -242,6 +363,7 @@
     stopLoop = startRenderLoop(() => {
       env!.controls.update();
       scene!.tick();
+      syncSystems();
       env!.render();
       // Mirror the simulator's alive count + elapsed time into reactive
       // state so the overlay readouts update without a manual ping.
@@ -271,6 +393,83 @@
     scene = null;
     env = null;
     currentHandle = null;
+    for (const { helper } of boundsHelpers) {
+      helper.geometry.dispose();
+      (helper.material as THREE.Material).dispose();
+    }
+    boundsHelpers = [];
+    boundsGroup = null;
+    systemRows = [];
+    hiddenSystems = new Set();
+  }
+
+  // ── Per-system bounds overlay ───────────────────────────────────────
+  const BOUNDS_HUE_STEP = 0.618033988749895; // golden-ratio hue spread
+
+  function boundsColor(i: number): THREE.Color {
+    return new THREE.Color().setHSL((0.08 + i * BOUNDS_HUE_STEP) % 1, 0.85, 0.6);
+  }
+  function boundsColorHex(i: number): string {
+    return '#' + boundsColor(i).getHexString();
+  }
+
+  /** Toggle a system's visibility (its sprites, its lights, and its AABB).
+   *  Reassigns the Set so Svelte re-renders the panel. */
+  function toggleSystem(i: number): void {
+    const next = new Set(hiddenSystems);
+    if (next.has(i)) next.delete(i);
+    else next.add(i);
+    hiddenSystems = next;
+  }
+
+  /** Apply per-system visibility (sprite mesh + the lights that system
+   *  authored), refresh the AABB helpers, and publish the panel rows. Called
+   *  each frame BEFORE render so visibility + Box3Helper matrices are fresh.
+   *  The helper pool is sized to the system count; a box draws only when the
+   *  overlay is on, the system is visible, and it has live particles. */
+  function syncSystems() {
+    const systems = currentHandle ? currentHandle.systems : [];
+    // 1. Visibility — sprite mesh + the lights that system authored.
+    for (let i = 0; i < systems.length; i++) {
+      systems[i].points.visible = !hiddenSystems.has(i);
+    }
+    if (currentHandle) {
+      for (const l of currentHandle.lights) {
+        l.group.visible = l.ownerSystemIndex < 0 || !hiddenSystems.has(l.ownerSystemIndex);
+      }
+    }
+    // 2. Size the AABB helper pool to the system count.
+    if (boundsGroup) {
+      while (boundsHelpers.length < systems.length) {
+        const idx = boundsHelpers.length;
+        const box = new THREE.Box3();
+        const helper = new THREE.Box3Helper(box, boundsColor(idx));
+        const mat = helper.material as THREE.LineBasicMaterial;
+        mat.depthTest = false;
+        mat.transparent = true;
+        helper.renderOrder = 999;
+        helper.visible = false;
+        boundsGroup.add(helper);
+        boundsHelpers.push({ box, helper });
+      }
+      while (boundsHelpers.length > systems.length) {
+        const last = boundsHelpers.pop()!;
+        boundsGroup.remove(last.helper);
+        last.helper.geometry.dispose();
+        (last.helper.material as THREE.Material).dispose();
+      }
+    }
+    // 3. Per-frame box update + panel rows.
+    const rows: Array<{ i: number; name: string; alive: number; hidden: boolean }> = [];
+    for (let i = 0; i < systems.length; i++) {
+      const hidden = hiddenSystems.has(i);
+      const slot = boundsHelpers[i];
+      if (slot) {
+        slot.helper.visible = showBounds && !hidden && systems[i].computeWorldBounds(slot.box);
+      }
+      rows.push({ i, name: systems[i].name, alive: systems[i].aliveCount, hidden });
+    }
+    systemRows = rows;
   }
 
   // ── Per-record viewer state ─────────────────────────────────────────
@@ -283,6 +482,7 @@
     if (!scene) return;
     scene.clear();
     currentHandle = null;
+    hiddenSystems = new Set();
     if (!rec || !selectedPath) return;
     const synthetic: ParticleAttachment = {
       group: 'inspector',
@@ -298,12 +498,16 @@
     if (handles.length === 0) return;
     const h = handles[0];
     scene.setAttachmentActive(h, playing);
+    scene.setAttachmentIntensityValues(h, intensityValues);
     currentHandle = h;
   }
 
-  // Rebuild whenever the active record changes.
+  // Rebuild whenever the active record changes. The rebuild also reads
+  // `playing` and `intensityValues` — untracked, so toggling play/pause or
+  // dragging an intensity slider never resets the simulator.
   $effect(() => {
-    rebuildSceneFromRecord(activeRecord);
+    const rec = activeRecord;
+    untrack(() => rebuildSceneFromRecord(rec));
   });
 
   // Toggle live activity when `playing` changes (without rebuilding the
@@ -379,12 +583,12 @@
     return path.replace(/^particles\//, '').replace(/\.xml$/, '');
   }
 
-  /** Set of action names the WEBVIEW emitter (`particles.ts`) actually
-   *  consumes today. Anything else in a record is silently ignored —
-   *  the inspector flags these so the user knows render fidelity is
-   *  limited there.
+  /** Set of action names the WEBVIEW emitter (`$lib/three/particles`)
+   *  actually consumes today. Anything else in a record is silently
+   *  ignored — the inspector flags these so the user knows render
+   *  fidelity is limited there.
    *
-   *  Source: `webview/src/lib/three/particles.ts` — the
+   *  Source: `webview/src/lib/three/particles/system-renderer.ts` — the
    *  `SystemRenderer` constructor's switch on `c.action`.
    */
   const RENDERED_ACTIONS = new Set([
@@ -419,7 +623,7 @@
    *  Note: `framesPerX/Y` (animation grid) and `blendType` (PS_RBT, 10
    *  values) ARE decoded by the parser (`read/particles.py`
    *  _decode_animation / _decode_renderer) and consumed by the renderer
-   *  (`three/particles.ts` `blendConfigForPsRbt` + the flipbook-UV shader
+   *  (`three/particles/material.ts` `blendConfigForPsRbt` + the flipbook-UV shader
    *  math) since the 2026-05-23 gap-closing pass — they are no longer gaps.
    *  What remains:
    *    - a few PS_RBT modes (SHIMMER / DEFORM_WATER_SURFACE) use a
@@ -609,6 +813,16 @@
             </button>
           {/each}
         </div>
+        <button
+          type="button"
+          onclick={() => (showBounds = !showBounds)}
+          title="Toggle per-system bounding boxes"
+          class="rounded border border-border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider {showBounds
+            ? 'bg-primary text-primary-foreground'
+            : 'bg-popover text-muted-foreground hover:text-foreground'}"
+        >
+          boxes
+        </button>
         {#if availableQualities.length > 1}
           <div class="flex rounded border border-border overflow-hidden">
             {#each availableQualities as q (q)}
@@ -688,6 +902,50 @@
           </div>
         </div>
       {/if}
+
+      <!-- Per-system panel: click a row to show/hide that system (its sprites,
+           its lights, and its AABB). Swatch ↔ the system's bounding-box colour. -->
+      {#if selectedPath && activeRecord && !recordError && systemRows.length > 0}
+        <div
+          class="bg-popover/85 border-border absolute left-3 top-20 flex max-h-[60%] flex-col overflow-auto rounded border px-1.5 py-1 font-mono text-[10px] backdrop-blur"
+        >
+          <div class="flex items-center justify-between gap-3 px-0.5 pb-1">
+            <span class="text-muted-foreground text-[9px] uppercase tracking-wider">systems</span>
+            {#if hiddenSystems.size > 0}
+              <button
+                type="button"
+                class="text-muted-foreground hover:text-foreground text-[9px] uppercase tracking-wider"
+                onclick={() => (hiddenSystems = new Set())}
+                title="Show all systems"
+              >
+                show all
+              </button>
+            {/if}
+          </div>
+          {#each systemRows as s (s.i)}
+            <button
+              type="button"
+              onclick={() => toggleSystem(s.i)}
+              title={`${s.hidden ? 'Show' : 'Hide'} ${s.name ? `"${s.name}" (#${s.i})` : `system #${s.i}`}`}
+              class="hover:bg-muted/40 flex items-center gap-1.5 rounded px-0.5 py-[1px] text-left {s.hidden
+                ? 'opacity-40'
+                : ''}"
+            >
+              <span
+                class="border-border inline-block size-2.5 flex-none rounded-[2px] border"
+                style={s.hidden
+                  ? ''
+                  : `background:${boundsColorHex(s.i)};border-color:${boundsColorHex(s.i)}`}
+              ></span>
+              <span class="text-muted-foreground flex-none">#{s.i}</span>
+              {#if s.name}
+                <span class="text-foreground max-w-[130px] truncate">{s.name}</span>
+              {/if}
+              <span class="text-muted-foreground ml-auto pl-3 tabular-nums">{s.alive}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
     </div>
   </section>
 
@@ -715,6 +973,74 @@
                 <li>· {g}</li>
               {/each}
             </ul>
+          </section>
+        {/if}
+
+        <!-- Intensity channels (gameplay input, not authored data) -->
+        {#if (activeRecord.intensityChannels ?? []).length > 0}
+          <section class="border-border bg-muted/20 mb-3 rounded border p-2">
+            <div class="mb-1.5 flex items-center justify-between">
+              <span class="text-muted-foreground text-[9px] uppercase tracking-wider">
+                intensity
+              </span>
+              <span class="text-muted-foreground text-[9px]">{intensityPreset}</span>
+            </div>
+            <div class="mb-2 flex items-center gap-1.5 font-mono text-[10px]">
+              <button
+                type="button"
+                class="rounded border px-1.5 py-0.5 {intensityPreset === 'authored'
+                  ? 'border-primary/60 bg-primary/15 text-foreground'
+                  : 'border-border text-muted-foreground hover:text-foreground'}"
+                onclick={setPresetAuthored}
+                title="Authored per-channel defaults (record.intensityChannels[].defaultIntensity)"
+              >
+                authored
+              </button>
+              <button
+                type="button"
+                class="rounded border px-1.5 py-0.5 {intensityPreset === 'caliber'
+                  ? 'border-primary/60 bg-primary/15 text-foreground'
+                  : 'border-border text-muted-foreground hover:text-foreground'}"
+                onclick={setPresetCaliber}
+                title="ClientShooterEffects caliber law: ((d − 0.05) / 0.5) × 10, clamped to [0, 10]"
+              >
+                gun shot
+              </button>
+              <input
+                type="number"
+                min="50"
+                max="550"
+                step="1"
+                value={caliberMm}
+                oninput={(e) => onCaliberInput(Number(e.currentTarget.value))}
+                class="border-border bg-background w-14 rounded border px-1 py-0.5 text-right tabular-nums"
+                aria-label="Gun caliber in millimetres"
+              />
+              <span class="text-muted-foreground">
+                mm → {caliberLawIntensity(caliberMm).toFixed(1)}
+              </span>
+            </div>
+            <div class="flex flex-col gap-1 font-mono text-[10px]">
+              {#each activeRecord.intensityChannels ?? [] as ch, i (i)}
+                <label class="flex items-center gap-2">
+                  <span class="text-muted-foreground w-20 flex-none truncate" title={ch.name}>
+                    {ch.name}
+                  </span>
+                  <input
+                    type="range"
+                    min={ch.minIntensity ?? 0}
+                    max={ch.maxIntensity ?? 10}
+                    step="0.1"
+                    value={intensityValues[i] ?? 1}
+                    oninput={(e) => onChannelSlider(i, Number(e.currentTarget.value))}
+                    class="min-w-0 flex-1"
+                  />
+                  <span class="text-foreground w-8 flex-none text-right tabular-nums">
+                    {(intensityValues[i] ?? 1).toFixed(1)}
+                  </span>
+                </label>
+              {/each}
+            </div>
           </section>
         {/if}
 

@@ -40,9 +40,67 @@ export interface WeatherEnvEntry {
   cube: { format: string; width: number; height: number; mips: number; is_cube: boolean } | null;
   cubemaps_path: string | null;
   hdr: Record<string, number | number[] | boolean>;
+  color_grading?: Record<string, number | number[] | boolean>;
   sh: number[][] | null;
   pbs_extras: Record<string, number | number[] | boolean>;
   sun: SunParams | null;
+}
+
+/** WG PostFX color grade (UE4-style per-luminance-range CDL), flattened for the
+ *  tonemap shader. Indices are [global, shadows, midtones, highlights]. Applied
+ *  in linear HDR AFTER exposure, BEFORE the GT tonemap (the order WG uses — see
+ *  reference/engine/wg_render_color_grading.md). `sat` is already the actual
+ *  saturation multiplier (the XML authors a delta-from-1, converted on load). */
+export interface ColorGrade {
+  /** `shadowsMaxRelLuminance` — luminance below which the Shadows range applies. */
+  shadowsMax: number;
+  /** `highlightsMinRelLuminance` — luminance above which the Highlights range applies. */
+  highlightsMin: number;
+  sat: number[]; // 4 × scalar (1 = neutral)
+  con: number[]; // 4 × scalar (1 = neutral)
+  gain: number[][]; // 4 × [r,g,b] (1 = neutral)
+  off: number[][]; // 4 × [r,g,b] (0 = neutral)
+}
+
+const _GRADE_RANGES = ['Global', 'Shadows', 'Midtones', 'Highlights'] as const;
+
+/** Convert a manifest `color_grading` block into a {@link ColorGrade}, or null
+ *  when the weather authors no (or a fully neutral) grade. */
+export function colorGradeFromEntry(entry: WeatherEnvEntry): ColorGrade | null {
+  const cg = entry.color_grading;
+  if (!cg || Object.keys(cg).length === 0) return null;
+  const num = (v: unknown, d: number): number => (typeof v === 'number' ? v : d);
+  const rgb = (v: unknown, d: number): number[] =>
+    Array.isArray(v)
+      ? [num(v[0], d), num(v[1], d), num(v[2], d)]
+      : typeof v === 'number'
+        ? [v, v, v]
+        : [d, d, d];
+  const sat: number[] = [];
+  const con: number[] = [];
+  const gain: number[][] = [];
+  const off: number[][] = [];
+  for (const r of _GRADE_RANGES) {
+    sat.push(1 + num(cg[`colorSaturation${r}`], 0)); // XML saturation is a delta from 1
+    con.push(num(cg[`colorContrast${r}`], 1));
+    gain.push(rgb(cg[`colorGain${r}`], 1));
+    off.push(rgb(cg[`colorOffset${r}`], 0));
+  }
+  // Skip when fully neutral (no point paying the shader cost / risking drift).
+  const neutral =
+    sat.every((s) => Math.abs(s - 1) < 1e-4) &&
+    con.every((c) => Math.abs(c - 1) < 1e-4) &&
+    gain.every((g) => g.every((x) => Math.abs(x - 1) < 1e-4)) &&
+    off.every((o) => o.every((x) => Math.abs(x) < 1e-4));
+  if (neutral) return null;
+  return {
+    shadowsMax: num(cg['shadowsMaxRelLuminance'], 0.09),
+    highlightsMin: num(cg['highlightsMinRelLuminance'], 0.5),
+    sat,
+    con,
+    gain,
+    off,
+  };
 }
 
 export interface EnvManifest {
@@ -62,6 +120,8 @@ export interface WgEnvironment {
   sh: number[][] | null;
   /** Directional sun (azimuth/elevation° + RGB color) for this weather. */
   sun: SunParams | null;
+  /** WG PostFX color grade for this weather (null when neutral/absent). */
+  colorGrading: ColorGrade | null;
   /** Per-weather rain wetness (Layer 1 tint + Layer 3 puddle intensities). */
   wetness: WetnessParams;
   /** Log-average luminance of the cube's mip 0 — the scene-average the WG
@@ -257,6 +317,7 @@ export async function loadWgEnvironment(
     hdr: pick.entry.hdr ?? {},
     sh: pick.entry.sh ?? null,
     sun: pick.entry.sun ?? null,
+    colorGrading: colorGradeFromEntry(pick.entry),
     wetness: wetnessFromEntry(pick.entry),
     avgLum,
     dispose() {
