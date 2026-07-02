@@ -4024,7 +4024,25 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
             vec2 mv1 = (uLightingMode > 0.5 ? texture2D(mvMap, cell1).bg : texture2D(mvMap, cell1).rg) * 2.0 - 1.0;
             vec2 uv0 = cell0 - mv0 * f * mvDistortion;
             vec2 uv1 = cell1 + mv1 * (1.0 - f) * mvDistortion;
-            base = mix(texture2D(map, uv0), texture2D(map, uv1), f);
+            // Manifest atlas-rect remap on the BODY samples only. When the
+            // base texture resolves via the manifest atlas (e.g. empty.tga on
+            // a shared 4096^2 page) instead of a direct URL, the packed cell
+            // UVs must be mapped into the atlas rect before sampling map --
+            // exactly as the randomCell/animated/static branches do. This was
+            // the one flipbook branch missing it, so an atlas-resolved base
+            // under motionVectors sampled raw grid cells of the WHOLE atlas
+            // page: a big textured square (Daruma_Gold_CustomDeath_UnderWater
+            // system #0, empty.tga + Smoke_expl_cloud_7x7_MVEA). The _MVEA
+            // warp field (mvMap, below) is its own non-atlased file, so it
+            // keeps the RAW grid UVs -- the remap applies to the packed page
+            // only.
+            vec2 buv0 = uv0;
+            vec2 buv1 = uv1;
+            if (useAtlasRect > 0.5) {
+              buv0 = mix(atlasRect.xy, atlasRect.zw, buv0);
+              buv1 = mix(atlasRect.xy, atlasRect.zw, buv1);
+            }
+            base = mix(texture2D(map, buv0), texture2D(map, buv1), f);
             if (wantMvEmission) {
               // _MVEA.R = emission, .A = opacity — sampled at the warped UVs,
               // lerped by f. Non-gradient permutation: emission substitutes
