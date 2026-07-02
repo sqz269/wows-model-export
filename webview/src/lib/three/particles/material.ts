@@ -213,17 +213,38 @@ function rotationPivotForCenter(
   _label: string | undefined,
   _customOffset: [number, number] | undefined,
 ): THREE.Vector2 {
-  // RESOLVED 2026-06-23 (RE on the LIVE build 12668706 + a 39,663-sprite buildQuad hook test):
-  // the native engine spins sprites about their CENTER and ignores rotationCenter /
-  // customCenterOffset entirely. fx_Sprite_buildQuad rotates the U/V basis about the quad center
-  // (the spin math has no pivot input) and writes a quad symmetric about the particle position
-  // (the position formula has no customCenterOffset term — byte-identical across 12506899/12668706).
-  // rotationCenter + customCenterOffset are DECODE-ONLY: the producer parses and emits them for
-  // schema stability, but no native draw-path code reads them. The earlier bottom/corner/custom
-  // pivots were a faithful-looking but SPURIOUS addition; the spin pivot is always centered.
-  // Empirical confirmation: every rendered sprite's quad reconstructs to its worldPos within snorm16
-  // quantization (max relative residual 6e-4). See memory project_particle_billboard_orientation_re.
+  // The SPIN pivot is always the quad center (RE 2026-06-23, live build hook:
+  // fx_Sprite_buildQuad's sincos rotates the U/V basis with no pivot input).
+  // rotationCenter/customCenterOffset do NOT feed the spin — but they are NOT
+  // decode-only either: see anchorShiftForRotationCenter below (2026-07-02).
   return new THREE.Vector2(0.5, 0.5);
+}
+
+// Quad ANCHOR offset in half-extent units (CORRECTED 2026-07-02 — supersedes
+// the "rotationCenter is decode-only" reading, which only proved the SPIN
+// pivot centered; the 39k-sprite live population was rotationCenter=center).
+// fx_DrawCfg_cook cooks rotationCenter into a pivot pair (writer +0x68/+0x6c
+// = buildQuad's cfg+0x70/+0x74, once mislabeled "scaleX/scaleY"), and
+// fx_Sprite_buildQuad offsets the INSTANCE POSITION by it:
+//   pos = wpos + right·halfW·kx + up·halfH·ky
+// PS_RRC: 0=bottom→(0,1) (bottom edge at the particle — e.g. the
+// Laser_Charge_Shot_H2020 beam extends one way from the muzzle),
+// 1=corner→(1,1), 2=center→(0,0) (customCenterOffset IGNORED for center),
+// 3=custom→customCenterOffset verbatim.
+function anchorShiftForRotationCenter(
+  label: string | undefined,
+  customOffset: [number, number] | undefined,
+): THREE.Vector2 {
+  switch (label) {
+    case 'bottom':
+      return new THREE.Vector2(0, 1);
+    case 'corner':
+      return new THREE.Vector2(1, 1);
+    case 'custom':
+      return new THREE.Vector2(customOffset?.[0] ?? 0, customOffset?.[1] ?? 0);
+    default:
+      return new THREE.Vector2(0, 0); // 'center' + unknown
+  }
 }
 
 /**
@@ -271,6 +292,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
   const framesEnd = opts.framesRangeEnd ?? 0;
   const spriteRotation = opts.spriteRotation ? 1 : 0;
   const rotationPivot = rotationPivotForCenter(opts.rotationCenter, opts.customCenterOffset);
+  const anchorShift = anchorShiftForRotationCenter(opts.rotationCenter, opts.customCenterOffset);
   const spriteAspectX = Math.max(0.001, Math.abs(opts.scaleX ?? 1));
   const pointExtent = spriteRotation
     ? Math.sqrt(spriteAspectX * spriteAspectX + 1)
@@ -400,6 +422,8 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       // not clip inside the fixed GL_POINT bounds.
       uUseSpriteRotation: { value: spriteRotation },
       uRotationPivot: { value: rotationPivot },
+      // rotationCenter anchor (half-extent units): pos += right·halfW·x + up·halfH·y.
+      uAnchorShift: { value: anchorShift },
       uSpriteAspectX: { value: spriteAspectX },
       uPointExtent: { value: pointExtent },
       uUvTiling: { value: new THREE.Vector2(opts.tilingU ?? 1, opts.tilingV ?? 1) },
@@ -528,6 +552,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uniform float uExplicitOrientationLocal;
       uniform float uUseAxialBillboard;
       uniform float uUseFixedOrientation;
+      uniform vec2 uAnchorShift;
       uniform float uHideStartCos;
       uniform float uHideSpeed;
       uniform float uHideInvert;
@@ -589,6 +614,12 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
         vec2 cornerUV = position.xy;
         vLocalUV = cornerUV;
         float worldDiam = size * vPointExtent;
+        // rotationCenter anchor (fx_Sprite_buildQuad: pos += right*halfW*kx +
+        // up*halfH*ky; halfW folds the aspect like native drawRec+0x04, halfH
+        // = the base half-height). bottom=(0,1) puts the bottom edge at the
+        // particle (muzzle-anchored beams); center=(0,0) is a no-op.
+        float anchorHalfH = size * 0.5;
+        vec2 anchorOff = uAnchorShift * vec2(anchorHalfH * spriteAspectX, anchorHalfH);
         if (uUseAxialBillboard > 0.5) {
           // AXIAL (cylindrical) billboard — billboard=true + nonzero eo: the
           // card's long/up axis = eo (world, or the attachment frame when
@@ -612,8 +643,8 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
             ? U / uLen
             : normalize(cross(axisW, abs(axisW.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
           vec3 cornerW = centerW
-            + U * ((cornerUV.x - 0.5) * worldDiam)
-            + axisW * ((0.5 - cornerUV.y) * worldDiam);
+            + U * ((cornerUV.x - 0.5) * worldDiam + anchorOff.x)
+            + axisW * ((0.5 - cornerUV.y) * worldDiam + anchorOff.y);
           gl_Position = projectionMatrix * viewMatrix * vec4(cornerW, 1.0);
         } else if (uUseFixedOrientation > 0.5) {
           // Fixed-orientation quad (fx_Sprite_buildQuad fixed-card branch, RE
@@ -639,14 +670,14 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           vec3 V = tA;
           vec3 centerW = (modelMatrix * vec4(iPosition, 1.0)).xyz;
           vec3 cornerW = centerW
-            + U * ((cornerUV.x - 0.5) * worldDiam)
-            + V * ((0.5 - cornerUV.y) * worldDiam);
+            + U * ((cornerUV.x - 0.5) * worldDiam + anchorOff.x)
+            + V * ((0.5 - cornerUV.y) * worldDiam + anchorOff.y);
           gl_Position = projectionMatrix * viewMatrix * vec4(cornerW, 1.0);
         } else {
           // INSTANCED camera-facing billboard (default, unchanged): expand the
           // quad in view space so it always faces the camera.
           vec4 mvPosition = modelViewMatrix * vec4(iPosition, 1.0);
-          vec2 viewOffset = vec2(cornerUV.x - 0.5, 0.5 - cornerUV.y) * worldDiam;
+          vec2 viewOffset = vec2(cornerUV.x - 0.5, 0.5 - cornerUV.y) * worldDiam + anchorOff;
           gl_Position = projectionMatrix * vec4(mvPosition.xyz + vec3(viewOffset, 0.0), 1.0);
         }
       }
