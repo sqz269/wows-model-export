@@ -1129,6 +1129,15 @@ def absorb_gameparams_camera(
             "double": isinstance(outer, dict),
             "inner": _traj(inner),
         }
+        # castZoom: aim-distance -> zoom-multiplier ramp for the trajectory's
+        # scoped view (keys = distance in ballistic metres, the engine maps them
+        # via BALLISTIC_TO_BW; values = zoom). Corpus (build 12506899, 22931
+        # entities): authored ONLY on submarine Periscope/PeriscopeTorp
+        # trajectories ({3000: 5, 10000: 12}); empty everywhere else, so it is
+        # emitted only when non-empty.
+        cast_zoom = comp.get("castZoom")
+        if cast_zoom:
+            entry["castZoom"] = cast_zoom
         if isinstance(outer, dict):
             entry["outer"] = _traj(outer)
         trajectories.append(entry)
