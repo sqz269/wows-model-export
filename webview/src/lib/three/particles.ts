@@ -1676,7 +1676,16 @@ class SystemRenderer {
     this.points.updateWorldMatrix(true, false);
     this.sortCamera.getWorldPosition(SystemRenderer.TMP_POS2);
     this.points.getWorldPosition(SystemRenderer.TMP_WORLD);
-    const distance = SystemRenderer.TMP_WORLD.distanceTo(SystemRenderer.TMP_POS2);
+    // The distance-config ramp axis is authored in NATIVE (BW) units, like every
+    // other length in the records (native apply FUN_1406c9c40 measures camera
+    // distance in its own world frame, which has no scale nodes). Our world is
+    // metres at NATIVE_TO_METRES per BW unit, so convert before sampling.
+    // Corpus evidence: Fire_big fades emission over keys 17→60 / 60→500 — as raw
+    // metres a deck fire would be emission-culled 60 m from the camera; as BW the
+    // fade spans ~0.5-15 km of apparent range, a plausible LOD. Sampling raw
+    // metres (pre-2026-07-01) hit the ramps ~15× too early on every effect.
+    const distance =
+      SystemRenderer.TMP_WORLD.distanceTo(SystemRenderer.TMP_POS2) / NATIVE_TO_METRES;
     for (const config of this.distanceConfigs) {
       const factor = sampleRamp(config.ramp, distance, 1);
       if (!Number.isFinite(factor)) continue;
@@ -3423,11 +3432,16 @@ function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE.Shader
     opts.hideSpeed !== undefined && Number.isFinite(opts.hideSpeed) && opts.hideSpeed > 0
       ? opts.hideSpeed
       : 1;
+  // Soft-particle fade slope: authored against NATIVE (BW) depth deltas
+  // (fade = saturate(Δdepth_bw × k)); the shader computes Δdepth in eye METRES,
+  // so divide by NATIVE_TO_METRES. Raw-authored (pre-2026-07-01) made the fade
+  // band 15× too narrow — soft particles hardened much closer to surfaces than
+  // native.
   const softParticleDepthScale =
     opts.softParticleDepthScale !== undefined &&
     Number.isFinite(opts.softParticleDepthScale) &&
     opts.softParticleDepthScale > 0
-      ? opts.softParticleDepthScale
+      ? opts.softParticleDepthScale / NATIVE_TO_METRES
       : 0;
   const distortionMode =
     opts.blendType === 'DEFORM_WATER_SURFACE' ? 1 : opts.blendType === 'SHIMMER' ? 2 : 0;
