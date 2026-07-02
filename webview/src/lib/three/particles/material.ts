@@ -676,8 +676,20 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
             ? vec3(N.y >= 0.0 ? 1.0 : -1.0, 0.0, 0.0)
             : normalize(vec3(-N.z, 0.0, N.x));
           vec3 tB = (nxz < 1e-8) ? vec3(0.0, 0.0, 1.0) : cross(tA, N);
-          vec3 U = tB;
-          vec3 V = tA;
+          // Per-particle in-plane angle rotates the AXES here (native
+          // fx_Sprite_buildQuad mode-0 sincos), NOT the sampled UVs — so the
+          // rotationCenter anchor lever arm below turns with it, exactly like
+          // native's post-rotation pos += rightAxis*halfW*kx + upAxis*halfH*ky.
+          // rotationPhase carries initialOrientation + spin drift + the
+          // camera-azimuth spawn bake (flat local eoY cards). velocityOriented
+          // flat cards stay on the FS per-frame velocity-angle path instead
+          // (native spawn-bakes the card-plane velocity angle; approximation
+          // documented at the FS gate).
+          float thetaFC = (uVelocityOriented > 0.5) ? 0.0 : rotationPhase;
+          float sFC = sin(thetaFC);
+          float cFC = cos(thetaFC);
+          vec3 U = tB * cFC - tA * sFC;
+          vec3 V = tB * sFC + tA * cFC;
           vec3 centerW = (modelMatrix * vec4(iPosition, 1.0)).xyz;
           vec3 cornerW = centerW
             + U * ((cornerUV.x - 0.5) * worldDiam + anchorOff.x)
@@ -712,6 +724,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uniform float uUseSpriteRotation;
       uniform vec2 uRotationPivot;
       uniform float uVelocityOriented;
+      uniform float uUseFixedOrientation;
       uniform float uSpriteAspectX;
       uniform float uPointExtent;
       uniform vec2 uUvTiling;
@@ -777,7 +790,15 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
             uRotationPivot.y - 0.5
           );
           vec2 spriteGeom = pointGeom;
-          if (uUseSpriteRotation > 0.5) {
+          // Fixed-orientation cards rotate their AXES in the vertex shader
+          // (native buildQuad mode 0), so the UV footprint must NOT rotate
+          // again here. velocityOriented fixed cards are the exception: their
+          // angle still applies to the sampled UVs below (per-frame view-plane
+          // velocity — an approximation of native's spawn-baked card-plane
+          // velocity angle; see the VS note).
+          bool fsRotates = uUseSpriteRotation > 0.5
+            && !(uUseFixedOrientation > 0.5 && uVelocityOriented < 0.5);
+          if (fsRotates) {
             // GL_POINTS cannot rotate the quad geometry. Enlarge the point in
             // the vertex shader, rotate source geometry by the inverse angle,
             // then sample the unrotated sprite UVs.

@@ -238,6 +238,11 @@ export class SystemRenderer {
   private spinRateRange = 0;
   private initialOrientationBase = 0;
   private initialOrientationRange = 0;
+  /** ±sign(eo.y) when the native flat-card camera-azimuth spawn bake applies
+   *  (mode-2 + explicitOrientationLocal + !billboard + eo=(0,±y,0), not
+   *  velocityOriented); 0 = off. See the constructor note
+   *  (fx_Particle_emitUpdate @0x14071b231). */
+  private spawnCameraYawSign = 0;
   private readonly depthSortParticles: boolean;
   private sortCamera: THREE.Camera | null = null;
   private distanceConfigs: ParticleSystemIntensityConfig[] = [];
@@ -729,11 +734,35 @@ export class SystemRenderer {
     this.spinRateRange = finiteNumber(renderer?.spinRateRange, 0);
     this.initialOrientationBase = finiteNumber(renderer?.initialOrientationBase, 0);
     this.initialOrientationRange = finiteNumber(renderer?.initialOrientationRange, 0);
-    // billboard + nonzero eo = the AXIAL billboard (card long axis = eo,
-    // yawing about it to the camera) — handled entirely in the vertex shader
-    // via uUseAxialBillboard; the native camera-azimuth spawn bake
-    // (fx_Particle_emitUpdate, world-Y subset) is that same facing, so no
-    // sim-side rotation term is needed here.
+    // Camera-azimuth spawn bake (fx_Particle_emitUpdate @0x14071b231, flag
+    // map corrected 2026-07-02 §9): a mode-2 system with
+    // explicitOrientationLocal=true, billboard=FALSE and eo=(0,±y,0) bakes
+    // atan2f(−camFwd.x, camFwd.z) (negated for eo.y<0) into each particle's
+    // spawn angle — record+0x5c, ADDITIVE with initialOrientation
+    // (fx_Particle_initSpinAngle @0x14071a710). Flat LOCAL water cards
+    // (shell-splash foam/deform sheets, 661 systems) keep their texture-up +
+    // rotationCenter anchor lever arm facing the viewer's azimuth at spawn.
+    // billboard=true systems never get it (they are the AXIAL population,
+    // handled per-draw in the VS via uUseAxialBillboard). velocityOriented is
+    // NOT in the native gate, but initSpinAngle then OVERRIDES the angle with
+    // the velocity direction projected into the card plane (unless the
+    // projection is degenerate); the webview approximates that override with
+    // the per-frame FS velocity angle, so velocityOriented systems skip the
+    // bake here rather than double-count the facing.
+    {
+      const eo = renderer?.explicitOrientation;
+      this.spawnCameraYawSign =
+        this.coordinateStyle === 2 &&
+        renderer?.explicitOrientationLocal === true &&
+        renderer?.billboard !== true &&
+        renderer?.velocityOriented !== true &&
+        Array.isArray(eo) &&
+        (eo[0] ?? 0) === 0 &&
+        (eo[2] ?? 0) === 0 &&
+        (eo[1] ?? 0) !== 0
+          ? Math.sign(eo[1] as number)
+          : 0;
+    }
     const fx = anim?.framesPerX ?? 1;
     const fy = anim?.framesPerY ?? 1;
     this.framesRangeEnd = Math.max(0, anim?.framesRangeEnd ?? fx * fy);
@@ -1904,6 +1933,18 @@ export class SystemRenderer {
     // spinRateRange drift term in tick().
     this.rotationPhase[slot] =
       (Math.random() - 0.5) * this.initialOrientationRange + this.initialOrientationBase;
+    // Flat-card camera-azimuth spawn bake (fx_Particle_emitUpdate
+    // @0x14071b231): add atan2(−fwd.x, fwd.z) of the camera forward at THIS
+    // particle's spawn moment, sign per eo.y. Consumed by the VS fixed-card
+    // axis rotation (not the FS UV spin). Absolute sign vs native is still
+    // unverified (needs a live-game A/B or a corner-stream capture — handoff
+    // §7); the term's PRESENCE is byte-proven.
+    if (this.spawnCameraYawSign !== 0 && this.sortCamera) {
+      this.sortCamera.getWorldDirection(SystemRenderer.TMP_POS2);
+      this.rotationPhase[slot] +=
+        this.spawnCameraYawSign *
+        Math.atan2(-SystemRenderer.TMP_POS2.x, SystemRenderer.TMP_POS2.z);
+    }
     this.spinSeed[slot] = Math.random();
     const sc = SystemRenderer.TMP_CLOCKS;
     sc.particleAge = 0;
