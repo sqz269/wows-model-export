@@ -625,7 +625,14 @@ export class SystemRenderer {
           Array.isArray(plane) && plane.length >= 3
             ? new THREE.Vector3(plane[0], plane[1], plane[2])
             : new THREE.Vector3(0, 1, 0);
-        if (planeNormal.lengthSq() <= 1e-10) planeNormal.set(0, 1, 0);
+        // Native tests pos·n − d with the UNNORMALIZED authored normal
+        // (fx_Action_barrierPlane_particle; corpus authors (0,0.1,0)), so
+        // normalizing n here must rescale d by 1/|n| to keep the same plane.
+        let planeLen = planeNormal.length();
+        if (planeLen <= 1e-5) {
+          planeNormal.set(0, 1, 0);
+          planeLen = 1;
+        }
         planeNormal.normalize();
         this.barrierActions.push({
           shape: c.action,
@@ -647,10 +654,13 @@ export class SystemRenderer {
               ? new THREE.Vector3(opposite[0], opposite[1], opposite[2])
               : new THREE.Vector3(),
           planeNormal,
-          planeConstant: Array.isArray(plane) && plane.length >= 4 ? plane[3] : 0,
-          // Parsed but still simulated in attachment-local coordinates. Native
-          // supports world-space planes; resolving that exactly needs scene-level
-          // transform context instead of this per-system local renderer.
+          planeConstant: (Array.isArray(plane) && plane.length >= 4 ? plane[3] : 0) / planeLen,
+          // Frame law (fx_Action_barrierPlane_system @0x140743530, RE
+          // 2026-07-02): useWorldSpace=false → the plane lives in the SIM
+          // frame verbatim; useWorldSpace=true → the plane is authored in
+          // WORLD space (native world y=0 = sea level) and native converts it
+          // into the sim frame per frame via the pool inverse-node matrix.
+          // sampleBarrierState implements the equivalent world-frame test.
           useWorldSpace: !!body.useWorldSpace,
           effectName: typeof body.effectName === 'string' ? body.effectName : '',
         });
@@ -2465,12 +2475,39 @@ export class SystemRenderer {
         return;
       }
       case 'plane': {
-        const sideNow = action.planeNormal.dot(current) - action.planeConstant;
-        const sideNext = action.planeNormal.dot(predicted) - action.planeConstant;
+        let cur: THREE.Vector3 = current;
+        let next: THREE.Vector3 = predicted;
+        normalOut.copy(action.planeNormal);
+        const sim = this.points.parent;
+        if (action.useWorldSpace && sim) {
+          // useWorldSpace (fx_Action_barrierPlane_system @0x140743530, RE
+          // 2026-07-02): the authored plane is in WORLD space — native
+          // converts it into the sim frame per frame via the pool
+          // inverse-node matrix; we equivalently evaluate the particle in the
+          // world frame. localToWorld runs in metres while the sim is native
+          // BW units, so ×15 in / ÷15 out (same bridge as
+          // convertSimulationPositionToSourceFrame); SEA_LEVEL_Y re-bases the
+          // scene's sea level onto the native world y=0 that the 78
+          // waterline-splash barriers author against. normalOut goes back to
+          // the sim frame so bounce/force reactions stay sim-space (unused in
+          // corpus — all 92 plane barriers are reaction-3 spawns).
+          sim.updateWorldMatrix(true, false);
+          cur = SystemRenderer.TMP_REL.copy(current).multiplyScalar(NATIVE_TO_METRES);
+          sim.localToWorld(cur);
+          cur.y -= SEA_LEVEL_Y;
+          cur.multiplyScalar(1 / NATIVE_TO_METRES);
+          next = SystemRenderer.TMP_REL2.copy(predicted).multiplyScalar(NATIVE_TO_METRES);
+          sim.localToWorld(next);
+          next.y -= SEA_LEVEL_Y;
+          next.multiplyScalar(1 / NATIVE_TO_METRES);
+          sim.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
+          normalOut.applyQuaternion(SystemRenderer.TMP_QUAT);
+        }
+        const sideNow = action.planeNormal.dot(cur) - action.planeConstant;
+        const sideNext = action.planeNormal.dot(next) - action.planeConstant;
         this.barrierInsideNow = sideNow < 0;
         this.barrierInsideNext = sideNext < 0;
         this.barrierDistanceRatio = sideNow < 0 ? 0 : 1;
-        normalOut.copy(action.planeNormal);
         return;
       }
     }
