@@ -166,6 +166,8 @@
     collisionObstacles: number;
     collisionTriangles: number;
     dyedInstances: number;
+    dyedAppliedInstances: number;
+    dyedAppliedMeshes: number;
     materialOverrideInstances: number;
   } | null>(null);
 
@@ -232,6 +234,16 @@
   let dynamicLightingRuntimeRaw = $state(2);
   let mapRenderScale = $state(1);
   let mapPostprocess = $state(false);
+
+  // Per-instance dye application. The toolkit resolves each instance dye
+  // pair {matter_id, tint_name_id} against the prototype dye table
+  // (models.bin inline DyeEntry records) and bakes the selected tint .mfm
+  // material into the GLB; `dyes_resolved` node extras carry the target
+  // part indices + the baked material's glTF index. Applying swaps the
+  // part's material for the tint — the engine-faithful re-skin. Toggle OFF
+  // to inspect the undyed base look.
+  let applyDyes = $state(true);
+  let dyeSwaps: { mesh: THREE.Mesh; original: THREE.Material | THREE.Material[]; dyed: THREE.Material }[] = [];
 
   // Engine point lights from `space.bin` pointLights[] (stride 0xc0).
   // Toggle ON to add the engine's atmospheric/accent lights; OFF to inspect
@@ -392,6 +404,16 @@
     debug_fan_triangles: [number, number, number][];
   }
 
+  /** A toolkit-resolved dye selection (see `ResolvedDye` in
+   *  gltf_export.rs). */
+  interface DyeResolvedEntry {
+    matter_id: number;
+    tint_name_id: number;
+    replaces_material_id: number;
+    target_parts: number[];
+    material: number;
+  }
+
   /** Per-instance extras emitted by the toolkit. See
    *  `build_instance_extras`. */
   interface InstanceExtras {
@@ -399,12 +421,17 @@
     min_quality_level?: number;
     stable_guid?: string;
     lod_extents?: number[];
-    /** `[[matter_id, replaces_id], ...]` — opaque u32 pairs identifying
-     *  per-instance dye overrides. Themed event maps carry hundreds;
-     *  "plain" maps zero. Webview v1 surfaces the count only and doesn't
-     *  yet apply the override — the matter_id needs a hash-table lookup
-     *  to resolve to an actual texture/color tweak. */
+    /** `[[matter_id, tint_name_id], ...]` — raw u32 selection pairs (the
+     *  second u32's wire name upstream is `replaces_id` for schema
+     *  stability). Kept for diagnostics; the applied form is
+     *  `dyes_resolved`. */
     dyes?: [number, number][];
+    /** Toolkit-resolved dye selections: instance pair → prototype DyeEntry
+     *  → tint .mfm material baked into this GLB. `material` is the glTF
+     *  material index of the baked tint; `target_parts` are 0-based part
+     *  indices in `_part_{j}` order (single-mesh instances have one part,
+     *  index 0). */
+    dyes_resolved?: DyeResolvedEntry[];
     /** Count of materialInstances[] overrides on this instance. v1
      *  surfaces the count; decoding the 0x70-byte
      *  MaterialInstancePrototype records is a follow-up. */
@@ -1071,6 +1098,60 @@
     return out;
   }
 
+  /** Swap dyed instances' part meshes to the baked tint materials named by
+   *  `dyes_resolved` node extras. The tint materials sit unreferenced in the
+   *  GLB's material table; `parser.getDependency('material', i)` builds them
+   *  on demand. Returns swap records (for the live toggle) + the dyed
+   *  instance count actually applied. */
+  async function applyResolvedDyes(
+    root: THREE.Object3D,
+    parser: { getDependency: (type: string, index: number) => Promise<unknown> },
+  ): Promise<{ swaps: typeof dyeSwaps; instances: number }> {
+    const dyedNodes: { node: THREE.Object3D; entries: DyeResolvedEntry[] }[] = [];
+    root.traverse((o) => {
+      const entries = (o.userData as InstanceExtras).dyes_resolved;
+      if (entries && entries.length > 0) dyedNodes.push({ node: o, entries });
+    });
+    const swaps: typeof dyeSwaps = [];
+    const materialCache = new Map<number, THREE.Material>();
+    let instances = 0;
+    for (const { node, entries } of dyedNodes) {
+      // Part meshes in producer part order: single-part instances load as a
+      // Mesh directly on the instance node; multi-part instances have
+      // `_part_{j}`-named mesh children (index parsed from the name, with
+      // child order as fallback).
+      const parts: THREE.Mesh[] = [];
+      if ((node as THREE.Mesh).isMesh) {
+        parts.push(node as THREE.Mesh);
+      } else {
+        for (const child of node.children) {
+          if (!(child as THREE.Mesh).isMesh) continue;
+          const m = /_part_(\d+)$/.exec(child.name ?? '');
+          if (m) parts[Number(m[1])] = child as THREE.Mesh;
+          else parts.push(child as THREE.Mesh);
+        }
+      }
+      let applied = false;
+      for (const entry of entries) {
+        if (!Number.isInteger(entry.material)) continue;
+        let dyed = materialCache.get(entry.material);
+        if (!dyed) {
+          dyed = (await parser.getDependency('material', entry.material)) as THREE.Material;
+          materialCache.set(entry.material, dyed);
+        }
+        for (const j of entry.target_parts) {
+          const mesh = parts[j];
+          if (!mesh) continue;
+          swaps.push({ mesh, original: mesh.material, dyed });
+          mesh.material = dyed;
+          applied = true;
+        }
+      }
+      if (applied) instances += 1;
+    }
+    return { swaps, instances };
+  }
+
   function applyLightFilter(
     lights: THREE.PointLight[],
     show: boolean,
@@ -1588,6 +1669,7 @@
           return;
         }
         loadedRoot = gltf.scene;
+        dyeSwaps = [];
         annotateGltfSourceNames(loadedRoot, gltf as unknown as GltfWithAssociations);
         env.scene.add(loadedRoot);
 
@@ -1668,6 +1750,18 @@
           showLights,
           dynamicLightingRuntimeRaw,
         );
+
+        // Apply toolkit-resolved dyes (baked tint materials referenced by
+        // `dyes_resolved` extras). Swaps are recorded so the checkbox can
+        // flip between dyed and base looks without a reload.
+        const dyeApply = await applyResolvedDyes(
+          loadedRoot,
+          (gltf as unknown as { parser: Parameters<typeof applyResolvedDyes>[1] }).parser,
+        );
+        dyeSwaps = dyeApply.swaps;
+        if (!applyDyes) {
+          for (const s of dyeSwaps) s.mesh.material = s.original;
+        }
         freezeStaticTransforms(loadedRoot);
 
         viewerStats = {
@@ -1689,6 +1783,8 @@
           collisionObstacles: 0,
           collisionTriangles: 0,
           dyedInstances,
+          dyedAppliedInstances: dyeApply.instances,
+          dyedAppliedMeshes: dyeApply.swaps.length,
           materialOverrideInstances,
           bbox: box.isEmpty()
             ? null
@@ -1806,6 +1902,15 @@
         ...stats,
         vegetationDrawnInstances: budget.drawn,
       };
+    }
+  });
+
+  // Live toggle between the dyed (engine-faithful) and base looks. Swaps
+  // are captured at load; flipping just repoints each mesh's material.
+  $effect(() => {
+    const on = applyDyes;
+    for (const s of dyeSwaps) {
+      s.mesh.material = on ? s.dyed : s.original;
     }
   });
 
@@ -2184,13 +2289,27 @@
                 >map particles unavailable</span
               >
             {/if}
-            {#if viewerStats.dyedInstances > 0 || viewerStats.materialOverrideInstances > 0}
+            {#if viewerStats.dyedAppliedInstances > 0}
+              <label
+                class="flex items-center gap-1.5"
+                title="Per-instance dyes: each pair selects a prototype dye tint; the toolkit bakes the tint .mfm material into the GLB and the viewer swaps it onto the target parts. Toggle OFF for the undyed base look."
+              >
+                <input type="checkbox" bind:checked={applyDyes} />
+                <span>
+                  Dyes ({viewerStats.dyedAppliedInstances}/{viewerStats.dyedInstances} applied,
+                  {viewerStats.dyedAppliedMeshes} meshes)
+                </span>
+              </label>
+            {/if}
+            {#if viewerStats.dyedInstances > viewerStats.dyedAppliedInstances || viewerStats.materialOverrideInstances > 0}
               <span
                 class="text-muted-foreground/70 flex items-center gap-1.5"
-                title="Per-instance overrides emitted by the toolkit but not yet applied by the webview. Dye keys are 8-byte (matter_id, replaces_id) pairs; the engine resolves them via a hash table not yet RE'd. Material override count refers to MaterialInstancePrototype records (0x70 stride) — decoding is a follow-up."
+                title="Per-instance overrides emitted by the toolkit but not applied by the webview. Unresolved dyes lack a prototype dye-table join (GLB predates the dye bake, or the tint .mfm didn't resolve). Material override count refers to MaterialInstancePrototype property bags whose name hashes are still unresolved — application is a follow-up."
               >
-                overrides: {[
-                  viewerStats.dyedInstances > 0 ? `${viewerStats.dyedInstances} dyed` : null,
+                unapplied: {[
+                  viewerStats.dyedInstances > viewerStats.dyedAppliedInstances
+                    ? `${viewerStats.dyedInstances - viewerStats.dyedAppliedInstances} dyed`
+                    : null,
                   viewerStats.materialOverrideInstances > 0
                     ? `${viewerStats.materialOverrideInstances} matlInst`
                     : null,
