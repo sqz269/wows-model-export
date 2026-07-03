@@ -47,6 +47,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from ...config import PipelineConfig
 from ...errors import ToolkitError
+from ...sky_assets import extract_sky_assets
 from ...toolkit import export_map, list_spaces
 
 # Space names are filesystem-safe: digits, letters, underscore, dash.
@@ -1044,6 +1045,22 @@ def make_router(config: PipelineConfig) -> APIRouter:
             except OSError:
                 pass
 
+        # Per-weather sky/IBL assets: join the GLB's `weathers[]` extras to
+        # the on-disk lightcube probes and emit equirect .hdr environment
+        # maps + sky_manifest.json. Best-effort per weather.
+        sky_manifest_doc: dict[str, Any] | None = None
+        sky_manifest_error: str | None = None
+        try:
+            gltf_doc = _read_glb_json(glb_out)
+            sky_extras = _primary_scene_extras(gltf_doc)
+            res_unpack = config.require_game_dir() / "res_unpack"
+            sky_manifest_doc = extract_sky_assets(sky_extras, res_unpack, glb_out.parent)
+            (glb_out.parent / "sky_manifest.json").write_text(
+                json.dumps(sky_manifest_doc, indent=2), encoding="utf-8"
+            )
+        except Exception as err:  # noqa: BLE001
+            sky_manifest_error = f"{type(err).__name__}: {err}"
+
         # Persist an export record so the list endpoint can show
         # "exported at <time> with <flags>". Best-effort — a failed
         # write doesn't fail the export.
@@ -1087,6 +1104,16 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 if point_light_manifest_out.is_file()
                 else None
             ),
+            "sky_manifest": (
+                {
+                    "schema": sky_manifest_doc.get("schema"),
+                    "weather_count": sky_manifest_doc.get("weather_count"),
+                    "extracted_count": sky_manifest_doc.get("extracted_count"),
+                }
+                if sky_manifest_doc
+                else None
+            ),
+            "sky_manifest_error": sky_manifest_error,
             "particle_manifest": (
                 {
                     "schema": particle_manifest_doc.get("schema"),
@@ -1312,6 +1339,8 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 "point_light_manifest_size": meta_doc["point_light_manifest_size"],
                 "point_light_manifest": meta_doc["point_light_manifest"],
                 "point_light_manifest_error": meta_doc.get("point_light_manifest_error"),
+                "sky_manifest": meta_doc.get("sky_manifest"),
+                "sky_manifest_error": meta_doc.get("sky_manifest_error"),
                 "elapsed_ms": meta_doc["elapsed_ms"],
                 "flags": meta_doc["flags"],
             }
@@ -1342,6 +1371,56 @@ def make_router(config: PipelineConfig) -> APIRouter:
             path=glb,
             media_type="model/gltf-binary",
             filename=f"{name}.glb",
+        )
+
+    # ── GET /api/maps/{name}/sky-manifest ─────────────────────────────
+    # Per-weather sky/IBL manifest: which weather presets have an
+    # extracted equirect environment .hdr (from the engine's per-weather
+    # lightcube probes).
+    @router.get("/maps/{name}/sky-manifest")
+    def get_sky_manifest(name: str) -> Response:
+        if not _SPACE_NAME.match(name):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "invalid space name"},
+            )
+        manifest = _space_cache_dir(config, name) / "sky_manifest.json"
+        if not manifest.is_file():
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "ok": False,
+                    "error": "sky_manifest_not_exported",
+                    "hint": f"POST /api/maps/{name}/export first.",
+                },
+            )
+        return FileResponse(
+            path=manifest,
+            media_type="application/json",
+            filename="sky_manifest.json",
+        )
+
+    # ── GET /api/maps/{name}/sky/{weather}/env_cube.hdr ───────────────
+    # Serves an extracted per-weather equirect environment map (Radiance
+    # RGBE). Weather names are sanitized at write time; reject anything
+    # that isn't a plain path component here.
+    @router.get("/maps/{name}/sky/{weather}/env_cube.hdr")
+    def get_sky_env(name: str, weather: str) -> Response:
+        if not _SPACE_NAME.match(name) or not re.fullmatch(r"[A-Za-z0-9_-]+", weather):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "invalid name"},
+            )
+        hdr = _space_cache_dir(config, name) / "sky" / weather / "env_cube.hdr"
+        if not hdr.is_file():
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "error": "sky_env_not_exported"},
+            )
+        return FileResponse(
+            path=hdr,
+            media_type="image/vnd.radiance",
+            filename="env_cube.hdr",
         )
 
     # ── GET /api/maps/{name}/collision-manifest ───────────────────────

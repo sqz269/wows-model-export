@@ -15,6 +15,7 @@
 
   import { onMount, untrack } from 'svelte';
   import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+  import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
   import * as THREE from 'three';
 
   import { fetchJson } from '$lib/api';
@@ -23,6 +24,7 @@
     exportMap,
     mapGlbUrl,
     mapCollisionManifestUrl,
+    mapSkyEnvUrl,
     deleteMapCache,
     type MapListEntry,
     type MapCategory,
@@ -235,6 +237,97 @@
   let mapRenderScale = $state(1);
   let mapPostprocess = $state(false);
 
+  // Per-weather environment: fog + WG sun + IBL from the engine's per-weather
+  // lightcube probes (extracted to equirect .hdr by the pipeline's sky step).
+  // Weather blocks come from `weathers` scene extras; the selector re-drives
+  // fog color/density, the key directional (WG sun yaw/pitch/color), and
+  // scene.environment/background without a reload.
+  let weatherBlocks = $state<WeatherBlock[]>([]);
+  let activeWeatherName = $state('Default');
+  let skyBackground = $state(true);
+  const skyEnvCache = new Map<string, THREE.Texture | null>();
+  let loadedSpaceName = '';
+  // Same convention the ship viewer uses for the WG sun (viewer.ts).
+  const WG_MAP_SUN_INTENSITY = 3.0;
+  const WG_MAP_FILL_HEMI = 0.0;
+  const PROCEDURAL_FILL = 0.85;
+
+  function clearSkyEnvCache() {
+    for (const tex of skyEnvCache.values()) tex?.dispose();
+    skyEnvCache.clear();
+  }
+
+  /** Direction TOWARD the sun from WG yaw/pitch degrees — same formula as the
+   *  ship viewer's `sunDirection` (shared glTF frame). */
+  function mapsSunDirection(yaw: number, pitch: number): THREE.Vector3 {
+    const y = THREE.MathUtils.degToRad(yaw);
+    const p = THREE.MathUtils.degToRad(pitch);
+    const cp = Math.cos(p);
+    return new THREE.Vector3(cp * Math.sin(y), Math.sin(p), cp * Math.cos(y));
+  }
+
+  async function fetchSkyEnv(weather: string): Promise<THREE.Texture | null> {
+    if (skyEnvCache.has(weather)) return skyEnvCache.get(weather) ?? null;
+    try {
+      const safe = weather.replace(/[^A-Za-z0-9_-]/g, '_');
+      const tex = await new RGBELoader().loadAsync(mapSkyEnvUrl(loadedSpaceName, safe));
+      tex.mapping = THREE.EquirectangularReflectionMapping;
+      skyEnvCache.set(weather, tex);
+      return tex;
+    } catch {
+      // 404 = this weather has no extracted probe (or the export predates
+      // the sky step). Cache the miss so we don't refetch per toggle.
+      skyEnvCache.set(weather, null);
+      return null;
+    }
+  }
+
+  /** Apply one weather block: fog, sun, IBL environment, background. */
+  async function applyWeatherEnv(name: string) {
+    const env = activeEnv;
+    if (!env || weatherBlocks.length === 0) return;
+    const block = weatherBlocks.find((b) => b.name === name) ?? weatherBlocks[0];
+    if (!block) return;
+
+    const fogC = block.fog?.fogColor;
+    const fogD = block.fog?.fogDensity;
+    const fogCol =
+      Array.isArray(fogC) && fogC.length >= 3 ? new THREE.Color(fogC[0], fogC[1], fogC[2]) : null;
+    if (activeFog && fogCol) activeFog.color.copy(fogCol);
+    if (typeof fogD === 'number' && fogD > 0) {
+      engineFogDensity = fogD;
+      if (activeFog) activeFog.density = fogD / Math.max(1, fogScale);
+    }
+
+    const sun = block.sun;
+    if (sun && typeof sun.yaw === 'number' && typeof sun.pitch === 'number') {
+      const color = new THREE.Color();
+      if (Array.isArray(sun.color) && sun.color.length >= 3) {
+        color.setRGB(sun.color[0], sun.color[1], sun.color[2], THREE.LinearSRGBColorSpace);
+      } else {
+        color.setRGB(1, 1, 1, THREE.LinearSRGBColorSpace);
+      }
+      env.setSunLight({
+        direction: mapsSunDirection(sun.yaw, sun.pitch),
+        color,
+        intensity: WG_MAP_SUN_INTENSITY,
+      });
+    }
+
+    const tex = await fetchSkyEnv(block.name);
+    // The user may have switched weather/map while the HDR loaded.
+    if (activeWeatherName !== name || activeEnv !== env) return;
+    if (tex) {
+      env.setEnvironment(tex);
+      env.setFillLights(WG_MAP_FILL_HEMI);
+      env.scene.background = skyBackground ? tex : (fogCol ?? env.scene.background);
+    } else {
+      env.setEnvironment(null);
+      env.setFillLights(PROCEDURAL_FILL, PROCEDURAL_FILL);
+      if (fogCol) env.scene.background = fogCol;
+    }
+  }
+
   // Per-instance dye application. The toolkit resolves each instance dye
   // pair {matter_id, tint_name_id} against the prototype dye table
   // (models.bin inline DyeEntry records) and bakes the selected tint .mfm
@@ -345,6 +438,23 @@
     };
     lights?: MapLight[];
     particles?: MapParticleAnchor[];
+    weathers?: WeatherBlock[];
+  }
+
+  /** One `<Weather user_name=...>` block from space.ubersettings, emitted
+   *  verbatim by the toolkit (`weathers` scene extras). First = the unnamed
+   *  base block, exported as name "Default". Leaf values are f32 / f32[] /
+   *  string per the ubersettings authoring. */
+  interface WeatherBlock {
+    name: string;
+    fog?: Record<string, number | number[]>;
+    wind?: Record<string, number | number[]>;
+    sun?: { yaw?: number; pitch?: number; color?: number[] };
+    sun_disk?: Record<string, number | number[] | string>;
+    sky_dome?: Record<string, number | number[] | string>;
+    pbs?: { cubemapsPath?: string };
+    spherical_harmonics?: Record<string, string>;
+    hdr_environment?: Record<string, number>;
   }
 
   /** A single engine point-light, world-space. RGBA convention: RGB is
@@ -1678,6 +1788,12 @@
         // build_scene_extras). Falls back to a sensible default when the
         // GLB predates the toolkit fix.
         const sceneExtras = (gltf.scene.userData ?? {}) as MapSceneExtras;
+        // Per-weather environment blocks (fog/sun/IBL). Reset the selector
+        // to the base block on every load; the HDR cache is per map.
+        loadedSpaceName = sn;
+        clearSkyEnvCache();
+        weatherBlocks = sceneExtras.weathers ?? [];
+        activeWeatherName = weatherBlocks[0]?.name ?? 'Default';
         let fogDensity: number | null = null;
         if (sceneExtras.fog) {
           const c = sceneExtras.fog.fog_color;
@@ -1903,6 +2019,17 @@
         vegetationDrawnInstances: budget.drawn,
       };
     }
+  });
+
+  // Weather preset selector: re-drive fog + sun + IBL/background when the
+  // user picks a weather (or when the sky-background toggle flips). Also
+  // fires once after load via the state reset in the load effect.
+  $effect(() => {
+    const name = activeWeatherName;
+    void skyBackground;
+    const env = activeEnv;
+    if (!env || weatherBlocks.length === 0) return;
+    void applyWeatherEnv(name);
   });
 
   // Live toggle between the dyed (engine-faithful) and base looks. Swaps
@@ -2317,6 +2444,29 @@
                   .filter(Boolean)
                   .join(', ')}
               </span>
+            {/if}
+            {#if weatherBlocks.length > 0}
+              <label
+                class="flex items-center gap-1.5"
+                title="Weather preset (space.ubersettings <Weather> blocks). Re-drives fog, the WG sun, and — when the export carries extracted lightcube probes — the IBL environment + sky background."
+              >
+                <span>Weather</span>
+                <select
+                  bind:value={activeWeatherName}
+                  class="bg-input border-border rounded border px-1 py-0.5 text-xs"
+                >
+                  {#each weatherBlocks as w (w.name)}
+                    <option value={w.name}>{w.name}</option>
+                  {/each}
+                </select>
+              </label>
+              <label
+                class="flex items-center gap-1.5"
+                title="Show the weather's environment probe as the sky background (256²-face probe → soft backdrop). OFF = flat fog color."
+              >
+                <input type="checkbox" bind:checked={skyBackground} />
+                <span>Sky</span>
+              </label>
             {/if}
             {#if viewerStats.fogDensity != null}
               <label

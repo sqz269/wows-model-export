@@ -232,6 +232,17 @@ export function mapPointLightManifestUrl(name: string): string {
   return `/api/maps/${encodeURIComponent(name)}/point-light-manifest`;
 }
 
+/** URL for the per-weather sky/IBL manifest. */
+export function mapSkyManifestUrl(name: string): string {
+  return `/api/maps/${encodeURIComponent(name)}/sky-manifest`;
+}
+
+/** URL for one weather's extracted equirect environment map (Radiance .hdr,
+ *  from the engine's per-weather lightcube probe). */
+export function mapSkyEnvUrl(name: string, weather: string): string {
+  return `/api/maps/${encodeURIComponent(name)}/sky/${encodeURIComponent(weather)}/env_cube.hdr`;
+}
+
 /** Drop the cached GLB + export.json. Re-export afterwards to rebuild. */
 export async function deleteMapCache(name: string): Promise<MapDeleteResponse> {
   return fetchJson<MapDeleteResponse>(`/api/maps/${encodeURIComponent(name)}`, {
