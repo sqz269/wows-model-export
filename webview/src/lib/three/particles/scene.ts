@@ -22,6 +22,7 @@ import {
 } from './sampling';
 import { SystemRenderer } from './system-renderer';
 import type { ParticleEffectSpawnCallback, ParticleEffectSpawnRequest } from './system-renderer';
+import { composeMainBucket } from './bucket-compositor';
 import { LightRenderer } from './light-renderer';
 import { PS_RBT_LUT_MODES, buildParticleMaterial } from './material';
 
@@ -619,6 +620,23 @@ export class ParticleScene {
       for (const l of effect.lights) l.tick(dt);
     }
     this.pruneFinishedSpawnedEffects();
+    // Native shared list-0: one back-to-front sort across every main-bucket
+    // system of every live effect, then per-technique runs (see
+    // bucket-compositor.ts). Runs after prune so disposed systems are gone.
+    const composed: SystemRenderer[] = [];
+    for (const handle of this.attachments.values()) {
+      if (!handle.active) continue;
+      for (const s of handle.systems) {
+        if (s.composedMainBucket && s.isActive) composed.push(s);
+      }
+    }
+    for (const effect of this.spawnedEffects) {
+      if (!effect.parent.active) continue;
+      for (const s of effect.systems) {
+        if (s.composedMainBucket && s.isActive) composed.push(s);
+      }
+    }
+    composeMainBucket(composed, this.sortCamera);
   }
 
   /** Toggle one attachment on or off. */

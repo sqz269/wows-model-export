@@ -86,6 +86,45 @@ export interface ParticleEffectSpawnRequest {
 
 export type ParticleEffectSpawnCallback = (request: ParticleEffectSpawnRequest) => void;
 
+/** One entry of the scene-global main-bucket draw list — the webview twin of
+ *  a native 0x50-stride DrawRec in pass-context list 0. `key` mirrors the
+ *  rec+0x00 sort key: camera-view depth in NATIVE units, positive = farther
+ *  (fx_ParticleSystem_cookDrawRecords), −1000 sentinel for camera-attached
+ *  coordinateStyle 1 systems (DAT_1425575c0 — sorts nearest, drawn last). */
+export interface BucketDrawRecord {
+  sys: SystemRenderer;
+  slot: number;
+  key: number;
+}
+
+/** Native camera-attached sort key (DAT_1425575c0 = −1000.0f). */
+const CAMERA_ATTACHED_SORT_KEY = -1000;
+/** Native minimum folded alpha for a particle to be cooked into the draw
+ *  list at all (DAT_142556328 ≈ 0.15/255; cookDrawRecords culls below it). */
+const MIN_DRAW_ALPHA = 0.000588;
+
+/** Packed draw-attribute target — either the system's own mesh arrays or one
+ *  pooled run mesh's arrays (composed main bucket). */
+interface RunDrawArrays {
+  pos: Float32Array;
+  vel: Float32Array;
+  col: Float32Array;
+  size: Float32Array;
+  glow: Float32Array;
+  scaleX: Float32Array;
+  age: Float32Array;
+  frameSeed: Float32Array;
+  framePhase: Float32Array;
+  rotationPhase: Float32Array;
+}
+
+interface RunMeshEntry {
+  mesh: THREE.Mesh;
+  geom: THREE.InstancedBufferGeometry;
+  arrays: RunDrawArrays;
+  attrs: THREE.InstancedBufferAttribute[];
+}
+
 interface SystemRendererOptions {
   spawnEffect?: ParticleEffectSpawnCallback;
   loopOneShot?: boolean;
@@ -245,6 +284,34 @@ export class SystemRenderer {
    *  (fx_Particle_emitUpdate @0x14071b231). */
   private spawnCameraYawSign = 0;
   private readonly depthSortParticles: boolean;
+  /** Main-bucket member (BLEND_BUCKET_RENDER_ORDER tier 0): the draw is owned
+   *  by the scene-global compositor (bucket-compositor.ts), which mirrors the
+   *  native shared list-0 — ONE back-to-front sort across every system of
+   *  every effect, split into per-technique runs (fx_ParticleSystem_
+   *  sortDrawLists + fx_Sprite_coalesceBatches, RE 2026-07-03). The system's
+   *  own `points` mesh stays empty (instanceCount 0); pooled run meshes carry
+   *  the instances instead. */
+  readonly composedMainBucket: boolean;
+  /** blend ∈ 0x2e8 sorted set AND sortType < 2 — native REPLACES this
+   *  system's real depth keys with a monotone min→max ramp over its append
+   *  order (cookDrawRecords key-relinearise), i.e. the system keeps emission
+   *  order internally while still interleaving with other systems across its
+   *  depth span. sortType ≥ 2 systems keep REAL per-particle keys (true depth
+   *  sort). Doc 63 M5 read this gate INVERTED; corrected from the decompile
+   *  2026-07-03. */
+  private readonly emissionPinnedOrder: boolean;
+  private readonly sortTypeNum: number;
+  /** Monotone per-slot spawn sequence — the append order proxy for the
+   *  native pool order (slot indices are free-list reused, so slot order is
+   *  NOT emission order). sortType 1 iterates newest-first. */
+  private spawnSerial: Float64Array;
+  private spawnSerialCounter = 0;
+  /** Pooled per-run meshes for the composed main bucket (one per contiguous
+   *  same-system run of the globally sorted list — the three.js analog of a
+   *  native coalesced batch). Grown lazily, hidden past runCursor. */
+  private runMeshes: RunMeshEntry[] = [];
+  private runCursor = 0;
+  private readonly selfDrawArrays: RunDrawArrays;
   private sortCamera: THREE.Camera | null = null;
   private distanceConfigs: ParticleSystemIntensityConfig[] = [];
   /** DEV ONLY: raw authored system, kept for debugConfig() property-parity. */
@@ -743,9 +810,21 @@ export class SystemRenderer {
     // to the full grid when the range wasn't authored.
     const anim = system.animation;
     const renderer = system.renderer;
+    this.sortTypeNum = finiteNumber(renderer?.sortType, 2);
+    // Native key rules (fx_ParticleSystem_cookDrawRecords, decompile-corrected
+    // 2026-07-03 — doc 63 M5 had this INVERTED): every record gets a REAL
+    // per-particle view-depth key; blend ∈ 0x2e8 && sortType < 2 then
+    // OVERWRITES them with a monotone min→max ramp over append order
+    // (= emission order pinned). So sortType ≥ 2 sorted-set systems ARE
+    // depth-sorted, sortType < 2 ones are NOT. Main-bucket systems get the
+    // exact rule via the scene compositor; this per-system gate is the
+    // self-packed (underwater-tier) approximation of the same law.
     this.depthSortParticles =
-      PS_RBT_DEPTH_SORT_MODES.has(renderer?.blendType ?? '') &&
-      finiteNumber(renderer?.sortType, 2) < 2;
+      PS_RBT_DEPTH_SORT_MODES.has(renderer?.blendType ?? '') && this.sortTypeNum >= 2;
+    this.emissionPinnedOrder =
+      PS_RBT_DEPTH_SORT_MODES.has(renderer?.blendType ?? '') && this.sortTypeNum < 2;
+    this.composedMainBucket =
+      (BLEND_BUCKET_RENDER_ORDER[renderer?.blendType ?? ''] ?? 0) === 0;
     this.frameRateRamp = anim?.frameRateRamp;
     this.yawRateRamp = rampHasNonZeroValue(renderer?.yawRateRamp)
       ? renderer?.yawRateRamp
@@ -817,6 +896,19 @@ export class SystemRenderer {
     this.frameSeed = new Float32Array(this.capacity);
     this.framePhase = new Float32Array(this.capacity);
     this.rotationPhase = new Float32Array(this.capacity);
+    this.spawnSerial = new Float64Array(this.capacity);
+    this.selfDrawArrays = {
+      pos: this.drawPos,
+      vel: this.velGpu,
+      col: this.drawColorRGBA,
+      size: this.drawSizeArr,
+      glow: this.drawGlowStrength,
+      scaleX: this.drawSpriteScaleX,
+      age: this.ageGpu,
+      frameSeed: this.drawFrameSeed,
+      framePhase: this.drawFramePhase,
+      rotationPhase: this.drawRotationPhase,
+    };
     this.spinSeed = new Float32Array(this.capacity);
     this.psize = new Float32Array(this.capacity);
     this.pidx = new Float32Array(this.capacity);
@@ -896,6 +988,14 @@ export class SystemRenderer {
   setActive(active: boolean): void {
     this.active = active;
     this.points.visible = active;
+    if (!active) {
+      // The scene compositor only packs ACTIVE systems — hide this system's
+      // run meshes so a solo/hide toggle doesn't leave stale runs on screen.
+      for (const r of this.runMeshes) {
+        r.mesh.visible = false;
+        r.geom.instanceCount = 0;
+      }
+    }
     if (active && this.loopOneShot) this.finished = false;
   }
 
@@ -1267,7 +1367,9 @@ export class SystemRenderer {
     }
     this.updateDistanceState();
     this.advanceBy(dt, true);
-    this.writeBuffers();
+    // Main-bucket systems are drawn by the scene-global compositor (native
+    // shared list-0); their own mesh stays empty.
+    if (!this.composedMainBucket) this.writeBuffers();
   }
 
   /** Advance the sim by `dt`, subdivided into ≤0.25 s substeps like the
@@ -1747,11 +1849,7 @@ export class SystemRenderer {
     // remain slot-indexed; the draw arrays are packed/sorted copies so
     // transparent order-dependent modes can render back-to-front without
     // corrupting live particle state.
-    const order: number[] = [];
-    for (let i = 0; i < this.capacity; i++) {
-      if (this.age[i] < 0) continue;
-      order.push(i);
-    }
+    const order = this.collectLiveSlotsInAppendOrder();
     if (this.depthSortParticles && this.sortCamera && order.length > 1) {
       this.sortCamera.updateMatrixWorld(true);
       this.points.updateWorldMatrix(true, false);
@@ -1767,7 +1865,7 @@ export class SystemRenderer {
       });
     }
     for (let writeIdx = 0; writeIdx < order.length; writeIdx++) {
-      this.writeDrawSlot(order[writeIdx], writeIdx);
+      this.writeDrawSlot(order[writeIdx], writeIdx, this.selfDrawArrays);
     }
     this.instGeom.instanceCount = order.length;
     this.posAttr.needsUpdate = true;
@@ -1792,7 +1890,7 @@ export class SystemRenderer {
     );
   }
 
-  private writeDrawSlot(sourceSlot: number, drawSlot: number): void {
+  private writeDrawSlot(sourceSlot: number, drawSlot: number, t: RunDrawArrays): void {
     const src3 = sourceSlot * 3;
     const dst3 = drawSlot * 3;
     const src4 = sourceSlot * 4;
@@ -1804,31 +1902,197 @@ export class SystemRenderer {
     // sprite footprint without touching every per-frame input. (World-frame
     // INPUTS — sea-level snap, parent velocity — are divided back at their
     // source so they enter the record-unit sim consistently.)
-    this.drawPos[dst3 + 0] = this.pos[src3 + 0] * NATIVE_TO_METRES;
-    this.drawPos[dst3 + 1] = this.pos[src3 + 1] * NATIVE_TO_METRES;
-    this.drawPos[dst3 + 2] = this.pos[src3 + 2] * NATIVE_TO_METRES;
+    t.pos[dst3 + 0] = this.pos[src3 + 0] * NATIVE_TO_METRES;
+    t.pos[dst3 + 1] = this.pos[src3 + 1] * NATIVE_TO_METRES;
+    t.pos[dst3 + 2] = this.pos[src3 + 2] * NATIVE_TO_METRES;
     if (this.velocityAxial) {
       // Spawn-seeded unit axis (native sim+0x70) — the VS only normalizes it,
       // so no NATIVE_TO_METRES scale; a zero axis falls back to eo in the VS.
-      this.velGpu[dst3 + 0] = this.spawnAxis[src3 + 0];
-      this.velGpu[dst3 + 1] = this.spawnAxis[src3 + 1];
-      this.velGpu[dst3 + 2] = this.spawnAxis[src3 + 2];
+      t.vel[dst3 + 0] = this.spawnAxis[src3 + 0];
+      t.vel[dst3 + 1] = this.spawnAxis[src3 + 1];
+      t.vel[dst3 + 2] = this.spawnAxis[src3 + 2];
     } else {
-      this.velGpu[dst3 + 0] = this.vel[src3 + 0] * NATIVE_TO_METRES;
-      this.velGpu[dst3 + 1] = this.vel[src3 + 1] * NATIVE_TO_METRES;
-      this.velGpu[dst3 + 2] = this.vel[src3 + 2] * NATIVE_TO_METRES;
+      t.vel[dst3 + 0] = this.vel[src3 + 0] * NATIVE_TO_METRES;
+      t.vel[dst3 + 1] = this.vel[src3 + 1] * NATIVE_TO_METRES;
+      t.vel[dst3 + 2] = this.vel[src3 + 2] * NATIVE_TO_METRES;
     }
-    this.drawColorRGBA[dst4 + 0] = this.colorRGBA[src4 + 0];
-    this.drawColorRGBA[dst4 + 1] = this.colorRGBA[src4 + 1];
-    this.drawColorRGBA[dst4 + 2] = this.colorRGBA[src4 + 2];
-    this.drawColorRGBA[dst4 + 3] = this.colorRGBA[src4 + 3];
-    this.drawSizeArr[drawSlot] = this.sizeArr[sourceSlot] * NATIVE_TO_METRES;
-    this.drawGlowStrength[drawSlot] = this.glowStrengthArr[sourceSlot];
-    this.drawSpriteScaleX[drawSlot] = this.spriteScaleXArr[sourceSlot];
-    this.ageGpu[drawSlot] = this.age[sourceSlot];
-    this.drawFrameSeed[drawSlot] = this.frameSeed[sourceSlot];
-    this.drawFramePhase[drawSlot] = this.framePhase[sourceSlot];
-    this.drawRotationPhase[drawSlot] = this.rotationPhase[sourceSlot];
+    t.col[dst4 + 0] = this.colorRGBA[src4 + 0];
+    t.col[dst4 + 1] = this.colorRGBA[src4 + 1];
+    t.col[dst4 + 2] = this.colorRGBA[src4 + 2];
+    t.col[dst4 + 3] = this.colorRGBA[src4 + 3];
+    t.size[drawSlot] = this.sizeArr[sourceSlot] * NATIVE_TO_METRES;
+    t.glow[drawSlot] = this.glowStrengthArr[sourceSlot];
+    t.scaleX[drawSlot] = this.spriteScaleXArr[sourceSlot];
+    t.age[drawSlot] = this.age[sourceSlot];
+    t.frameSeed[drawSlot] = this.frameSeed[sourceSlot];
+    t.framePhase[drawSlot] = this.framePhase[sourceSlot];
+    t.rotationPhase[drawSlot] = this.rotationPhase[sourceSlot];
+  }
+
+  /** Live slots in APPEND order — the native pool iteration order of
+   *  fx_ParticleSystem_cookDrawRecords: spawn order (spawnSerial), reversed
+   *  to newest-first when sortType == 1. Slots whose folded alpha is below
+   *  the native cook cull (MIN_DRAW_ALPHA) are dropped from the draw list
+   *  entirely, matching cookDrawRecords. */
+  private collectLiveSlotsInAppendOrder(): number[] {
+    const order: number[] = [];
+    for (let i = 0; i < this.capacity; i++) {
+      if (this.age[i] < 0) continue;
+      if (this.colorRGBA[i * 4 + 3] < MIN_DRAW_ALPHA) continue;
+      order.push(i);
+    }
+    const serial = this.spawnSerial;
+    order.sort(
+      this.sortTypeNum === 1 ? (a, b) => serial[b] - serial[a] : (a, b) => serial[a] - serial[b],
+    );
+    return order;
+  }
+
+  // -------------------------------------------------------------------------
+  // Composed main bucket (scene-global sorted list — bucket-compositor.ts)
+  // -------------------------------------------------------------------------
+
+  /** Whether this system currently takes part in the scene compositor pass. */
+  get isActive(): boolean {
+    return this.active;
+  }
+
+  /** Append this system's live particles to the scene-global main-bucket
+   *  draw list with native sort keys (fx_ParticleSystem_cookDrawRecords):
+   *  key = camera-view depth in NATIVE units (positive = farther);
+   *  coordinateStyle 1 (camera-attached) = the −1000 sentinel; blend ∈ 0x2e8
+   *  && sortType < 2 = keys relinearised min→max over append order so the
+   *  system keeps emission order internally while spanning its real depth
+   *  range in the global interleave. */
+  appendDrawRecords(out: BucketDrawRecord[], camera: THREE.Camera | null): void {
+    const slots = this.collectLiveSlotsInAppendOrder();
+    if (slots.length === 0) return;
+    if (this.coordinateStyle === 1 || !camera) {
+      for (const s of slots) out.push({ sys: this, slot: s, key: CAMERA_ATTACHED_SORT_KEY });
+      return;
+    }
+    this.points.updateWorldMatrix(true, false);
+    const m = SystemRenderer.TMP_VIEW_SORT.multiplyMatrices(
+      camera.matrixWorldInverse,
+      this.points.matrixWorld,
+    ).elements;
+    const base = out.length;
+    let min = Infinity;
+    let max = -Infinity;
+    for (const s of slots) {
+      const ix = s * 3;
+      const x = this.pos[ix + 0] * NATIVE_TO_METRES;
+      const y = this.pos[ix + 1] * NATIVE_TO_METRES;
+      const z = this.pos[ix + 2] * NATIVE_TO_METRES;
+      // three.js view space looks down −Z; negate for the native positive-far
+      // key, ÷15 back to native units so the −1000 sentinel keeps its native
+      // relationship.
+      const key = -(m[2] * x + m[6] * y + m[10] * z + m[14]) / NATIVE_TO_METRES;
+      if (key < min) min = key;
+      if (key > max) max = key;
+      out.push({ sys: this, slot: s, key });
+    }
+    if (this.emissionPinnedOrder && slots.length > 1) {
+      const step = (max - min) / (slots.length - 1);
+      for (let i = 0; i < slots.length; i++) out[base + i].key = min + step * i;
+    }
+  }
+
+  beginRuns(): void {
+    this.runCursor = 0;
+  }
+
+  /** Pack one contiguous same-system run of the globally sorted list into a
+   *  pooled run mesh — the three.js analog of one native coalesced batch
+   *  (fx_Sprite_coalesceBatches): its own instance buffers, the system's
+   *  material, and a fractional renderOrder inside the main tier so three.js
+   *  submits the runs in exactly the global back-to-front order. */
+  packRun(
+    records: readonly BucketDrawRecord[],
+    start: number,
+    count: number,
+    runOrder: number,
+  ): void {
+    let entry = this.runMeshes[this.runCursor];
+    if (!entry) {
+      entry = this.createRunMesh();
+      this.runMeshes.push(entry);
+    }
+    this.runCursor++;
+    for (let i = 0; i < count; i++) {
+      this.writeDrawSlot(records[start + i].slot, i, entry.arrays);
+    }
+    for (const a of entry.attrs) a.needsUpdate = true;
+    entry.geom.instanceCount = count;
+    entry.mesh.renderOrder = Math.min(0.99, runOrder * 1e-4);
+    entry.mesh.visible = true;
+    if (!entry.mesh.parent && this.points.parent) this.points.parent.add(entry.mesh);
+  }
+
+  endRuns(): void {
+    for (let k = this.runCursor; k < this.runMeshes.length; k++) {
+      this.runMeshes[k].mesh.visible = false;
+      this.runMeshes[k].geom.instanceCount = 0;
+    }
+  }
+
+  private createRunMesh(): RunMeshEntry {
+    const geom = new THREE.InstancedBufferGeometry();
+    // Own copy of the base quad + index (12 floats / 6 indices). Sharing the
+    // BufferAttribute objects with the system's live geometry silently
+    // produced empty draws (three.js VAO/attribute bookkeeping) — verified
+    // empirically 2026-07-03: a from-scratch clone renders, a shared-attr
+    // clone does not.
+    geom.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0], 3),
+    );
+    geom.setIndex([0, 1, 2, 2, 1, 3]);
+    const cap = this.capacity;
+    const arrays: RunDrawArrays = {
+      pos: new Float32Array(cap * 3),
+      vel: new Float32Array(cap * 3),
+      col: new Float32Array(cap * 4),
+      size: new Float32Array(cap),
+      glow: new Float32Array(cap),
+      scaleX: new Float32Array(cap),
+      age: new Float32Array(cap),
+      frameSeed: new Float32Array(cap),
+      framePhase: new Float32Array(cap),
+      rotationPhase: new Float32Array(cap),
+    };
+    const mk = (arr: Float32Array, itemSize: number): THREE.InstancedBufferAttribute => {
+      const attr = new THREE.InstancedBufferAttribute(arr, itemSize);
+      attr.setUsage(THREE.DynamicDrawUsage);
+      return attr;
+    };
+    const attrs = [
+      mk(arrays.pos, 3),
+      mk(arrays.vel, 3),
+      mk(arrays.col, 4),
+      mk(arrays.size, 1),
+      mk(arrays.glow, 1),
+      mk(arrays.scaleX, 1),
+      mk(arrays.age, 1),
+      mk(arrays.frameSeed, 1),
+      mk(arrays.framePhase, 1),
+      mk(arrays.rotationPhase, 1),
+    ];
+    geom.setAttribute('iPosition', attrs[0]);
+    geom.setAttribute('velocity', attrs[1]);
+    geom.setAttribute('color', attrs[2]);
+    geom.setAttribute('size', attrs[3]);
+    geom.setAttribute('glowStrength', attrs[4]);
+    geom.setAttribute('spriteScaleX', attrs[5]);
+    geom.setAttribute('age', attrs[6]);
+    geom.setAttribute('frameSeed', attrs[7]);
+    geom.setAttribute('framePhase', attrs[8]);
+    geom.setAttribute('rotationPhase', attrs[9]);
+    geom.instanceCount = 0;
+    const mesh = new THREE.Mesh(geom, this.material);
+    mesh.frustumCulled = false;
+    mesh.visible = false;
+    return { mesh, geom, arrays, attrs };
   }
 
   /** Pre-fill the ring buffer to the engine's frame-1 density: run STEPS
@@ -1947,6 +2211,7 @@ export class SystemRenderer {
       this.spawnAxis[slot * 3 + 2] = svz * inv;
     }
     this.age[slot] = 0;
+    this.spawnSerial[slot] = ++this.spawnSerialCounter;
     this.lifetime[slot] = this.maxAge;
     sampleColor(this.tintColor, 0, SystemRenderer.TMP_COL);
     const aRow = this.alphaDepthRow;
@@ -2658,6 +2923,11 @@ export class SystemRenderer {
   dispose(): void {
     this.points.parent?.remove(this.points);
     this.points.geometry.dispose();
+    for (const r of this.runMeshes) {
+      r.mesh.parent?.remove(r.mesh);
+      r.geom.dispose();
+    }
+    this.runMeshes = [];
     this.material.dispose();
     // Texture lifetime is managed by the ParticleScene's texture cache
     // (shared across systems that point at the same DDS) — don't dispose
