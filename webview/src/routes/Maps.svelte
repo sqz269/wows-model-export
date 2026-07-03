@@ -162,6 +162,8 @@
     vegetationSpecies: number;
     vegetationInstances: number;
     vegetationDrawnInstances: number;
+    vegetationRareInstances: number;
+    vegetationTintApplied: boolean;
     mapParticleAnchors: number;
     mapParticleResolved: number;
     collisionModels: number;
@@ -354,6 +356,76 @@
   let showVegetation = $state(true);
   let mapVegetationDrawRatio = $state(0.25);
   let vegetationGroup: THREE.Group | null = null;
+  // The engine's *Rare forest layers are decimated FAR-DENSITY companions of
+  // Primary/Underwater — drawn INSTEAD of the base layer at distance, never
+  // additively. Default OFF (base layers shown everywhere); toggle ON to
+  // inspect the far set (expect near-duplicate positions).
+  let showRareVegetation = $state(false);
+
+  /** Rare-layer visibility, composed with the group-level Vegetation toggle. */
+  function applyRareVegetationVisibility(group: THREE.Group | null, showRare: boolean) {
+    if (!group) return;
+    for (const child of group.children) {
+      const layer = (child.userData?.vegetation_layer as string) ?? 'Primary';
+      if (layer.endsWith('Rare')) child.visible = showRare;
+    }
+  }
+
+  /** Per-instance vegetation tint from the embedded `forest_tintmap` (the
+   *  engine samples it per-pixel in the tree/impostor shaders keyed on world
+   *  XZ; per-instance color is the map-scale approximation). The AO alpha
+   *  term is not applied — its exact shader math is still open. */
+  async function applyVegetationTint(
+    group: THREE.Group | null,
+    parser: { getDependency: (type: string, index: number) => Promise<unknown> },
+    extras: MapSceneExtras,
+  ): Promise<boolean> {
+    const tint = extras.vegetation_tint;
+    const bounds = extras.bounds;
+    if (!group || !tint || !bounds) return false;
+    let image: CanvasImageSource & { width: number; height: number };
+    try {
+      const tex = (await parser.getDependency('texture', tint.texture)) as THREE.Texture;
+      image = tex.image as CanvasImageSource & { width: number; height: number };
+      if (!image || !image.width) return false;
+    } catch {
+      return false;
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return false;
+    ctx.drawImage(image, 0, 0);
+    const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+
+    const spanX = bounds.max_x - bounds.min_x;
+    const spanZ = bounds.max_z - bounds.min_z;
+    const m = new THREE.Matrix4();
+    const p = new THREE.Vector3();
+    const color = new THREE.Color();
+    for (const child of group.children) {
+      const im = child as THREE.InstancedMesh;
+      if (!im.isInstancedMesh) continue;
+      const capacity = im.instanceMatrix.count;
+      for (let i = 0; i < capacity; i++) {
+        im.getMatrixAt(i, m);
+        p.setFromMatrixPosition(m);
+        // World glTF z = −worldZ(BW); tint rows run max_z → min_z
+        // (minimap/North-up frame, `v_origin: "max_z"`).
+        const u = Math.min(Math.max((p.x - bounds.min_x) / spanX, 0), 1);
+        const v = Math.min(Math.max((bounds.max_z + p.z) / spanZ, 0), 1);
+        const px = Math.min(canvas.width - 1, (u * canvas.width) | 0);
+        const py = Math.min(canvas.height - 1, (v * canvas.height) | 0);
+        const o = (py * canvas.width + px) * 4;
+        // Tint is an albedo multiplier; texture bytes are sRGB-encoded.
+        color.setRGB(pixels[o] / 255, pixels[o + 1] / 255, pixels[o + 2] / 255, THREE.SRGBColorSpace);
+        im.setColorAt(i, color);
+      }
+      if (im.instanceColor) im.instanceColor.needsUpdate = true;
+    }
+    return true;
+  }
 
   // Map-authored particle anchors from `space.bin.particles[]`. These are
   // distinct from ship-side Effect attachments: placement comes from the map
@@ -439,6 +511,10 @@
     lights?: MapLight[];
     particles?: MapParticleAnchor[];
     weathers?: WeatherBlock[];
+    /** Embedded forest tint map: glTF texture index + row orientation.
+     *  RGB = per-location vegetation tint (albedo multiplier); alpha = AO
+     *  term (not applied — shader math still open). */
+    vegetation_tint?: { texture: number; v_origin: string };
   }
 
   /** One `<Weather user_name=...>` block from space.ubersettings, emitted
@@ -1059,7 +1135,9 @@
     const preInstanced: InstancedVegetation[] = [];
     const toRemove: THREE.Object3D[] = [];
     const TREE_NAME = /^Tree_(\d+)_\d+$/;
-    const TREE_INSTANCED_NAME = /^Tree_(\d+)_instances$/;
+    // `Tree_{mesh}_{Layer}_instances` since the 4-layer export; the
+    // layer-less form matches older GLBs (Primary-only).
+    const TREE_INSTANCED_NAME = /^Tree_(\d+)(?:_([A-Za-z]+))?_instances$/;
 
     root.traverse((o) => {
       const instanced = o as THREE.InstancedMesh;
@@ -1067,8 +1145,10 @@
         const match = instanced.name.match(TREE_INSTANCED_NAME);
         if (match) {
           const speciesIdx = match[1];
+          const layer = (instanced.userData?.vegetation_layer as string) ?? match[2] ?? 'Primary';
+          instanced.userData.vegetation_layer = layer;
           const minQualityLevel = rawQualityValue(instanced.userData?.min_quality_level);
-          const bucketKey = `${speciesIdx}:${minQualityLevel ?? 'any'}`;
+          const bucketKey = `${speciesIdx}:${layer}:${minQualityLevel ?? 'any'}`;
           preInstanced.push({ mesh: instanced, bucketKey, minQualityLevel });
           return;
         }
@@ -1114,8 +1194,11 @@
 
     const group = new THREE.Group();
     group.name = 'Vegetation';
+    // Buckets are (species × layer × quality); count distinct SPECIES for
+    // the stats label.
     const speciesKeys = new Set<string>();
     let totalInstances = 0;
+    const distinctSpecies = (key: string) => key.split(':')[0];
 
     for (const [bucketKey, bucket] of bySpecies) {
       const im = new THREE.InstancedMesh(bucket.geometry, bucket.material, bucket.meshes.length);
@@ -1143,7 +1226,7 @@
       // reference tree drifts in/out of view.
       im.computeBoundingSphere();
       group.add(im);
-      speciesKeys.add(bucketKey);
+      speciesKeys.add(distinctSpecies(bucketKey));
       totalInstances += bucket.meshes.length;
     }
 
@@ -1160,7 +1243,7 @@
       item.mesh.userData.instance_count = item.mesh.count;
       item.mesh.userData.full_instance_count = item.mesh.count;
       group.add(item.mesh);
-      speciesKeys.add(item.bucketKey);
+      speciesKeys.add(distinctSpecies(item.bucketKey));
       totalInstances += item.mesh.count;
     }
 
@@ -1844,6 +1927,18 @@
         vegetationGroup = veg.group;
         const vegetationBudget = applyVegetationDrawBudget(vegetationGroup, mapVegetationDrawRatio);
         if (vegetationGroup) vegetationGroup.visible = showVegetation;
+        applyRareVegetationVisibility(vegetationGroup, showRareVegetation);
+        let vegetationRareInstances = 0;
+        for (const child of vegetationGroup?.children ?? []) {
+          if (((child.userData?.vegetation_layer as string) ?? '').endsWith('Rare')) {
+            vegetationRareInstances += (child.userData?.full_instance_count as number) ?? 0;
+          }
+        }
+        const vegetationTintApplied = await applyVegetationTint(
+          vegetationGroup,
+          (gltf as unknown as { parser: Parameters<typeof applyVegetationTint>[1] }).parser,
+          sceneExtras,
+        );
 
         // Pre-collect LOD-cullable instances so the per-frame pass doesn't
         // re-traverse the scene tree. Must run after frameToBox and after
@@ -1893,6 +1988,8 @@
           vegetationSpecies: veg.speciesCount,
           vegetationInstances: veg.instanceCount,
           vegetationDrawnInstances: vegetationBudget.drawn,
+          vegetationRareInstances,
+          vegetationTintApplied,
           mapParticleAnchors: mapParticleAnchors.length,
           mapParticleResolved: usableMapParticleAnchors(mapParticleAnchors).length,
           collisionModels: 0,
@@ -2019,6 +2116,12 @@
         vegetationDrawnInstances: budget.drawn,
       };
     }
+  });
+
+  // Live toggle for the far-density (*Rare) vegetation layers.
+  $effect(() => {
+    const show = showRareVegetation;
+    applyRareVegetationVisibility(vegetationGroup, show);
   });
 
   // Weather preset selector: re-drive fog + sun + IBL/background when the
@@ -2443,6 +2546,23 @@
                 ]
                   .filter(Boolean)
                   .join(', ')}
+              </span>
+            {/if}
+            {#if viewerStats.vegetationRareInstances > 0}
+              <label
+                class="flex items-center gap-1.5"
+                title="The engine's *Rare forest layers are decimated far-density companions drawn INSTEAD of the base layers at distance. Toggle ON to inspect them (expect near-duplicate positions)."
+              >
+                <input type="checkbox" bind:checked={showRareVegetation} />
+                <span>Far veg ({viewerStats.vegetationRareInstances.toLocaleString()})</span>
+              </label>
+            {/if}
+            {#if viewerStats.vegetationTintApplied}
+              <span
+                class="text-muted-foreground/70"
+                title="Per-instance vegetation tint sampled from the map's forest_tintmap (engine samples per-pixel in the tree shaders; per-instance is the map-scale approximation). AO alpha term not applied."
+              >
+                tinted
               </span>
             {/if}
             {#if weatherBlocks.length > 0}
