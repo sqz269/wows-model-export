@@ -869,6 +869,13 @@ export class SystemRenderer {
     this.instGeom = geom;
     this.points = new THREE.Mesh(geom, material);
     this.points.frustumCulled = false;
+    // DEFORM_WATER_SURFACE quads natively write the WATER-SIM RT (signed
+    // height + foam accumulation) — they are part of the water surface, drawn
+    // UNDER every sprite. The webview approximates them as screen-space
+    // alpha-over quads; without an explicit order, three.js ties on object
+    // depth resolve by insertion order and (spawned-child) foam sheets land ON
+    // TOP of sibling smoke/sparks. Draw the deform family first instead.
+    if (system.renderer?.blendType === 'DEFORM_WATER_SURFACE') this.points.renderOrder = -1;
     this.intensityChannels = system.intensities?.channels ?? [];
     this.intensityDefaults = Array.from(options.intensityDefaults ?? []);
     this.dbgSystem = system;
@@ -1867,6 +1874,12 @@ export class SystemRenderer {
 
   private applySpawnerActions(dt: number): void {
     if (!this.spawnEffect || this.spawnerActions.length === 0) return;
+    // A hidden system must not keep manufacturing VISIBLE child effects — the
+    // inspector's per-system toggle only flips points.visible while the sim
+    // keeps ticking, so without this gate a hidden spawner floods the scene
+    // with orphan children forever (child effects are not in the panel's
+    // system list). Same gate as the barrier SPAWN reaction below.
+    if (!this.points.visible) return;
     let spawnedThisTick = 0;
     for (const action of this.spawnerActions) {
       const rate = sampleRamp(action.spawnRamp, this.elapsed, 0);
@@ -2377,7 +2390,9 @@ export class SystemRenderer {
           }
           break;
         case BARRIER_REACTION_SPAWN:
-          if (allowChildSpawns && crossed && action.effectName && this.spawnEffect) {
+          // points.visible: a hidden system keeps simulating but must not keep
+          // spawning visible children (see applySpawnerActions).
+          if (allowChildSpawns && crossed && action.effectName && this.spawnEffect && this.points.visible) {
             const spawnPos = SystemRenderer.TMP_WORLD.copy(current);
             this.convertSimulationPositionToSourceFrame(spawnPos);
             // The child group is positioned relative to the metre-scaled parent
