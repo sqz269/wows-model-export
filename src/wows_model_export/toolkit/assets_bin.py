@@ -89,10 +89,21 @@ def ensure_dump(
         # take the largest — the canonical file is the heaviest by a
         # wide margin.
         src = max(candidates, key=lambda p: p.stat().st_size)
-        # shutil.move rather than os.replace — the system temp dir is
-        # often on a different drive than cache_dir, and os.replace
-        # raises WinError 17 across drives on Windows.
-        shutil.move(str(src), str(cache_path))
+        # Stage next to the destination first (shutil.move handles the
+        # cross-drive hop the system temp dir usually implies), then swap
+        # atomically. Moving straight onto the live cache would copy over
+        # it non-atomically (truncation window on interrupt) and fails
+        # outright on Windows while a reader has the cache memory-mapped
+        # (WinError 1224) — e.g. a running server holding a ParticleStore
+        # open. With the swap, a mapped cache fails cleanly and leaves the
+        # previous file intact.
+        tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        shutil.move(str(src), str(tmp))
+        try:
+            os.replace(tmp, cache_path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
     return cache_path
 
 

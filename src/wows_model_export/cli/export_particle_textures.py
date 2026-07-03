@@ -26,7 +26,25 @@ Argv::
     wows-export-particle-textures --dest <PIPELINE_ROOT>
         [--glob PATTERN ...]        # default: particles/trails/*.dds
         [--all-particle-textures]   # Phase 1: particles/**/*.dds
+        [--library]                 # decoded records.json/index.json + .vfd fields
+        [--full]                    # everything: --all-particle-textures --library
+        [--refresh-assets]          # re-dump assets.bin from the client first
         [common flags ...]
+
+``--library`` delivers the decoded particle library (the shared
+``library/particles/records.json`` + ``index.json`` built by
+``compose.library_particles.ensure_built``) to
+``<dest>/particles/library/``, plus the velocity-field ``.vfd`` resources
+referenced by ``velocityField.fieldSourceName`` at their VFS-layout
+``<dest>/content/particles/velocity_fields/`` paths — so a consumer can
+resolve ``fieldSourceName`` verbatim under its pipeline root, the same way
+the webview fetches ``repoUrl(fieldSourceName)``. A ``--library``-only run
+skips the texture extraction step.
+
+The library build is mtime+schema gated against the CACHED ``assets.bin``;
+that cache is never refreshed on its own, so after a game-client update pass
+``--refresh-assets`` to re-dump ``assets.bin`` (and thereby rebuild the
+library against the current client) before delivering.
 
 Many WG particle textures (incl. the main tracer strips) are stored as
 LEGACY uncompressed bitmask DDS (FourCC=0, R8G8B8A8). Some loaders reject
@@ -51,10 +69,13 @@ route it through the publish/normalize pipeline instead.
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import struct
 import sys
 import traceback
 from pathlib import Path
+from typing import Any
 
 from ..errors import ConfigError, ToolkitError
 from ..toolkit import vfs as _vfs
@@ -102,6 +123,29 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Phase 1 shorthand: extract every particle texture "
              "(particles/**/*.dds), not just the tracer trails.",
+    )
+    ap.add_argument(
+        "--library",
+        action="store_true",
+        help="Deliver the decoded particle library (records.json + index.json "
+             "via compose.library_particles.ensure_built) to "
+             "<dest>/particles/library/, plus the referenced velocity-field "
+             ".vfd resources at <dest>/content/particles/velocity_fields/. "
+             "Given alone, skips the texture extraction step.",
+    )
+    ap.add_argument(
+        "--full",
+        action="store_true",
+        help="Deliver the whole particle asset set: "
+             "--all-particle-textures + --library.",
+    )
+    ap.add_argument(
+        "--refresh-assets",
+        action="store_true",
+        help="Re-dump assets.bin from the game client before building the "
+             "library (the cache is otherwise kept forever, so a library "
+             "delivery after a client update needs this to pick up the "
+             "current corpus).",
     )
     add_common_args(ap)
     return ap
@@ -227,9 +271,57 @@ def _transcode_bc6h_ramp(path: Path) -> bool:
 def _select_globs(args: argparse.Namespace) -> tuple[str, ...]:
     if args.glob:
         return tuple(args.glob)
-    if args.all_particle_textures:
+    if args.all_particle_textures or args.full:
         return _ALL_PARTICLE_GLOBS
     return _DEFAULT_GLOBS
+
+
+def _atomic_copy(src: Path, target: Path) -> None:
+    """Copy ``src`` over ``target`` atomically (tmp sibling + ``os.replace``).
+
+    A consumer may hot-reload the library keyed on the file's write time;
+    a plain overwrite of a ~160 MB records.json would expose a truncated
+    window. The tmp file lives next to the target (same volume).
+    """
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    shutil.copyfile(src, tmp)
+    os.replace(tmp, target)
+
+
+def _deliver_library(dest: Path, cfg) -> dict[str, Any]:
+    """Deliver the decoded particle library + velocity fields under ``dest``.
+
+    Ensures the workspace library is built (mtime+schema gated), then copies
+    ``records.json`` + ``index.json`` to ``<dest>/particles/library/`` and the
+    extracted ``.vfd`` velocity fields to their VFS-layout
+    ``<dest>/content/particles/velocity_fields/`` paths, so consumers resolve
+    ``velocityField.fieldSourceName`` verbatim under their pipeline root.
+    """
+    from ..compose import library_particles as _lib  # noqa: PLC0415
+
+    build_info = _lib.ensure_built(config=cfg)
+    ws = cfg.workspace.resolve()
+    paths = _lib.library_paths(ws)
+
+    out_root = dest / "particles" / "library"
+    out_root.mkdir(parents=True, exist_ok=True)
+    for src in (paths["records"], paths["index"]):
+        _atomic_copy(src, out_root / src.name)
+
+    vfd_src = ws / "content" / "particles" / "velocity_fields"
+    vfd_copied = 0
+    if vfd_src.is_dir():
+        vfd_out = dest / "content" / "particles" / "velocity_fields"
+        vfd_out.mkdir(parents=True, exist_ok=True)
+        for f in sorted(vfd_src.glob("*.vfd")):
+            _atomic_copy(f, vfd_out / f.name)
+            vfd_copied += 1
+
+    return {
+        "status": build_info.get("status"),
+        "records_bytes": (out_root / "records.json").stat().st_size,
+        "velocity_fields_copied": vfd_copied,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -240,35 +332,78 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config error: {e}", file=sys.stderr)
         return EXIT_CONFIG_ERROR
 
+    deliver_library = args.library or args.full
+    # A --library-only invocation delivers just the decoded records + fields;
+    # texture extraction still runs whenever globs were selected (explicitly
+    # or by default) or --full asked for everything.
+    extract_textures = (
+        args.full or args.all_particle_textures or bool(args.glob)
+        or not deliver_library
+    )
+
     globs = _select_globs(args)
     dest = args.dest.resolve()
 
-    try:
-        _vfs.extract(list(globs), dest, config=cfg)
-    except (ConfigError, ToolkitError) as e:
-        print(f"\nerror: {e}", file=sys.stderr)
-        return EXIT_CONFIG_ERROR
-    except Exception as e:  # noqa: BLE001
-        traceback.print_exc(file=sys.stderr)
-        print(f"\nunexpected error: {type(e).__name__}: {e}", file=sys.stderr)
-        return EXIT_UNEXPECTED
+    if args.refresh_assets:
+        from ..toolkit import assets_bin as _assets_bin  # noqa: PLC0415
 
-    # Post-extract passes (idempotent):
-    #  - modernize legacy uncompressed DDS headers -> DX10 so loaders accept them
-    #  - transcode BC6H_UF16 HDR ramps -> PNG sibling (Unity mis-decodes BC6H)
+        try:
+            _assets_bin.ensure_dump(refresh=True, config=cfg)
+        except (ConfigError, ToolkitError) as e:
+            print(f"\nerror: {e}", file=sys.stderr)
+            return EXIT_CONFIG_ERROR
+
     converted = bc6h = 0
-    for dds in dest.glob("particles/**/*.dds"):
-        if _modernize_legacy_dds(dds):
-            converted += 1
-        if _transcode_bc6h_ramp(dds):
-            bc6h += 1
+    n = 0
+    if extract_textures:
+        try:
+            _vfs.extract(list(globs), dest, config=cfg)
+        except (ConfigError, ToolkitError) as e:
+            print(f"\nerror: {e}", file=sys.stderr)
+            return EXIT_CONFIG_ERROR
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc(file=sys.stderr)
+            print(f"\nunexpected error: {type(e).__name__}: {e}", file=sys.stderr)
+            return EXIT_UNEXPECTED
 
-    # vfs.extract returns only the out_dir (the glob match size isn't known up
-    # front), so count what actually landed for the summary.
-    n = sum(1 for _ in dest.glob("particles/**/*.dds"))
+        # Post-extract passes (idempotent):
+        #  - modernize legacy uncompressed DDS headers -> DX10 so loaders accept them
+        #  - transcode BC6H_UF16 HDR ramps -> EXR/PNG sibling (loaders mis-decode BC6H)
+        for dds in dest.glob("particles/**/*.dds"):
+            if _modernize_legacy_dds(dds):
+                converted += 1
+            if _transcode_bc6h_ramp(dds):
+                bc6h += 1
+
+        # vfs.extract returns only the out_dir (the glob match size isn't known
+        # up front), so count what actually landed for the summary.
+        n = sum(1 for _ in dest.glob("particles/**/*.dds"))
+
+    lib_summary = ""
+    if deliver_library:
+        try:
+            lib = _deliver_library(dest, cfg)
+        except (ConfigError, ToolkitError) as e:
+            print(f"\nerror: {e}", file=sys.stderr)
+            return EXIT_CONFIG_ERROR
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc(file=sys.stderr)
+            print(f"\nunexpected error: {type(e).__name__}: {e}", file=sys.stderr)
+            return EXIT_UNEXPECTED
+        lib_summary = (
+            f"  library={lib['status']} "
+            f"records_bytes={lib['records_bytes']} "
+            f"vfd_copied={lib['velocity_fields_copied']}"
+        )
+
+    tex_summary = (
+        f"globs={list(globs)}  dds_on_disk={n}  "
+        f"dx10_rewritten={converted}  bc6h_transcoded={bc6h}"
+        if extract_textures
+        else "textures=skipped"
+    )
     print(
-        f"export-particle-textures -> {dest}  globs={list(globs)}  "
-        f"dds_on_disk={n}  dx10_rewritten={converted}  bc6h_transcoded={bc6h}",
+        f"export-particle-textures -> {dest}  {tex_summary}{lib_summary}",
         file=sys.stderr,
     )
     return EXIT_OK
