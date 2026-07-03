@@ -13,6 +13,7 @@ import type {
 } from '$lib/types/sidecar';
 import {
   ABSOLUTE_MAX_CAPACITY,
+  BLEND_BUCKET_RENDER_ORDER,
   CHILD_EFFECT_SPAWNS_PER_SYSTEM_TICK,
   DEFAULT_PARTICLE_LIFETIME,
   DEFAULT_SIZE,
@@ -869,13 +870,17 @@ export class SystemRenderer {
     this.instGeom = geom;
     this.points = new THREE.Mesh(geom, material);
     this.points.frustumCulled = false;
-    // DEFORM_WATER_SURFACE quads natively write the WATER-SIM RT (signed
-    // height + foam accumulation) — they are part of the water surface, drawn
-    // UNDER every sprite. The webview approximates them as screen-space
-    // alpha-over quads; without an explicit order, three.js ties on object
-    // depth resolve by insertion order and (spawned-child) foam sheets land ON
-    // TOP of sibling smoke/sparks. Draw the deform family first instead.
-    if (system.renderer?.blendType === 'DEFORM_WATER_SURFACE') this.points.renderOrder = -1;
+    // Native blend-bucket draw order (fx_ParticleSystem_cookDrawRecords
+    // routes each system into one of FIVE per-pass draw lists by blendType;
+    // fx_ParticlePass_render drains them: water stage emits deform then
+    // water-surface BEFORE the main list, underwater after it, shimmer last —
+    // fx_Water_renderSurfaceParticleLists / fx_ParticlePass_emitMainAndUnderwater,
+    // RE 2026-07-03). three.js ties on object depth resolve by insertion
+    // order, so without an explicit renderOrder a late-indexed water-surface
+    // system (e.g. CustomDeath_AzurLane_Explosion_Submarine #20-22 aura
+    // rings) lands ON TOP of the whole burst instead of under it. Within one
+    // tier insertion order = system index = native emission order.
+    this.points.renderOrder = BLEND_BUCKET_RENDER_ORDER[system.renderer?.blendType ?? ''] ?? 0;
     this.intensityChannels = system.intensities?.channels ?? [];
     this.intensityDefaults = Array.from(options.intensityDefaults ?? []);
     this.dbgSystem = system;

@@ -68,3 +68,21 @@ export const PS_RBT_DEPTH_SORT_MODES = new Set([
   'GRADIENT_MAP',
   'BLENDED',
 ]);
+
+/** Native blend-bucket submission order, as three.js renderOrder tiers.
+ *  fx_ParticleSystem_cookDrawRecords (@0x14071c820) routes each system into
+ *  one of five per-pass draw lists by blendType; the frame drains them
+ *  deform → water-surface → main → underwater → shimmer
+ *  (fx_Water_renderSurfaceParticleLists emits lists 1+2 inside the WATER
+ *  stage before fx_ParticlePass_emitMainAndUnderwater emits 0 then 3;
+ *  fx_ParticlePass_render emits shimmer last — RE 2026-07-03). Absent
+ *  modes (main list: ADDITIVE / BLENDED / GRADIENT_MAP / BLENDED_GLOW)
+ *  default to tier 0. */
+export const BLEND_BUCKET_RENDER_ORDER: Record<string, number> = {
+  DEFORM_WATER_SURFACE: -2,
+  BLENDED_WATER_SURFACE: -1,
+  ADDITIVE_WATER_SURFACE: -1,
+  BLENDED_UNDERWATER: 1,
+  UNDERWATER_GRADIENT_MAP: 1,
+  SHIMMER: 2,
+};
