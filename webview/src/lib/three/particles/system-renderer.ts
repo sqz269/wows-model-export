@@ -297,6 +297,15 @@ export class SystemRenderer {
   private pos: Float32Array;
   private vel: Float32Array;
   private velGpu: Float32Array;
+  // Velocity-axial orientation axis, unit, seeded ONCE at spawn — native
+  // fx_Particle_buildSpawnRecord (@0x14071a990) seeds the per-particle
+  // orientVec (sim+0x70) from the SPAWN velocity and never tracks the live
+  // velocity, so cards keep their spawn axis while forces curve the path
+  // (splash crowns under gravity). Zero = degenerate spawn speed -> the VS
+  // falls back to the authored eo axis. Only filled for the velocity-axial
+  // population (billboard + velocityOriented).
+  private spawnAxis: Float32Array;
+  private readonly velocityAxial: boolean;
   private age: Float32Array; // age in seconds; -1 = empty slot
   private lifetime: Float32Array;
   private colorRGBA: Float32Array;
@@ -786,6 +795,8 @@ export class SystemRenderer {
     this.pos = new Float32Array(this.capacity * 3);
     this.vel = new Float32Array(this.capacity * 3);
     this.velGpu = new Float32Array(this.capacity * 3);
+    this.spawnAxis = new Float32Array(this.capacity * 3);
+    this.velocityAxial = renderer?.billboard === true && renderer?.velocityOriented === true;
     this.age = new Float32Array(this.capacity);
     this.lifetime = new Float32Array(this.capacity);
     this.ageRate = new Float32Array(this.capacity);
@@ -1784,9 +1795,17 @@ export class SystemRenderer {
     this.drawPos[dst3 + 0] = this.pos[src3 + 0] * NATIVE_TO_METRES;
     this.drawPos[dst3 + 1] = this.pos[src3 + 1] * NATIVE_TO_METRES;
     this.drawPos[dst3 + 2] = this.pos[src3 + 2] * NATIVE_TO_METRES;
-    this.velGpu[dst3 + 0] = this.vel[src3 + 0] * NATIVE_TO_METRES;
-    this.velGpu[dst3 + 1] = this.vel[src3 + 1] * NATIVE_TO_METRES;
-    this.velGpu[dst3 + 2] = this.vel[src3 + 2] * NATIVE_TO_METRES;
+    if (this.velocityAxial) {
+      // Spawn-seeded unit axis (native sim+0x70) — the VS only normalizes it,
+      // so no NATIVE_TO_METRES scale; a zero axis falls back to eo in the VS.
+      this.velGpu[dst3 + 0] = this.spawnAxis[src3 + 0];
+      this.velGpu[dst3 + 1] = this.spawnAxis[src3 + 1];
+      this.velGpu[dst3 + 2] = this.spawnAxis[src3 + 2];
+    } else {
+      this.velGpu[dst3 + 0] = this.vel[src3 + 0] * NATIVE_TO_METRES;
+      this.velGpu[dst3 + 1] = this.vel[src3 + 1] * NATIVE_TO_METRES;
+      this.velGpu[dst3 + 2] = this.vel[src3 + 2] * NATIVE_TO_METRES;
+    }
     this.drawColorRGBA[dst4 + 0] = this.colorRGBA[src4 + 0];
     this.drawColorRGBA[dst4 + 1] = this.colorRGBA[src4 + 1];
     this.drawColorRGBA[dst4 + 2] = this.colorRGBA[src4 + 2];
@@ -1896,6 +1915,19 @@ export class SystemRenderer {
     this.vel[slot * 3 + 0] = SystemRenderer.TMP_VEL.x;
     this.vel[slot * 3 + 1] = SystemRenderer.TMP_VEL.y;
     this.vel[slot * 3 + 2] = SystemRenderer.TMP_VEL.z;
+    if (this.velocityAxial) {
+      // Seed the axial axis from the FINAL spawn velocity (post folds, post
+      // frame hop — same frame as this.vel). Never re-read live velocity:
+      // native seeds sim+0x70 once at spawn (see spawnAxis).
+      const svx = SystemRenderer.TMP_VEL.x;
+      const svy = SystemRenderer.TMP_VEL.y;
+      const svz = SystemRenderer.TMP_VEL.z;
+      const sl = svx * svx + svy * svy + svz * svz;
+      const inv = sl > 1e-10 ? 1 / Math.sqrt(sl) : 0;
+      this.spawnAxis[slot * 3 + 0] = svx * inv;
+      this.spawnAxis[slot * 3 + 1] = svy * inv;
+      this.spawnAxis[slot * 3 + 2] = svz * inv;
+    }
     this.age[slot] = 0;
     this.lifetime[slot] = this.maxAge;
     sampleColor(this.tintColor, 0, SystemRenderer.TMP_COL);

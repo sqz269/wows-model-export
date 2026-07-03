@@ -339,9 +339,11 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
   // the Unity consumer, render-confirmed on PROJ_AP_Explo_Water). Corpus:
   // 234 systems / 109 effects — torpedo/shell/bomb splash columns, rocket
   // launches. The old UV-spin treatment left these camera-facing with a
-  // view-plane texture spin. Caveat: native seeds the axis at SPAWN; the
-  // shader reads the live per-frame velocity (same as Unity) — equivalent for
-  // the short-lived spark/splash population unless velocity curves hard.
+  // view-plane texture spin. The axis is SEEDED AT SPAWN (native sim+0x70):
+  // for velocity-axial systems the renderer fills the `velocity` attribute
+  // with the spawn-baked unit axis, not the live velocity — a live axis made
+  // cards tumble upside-down wherever forces curve the path (gravity-bent
+  // splash crowns, e.g. StarTrek_Ray_Laser_Impulse_Water sys "main_first").
   const useVelocityAxial = opts.billboard === true && opts.velocityOriented === true ? 1 : 0;
   const useAxialBillboard =
     opts.billboard === true && (opts.velocityOriented === true || hasExplicitOrientation) ? 1 : 0;
