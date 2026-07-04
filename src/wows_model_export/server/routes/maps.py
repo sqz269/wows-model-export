@@ -916,7 +916,7 @@ def make_router(config: PipelineConfig) -> APIRouter:
         for key in (
             "lod", "terrain_step", "no_terrain", "no_water",
             "no_vegetation", "no_textures", "vegetation_density",
-            "max_texture_size",
+            "max_texture_size", "lightmap_density",
         ):
             if key in body and body[key] is not None:
                 kwargs[key] = body[key]

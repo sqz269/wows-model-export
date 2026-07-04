@@ -38,6 +38,7 @@ def export_map(
     no_textures: bool = False,
     vegetation_density: float = 0.0,
     max_texture_size: int | None = None,
+    lightmap_density: int = 4,
     collision_manifest_json: Path | str | os.PathLike | None = None,
 ) -> ToolkitResult:
     """Export a single space (battle map / dock / operations scenario) to
@@ -96,6 +97,7 @@ def export_map(
         "--lod", str(lod),
         "--terrain-step", str(terrain_step),
         "--vegetation-density", str(vegetation_density),
+        "--lightmap-density", str(lightmap_density),
     ]
     if no_terrain:
         argv.append("--no-terrain")
