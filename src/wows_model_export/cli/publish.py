@@ -58,6 +58,14 @@ def _build_parser() -> argparse.ArgumentParser:
              "environment, maps).",
     )
     ap.add_argument(
+        "--maps",
+        nargs="*",
+        default=None,
+        metavar="MAP",
+        help="Restrict the maps domain to these map dirs (e.g. 40_Okinawa "
+             "s01_NavalBase). Default: every map export in the workspace.",
+    )
+    ap.add_argument(
         "--force",
         action="store_true",
         help="Copy every file regardless of mtime/size compare.",
@@ -103,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
             config=cfg,
             only_ships=only_ships,
             domains=domains,
+            only_maps=tuple(args.maps) if args.maps else None,
             force=args.force,
             on_event=printer,
         )

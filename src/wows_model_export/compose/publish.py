@@ -343,6 +343,7 @@ def publish(
     domains: tuple[str, ...] = (
         "ships", "library", "projectiles", "decals", "environment",
     ),
+    only_maps: tuple[str, ...] | None = None,
     force: bool = False,
     on_event: OnEvent | None = None,
     cancel: threading.Event | None = None,
@@ -605,15 +606,37 @@ def publish(
     maps_counts = PublishCounts()
     if "maps" in domain_set:
         with runner.step("copy_maps") as ctx:
-            maps_counts = _publish_tree(
-                workspace / "maps",
-                target_dir / "maps",
-                force=force,
-                allow_json=True,
-                allow_glb=False,
-                allow_dds=True,
-                extra_extensions=_MAP_SIDECAR_EXTENSIONS,
-            )
+            # The workspace maps tree accumulates every map ever exported
+            # (audits, one-off inspections); consumers typically want a
+            # curated subset — `only_maps` restricts the copy per map dir.
+            if only_maps:
+                for map_name in only_maps:
+                    src = workspace / "maps" / map_name
+                    if not src.is_dir():
+                        runner.emit(
+                            "copy_maps", "progress",
+                            detail=f"map not in workspace: {map_name}",
+                        )
+                        continue
+                    maps_counts = _combine_counts(maps_counts, _publish_tree(
+                        src,
+                        target_dir / "maps" / map_name,
+                        force=force,
+                        allow_json=True,
+                        allow_glb=False,
+                        allow_dds=True,
+                        extra_extensions=_MAP_SIDECAR_EXTENSIONS,
+                    ))
+            else:
+                maps_counts = _publish_tree(
+                    workspace / "maps",
+                    target_dir / "maps",
+                    force=force,
+                    allow_json=True,
+                    allow_glb=False,
+                    allow_dds=True,
+                    extra_extensions=_MAP_SIDECAR_EXTENSIONS,
+                )
             ctx.annotate(
                 f"copied={maps_counts.copied} skipped={maps_counts.skipped}",
                 data={
