@@ -1821,6 +1821,10 @@
         env.controls.target.set(0, 0, 0);
         env.controls.update();
         activeEnv = env;
+        // Debug/A-B harness hook: lets external tooling (console scripts,
+        // consumer-parity captures) position the camera at exact GLB-frame
+        // coordinates. Mirrors the particle scene's __particleScene hook.
+        (globalThis as { __mapsEnv?: SceneEnvironment }).__mapsEnv = env;
 
         onPickPointerDown = (event: PointerEvent) => {
           if (event.button !== 0) return;
