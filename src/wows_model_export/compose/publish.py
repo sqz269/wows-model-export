@@ -89,8 +89,8 @@ _DOMAIN_STEPS: dict[str, str] = {
 
 # Non-GLB/JSON/DDS sidecar extensions the maps domain carries: shoreline
 # SDF + minimap-style PNGs, per-weather sky HDR environment maps, raw
-# terrain heightfield (u16le).
-_MAP_SIDECAR_EXTENSIONS: tuple[str, ...] = (".png", ".hdr", ".r16")
+# terrain heightfield (u16le), vegetation mesh/instance blobs (.bin).
+_MAP_SIDECAR_EXTENSIONS: tuple[str, ...] = (".png", ".hdr", ".r16", ".bin")
 
 
 # ---------------------------------------------------------------------------
