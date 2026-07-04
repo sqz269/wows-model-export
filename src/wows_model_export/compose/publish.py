@@ -595,10 +595,13 @@ def publish(
         runner.emit("copy_environment", "skipped", detail="domain not requested")
 
     # ── Step: copy_maps ───────────────────────────────────────────────
-    # Cached map/space exports: per-map GLB + manifest JSONs + the
-    # non-GLB sidecars (shoreline SDF PNGs, raw terrain heightfield
-    # .r16, per-weather sky .hdr). OPT-IN — never in the default domain
-    # fan-out (exports run hundreds of MB per map).
+    # Cached map/space exports: manifest JSONs + the non-GLB sidecars
+    # (shoreline SDF PNGs, raw terrain heightfield .r16, per-weather sky
+    # .hdr). GLBs are deliberately EXCLUDED: the whole-map scene GLB is a
+    # webview artifact (hundreds of MB), and map_local/*.glb prototype
+    # meshes are editor-imported assets that belong under the consumer's
+    # Pipeline folder, not StreamingAssets. OPT-IN — never in the default
+    # domain fan-out.
     maps_counts = PublishCounts()
     if "maps" in domain_set:
         with runner.step("copy_maps") as ctx:
@@ -607,7 +610,7 @@ def publish(
                 target_dir / "maps",
                 force=force,
                 allow_json=True,
-                allow_glb=True,
+                allow_glb=False,
                 allow_dds=True,
                 extra_extensions=_MAP_SIDECAR_EXTENSIONS,
             )
