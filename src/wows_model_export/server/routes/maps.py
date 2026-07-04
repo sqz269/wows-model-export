@@ -1050,9 +1050,12 @@ def make_router(config: PipelineConfig) -> APIRouter:
         # maps + sky_manifest.json. Best-effort per weather.
         sky_manifest_doc: dict[str, Any] | None = None
         sky_manifest_error: str | None = None
+        scene_extras_doc: dict[str, Any] | None = None
         try:
             gltf_doc = _read_glb_json(glb_out)
             sky_extras = _primary_scene_extras(gltf_doc)
+            if isinstance(sky_extras, dict):
+                scene_extras_doc = sky_extras
             res_unpack = config.require_game_dir() / "res_unpack"
             sky_manifest_doc = extract_sky_assets(sky_extras, res_unpack, glb_out.parent)
             (glb_out.parent / "sky_manifest.json").write_text(
@@ -1060,6 +1063,18 @@ def make_router(config: PipelineConfig) -> APIRouter:
             )
         except Exception as err:  # noqa: BLE001
             sky_manifest_error = f"{type(err).__name__}: {err}"
+
+        # Raw terrain heightfield sidecar: echo the GLB's `terrain_heightmap`
+        # extras (+ on-disk sidecar size) so consumers can discover it from
+        # export.json without opening the GLB.
+        terrain_heightmap_doc: dict[str, Any] | None = None
+        thm = (scene_extras_doc or {}).get("terrain_heightmap")
+        if isinstance(thm, dict) and thm.get("file"):
+            sidecar = glb_out.parent / str(thm["file"])
+            terrain_heightmap_doc = dict(thm)
+            terrain_heightmap_doc["size"] = (
+                sidecar.stat().st_size if sidecar.is_file() else None
+            )
 
         # Persist an export record so the list endpoint can show
         # "exported at <time> with <flags>". Best-effort — a failed
@@ -1254,6 +1269,7 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 if point_light_manifest_doc
                 else None
             ),
+            "terrain_heightmap": terrain_heightmap_doc,
             "elapsed_ms": int(result.elapsed_ms),
             "stderr": result.stderr,
         }

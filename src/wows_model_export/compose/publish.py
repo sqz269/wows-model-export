@@ -39,18 +39,27 @@ What it copies (per domain):
                     workspace-relative URLs resolve against the published root.
                     Built with ``wows-build-environment-library``; absent ->
                     no-op.
+* ``maps``        — cached map/space exports ``maps/<Map>/``: the map GLB +
+                    the sidecar manifests (``export.json`` + ``*_manifest``
+                    JSONs) + the non-GLB sidecars the map contract carries —
+                    shoreline SDF ``.png`` pair, raw terrain heightfield
+                    ``.r16``, per-weather sky ``.hdr`` environment maps.
+                    OPT-IN only (not in the default domain fan-out): map
+                    exports run hundreds of MB each, so callers request
+                    ``domains=("maps",)`` deliberately. Absent -> no-op.
 
 Canonical :class:`StepEvent` step names emitted to ``on_event``:
 
     "discover_domain_files"  "copy_ships"  "copy_library"
     "copy_projectiles"       "copy_decals"  "copy_environment"
+    "copy_maps"
 
 Each step emits ``started`` -> ``completed`` (or ``skipped``).
 
 Domain selection: pass ``domains=("ships", "library", ...)`` to restrict
-the operation; the default fans out across all four. ``only_ships``
-filters the ``ships`` domain to a subset; absent it, every ship that
-carries a ``<Name>.meta.json`` sidecar gets published.
+the operation; the default fans out across all domains except ``maps``.
+``only_ships`` filters the ``ships`` domain to a subset; absent it, every
+ship that carries a ``<Name>.meta.json`` sidecar gets published.
 """
 from __future__ import annotations
 
@@ -75,7 +84,13 @@ _DOMAIN_STEPS: dict[str, str] = {
     "projectiles": "copy_projectiles",
     "decals":      "copy_decals",
     "environment": "copy_environment",
+    "maps":        "copy_maps",
 }
+
+# Non-GLB/JSON/DDS sidecar extensions the maps domain carries: shoreline
+# SDF + minimap-style PNGs, per-weather sky HDR environment maps, raw
+# terrain heightfield (u16le).
+_MAP_SIDECAR_EXTENSIONS: tuple[str, ...] = (".png", ".hdr", ".r16")
 
 
 # ---------------------------------------------------------------------------
@@ -236,14 +251,18 @@ def _publish_tree(
     allow_json: bool = True,
     allow_glb: bool = True,
     allow_dds: bool = True,
+    extra_extensions: tuple[str, ...] = (),
     skip_suffix: tuple[str, ...] = (),
 ) -> PublishCounts:
     """Walk ``src_root`` recursively and mirror eligible files into ``dst_root``.
 
-    Used by the three library copies (accessories / projectiles / decals).
-    The flag tuple lets each call narrow what's published — the camo-mask
-    + camo_mat trees only carry DDS, while accessories + projectiles
-    need GLBs and JSON too.
+    Used by the library copies (accessories / projectiles / decals) and
+    the maps domain. The flag tuple lets each call narrow what's
+    published — the camo-mask + camo_mat trees only carry DDS, while
+    accessories + projectiles need GLBs and JSON too. ``extra_extensions``
+    widens the whitelist for domains whose contract carries formats
+    beyond GLB/JSON/DDS (the maps domain's ``.png``/``.hdr``/``.r16``
+    sidecars).
     """
     if not src_root.is_dir():
         return PublishCounts()
@@ -260,6 +279,7 @@ def _publish_tree(
             (allow_glb and ext == ".glb")
             or (allow_json and ext == ".json")
             or (allow_dds and ext in _DDS_EXTENSIONS)
+            or ext in extra_extensions
         )
         if not eligible:
             continue
@@ -344,9 +364,10 @@ def publish(
         only_ships   Restrict the ``ships`` domain to this subset. When
                      ``None``, publishes every ship under
                      ``workspace/ships`` that carries a sidecar.
-        domains      Which of the four domains to publish. Default
-                     fans out across all four; pass a tuple subset to
-                     opt out cleanly. Unknown names raise ``ValueError``.
+        domains      Which domains to publish. The default fans out
+                     across every domain EXCEPT ``maps`` (map exports
+                     run hundreds of MB each — request ``("maps",)``
+                     deliberately). Unknown names raise ``ValueError``.
         force        Skip the mtime+size compare and copy every file.
         on_event     Optional :class:`StepEvent` callback. Steps:
                      ``discover_domain_files``, ``copy_ships``,
@@ -573,6 +594,33 @@ def publish(
     else:
         runner.emit("copy_environment", "skipped", detail="domain not requested")
 
+    # ── Step: copy_maps ───────────────────────────────────────────────
+    # Cached map/space exports: per-map GLB + manifest JSONs + the
+    # non-GLB sidecars (shoreline SDF PNGs, raw terrain heightfield
+    # .r16, per-weather sky .hdr). OPT-IN — never in the default domain
+    # fan-out (exports run hundreds of MB per map).
+    maps_counts = PublishCounts()
+    if "maps" in domain_set:
+        with runner.step("copy_maps") as ctx:
+            maps_counts = _publish_tree(
+                workspace / "maps",
+                target_dir / "maps",
+                force=force,
+                allow_json=True,
+                allow_glb=True,
+                allow_dds=True,
+                extra_extensions=_MAP_SIDECAR_EXTENSIONS,
+            )
+            ctx.annotate(
+                f"copied={maps_counts.copied} skipped={maps_counts.skipped}",
+                data={
+                    "copied":  maps_counts.copied,
+                    "skipped": maps_counts.skipped,
+                },
+            )
+    else:
+        runner.emit("copy_maps", "skipped", detail="domain not requested")
+
     return PublishResult(
         target_dir=target_dir,
         ships=ships_counts,
@@ -580,6 +628,7 @@ def publish(
         projectiles=projectiles_counts,
         decals=decals_counts,
         environment=environment_counts,
+        maps=maps_counts,
         warnings=tuple(warnings),
     )
 

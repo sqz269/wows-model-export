@@ -284,6 +284,7 @@ class PublishResult:
     projectiles:  PublishCounts = PublishCounts()
     decals:       PublishCounts = PublishCounts()
     environment:  PublishCounts = PublishCounts()
+    maps:         PublishCounts = PublishCounts()
     warnings:     tuple[str, ...] = ()
 
 

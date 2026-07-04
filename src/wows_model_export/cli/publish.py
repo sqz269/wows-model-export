@@ -54,7 +54,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--domains",
         default="ships,library,projectiles,decals",
         help="Comma-separated list of domains to publish (default: "
-             "ships,library,projectiles,decals).",
+             "ships,library,projectiles,decals; also available: "
+             "environment, maps).",
     )
     ap.add_argument(
         "--force",
@@ -67,7 +68,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _summarize(result: PublishResult) -> str:
     bits = [f"published -> {result.target_dir}"]
-    for name in ("ships", "library", "projectiles", "decals"):
+    for name in (
+        "ships", "library", "projectiles", "decals", "environment", "maps",
+    ):
         counts = getattr(result, name)
         bits.append(
             f"{name}=copied:{counts.copied}/skipped:{counts.skipped}"
