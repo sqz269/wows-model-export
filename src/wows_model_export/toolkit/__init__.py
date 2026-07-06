@@ -37,7 +37,7 @@ from .ammo import ammo_json
 from .armor import armor_json
 from .bones import dump_bones, fetch_bones
 from .gameparams import dump_gameparams
-from .map import export_map, list_spaces
+from .map import export_decal_textures, export_map, list_spaces
 from .ship import (
     batch_export_model,
     export_model,
@@ -57,6 +57,7 @@ __all__ = [
     "batch_export_model",
     # Map export
     "export_map",
+    "export_decal_textures",
     "list_spaces",
     # Data dumps
     "armor_json",

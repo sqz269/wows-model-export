@@ -48,7 +48,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from ...config import PipelineConfig
 from ...errors import ToolkitError
 from ...sky_assets import extract_sky_assets
-from ...toolkit import export_map, list_spaces
+from ...toolkit import export_decal_textures, export_map, list_spaces
 
 # Space names are filesystem-safe: digits, letters, underscore, dash.
 # Constrains URL path params + the on-disk cache dir name. The toolkit's
@@ -983,6 +983,25 @@ def make_router(config: PipelineConfig) -> APIRouter:
             except OSError:
                 pass
 
+        # Decal texture payload (PNG store + decal_textures.json mapping).
+        # Separate toolkit invocation (`wowsunpack export-decals`) because
+        # the map GLB embeds only model/terrain textures — decal textures
+        # were never part of the GLB. Best-effort like the manifests.
+        decal_textures_doc: dict[str, Any] | None = None
+        decal_textures_error: str | None = None
+        decal_textures_dir = cache_dir / "decal_textures"
+        try:
+            export_decal_textures(
+                f"spaces/{name}",
+                decal_textures_dir,
+                config=config,
+            )
+            decal_textures_doc = json.loads(
+                (decal_textures_dir / "decal_textures.json").read_text(encoding="utf-8")
+            )
+        except Exception as err:  # noqa: BLE001
+            decal_textures_error = f"{type(err).__name__}: {err}"
+
         probe_manifest_doc: dict[str, Any] | None = None
         probe_manifest_error: str | None = None
         try:
@@ -1160,6 +1179,16 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 if static_decal_manifest_doc
                 else None
             ),
+            "decal_textures": (
+                {
+                    "schema": decal_textures_doc.get("schema"),
+                    "texture_count": decal_textures_doc.get("texture_count"),
+                    "error_count": len(decal_textures_doc.get("errors") or {}),
+                    "dir": str(decal_textures_dir),
+                }
+                if decal_textures_doc
+                else None
+            ),
             "probe_manifest": (
                 {
                     "schema": probe_manifest_doc.get("schema"),
@@ -1279,6 +1308,8 @@ def make_router(config: PipelineConfig) -> APIRouter:
             meta_doc["particle_manifest_error"] = particle_manifest_error
         if static_decal_manifest_error:
             meta_doc["static_decal_manifest_error"] = static_decal_manifest_error
+        if decal_textures_error:
+            meta_doc["decal_textures_error"] = decal_textures_error
         if probe_manifest_error:
             meta_doc["probe_manifest_error"] = probe_manifest_error
         if user_object_manifest_error:
@@ -1325,6 +1356,13 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 "static_decal_manifest_size": meta_doc["static_decal_manifest_size"],
                 "static_decal_manifest": meta_doc["static_decal_manifest"],
                 "static_decal_manifest_error": meta_doc.get("static_decal_manifest_error"),
+                # Gated on THIS run's doc (not is_file()) so a failed
+                # re-export can't advertise a stale store from a prior run.
+                "decal_textures_dir": (
+                    str(decal_textures_dir) if decal_textures_doc is not None else None
+                ),
+                "decal_textures": meta_doc["decal_textures"],
+                "decal_textures_error": meta_doc.get("decal_textures_error"),
                 "probe_manifest_path": (
                     str(probe_manifest_out)
                     if probe_manifest_out.is_file()

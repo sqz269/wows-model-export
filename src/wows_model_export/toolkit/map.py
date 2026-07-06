@@ -116,6 +116,39 @@ def export_map(
     return run_toolkit(argv, config=cfg, expect_outputs=expect_outputs)
 
 
+def export_decal_textures(
+    space_dir: str,
+    out_dir: Path | str | os.PathLike,
+    *,
+    config: PipelineConfig | None = None,
+) -> ToolkitResult:
+    """Export a space's static-decal texture payload as PNGs.
+
+    Wraps ``wowsunpack export-decals``: parses ``space.bin``
+    ``staticDecals[]``, resolves every referenced texture against the VFS
+    (the stored ``.tga`` references are authoring-time; the shipped client
+    carries split-mip DDS conversions), decodes alpha-preserving, and
+    writes flattened PNGs plus a ``decal_textures.json`` mapping
+    (``{vfs_path: file_name}``, schema ``wows.map.decal_textures.v1``)
+    into ``out_dir``.
+
+    Consumers pair this store with ``static_decal_manifest.json``: each
+    decal record's ``texture_paths`` triple resolves through the mapping
+    (or the same deterministic flattening rule) to the PNG files.
+    """
+    cfg = config or PipelineConfig.load()
+
+    out = Path(out_dir).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+
+    argv: list[str] = [
+        "--game-dir", str(cfg.require_game_dir()),
+        "export-decals", space_dir,
+        "--out-dir", str(out),
+    ]
+    return run_toolkit(argv, config=cfg, expect_outputs=(out / "decal_textures.json",))
+
+
 # ── space-listing helper (no toolkit dep, fast) ───────────────────────
 
 
@@ -168,7 +201,7 @@ def list_spaces(config: PipelineConfig | None = None) -> list[str]:
     return sorted(seen)
 
 
-__all__ = ["export_map", "list_spaces"]
+__all__ = ["export_map", "export_decal_textures", "list_spaces"]
 
 # Defensive: surface ToolkitError for `import *` consumers.
 _ = ToolkitError
