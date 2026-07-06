@@ -28,6 +28,7 @@ Available entry points (also listed in ``pyproject.toml``):
   * ``wows-build-decal-library``   -> :mod:`.build_decal_library`
   * ``wows-build-ammo-profiles``   -> :mod:`.build_ammo_profiles`
   * ``wows-rig-normalize-bones``   -> :mod:`.rig_normalize_bones`
+  * ``wows-export-map``            -> :mod:`.export_map`
 """
 
 from __future__ import annotations

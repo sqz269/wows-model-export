@@ -78,6 +78,7 @@ wows-build-ammo-profiles     = "wows_model_export.cli.build_ammo_profiles:main"
 wows-export-particle-textures = "wows_model_export.cli.export_particle_textures:main"
 wows-dedup-textures          = "wows_model_export.cli.dedup_textures:main"
 wows-rig-normalize-bones     = "wows_model_export.cli.rig_normalize_bones:main"
+wows-export-map              = "wows_model_export.cli.export_map:main"
 wows-webview-serve           = "wows_model_export.cli.webview_serve:main"
 
 [project.urls]
