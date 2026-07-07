@@ -382,6 +382,7 @@ def write_model_instance_manifest_from_glb(name: str, glb_path: Path, out_path: 
     stable_guids: set[str] = set()
     dye_pair_counts: dict[tuple[int, int], int] = {}
     landscape_count = 0
+    underwater_only_count = 0
     valid_transform_count = 0
     dyed_instance_count = 0
     material_override_instance_count = 0
@@ -430,6 +431,15 @@ def write_model_instance_manifest_from_glb(name: str, glb_path: Path, out_path: 
         is_landscape = bool(extras.get("is_landscape"))
         if is_landscape:
             landscape_count += 1
+        # Camera-medium visibility gate (VisualProto +0x38/+0x39), present in
+        # GLBs from toolkit >= export_map.instance_water_flags. Promoted
+        # verbatim; None = exported before the flags existed (consumers
+        # should treat absent as drawable-above-water, the engine default
+        # for everything that is not an LNU* underwater proxy).
+        underwater_model = extras.get("underwater_model")
+        abovewater_model = extras.get("abovewater_model")
+        if abovewater_model is False:
+            underwater_only_count += 1
         if _position_from_node(node) is not None:
             valid_transform_count += 1
         min_quality = extras.get("min_quality_level")
@@ -476,6 +486,8 @@ def write_model_instance_manifest_from_glb(name: str, glb_path: Path, out_path: 
             "position": _position_from_node(node),
             "local_mesh": extras.get("local_mesh"),
             "is_landscape": is_landscape,
+            "underwater_model": underwater_model,
+            "abovewater_model": abovewater_model,
             "min_quality_level": min_quality,
             "lod_extents": lod_extents if isinstance(lod_extents, list) else None,
             "stable_guid": stable_guid if isinstance(stable_guid, str) else None,
@@ -510,6 +522,7 @@ def write_model_instance_manifest_from_glb(name: str, glb_path: Path, out_path: 
         "valid_transform_count": valid_transform_count,
         "landscape_count": landscape_count,
         "non_landscape_count": len(instances) - landscape_count,
+        "underwater_only_count": underwater_only_count,
         "local_mesh_instance_count": sum(1 for instance in instances if instance.get("local_mesh")),
         "stable_guid_count": sum(1 for instance in instances if instance.get("stable_guid")),
         "unique_stable_guid_count": len(stable_guids),
