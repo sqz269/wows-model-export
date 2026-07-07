@@ -454,7 +454,8 @@ def _compose_sidecar(
             "transform": transform,
             "display_name": stem.replace("_", " "),
             "caliber_mm": (float(gun["barrelDiameter"]) * 1000.0) if gun.get("barrelDiameter") else None,
-            "barrel_count": gun.get("numBarrels"),
+            # WG stores numBarrels as a float (4.0); Unity Placement.barrel_count is int.
+            "barrel_count": int(gun["numBarrels"]) if gun.get("numBarrels") is not None else None,
             "ammo_ids": ammo_ids,
             "ammo_types": ammo_types,
             "dispersion": dispersion,
@@ -480,8 +481,10 @@ def _compose_sidecar(
             shells[ammo_id] = _shell_from_projectile(proj, max_dist)
         else:
             warn(f"{index}: ammo {ammo_id} not found in GameParams — shell skipped")
+    # NOTE: `source` must be a dict — the Unity SidecarSchema types
+    # BallisticsInfo.source as Dictionary<string,string> (ship shape).
     ballistics = {
-        "source": "gameparams",
+        "source": {"shells": "gameparams"},
         "ranges": ({"artillery_max_m": float(max_dist)} if max_dist is not None else {}),
         "shells": shells,
         "torpedoes": {},
@@ -595,9 +598,14 @@ def run_export(
 
         if gun_jobs:
             on_event(f"exporting {len(gun_jobs)} gun GLB(s) …")
+            # all_render_sets, matching the ship accessory library: the
+            # collapsed single-LOD path skips skin emit on divergent bone
+            # palettes, leaving JOINTS_0 without a skin — which the gltFast
+            # editor importer rejects (SortAndNormalizeBoneWeightsJob safety
+            # error). Per-render-set meshes each carry their own skin.
             batch_export_model(
                 gun_jobs,
-                shared={"no_textures": True, "emit_hardpoints": True},
+                shared={"no_textures": True, "emit_hardpoints": True, "all_render_sets": True},
                 config=cfg,
             )
             for job in gun_jobs:
