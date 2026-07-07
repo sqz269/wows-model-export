@@ -483,9 +483,15 @@ def _compose_sidecar(
             warn(f"{index}: ammo {ammo_id} not found in GameParams — shell skipped")
     # NOTE: `source` must be a dict — the Unity SidecarSchema types
     # BallisticsInfo.source as Dictionary<string,string> (ship shape).
+    # `main_battery_m` mirrors artillery.maxDist so the ship GunneryBuilder's
+    # per-battery range cap applies to building artillery unchanged.
     ballistics = {
         "source": {"shells": "gameparams"},
-        "ranges": ({"artillery_max_m": float(max_dist)} if max_dist is not None else {}),
+        "ranges": (
+            {"artillery_max_m": float(max_dist), "main_battery_m": float(max_dist)}
+            if max_dist is not None
+            else {}
+        ),
         "shells": shells,
         "torpedoes": {},
     }
