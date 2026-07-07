@@ -196,7 +196,11 @@ def _fold_armor_table(hull_armor: dict[str, Any], warn: Callable[[str], None]) -
     """
     table: dict[str, dict[str, Any]] = {}
     for raw_key, mm in sorted(hull_armor.items()):
-        key = int(raw_key)
+        try:
+            key = int(raw_key)
+        except (TypeError, ValueError):
+            warn(f"armor key {raw_key!r} is not numeric — skipped")
+            continue
         mat_id = key & 0xFFFF
         layer = (key >> 16) & 0xFFFF
         slot = table.setdefault(str(mat_id), {"thickness_mm": float(mm), "layers": [], "zones": []})
@@ -394,6 +398,11 @@ def _compose_sidecar(
         name: {"hl_type": "simple_hitlocation", "section": "Hull"}
         for name in box_names
     }
+    if not boxes:
+        warn(
+            f"{index}: hull GLB has NO Hitboxes group (hit_locations collision "
+            f"model missing/unparseable?) — building would be an unhittable target"
+        )
     hull_hit_location: dict[str, Any] = {
         "hl_type": "simple_hitlocation",
         "max_hp": float(hull.get("health", 0.0)),
@@ -464,7 +473,9 @@ def _compose_sidecar(
             "traverse_rate": rot[0] if isinstance(rot, (list, tuple)) and rot else None,
             "elev_rate": rot[1] if isinstance(rot, (list, tuple)) and len(rot) > 1 else None,
             "reload_s": gun.get("shotDelay"),
-            "pitch_dead_zones": gun.get("pitchDeadZones") or None,
+            # Consumer field is Placement.pitch_dead_zones_deg (float pairs,
+            # stored verbatim by TurretControllerBuilder.ToPitchZones).
+            "pitch_dead_zones_deg": gun.get("pitchDeadZones") or None,
             "shot_effect": gun.get("shotEffect"),
         }
         hl = gun.get("HitLocationArtillery") or gun.get("HitLocationAirDefense")
@@ -569,9 +580,25 @@ def run_export(
     if not selected:
         raise ValueError("no buildings selected (use indices=…, species=…, or all_buildings=True)")
     selected.sort()
-    on_event(f"selected {len(selected)} building(s)")
 
     report: dict[str, Any] = {"buildings": {}, "gun_models": [], "skipped": {}, "warnings": []}
+
+    # Guard hull-less entries UP FRONT: `--all` sweeps every typeinfo.type ==
+    # "Building" and some (logic/aggregate entries) carry no usable hull dict.
+    # A KeyError in Phase-1 job assembly would abort the whole run before any
+    # export; skip-with-report instead, like the new-format .visual skip.
+    viable: list[tuple[str, dict[str, Any]]] = []
+    for index, entry in selected:
+        hull = entry.get("hull")
+        model = hull.get("model") if isinstance(hull, dict) else None
+        if isinstance(model, str) and model.endswith(".model"):
+            viable.append((index, entry))
+        else:
+            reason = "no usable hull.model in GameParams entry"
+            report["skipped"][index] = reason
+            on_event(f"  {index}: SKIPPED — {reason}")
+    selected = viable
+    on_event(f"selected {len(selected)} building(s)")
 
     # Phase 1 — GLB exports, two batches (flags differ):
     #   hulls: --emit-hardpoints + --collision-hitbox-groups
