@@ -79,6 +79,7 @@ wows-export-particle-textures = "wows_model_export.cli.export_particle_textures:
 wows-dedup-textures          = "wows_model_export.cli.dedup_textures:main"
 wows-rig-normalize-bones     = "wows_model_export.cli.rig_normalize_bones:main"
 wows-export-map              = "wows_model_export.cli.export_map:main"
+wows-export-building         = "wows_model_export.cli.export_building:main"
 wows-webview-serve           = "wows_model_export.cli.webview_serve:main"
 
 [project.urls]
