@@ -843,13 +843,18 @@ class ColorScheme:
 @dataclass(frozen=True)
 class UvTransform:
     """Per-category UV transform from a ``<camouflage>``'s ``<UV>`` block.
-    ``scale`` multiplies the base UV; ``offset`` shifts after scale.
-    Defaults to identity ``([1,1], [0,0])`` when a category is missing
-    from the XML.  Mirrors the toolkit's ``UvTransform`` at
-    ``J:/PROG/test/wows-toolkit/.../camouflage.rs:26``.
+    ``rotate`` (radians) spins the UV about the tile center (0.5, 0.5)
+    FIRST; then ``scale`` multiplies and ``offset`` shifts — the order
+    the camo material CB applies them (``camoRepeatsRotate`` before
+    ``camoRepeats``; ``ship_camo_material.fx`` chunk001:9-17).
+    Defaults to identity ``([1,1], [0,0], 0.0)`` when a category is
+    missing from the XML.  The toolkit's ``UvTransform`` at
+    ``J:/PROG/test/wows-toolkit/.../camouflage.rs:26`` carries only
+    scale+offset; this parser is the rotate-aware superset.
     """
     scale:  tuple[float, float] = (1.0, 1.0)
     offset: tuple[float, float] = (0.0, 0.0)
+    rotate: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -911,8 +916,9 @@ class CamoEntry:
     textures:       dict[str, str] = field(default_factory=dict)
     # Maps part-category tag (lowercased to match
     # `classify_part_category` output) → UvTransform from ``<UV>``
-    # block. WG runtime samples ``mask`` at ``vMapUv * scale + offset``
-    # per category — critical for tiled-pattern accessories where the
+    # block. WG runtime samples ``mask`` at ``rot(vMapUv) * scale +
+    # offset`` per category (rotate about the tile center first) —
+    # critical for tiled-pattern accessories where the
     # `Plane_tile_camo_R.dds`-style file repeats at the per-camo scale.
     # Categories absent from the XML are NOT inserted; consumers fall
     # back to identity ``UvTransform()`` themselves.
@@ -1093,7 +1099,13 @@ class CamouflageDb:
                         oy = float(offset_parts[1]) if len(offset_parts) >= 2 else 0.0
                     except ValueError:
                         ox = oy = 0.0
-                    uv_transforms[tag] = UvTransform(scale=(sx, sy), offset=(ox, oy))
+                    rotate_text = (child.findtext("rotate") or "").strip()
+                    try:
+                        rot = float(rotate_text.split()[0]) if rotate_text else 0.0
+                    except (ValueError, IndexError):
+                        rot = 0.0
+                    uv_transforms[tag] = UvTransform(
+                        scale=(sx, sy), offset=(ox, oy), rotate=rot)
 
             # <colorSchemes> — multiple sibling blocks, one per roll. The
             # toolkit's Rust parser at camouflage.rs:191-196 takes only
@@ -1323,7 +1335,7 @@ def categories_for_entry(
         {
           "<category>": {
             "mask":     { "dds_mips": ["libraries/camo_masks/<file>.dd0", ...] },
-            "uv":       { "scale": [sx, sy], "offset": [ox, oy] },
+            "uv":       { "scale": [sx, sy], "offset": [ox, oy], "rotate": r },
             "mgn":      { "dds_mips": [...] },           # optional, Path B
             "anim_map": { "dds_mips": [...] },           # optional, Path B
             "params":   { ...MgnParams as JSON... }      # optional, Path B
@@ -1387,6 +1399,7 @@ def categories_for_entry(
             "uv":   {
                 "scale":  list(uv.scale),
                 "offset": list(uv.offset),
+                "rotate": uv.rotate,
             },
         }
         # Path B attachment — surfaced when the caller has extracted
@@ -1454,6 +1467,7 @@ def mat_textures_from_palette_entry(
             "uv":     {
                 "scale":  list(uv.scale),
                 "offset": list(uv.offset),
+                "rotate": uv.rotate,
             },
         }
         # Path B extras (rare on hybrid mat_palette but possible).
@@ -1508,7 +1522,7 @@ def path_b_categories_for_entry(
         {
           "<category>": {
             "mgn":      { "dds_mips": [...] },           # required
-            "uv":       { "scale": [sx, sy], "offset": [ox, oy] },
+            "uv":       { "scale": [sx, sy], "offset": [ox, oy], "rotate": r },
             "anim_map": { "dds_mips": [...] },           # optional
             "params":   { ...MgnParams as JSON... }      # optional
           }
@@ -1550,6 +1564,7 @@ def path_b_categories_for_entry(
             "uv": {
                 "scale":  list(uv.scale),
                 "offset": list(uv.offset),
+                "rotate": uv.rotate,
             },
         }
         anim_path = entry.anim_maps.get(tag)
@@ -1647,6 +1662,7 @@ def tile_categories_for_entry(
             "uv":   {
                 "scale":  list(uv.scale),
                 "offset": list(uv.offset),
+                "rotate": uv.rotate,
             },
         }
         if mat_extracted_mips is not None:
@@ -1731,7 +1747,7 @@ def mat_textures_for_entry(
             "albedo":   { "dds_mips": ["libraries/camo_mat/<file>.dd0", ...] },
             "mgn":      { "dds_mips": [...] },     # optional, Path B
             "anim_map": { "dds_mips": [...] },     # optional, Path B
-            "uv":       { "scale": [sx, sy], "offset": [ox, oy] },
+            "uv":       { "scale": [sx, sy], "offset": [ox, oy], "rotate": r },
             "params":   { ...MgnParams as JSON... }  # optional, Path B
           }
         }
@@ -1765,6 +1781,7 @@ def mat_textures_for_entry(
             "uv":     {
                 "scale":  list(uv.scale),
                 "offset": list(uv.offset),
+                "rotate": uv.rotate,
             },
         }
         # Path B extras: same XML tag (e.g. "Hull") keys mgn_textures /
