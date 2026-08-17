@@ -572,14 +572,16 @@ roughnessFactor *= mix( 1.0, 0.35, wetBandF );
   // WG _mg.G is the metallic source. Toolkit's swizzler moves it to
   // _mr.B (mr.B = mg.G). Pick the right channel per pack mode.
   float metalTexel = mix( texelMetalness.b, texelMetalness.g, wgPackMG );
-  // Path B metallic override: blend metalness toward camoMGN.G by
-  //   factor = paintMask * Influence_m * catMgnBound
-  // Engine recipe (chunk001:80): metal_mix = cm.g * mgnInfluence.x.
-  // (The engine then feeds metal_mix into the F0/Lambert split; we
-  // approximate by lerping the metalness factor directly — Three.js's
-  // metalness uniform feeds the same split downstream.)
-  float catMetalMix = catPaintMask * catMgnInfluence.x * catMgnBound;
-  metalTexel = mix( metalTexel, catMgnSample.g, catMetalMix );
+  // Path B metallic override. Engine law (chunk001:680-696) is
+  // ASYMMETRIC with gloss: Influence_m scales the camo VALUE
+  // (metalMixCamo = cm.G * inf.x feeds camoF0) while the base→camo
+  // blend weight is the paint mask ALONE — no influence term. A bound
+  // Part_mgn at Influence_m = 0 therefore WIPES base metal on painted
+  // texels. (The engine feeds metalMixCamo into the F0/Lambert split;
+  // we approximate by lerping the metalness factor directly —
+  // Three.js's metalness uniform feeds the same split downstream.)
+  float catMetalMix = catPaintMask * catMgnBound;
+  metalTexel = mix( metalTexel, catMgnSample.g * catMgnInfluence.x, catMetalMix );
   // PBS_ship.fx "legacy" metallic S-curve (engine §6b, PBS_ship chunk046
   // i29-36): metallic = min(1, (m^γ · g_legacySpecularMul)^g_legacySpecularPow)
   // with defaults γ=1, mul=3, pow=4 → min(1, (3m)^4): below ~0.33 goes
