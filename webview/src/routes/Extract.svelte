@@ -416,6 +416,7 @@
   <VehiclePicker
     bind:this={pickerRef}
     {vehicles}
+    {permoflagesByVehicle}
     {peculiarityLabels}
     activeTopKey={selectedVehicle?.top_key ?? null}
     onSelect={selectVehicle}

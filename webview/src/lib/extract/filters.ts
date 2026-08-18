@@ -9,6 +9,8 @@ import type {
   ChipFilter,
   ExtractFilterState,
   FilterOptions,
+  Permoflage,
+  Topology,
   Vehicle,
   VfsIssueStatus,
 } from '$lib/types/extract';
@@ -18,6 +20,17 @@ import {
   VFS_STATUS_ORDER,
   nationLabel,
 } from './labels';
+
+/** Structural order for the topology chip row — mesh swap leads because it's
+ *  the value users hunt for (bespoke-hull skins vs mere paint). */
+const TOPOLOGY_ORDER: readonly Topology[] = [
+  'mesh_swap',
+  'mat_albedo',
+  'mat_palette',
+  'hull_palette',
+  'tile_broadcast',
+  'other',
+];
 
 export type ChipState = 'off' | 'include' | 'exclude';
 
@@ -33,6 +46,7 @@ export function defaultFilterState(): ExtractFilterState {
     classes: emptyChip(),
     tiers: emptyChip(),
     peculiarities: emptyChip(),
+    topologies: emptyChip(),
     groups: emptyChip(),
     vfsStatuses: emptyChip(),
     native: 'any',
@@ -70,12 +84,17 @@ export function chipFilterActiveCount<T>(filter: ChipFilter<T>): number {
   return filter.include.size + filter.exclude.size;
 }
 
-/** Derive chip-row choices from the corpus. */
-export function deriveFilterOptions(vehicles: Vehicle[]): FilterOptions {
+/** Derive chip-row choices from the corpus. `permoflagesByVehicle` (keyed by
+ *  `top_key`) feeds the topology row; pass an empty Map to omit it. */
+export function deriveFilterOptions(
+  vehicles: Vehicle[],
+  permoflagesByVehicle: Map<string, Permoflage[]>,
+): FilterOptions {
   const nations = new Set<string>();
   const classes = new Set<string>();
   const tiers = new Set<number>();
   const pecCounts: Map<string, number> = new Map();
+  const topoCounts: Map<Topology, number> = new Map();
   const groupCounts: Map<string, number> = new Map();
   const vfsCounts: Map<VfsIssueStatus, number> = new Map();
 
@@ -87,6 +106,10 @@ export function deriveFilterOptions(vehicles: Vehicle[]): FilterOptions {
       if (SKIP_PECULIARITY_FILTER.has(p)) continue;
       pecCounts.set(p, (pecCounts.get(p) ?? 0) + 1);
     }
+    const topos = new Set(
+      (permoflagesByVehicle.get(v.top_key) ?? []).map((p) => p.topology),
+    );
+    for (const t of topos) topoCounts.set(t, (topoCounts.get(t) ?? 0) + 1);
     if (v.group) {
       groupCounts.set(v.group, (groupCounts.get(v.group) ?? 0) + 1);
     }
@@ -115,6 +138,12 @@ export function deriveFilterOptions(vehicles: Vehicle[]): FilterOptions {
     peculiarities: Array.from(pecCounts.entries())
       .map(([key, count]) => ({ key, count }))
       .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key)),
+    // Topology chips: fixed structural order (mesh swap first), counts = ships
+    // with at least one permoflage of that topology.
+    topologies: TOPOLOGY_ORDER.filter((k) => topoCounts.has(k)).map((key) => ({
+      key,
+      count: topoCounts.get(key) ?? 0,
+    })),
     // Group chips: sort by ship-count DESC so dominant values (upgradeable,
     // premium, special) lead and rare ones (disabled, unavailable) follow.
     groups: Array.from(groupCounts.entries())
@@ -164,18 +193,42 @@ function passMultiChip<T>(filter: ChipFilter<T>, values: readonly T[]): boolean 
   return true;
 }
 
-/** Apply the filter predicate to a vehicles array. */
+/** Apply the filter predicate to a vehicles array. `permoflagesByVehicle`
+ *  (keyed by `top_key`) backs the topology chips. */
 export function filterVehicles(
   vehicles: Vehicle[],
   state: ExtractFilterState,
+  permoflagesByVehicle: Map<string, Permoflage[]>,
 ): Vehicle[] {
   const q = state.text.trim().toLowerCase();
+  const topoActive = chipFilterIsActive(state.topologies);
   return vehicles.filter((v) => {
     if (!state.showTest && v.is_in_test) return false;
     if (state.nation && v.nation !== state.nation) return false;
     if (!passSingleChip(state.classes, v.class)) return false;
     if (!passSingleChip(state.tiers, v.tier)) return false;
     if (!passMultiChip(state.peculiarities, v.peculiarities ?? [])) return false;
+    if (topoActive) {
+      const perms = permoflagesByVehicle.get(v.top_key) ?? [];
+      // Exclude = blacklist, parallel to the peculiarity row: any permoflage
+      // of an excluded topology drops the ship.
+      if (state.topologies.exclude.size > 0) {
+        if (perms.some((p) => state.topologies.exclude.has(p.topology))) return false;
+      }
+      // Include is a JOINT match with the peculiarity includes: one and the
+      // same permoflage must satisfy both rows. "Halloween" + "mesh swap"
+      // means a halloween mesh-swap skin (Montana HW19), NOT a ship that has
+      // a halloween paint scheme plus an unrelated mesh-swap permoflage.
+      if (state.topologies.include.size > 0) {
+        const pecInc = state.peculiarities.include;
+        const hit = perms.some(
+          (p) =>
+            state.topologies.include.has(p.topology) &&
+            (pecInc.size === 0 || (p.peculiarity != null && pecInc.has(p.peculiarity))),
+        );
+        if (!hit) return false;
+      }
+    }
     if (state.native === 'has' && !v.native_permoflage) return false;
     if (state.native === 'no' && v.native_permoflage) return false;
     if (!passSingleChip(state.groups, v.group ?? null)) return false;

@@ -24,6 +24,7 @@
     type ChipState,
   } from '$lib/extract/filters';
   import {
+    TOPOLOGY_LABELS,
     VFS_STATUS_META,
     fallbackPeculiarityLabel,
     groupLabel,
@@ -34,18 +35,23 @@
     ExtractFilterState,
     NativeFilter,
     PeculiarityLabel,
+    Permoflage,
+    Topology,
     Vehicle,
     VfsIssueStatus,
   } from '$lib/types/extract';
 
   interface Props {
     vehicles: Vehicle[];
+    /** Keyed by `top_key`; backs the structure (topology) chip row. */
+    permoflagesByVehicle: Map<string, Permoflage[]>;
     peculiarityLabels: Record<string, PeculiarityLabel>;
     activeTopKey: string | null;
     onSelect: (v: Vehicle) => void;
   }
 
-  const { vehicles, peculiarityLabels, activeTopKey, onSelect }: Props = $props();
+  const { vehicles, permoflagesByVehicle, peculiarityLabels, activeTopKey, onSelect }: Props =
+    $props();
 
   let filterState = $state<ExtractFilterState>(defaultFilterState());
 
@@ -60,8 +66,8 @@
 
   let searchEl: HTMLInputElement | null = $state(null);
 
-  const options = $derived(deriveFilterOptions(vehicles));
-  const filtered = $derived(filterVehicles(vehicles, filterState));
+  const options = $derived(deriveFilterOptions(vehicles, permoflagesByVehicle));
+  const filtered = $derived(filterVehicles(vehicles, filterState, permoflagesByVehicle));
 
   // Cap rendered rows at 500 — a 2000-Vehicle corpus would overflow the
   // sidebar and tank scroll performance.
@@ -100,6 +106,9 @@
       peculiarities: cycleChip(filterState.peculiarities, p),
     };
   }
+  function cycleTopology(t: Topology) {
+    filterState = { ...filterState, topologies: cycleChip(filterState.topologies, t) };
+  }
   function cycleWgGroup(g: string) {
     filterState = { ...filterState, groups: cycleChip(filterState.groups, g) };
   }
@@ -135,6 +144,17 @@
   // Discoverability hint surfaced in chip tooltips for the simpler rows
   // (class / tier) that otherwise have nothing to show.
   const CHIP_HINT = 'click to cycle: include → exclude → off';
+
+  const TOPOLOGY_TOOLTIPS: Record<Topology, string> = {
+    mesh_swap: 'bespoke hull / swapped mounts / own decoratives (Leviathan Montana, Azur Lane, ARP…)',
+    mat_albedo: 'per-material albedo repaint — same geometry, new textures',
+    mat_palette: 'palette-tinted atlas overlay (paint only)',
+    hull_palette: 'hull palette camo (paint only)',
+    tile_broadcast: 'tiled camo broadcast (paint only)',
+    other: 'unclassified permoflage',
+  };
+  const JOINT_HINT =
+    'combined with a theme include, one permoflage must match BOTH (e.g. Halloween + mesh swap = halloween mesh-swap skins only)';
   function chipTooltip(label: string): string {
     return `${label}\n${CHIP_HINT}`;
   }
@@ -163,6 +183,7 @@
       chipFilterActiveCount(filterState.classes) +
       chipFilterActiveCount(filterState.tiers) +
       chipFilterActiveCount(filterState.peculiarities) +
+      chipFilterActiveCount(filterState.topologies) +
       chipFilterActiveCount(filterState.groups) +
       chipFilterActiveCount(filterState.vfsStatuses) +
       (filterState.native !== 'any' ? 1 : 0),
@@ -362,7 +383,7 @@
 
     {#if options.peculiarities.length > 0}
       <div>
-        <div class="text-muted-foreground mb-1 text-[10px] uppercase tracking-wide">Permoflage type</div>
+        <div class="text-muted-foreground mb-1 text-[10px] uppercase tracking-wide">Permoflage theme</div>
         <div class="flex flex-wrap gap-1">
           {#each options.peculiarities as { key, count } (key)}
             {@const meta = peculiarityLabels[key]}
@@ -371,6 +392,22 @@
               () => cyclePeculiarity(key),
               `${peculiarityTooltip(key, count, meta)}\n${CHIP_HINT}`,
               meta?.label ?? fallbackPeculiarityLabel(key),
+            )}
+          {/each}
+        </div>
+      </div>
+    {/if}
+
+    {#if options.topologies.length > 0}
+      <div>
+        <div class="text-muted-foreground mb-1 text-[10px] uppercase tracking-wide">Permoflage structure</div>
+        <div class="flex flex-wrap gap-1">
+          {#each options.topologies as { key, count } (key)}
+            {@render chipBtn(
+              chipState(filterState.topologies, key),
+              () => cycleTopology(key),
+              `${TOPOLOGY_TOOLTIPS[key]} · ${count} ships\n${JOINT_HINT}\n${CHIP_HINT}`,
+              TOPOLOGY_LABELS[key],
             )}
           {/each}
         </div>

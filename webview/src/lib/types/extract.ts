@@ -147,6 +147,11 @@ export interface ExtractFilterState {
   classes: ChipFilter<string>;
   tiers: ChipFilter<number>;
   peculiarities: ChipFilter<string>;
+  /** Structural permoflage topology (mesh_swap / mat_albedo / …). When both
+   *  this and `peculiarities` have includes, a single permoflage must match
+   *  both — "Halloween" + "mesh swap" means a halloween mesh-swap skin, not
+   *  a ship that has each on different permoflages. */
+  topologies: ChipFilter<Topology>;
   /** WG `Vehicle.group` (disabled / unavailable / clan / …). */
   groups: ChipFilter<string>;
   /** Extraction-readiness (no_splash / no_visual / no_dir / none). */
@@ -159,6 +164,8 @@ export interface FilterOptions {
   classes: string[];
   tiers: number[];
   peculiarities: { key: string; count: number }[];
+  /** Permoflage topologies present in the corpus, structural order. */
+  topologies: { key: Topology; count: number }[];
   /** WG group values, ranked by ship-count DESC. */
   groups: { key: string; count: number }[];
   /** Non-ok/unknown VFS statuses, in severity order. */
