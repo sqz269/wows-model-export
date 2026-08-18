@@ -7,7 +7,7 @@ accessories JSON. Argv shape::
         --candidates <P> --output <P>
         [--record-offsets 0x0,0x...]
         [--manifest P] [--hull-glb P]
-        [--include-dock] [--keep-skinned]
+        [--misc-preset dock|battle] [--keep-skinned]
         [--ship-nation N]
         [--extra-scopes common,...]
         [--keep-degenerate]
@@ -81,9 +81,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "Auto-discovered next to placements_json when unset.",
     )
     ap.add_argument(
-        "--include-dock",
-        action="store_true",
-        help="Keep dock-only placements (default: drop).",
+        "--misc-preset",
+        choices=("dock", "battle"),
+        default="dock",
+        help="Engine misc preset to emit: the port view loads 'dock' "
+             "and ignores 'battle' (the default matches port-style "
+             "renders); 'battle' selects the in-battle set instead. "
+             "Preset-neutral placements always pass.",
     )
     ap.add_argument(
         "--keep-skinned",
@@ -142,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
             keep_record_offsets=record_offsets,
             manifest_path=args.manifest,
             hull_glb=args.hull_glb,
-            include_dock=args.include_dock,
+            misc_preset=args.misc_preset,
             drop_skinned=not args.keep_skinned,
             ship_nation=args.ship_nation,
             extra_scopes=extra_scopes,

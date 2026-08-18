@@ -69,6 +69,30 @@ _SWAP_POSITION_TOL_M = 0.1
 # `parent_section` to the base prefix so the lookup hits.
 _HULL_SECTIONS = ("MidFront", "MidBack", "Bow", "Stern")
 
+# Engine misc-preset selection (RE 2026-08-17, scripts/m7636884b.pyc
+# `MiscPresets` + `_FAC_Creators.py:41-46`): the PORT view
+# (VEHICLE_APPEARANCE) loads `MiscPresets.dock()` — presetsToShow=
+# ('dock',), ignoredPresets=('battle',) — while battle (VEHICLE) shows
+# battle+status and ignores dock. Preset-marked skel_ext files come
+# from GameParams `customMiscs` as `{hull}_{part}_{miscName}.skel_ext`;
+# the miscName lands in the candidate's `segment` field as a suffix
+# token (`MidFront_dock`, `Bow_base_battle_A`). A segment with no
+# preset token is preset-neutral (bound via the model's own
+# skeletonExtenders list) and always loads.
+_MISC_PRESETS = ("dock", "battle")
+
+
+def _segment_preset(segment: str) -> str | None:
+    """Return the misc preset a segment is marked with (``"dock"`` /
+    ``"battle"``), or ``None`` for preset-neutral segments."""
+    if not segment:
+        return None
+    tokens = segment.split("_")
+    for p in _MISC_PRESETS:
+        if p in tokens:
+            return p
+    return None
+
 
 def _normalize_section(segment: str) -> str | None:
     """Map a raw skel_ext segment string to one of the four canonical
@@ -336,7 +360,7 @@ def _resolve_hash_mode(
     runner: StepRunner,
     manifest_path: Path | None = None,
     hull_glb: Path | None = None,
-    include_dock: bool = False,
+    misc_preset: str = "dock",
     drop_skinned: bool = True,
     ship_nation: str | None = None,
     extra_scopes: tuple[str, ...] = ("common",),
@@ -453,7 +477,7 @@ def _resolve_hash_mode(
 
         skipped_already_in_hp = 0
         skipped_swap_variant_at_hp = 0
-        skipped_dock = 0
+        skipped_other_preset = 0
         skipped_skinned = 0
         skipped_cross_nation = 0
         skipped_degenerate = 0
@@ -487,8 +511,13 @@ def _resolve_hash_mode(
                     continue
 
             segment = cand.get("segment") or ""
-            if segment.endswith("_dock") and not include_dock:
-                skipped_dock += 1
+            # Preset gate (engine law — see _MISC_PRESETS above): keep
+            # preset-neutral segments and the selected preset's; drop
+            # the opposite. Default "dock" models the port view, which
+            # is what static exports/renders represent.
+            seg_preset = _segment_preset(segment)
+            if seg_preset is not None and seg_preset != misc_preset:
+                skipped_other_preset += 1
                 continue
 
             prefix = cand.get("prefix") or ""
@@ -581,7 +610,7 @@ def _resolve_hash_mode(
                 "kept_hp_bound":                 len(merged) - n_emitted,
                 "skipped_unresolved":            skipped_unresolved,
                 "skipped_variant_block":         skipped_variant_block,
-                "skipped_dock":                  skipped_dock,
+                "skipped_other_preset":          skipped_other_preset,
                 "skipped_skinned":               skipped_skinned,
                 "skipped_cross_nation":          skipped_cross_nation,
                 "skipped_degenerate":            skipped_degenerate,
@@ -607,7 +636,7 @@ def _resolve_hash_mode(
         out["accessories"] = merged
         out["skel_ext_resolve"] = {
             "mode":                       "hash",
-            "include_dock":               include_dock,
+            "misc_preset":                misc_preset,
             "drop_skinned":               drop_skinned,
             "ship_nation":                resolved_nation or None,
             "allowed_scopes":             sorted(allowed_scopes) if allowed_scopes else None,
@@ -617,7 +646,7 @@ def _resolve_hash_mode(
             "candidates_resolved":        resolved["summary"]["resolved"],
             "candidates_unresolved":      skipped_unresolved,
             "skipped_variant_block":      skipped_variant_block,
-            "skipped_dock":               skipped_dock,
+            "skipped_other_preset":       skipped_other_preset,
             "skipped_skinned":            skipped_skinned,
             "skipped_cross_nation":       skipped_cross_nation,
             "skipped_degenerate":         skipped_degenerate,
@@ -661,7 +690,7 @@ def resolve_decorative_placements(
     keep_record_offsets: tuple[str, ...] | None = ("0x0",),
     manifest_path: Path | None = None,
     hull_glb: Path | None = None,
-    include_dock: bool = False,
+    misc_preset: str = "dock",
     drop_skinned: bool = True,
     ship_nation: str | None = None,
     extra_scopes: tuple[str, ...] = ("common",),
@@ -688,13 +717,20 @@ def resolve_decorative_placements(
             the raw placements.
         keep_record_offsets
             Tuple of ``.skel_ext`` record-offset hex strings to keep.  Default
-            ``("0x0",)`` retains only the base ship's record block.  Pass
-            ``None`` (or an empty tuple) to keep all permoflage variant
-            blocks.  Cherry-pick specific variants via e.g.
-            ``("0x0", "0x14080")``.
+            ``("0x0",)`` retains only the entry's OWN record — which is
+            the whole file's genuine content: every skel_ext VFS entry
+            owns exactly ONE record, at its offset 0x0 (byte-proven
+            2026-08-17; assets.bin blob 2 holds one
+            SkeletonExtenderPrototype per entry). Records at non-zero
+            offsets are NEIGHBORING FILES' records seen through the
+            toolkit's over-wide window, and their pointer arrays skew
+            when read through the wrong base — asset ids pair with
+            wrong transforms. Never widen this filter; it exists to
+            compensate for the toolkit's window-scan read model.
 
     See the I:-side module docstring for the full semantics of each
-    filter (cross-nation, dock, skinned-mesh bone, degenerate-matrix).
+    filter (cross-nation, misc-preset, skinned-mesh bone,
+    degenerate-matrix).
     parent_section comes from the WG-authoritative ``segment`` field
     on each skel_ext record; parent_mesh is set only for placements
     contained in a hull patch mesh (the one webview damage-cascade
@@ -718,7 +754,7 @@ def resolve_decorative_placements(
             runner=runner,
             manifest_path=manifest,
             hull_glb=hull_glb,
-            include_dock=include_dock,
+            misc_preset=misc_preset,
             drop_skinned=drop_skinned,
             ship_nation=ship_nation,
             extra_scopes=extra_scopes,
