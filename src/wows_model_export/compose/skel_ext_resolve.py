@@ -458,13 +458,6 @@ def _resolve_hash_mode(
         skipped_cross_nation = 0
         skipped_degenerate = 0
         skipped_variant_block = 0
-        skipped_coincident = 0
-        # Same asset at the same 1 cm-rounded position emitted twice is
-        # never authored intent — it's the same decorative surfacing from
-        # more than one segment file (battle + dock) or record block. The
-        # toolkit's candidate dedup is per-file, so the cross-file
-        # coincidences land here.
-        emitted_pos_keys: set[tuple] = set()
         skipped_unresolved = (
             len(candidates) - resolved["summary"]["resolved"]
         )
@@ -534,15 +527,6 @@ def _resolve_hash_mode(
                 skipped_swap_variant_at_hp += 1
                 continue
 
-            pos_key = (
-                asset_id,
-                round(position[0], 2), round(position[1], 2), round(position[2], 2),
-            )
-            if pos_key in emitted_pos_keys:
-                skipped_coincident += 1
-                continue
-            emitted_pos_keys.add(pos_key)
-
             # The skel_ext segment is WG-authoritative for damage-state
             # grouping — each segment block ties placements to one hull
             # section the engine evaluates together. Normalize themed
@@ -603,7 +587,6 @@ def _resolve_hash_mode(
                 "skipped_degenerate":            skipped_degenerate,
                 "skipped_already_in_hp":         skipped_already_in_hp,
                 "skipped_swap_variant_at_hp":    skipped_swap_variant_at_hp,
-                "skipped_coincident":            skipped_coincident,
                 "patch_anchored_new":            n_patch_anchored,
                 "patch_anchored_hp":             n_hp_mesh_resolved,
                 "dead_asset_id_set":             n_dead_stamped,
@@ -640,7 +623,6 @@ def _resolve_hash_mode(
             "skipped_degenerate":         skipped_degenerate,
             "skipped_already_in_hp":      skipped_already_in_hp,
             "skipped_swap_variant_at_hp": skipped_swap_variant_at_hp,
-            "skipped_coincident":         skipped_coincident,
             "dead_asset_id_set":          n_dead_stamped,
             "hull_glb_for_patches":       str(hull_glb) if patches_aabbs else None,
             "patches_indexed":            len(patches_aabbs),

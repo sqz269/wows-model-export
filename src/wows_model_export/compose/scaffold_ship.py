@@ -529,25 +529,17 @@ def _export_exterior_hulls(
         # Variant-hull skel_ext decoratives (REPLACEMENT layer): the engine
         # reads hull decoratives (voice tubes, binoculars, searchlights …)
         # from the LOADED hull model's `.skel_ext` files, so a hull swap
-        # replaces the whole layer. Unlike a BASE ship's skel_ext (where
-        # non-0x0 record blocks belong to OTHER permoflages and only the
-        # 0x0 block is this ship's — the cross-nation-phantom rule), a
-        # variant hull's own files put THIS style's records at non-zero
-        # offsets: keep every block (`keep_record_offsets=None`) or the
-        # whole dressing layer vanishes (Montana HW19: 6 of 7050 resolved
-        # candidates survived the 0x0 filter). Dock-segment records are
-        # kept too — themed superstructures often author their port-view
-        # decoratives ONLY in `_dock`/`_battle` segment files (HW19 has
-        # no plain MidFront.skel_ext); coincident battle/dock re-emissions
-        # collapse in the resolver's positional dedup.
+        # replaces the whole layer — themed hulls usually carry few or
+        # none (greebles baked into the mesh). Resolve the variant's own
+        # candidates through the SAME pipeline the base ship used
+        # (`keep_record_offsets=("0x0",)` = the variant model's base
+        # block) and persist the doc for consumers.
         if need_deco and cand_tmp is not None and cand_tmp.is_file():
             try:
                 _skel_ext_resolve.resolve_decorative_placements(
                     pl_tmp,
                     candidates_json=cand_tmp,
                     output_json=deco_path,
-                    keep_record_offsets=None,
-                    include_dock=True,
                     hull_glb=glb_path if glb_path.is_file() else None,
                     ship_nation=base_ship_nation,
                     config=cfg,
