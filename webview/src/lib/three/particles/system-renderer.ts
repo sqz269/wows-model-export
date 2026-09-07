@@ -49,6 +49,7 @@ import {
   clamp01,
   coordinateStyleUsesDetachedFrame,
   finiteNumber,
+  integrateRamp,
   rampHasNonZeroValue,
   sampleColor,
   sampleGenAxis,
@@ -1500,15 +1501,6 @@ export class SystemRenderer {
     }
   }
 
-  /** Advance the CPU simulation by `dt` seconds (emission + per-particle
-   *  update). Does NOT touch the GPU buffers — see writeBuffers(). */
-  /** Emitter duty-cycle gate. Per BigWorld `source_psa.cpp:398-434`, the active/
-   *  sleep cycle applies ONLY when `sleepPeriod > 0` (emit for `activePeriod`,
-   *  sleep for `sleepPeriod`, repeat). `sleepPeriod <= 0` (e.g. -1) means "active
-   *  all the time" (continuous); NaN/`activePeriod<=0` means no gate. Verified
-   *  live (Frida, build 12506899): GK_Shot (`sleepPeriod=-1`) emits a SUSTAINED
-   *  ~0.5s+ plateau bounded by `maxEmittingDuration`, NOT a 0.275s one-shot —
-   *  `activePeriod` does NOT bound `sleepPeriod<=0` emission. */
   /** Native systemActiveTime (PS_VALG_RAMP_PARAMETER=4). fx_Generator_eval
    *  case 4 reads emitterState[+0x18] − emitterState[+0x30] (system age minus
    *  the stamp written on the last sleep→active transition), so the clock
@@ -1544,15 +1536,33 @@ export class SystemRenderer {
     return cycle <= 0 ? true : phase % cycle <= ap; // active sub-window of each cycle
   }
 
+  /** Native negative-sleep source: emit one finite active window, then stop.
+   *  sourcesUpdate (build 12506899, LAB_1407196b8) sets source+0x39 when
+   *  sleep<0; only sleep>=0 advances the phase timestamp for another cycle.
+   *  tick @0x14071b7f0 clips dt to activePeriod - (sourceAge - phaseStamp).
+   *  Its delay gate looks ahead by dt, without subtracting a pre-delay
+   *  fraction. Keep that frame quantization rather than integrating overlap.
+   *  This supersedes the old claim based on BigWorld source_psa.cpp that
+   *  negative sleep means continuous emission: WG's implementation differs. */
+  private emitterStepDuration(previousElapsed: number, dt: number): number {
+    if (this.emitterActivePeriod > 0 && this.emitterSleepPeriod < 0) {
+      const phase = previousElapsed - this.emitterDelay;
+      if (phase + dt < 0) return 0;
+      return Math.min(dt, Math.max(0, this.emitterActivePeriod - phase));
+    }
+    return this.emitterActive(this.elapsed) ? dt : 0;
+  }
+
   /** System time (seconds) at which emission stops, for the finish/loop. All
-   *  `sleepPeriod<=0` systems (the majority — incl. every GK_Shot muzzle system)
-   *  emit continuously until `maxEmittingDuration`; the `sleepPeriod>0` duty
-   *  cycle is gated in `emitterActive()`, not here. */
+   *  Individual negative-sleep emitters stop at their activePeriod even when
+   *  the effect's maximum duration is longer; see emitterStepDuration(). */
   private oneShotEmitEnd(): number {
     return this.maxEmittingDuration;
   }
 
+  /** Advance CPU emission and particles; GPU buffers are packed separately. */
   private advance(dt: number, allowChildSpawns: boolean): void {
+    const previousElapsed = this.elapsed;
     this.elapsed += dt;
 
     // alphaSetter = camera-depth fade (fx_Action_alphaSpatialRamp): rebuild the
@@ -1645,9 +1655,7 @@ export class SystemRenderer {
       // was the ~98.5% ageScale~=1 approximation.
       const dAge = age - prevAge; // == dt * this.ageRate[i]
       if (this.frameRateRamp) {
-        const fps0 = sampleRamp(this.frameRateRamp, prevAge, 0);
-        const fps1 = sampleRamp(this.frameRateRamp, age, 0);
-        this.framePhase[i] += Math.max(0, 0.5 * (fps0 + fps1) * dAge);
+        this.framePhase[i] += integrateRamp(this.frameRateRamp, prevAge, age);
       }
       // Continuous sprite spin — byte-proven native model (FUN_14071b7f0,
       // RE 2026-06-21). TWO independent terms:
@@ -1661,9 +1669,7 @@ export class SystemRenderer {
       // initialOrientation (set at spawn) is the fixed start offset. BA_Logo
       // (flat ramp + spinRateRange 0) ⇒ both terms 0 ⇒ static.
       if (this.yawRateRamp && this.spinRateBase !== 0) {
-        const yaw0 = sampleRamp(this.yawRateRamp, prevAge, 0);
-        const yaw1 = sampleRamp(this.yawRateRamp, age, 0);
-        this.rotationPhase[i] += 0.5 * (yaw0 + yaw1) * this.spinRateBase * dAge;
+        this.rotationPhase[i] += integrateRamp(this.yawRateRamp, prevAge, age) * this.spinRateBase;
       }
       if (this.spinRateRange !== 0) {
         this.rotationPhase[i] += (this.spinSeed[i] - 0.5) * this.spinRateRange * dAge;
@@ -1717,7 +1723,10 @@ export class SystemRenderer {
       // last key time); repeat=false holds the final key (sampleColor
       // end-clamps). No /period normalization, no delay subtraction (delay is 0
       // across the whole tint corpus).
-      const tintT = this.tintRepeat && this.tintPeriod > 0 ? age % this.tintPeriod : age;
+      // Native tint samples rec.age * rec.invAux; maxAge is a death threshold,
+      // not a normalization divisor. lifetime / maxAge stores aux * AGE_AUX.
+      const tintAge = age * this.maxAge / this.lifetime[i];
+      const tintT = this.tintRepeat && this.tintPeriod > 0 ? tintAge % this.tintPeriod : tintAge;
       sampleColor(this.tintColor, tintT, SystemRenderer.TMP_COL);
       const aRow = this.alphaDepthRow;
       const alphaSetterFactor = aRow
@@ -1802,7 +1811,8 @@ export class SystemRenderer {
     // position/velocity volume generators; they share the capacity cap so the
     // system can't exceed `capacity`. A source whose rate is 0 spawns nothing.
     if (emitting) {
-      if (this.emitterRateVg && this.emitterActive(this.elapsed)) {
+      const emitterDt = this.emitterStepDuration(previousElapsed, dt);
+      if (this.emitterRateVg && emitterDt > 0) {
         // Emitter ramp keyed in SECONDS against systemAge, sampled at
         // `elapsed mod activePeriod` (constant/linear VGs ignore t; ramp VGs
         // hold their last value past the tail; activePeriod==0 ⇒ raw elapsed).
@@ -1816,7 +1826,7 @@ export class SystemRenderer {
           this.distanceRateMultiplier;
         this.emitAccum = this.emitFromSource(
           eRate,
-          dt,
+          emitterDt,
           this.emitAccum,
           this.emitterPosVg,
           this.emitterVelVg,
@@ -1920,7 +1930,14 @@ export class SystemRenderer {
     t.col[dst4 + 1] = this.colorRGBA[src4 + 1];
     t.col[dst4 + 2] = this.colorRGBA[src4 + 2];
     t.col[dst4 + 3] = this.colorRGBA[src4 + 3];
-    t.size[drawSlot] = this.sizeArr[sourceSlot] * NATIVE_TO_METRES;
+    // Native cookDrawRecords writes HALF-extents (base size × scaler) to
+    // drawRec+0x04/+0x08. VS0 expands signed [-1,1] corners by those values;
+    // its UV conversion is (corner + 1) / 2 (tokens 186–207, 280–302).
+    // Our shaders expand [0,1] corners about .5 and expect a full diameter,
+    // including the rotationCenter anchor's diameter*.5. Convert here for
+    // both the per-system and composed-bucket draw paths. Keep sim lengths,
+    // positions, velocities and light radii in their existing units.
+    t.size[drawSlot] = this.sizeArr[sourceSlot] * (2 * NATIVE_TO_METRES);
     t.glow[drawSlot] = this.glowStrengthArr[sourceSlot];
     t.scaleX[drawSlot] = this.spriteScaleXArr[sourceSlot];
     t.age[drawSlot] = this.age[sourceSlot];
@@ -1998,6 +2015,15 @@ export class SystemRenderer {
     }
   }
 
+  /** Inspector visibility must include the separately parented sorted batches.
+   * Keep their buffers intact so toggling a paused effect works immediately. */
+  setDrawVisible(visible: boolean): void {
+    this.points.visible = visible;
+    for (const entry of this.runMeshes) {
+      entry.mesh.visible = visible && entry.geom.instanceCount > 0;
+    }
+  }
+
   beginRuns(): void {
     this.runCursor = 0;
   }
@@ -2025,7 +2051,7 @@ export class SystemRenderer {
     for (const a of entry.attrs) a.needsUpdate = true;
     entry.geom.instanceCount = count;
     entry.mesh.renderOrder = Math.min(0.99, runOrder * 1e-4);
-    entry.mesh.visible = true;
+    entry.mesh.visible = this.points.visible;
     if (!entry.mesh.parent && this.points.parent) this.points.parent.add(entry.mesh);
   }
 

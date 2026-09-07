@@ -29,6 +29,7 @@
   import { navState } from '$lib/nav_state.svelte';
   import { hasModifier, isTypingContext } from '$lib/shortcuts';
   import { ParticleScene, type ParticleAttachmentHandle } from '$lib/three/particles';
+  import { gunShotIntensity } from '$lib/three/particles/gun-shot-intensity';
   import { createSceneEnvironment, type SceneEnvironment } from '$lib/three/scene';
   import { observeResize } from '$lib/three/resize';
   import { startRenderLoop } from '$lib/three/render_loop';
@@ -84,6 +85,15 @@
   let intensityValues = $state<number[]>([]);
   let intensityPreset = $state<'authored' | 'caliber' | 'custom'>('authored');
   let caliberMm = $state(420);
+  let barrelCount = $state(1);
+  let shotModifier = $state(1);
+  // Environment multipliers from the saved GK capture; editable because
+  // another map/weather configuration can use different lighting values.
+  let particleDirectLight = $state(0.25);
+  let particleAmbientLight = $state(0.8);
+  // GK alphaSetter is a spatial near-camera fade (full opacity at ~42 m),
+  // so the former 19 m orbit started inside the fade and hid the smoke.
+  const defaultParticleCamera: [number, number, number] = [60, 40, 60];
 
   // ── Three.js scene ──────────────────────────────────────────────────
 
@@ -108,9 +118,7 @@
   /** Indices of systems toggled OFF (hidden) in the inspector. */
   let hiddenSystems = $state<Set<number>>(new Set());
   /** Per-system panel rows (rebuilt each frame: live count + hidden flag). */
-  let systemRows = $state<
-    Array<{ i: number; name: string; alive: number; hidden: boolean }>
-  >([]);
+  let systemRows = $state<Array<{ i: number; name: string; alive: number; hidden: boolean }>>([]);
 
   // Inspector backdrop. Occluding / alpha-blended smoke (flak bursts, fire
   // smoke — the GRADIENT_MAP + lightmapping path) is near-invisible against a
@@ -242,15 +250,9 @@
     );
   }
 
-  /** ClientShooterEffects muzzle intensity law (decompiled m30eb35be.py,
-   *  build 12506899): ((barrelDiameter − 0.05) / (0.55 − 0.05)) × 10,
-   *  clamped to [0, 10] (EffectsConstants MIN/MAX_BARREL_DIAMETER +
-   *  MIN/MAX_INTENSITY). The numBarrels term
-   *  clamp(n × 0.6, 1.0, −30.0) degenerates to 1.0 (authored max is
-   *  negative), so it is omitted. 420 mm → 7.4. */
+  /** Match the firing mount's caliber, barrel count and effect modifier. */
   function caliberLawIntensity(mm: number): number {
-    const raw = ((mm / 1000 - 0.05) / (0.55 - 0.05)) * 10;
-    return Math.min(10, Math.max(0, raw));
+    return gunShotIntensity(mm, barrelCount, shotModifier);
   }
 
   /** The shot code sets ONE effect-level value —
@@ -300,6 +302,20 @@
     }
   }
 
+  function onShotParameters(barrels: number, modifier: number): void {
+    if (!Number.isFinite(barrels) || !Number.isFinite(modifier)) return;
+    barrelCount = Math.max(1, Math.trunc(barrels));
+    shotModifier = Math.max(0, modifier);
+    if (intensityPreset === 'caliber') setPresetCaliber();
+  }
+
+  function onParticleLighting(direct: number, ambient: number): void {
+    if (!Number.isFinite(direct) || !Number.isFinite(ambient)) return;
+    particleDirectLight = Math.max(0, direct);
+    particleAmbientLight = Math.max(0, ambient);
+    scene?.setLightingFactors(particleDirectLight, particleAmbientLight);
+  }
+
   function onChannelSlider(i: number, v: number): void {
     const next = intensityValues.slice();
     next[i] = v;
@@ -322,14 +338,21 @@
 
   // ── Three.js lifecycle ──────────────────────────────────────────────
 
+  function resetView(): void {
+    if (!env) return;
+    env.camera.position.set(...defaultParticleCamera);
+    env.controls.target.set(0, 0, 0);
+    env.controls.update();
+  }
+
   function mountViewer(container: HTMLElement) {
     // Compact-ish scene: camera close to the origin, smaller grid, no
     // axes hint (the inspector doesn't care about world axes — the
     // emitter is at (0,0,0) by construction).
     env = createSceneEnvironment(container, {
       background: 0x0a0c11,
-      cameraPosition: [12, 8, 12],
-      gridSize: 40,
+      cameraPosition: defaultParticleCamera,
+      gridSize: 120,
       gridDivisions: 20,
       axesSize: 1.5,
       far: 1000,
@@ -344,6 +367,7 @@
     env.axes.visible = false;
 
     scene = new ParticleScene(env.renderer);
+    scene.setLightingFactors(particleDirectLight, particleAmbientLight);
     scene.setSortCamera(env.camera);
     const sun = env.getSunLight();
     scene.setSunLighting(sun.direction, sun.color);
@@ -362,7 +386,7 @@
 
     stopLoop = startRenderLoop(() => {
       env!.controls.update();
-      scene!.tick();
+      scene!.tick(undefined, !playing);
       syncSystems();
       env!.render();
       // Mirror the simulator's alive count + elapsed time into reactive
@@ -431,7 +455,7 @@
     const systems = currentHandle ? currentHandle.systems : [];
     // 1. Visibility — sprite mesh + the lights that system authored.
     for (let i = 0; i < systems.length; i++) {
-      systems[i].points.visible = !hiddenSystems.has(i);
+      systems[i].setDrawVisible(!hiddenSystems.has(i));
     }
     if (currentHandle) {
       for (const l of currentHandle.lights) {
@@ -497,7 +521,7 @@
     );
     if (handles.length === 0) return;
     const h = handles[0];
-    scene.setAttachmentActive(h, playing);
+    scene.setAttachmentActive(h, true);
     scene.setAttachmentIntensityValues(h, intensityValues);
     currentHandle = h;
   }
@@ -508,14 +532,6 @@
   $effect(() => {
     const rec = activeRecord;
     untrack(() => rebuildSceneFromRecord(rec));
-  });
-
-  // Toggle live activity when `playing` changes (without rebuilding the
-  // simulator — preserves the ring buffer state).
-  $effect(() => {
-    if (currentHandle && scene) {
-      scene.setAttachmentActive(currentHandle, playing);
-    }
   });
 
   // ── Lifecycle wiring ────────────────────────────────────────────────
@@ -797,6 +813,14 @@
       {/if}
 
       <div class="ml-auto flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onclick={resetView}
+          title="Frame the emitter outside GK's near-camera fade zone. Zooming close applies authored distance fading."
+        >
+          Reset view
+        </Button>
         <div
           class="flex rounded border border-border overflow-hidden"
           title="Inspector backdrop — occluding smoke (flak/fire smoke) needs a lit sky to be visible; additive effects read on either"
@@ -976,6 +1000,41 @@
           </section>
         {/if}
 
+        <section class="border-border bg-muted/20 mb-3 rounded border p-2">
+          <div class="text-muted-foreground mb-1 text-[9px] uppercase tracking-wider">
+            reference lighting
+          </div>
+          <p class="text-muted-foreground mb-2 text-[10px]">Defaults from the saved GK capture.</p>
+          <div class="flex flex-wrap gap-2 font-mono text-[10px]">
+            <label class="flex items-center gap-1">
+              direct
+              <input
+                type="number"
+                min="0"
+                step="0.05"
+                value={particleDirectLight}
+                oninput={(e) =>
+                  onParticleLighting(Number(e.currentTarget.value), particleAmbientLight)}
+                class="border-border bg-background w-14 rounded border px-1 py-0.5 text-right"
+                aria-label="Particle direct lighting factor"
+              />
+            </label>
+            <label class="flex items-center gap-1">
+              ambient
+              <input
+                type="number"
+                min="0"
+                step="0.05"
+                value={particleAmbientLight}
+                oninput={(e) =>
+                  onParticleLighting(particleDirectLight, Number(e.currentTarget.value))}
+                class="border-border bg-background w-14 rounded border px-1 py-0.5 text-right"
+                aria-label="Particle ambient lighting factor"
+              />
+            </label>
+          </div>
+        </section>
+
         <!-- Intensity channels (gameplay input, not authored data) -->
         {#if (activeRecord.intensityChannels ?? []).length > 0}
           <section class="border-border bg-muted/20 mb-3 rounded border p-2">
@@ -985,7 +1044,7 @@
               </span>
               <span class="text-muted-foreground text-[9px]">{intensityPreset}</span>
             </div>
-            <div class="mb-2 flex items-center gap-1.5 font-mono text-[10px]">
+            <div class="mb-2 flex flex-wrap items-center gap-1.5 font-mono text-[10px]">
               <button
                 type="button"
                 class="rounded border px-1.5 py-0.5 {intensityPreset === 'authored'
@@ -1002,7 +1061,7 @@
                   ? 'border-primary/60 bg-primary/15 text-foreground'
                   : 'border-border text-muted-foreground hover:text-foreground'}"
                 onclick={setPresetCaliber}
-                title="ClientShooterEffects caliber law: ((d − 0.05) / 0.5) × 10, clamped to [0, 10]"
+                title="Gun caliber × barrel-count factor × effect modifier, clamped to [0, 10]"
               >
                 gun shot
               </button>
@@ -1020,6 +1079,35 @@
                 mm → {caliberLawIntensity(caliberMm).toFixed(1)}
               </span>
             </div>
+            <div class="mb-2 flex flex-wrap gap-2 font-mono text-[10px]">
+              <label class="flex items-center gap-1">
+                barrels
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={barrelCount}
+                  oninput={(e) => onShotParameters(Number(e.currentTarget.value), shotModifier)}
+                  class="border-border bg-background w-12 rounded border px-1 py-0.5 text-right"
+                  aria-label="Gun mount barrel count"
+                />
+              </label>
+              <label class="flex items-center gap-1">
+                modifier
+                <input
+                  type="number"
+                  min="0"
+                  step="0.05"
+                  value={shotModifier}
+                  oninput={(e) => onShotParameters(barrelCount, Number(e.currentTarget.value))}
+                  class="border-border bg-background w-14 rounded border px-1 py-0.5 text-right"
+                  aria-label="Gun effect intensity modifier"
+                />
+              </label>
+            </div>
+            <p class="text-muted-foreground mb-2 text-[10px]">
+              Single-emitter preview; barrel count controls shot intensity.
+            </p>
             <div class="flex flex-col gap-1 font-mono text-[10px]">
               {#each activeRecord.intensityChannels ?? [] as ch, i (i)}
                 <label class="flex items-center gap-2">

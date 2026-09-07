@@ -74,6 +74,23 @@ export function sampleRamp(ramp: ParticleRamp | undefined, t: number, fallback =
   return pts[pts.length - 1].value;
 }
 
+/** Native fx_Ramp_integrate: integrate authored segments, without extending the last knot. */
+export function integrateRamp(ramp: ParticleRamp | undefined, from: number, to: number): number {
+  const pts = ramp?.points;
+  if (!pts || pts.length < 2 || to <= from) return 0;
+  let area = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1],
+      b = pts[i];
+    const lo = Math.max(from, a.time),
+      hi = Math.min(to, b.time);
+    if (hi <= lo || b.time <= a.time) continue;
+    const slope = (b.value - a.value) / (b.time - a.time);
+    area += (hi - lo) * (a.value + slope * ((lo + hi) * 0.5 - a.time));
+  }
+  return area;
+}
+
 /** Sample a Color (RGBA) curve at parameter ``t ∈ [0, 1]``. Out → 4 floats. */
 export function sampleColor(color: ParticleColor | undefined, t: number, out: Float32Array): void {
   if (!color || !color.points || color.points.length === 0) {

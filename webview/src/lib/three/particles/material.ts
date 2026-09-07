@@ -110,11 +110,11 @@ interface ParticleMaterialOptions {
    *  (card whose long axis = eo, yawing about it to face the camera); see
    *  uUseAxialBillboard. */
   billboard?: boolean;
-  /** Renderer lighting scalars (+0x54, +0x64..+0x6c). Note: renderer
-   *  lightingShineness (+0x4c) is deliberately NOT consumed here — DXBC audit
-   *  2026-06-09 showed the native body pow exponent is the PerFrame global
-   *  g_gammaCorrection.x (≈1.0), not the per-record field; lightingShineness
-   *  only reaches a CPU-side draw descriptor (FUN_140716f00 +0x24). */
+  /** Native IA TEXCOORD6.x -> PS TEXCOORD9.x: emissive amplitude, not a pow. */
+  lightingShineness?: number;
+  /** Direct/ambient global factors. Default is captured GK profile, not a universal law. */
+  particleLightingFactors?: [number, number];
+  /** Renderer lighting scalars (+0x54, +0x64..+0x6c). */
   lightingAmbient?: number;
   lightingDiffuse?: number;
   lightingTransmission?: number;
@@ -525,7 +525,12 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       mvMap: { value: null as THREE.Texture | null },
       useMv: { value: 0 },
       mvDistortion: { value: opts.motionVectorsDistortion ?? 0 },
-      useEmissionAlphaFromMV: { value: opts.useEmissionAlphaFromMV ? 1 : 0 },
+      // fx_ParticleDesc_packRenderFlags @140716f00 forces bit 8 for both
+      // gradient blend modes, independently of the raw animation boolean.
+      // Capture30663 GK smoke flags=0x3c: opacity comes from MVEA.A, not LM.A.
+      useEmissionAlphaFromMV: {
+        value: opts.useEmissionAlphaFromMV || PS_RBT_LUT_MODES.has(opts.blendType ?? '') ? 1 : 0,
+      },
       // Premultiplied-alpha output (RE 2026-05-29). GRADIENT_MAP /
       // UNDERWATER_GRADIENT_MAP blend premultiplied alpha-over in the engine
       // (Src=ONE, Dst=INV_SRC_ALPHA), so the fragment shader must premultiply
@@ -551,9 +556,11 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uDistortionSceneTexture: { value: null as THREE.Texture | null },
       uDistortionSceneSize: { value: new THREE.Vector2(1, 1) },
       // Warm "detonation glow" strength for the lightmapping + GRADIENT_MAP
-      // path. Native multiplies the ramp term by the scaler-driven
-      // per-particle payload; the uniform is the 1.0 default/fallback.
-      uGlowStrength: { value: 1.0 },
+      // path. Native IA TEXCOORD6.x -> PS TEXCOORD9.x is lightingShineness.
+      uGlowStrength: { value: Math.max(0, finiteNumber(opts.lightingShineness, 1)) },
+      // Capture gk_frame30663 VS274/PS312: PerFrame lightingFactor.xy.
+      // Environment-specific; scene setter allows a different reference profile.
+      uParticleLightingFactors: { value: new THREE.Vector2(...(opts.particleLightingFactors ?? [0.25, 0.8])) },
       // Native FUN_140716f00 packs Renderer.shadowsStrength as
       // int(value) < 2 ? 0 : int(value) - 1 into the shader's byte payload.
       // The GRADIENT_MAP + lightmapping pixel path uses it to posterize the
@@ -601,6 +608,9 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       varying float vSpriteAspectX;
       varying float vPointExtent;
       varying vec2 vLocalUV;
+      varying vec3 vLightingRight;
+      varying vec3 vLightingUp;
+      varying vec3 vLightingToCamera;
 
       void main() {
         vColor = color;
@@ -614,6 +624,9 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           ? atan(viewVel.y, viewVel.x)
           : 0.0;
         vec3 worldPos = (modelMatrix * vec4(iPosition, 1.0)).xyz;
+        vLightingToCamera = cameraPosition - worldPos;
+        vLightingRight = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
+        vLightingUp = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
         // Velocity-axial axis (billboard + velocityOriented): the particle's
         // live velocity direction in world space, eo as the degenerate
         // fallback (native buildSpawnRecord seeds sim+0x70 the same way).
@@ -687,6 +700,8 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           vec3 cornerW = centerW
             + U * ((cornerUV.x - 0.5) * worldDiam + anchorOff.x)
             + axisW * ((0.5 - cornerUV.y) * worldDiam + anchorOff.y);
+          vLightingRight = U;
+          vLightingUp = axisW;
           gl_Position = projectionMatrix * viewMatrix * vec4(cornerW, 1.0);
         } else if (uUseFixedOrientation > 0.5) {
           // Fixed-orientation quad (fx_Sprite_buildQuad fixed-card branch, RE
@@ -722,6 +737,8 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           float cFC = cos(thetaFC);
           vec3 U = tB * cFC - tA * sFC;
           vec3 V = tB * sFC + tA * cFC;
+          vLightingRight = U;
+          vLightingUp = V;
           vec3 centerW = (modelMatrix * vec4(iPosition, 1.0)).xyz;
           vec3 cornerW = centerW
             + U * ((cornerUV.x - 0.5) * worldDiam + anchorOff.x)
@@ -737,6 +754,10 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       }
     `,
     fragmentShader: /* glsl */ `
+      uniform vec2 uParticleLightingFactors;
+      varying vec3 vLightingRight;
+      varying vec3 vLightingUp;
+      varying vec3 vLightingToCamera;
       uniform sampler2D map;
       uniform float useMap;
       uniform sampler2D lut;
@@ -806,7 +827,12 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
 
       float quantizeLightingScalar(float value, float steps) {
         if (steps <= 0.5) return value;
-        return floor(value * steps + 0.5) / steps;
+        float scaled = value * steps;
+        float whole = floor(scaled);
+        // Native DXBC round_ne: ties to even (GLSL ES1 has no roundEven).
+        float rounded = (scaled - whole == 0.5 && mod(whole, 2.0) == 0.0)
+          ? whole : floor(scaled + 0.5);
+        return rounded / steps;
       }
 
       void main() {
@@ -924,10 +950,10 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
             // framesRangeEnd + framesRangeBegin (was period-driven, wrapped by
             // end-begin). The MV warp/cross-fade is unchanged.
             float idxF = (uUseFramePhase > 0.5) ? vFramePhase : vAge * uFrameRate;
-            float f = fract(idxF);
+            float f = floor(fract(idxF) * 255.0) / 255.0;
             float fl = floor(idxF);
             float n0 = mod(fl, uFramesEnd) + uFramesBegin;
-            float n1 = mod(fl + 1.0, uFramesEnd) + uFramesBegin;
+            float n1 = n0 + 1.0; // Native guard frame; only the primary wraps its authored range.
             vec2 grid = vec2(fx, fy);
             vec2 cell0 = (vec2(mod(n0, fx), floor(n0 / fx)) + local) / grid;
             vec2 cell1 = (vec2(mod(n1, fx), floor(n1 / fx)) + local) / grid;
@@ -981,10 +1007,10 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
             // (the engine writes blend byte +0x7d = frac*255 for any nonzero
             // animationType; the older non-MV branch hard-popped).
             float idxF = (uUseFramePhase > 0.5) ? vFramePhase : vAge * uFrameRate;
-            float f = fract(idxF);
+            float f = floor(fract(idxF) * 255.0) / 255.0;
             float fl = floor(idxF);
             float n0 = mod(fl, uFramesEnd) + uFramesBegin;
-            float n1 = mod(fl + 1.0, uFramesEnd) + uFramesBegin;
+            float n1 = n0 + 1.0;
             vec2 grid = vec2(fx, fy);
             vec2 puv0 = (vec2(mod(n0, fx), floor(n0 / fx)) + local) / grid;
             vec2 puv1 = (vec2(mod(n1, fx), floor(n1 / fx)) + local) / grid;
@@ -1050,14 +1076,8 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           float gmag = (uGradientMapMode > 0.5 && mvEmissionSample >= 0.0)
             ? mvEmissionSample
             : base.r;
-          // Native applies pow(base.rgb, g_gammaCorrection.x) here — a
-          // PerFrame GLOBAL defaulting to 1.0 (identity), confirmed by DXBC
-          // audit 2026-06-09 (cb1[20] in all 7 permutations; reflection
-          // header "g_gammaCorrection // Offset: 320"). An earlier port
-          // mis-read the exponent as renderer.lightingShineness — authored
-          // up to 100 on GK_Shot smoke, which crushed the lightmapped body
-          // to black. lightingShineness never reaches the GPU (it stops in
-          // a CPU draw descriptor, FUN_140716f00 +0x24), so no pow here.
+          // LM lobes stay raw: native bypasses the base-RGB gamma result for
+          // this branch. Shineness DOES reach the GPU, as glow amplitude.
           if (uLightingMode > 0.5) {
             // _LM = a 4-WAY directional lightmap (PS_RLT lightmapping4Way).
             // base.RGBA are FOUR grayscale renders of the same puff baked-lit
@@ -1073,33 +1093,54 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
             // also reuses base.a as the opacity source (kept below as base.a),
             // so A is BOTH the +bitangent render AND the alpha.
             //
-            // Camera-facing billboards: the tangent frame is the view axes
-            // (+X tangent, +Y bitangent, +Z normal toward camera), so dotting
-            // each with the view-space (toward-)sun reduces to the sun's view
-            // components. (Velocity/explicit-oriented sprites still use this
-            // camera-frame approximation, as the prior decode did; a fully
-            // exact basis needs per-particle world axes as varyings.)
-            vec3 sunV = normalize((viewMatrix * vec4(uSunDirWorld, 0.0)).xyz);
-            float d1 = sunV.x; // +tangent   . toward-sun
-            float d2 = sunV.y; // +bitangent . toward-sun
-            float d3 = sunV.z; // +normal    . toward-sun
+            // Reconstruct in the rendered texture's world axes, including
+            // fixed/axial orientation, spin, and UV flips. Native PS312 reads
+            // the same per-instance basis rather than a global camera frame.
+            vec3 right = normalize(vLightingRight);
+            vec3 up = normalize(vLightingUp);
+            // UV-only spin must rotate the lighting frame too. Fixed-card
+            // geometry already carries its spin, so do not apply it twice.
+            bool lightingFsRotates = uUseSpriteRotation > 0.5
+              && !(uUseFixedOrientation > 0.5 && uVelocityOriented < 0.5);
+            if (lightingFsRotates) {
+              float angle = vRotationPhase
+                + ((uVelocityOriented > 0.5 && uVelocityAxial < 0.5) ? vVelocityAngle : 0.0);
+              vec3 oldRight = right;
+              right = cos(angle) * right - sin(angle) * up;
+              up = sin(angle) * oldRight + cos(angle) * up;
+            }
+            // Native flips texture axes AFTER spin; the normal is face-forward.
+            right *= 1.0 - 2.0 * uUvFlip.x;
+            up *= 1.0 - 2.0 * uUvFlip.y;
+            vec3 normal = normalize(cross(right, up));
+            if (dot(normal, vLightingToCamera) < 0.0) normal = -normal;
+            vec3 sunW = normalize(uSunDirWorld);
+            float d1 = dot(right, sunW);
+            float d2 = dot(up, sunW);
+            float d3 = dot(normal, sunW);
             float ch1 = d1 > 0.0 ? base.r : base.g;
             float ch2 = d2 > 0.0 ? base.a : base.b;
-            // Billboard-normal axis: native picks a gamma-curved average of the
-            // 4 renders (front) vs a per-particle soft fade (back). The soft
-            // scalars (v6.w / v10.z) are not plumbed; approximate the back as
-            // the attenuated front term.
+            // PS312 front average and authored wrap/transmission back lobe.
             float avg4 = (base.r + base.g + base.b + base.a) * 0.25;
             float frontTerm = min(pow(max(avg4, 0.0), 0.625), 1.0);
-            float ch3 = d3 > 0.0 ? frontTerm : frontTerm * 0.5;
+            float opacity = (useMvAlpha && mvAlphaSample >= 0.0) ? mvAlphaSample : base.a;
+            float particleAlpha = opacity * vColor.a * vHideFade;
+            float backTerm = 1.0 + uLightWrapAmount
+              - pow(max(particleAlpha, 0.00001), uLightingTransmission);
+            float ch3 = d3 > 0.0 ? frontTerm : backTerm;
             // Squared-cosine weights, saturate, NO energy-normalize
             // (ps4.txt:789-794 mul/mul/mad/mad_sat).
             float lit = clamp(d1 * d1 * ch1 + d2 * d2 * ch2 + d3 * d3 * ch3, 0.0, 1.0);
             // Ambient floor so fully-shadowed smoke isn't pure black; colored
             // sun term (RE doc 63 M2) tints the relit body by the weather sun.
-            float ambient = uLightingAmbient * frontTerm;
+            // PS312 quantizes the direct/ambient scalar factors BEFORE color
+            // composition. Environment SH/shadowing is still approximated by
+            // scalar ambient and an unshadowed direct term in this consumer.
+            lit = quantizeLightingScalar(lit, uOpacityLightingSteps);
+            frontTerm = quantizeLightingScalar(frontTerm, uOpacityLightingSteps);
+            float ambient = uLightingAmbient * frontTerm * uParticleLightingFactors.y;
             base = vec4(
-              clamp(vec3(ambient) + lit * uLightingDiffuse * uSunColorNorm, 0.0, 1.0),
+              vec3(ambient) + lit * uLightingDiffuse * uSunColorNorm * uParticleLightingFactors.x,
               base.a
             );
           }
@@ -1122,23 +1163,23 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
               // the relit smoke body, OUTSIDE the per-particle tint (engine:
               // rgb = base*lit + emis*v10.x). Native packs renderer
               // shadowsStrength as the byte step count that quantizes glow
-              // before U = 1 - glow. vGlowStrength carries the native
-              // scaler-driven per-particle payload (default 1.0).
+              // before U = 1 - glow. lightingShineness scales the emissive
+              // result; the geometry scaler does not multiply this payload.
               // Now varies per-texel → a warm GRADIENT across the sprite, not
               // one flat tan colour.
               float glowKey = gmag;
               if (uGlowPosterizeSteps > 0.5) {
-                glowKey = floor(glowKey * uGlowPosterizeSteps + 0.5) / uGlowPosterizeSteps;
+                glowKey = quantizeLightingScalar(glowKey, uGlowPosterizeSteps);
               }
               vec4 g = texture2D(lut, vec2(1.0 - glowKey, 0.5));
-              glow = g.rgb * g.a * uGlowStrength * vGlowStrength;
+              glow = g.rgb * g.a * uGlowStrength;
             } else {
               // Lambert GRADIENT_MAP: luminance-keyed recolor (engine lambert
               // path) — sweep the ramp by the sprite luminance (base.r).
               base = vec4(texture2D(lut, vec2(base.r, 0.5)).rgb, base.a);
             }
           }
-          if (uDistortion <= 0.5 && uOpacityLightingSteps > 0.5) {
+          if (uLightingMode <= 0.5 && uDistortion <= 0.5 && uOpacityLightingSteps > 0.5) {
             // Native extracts Renderer.opacityMultiplier as an 8-bit step
             // count and quantizes lighting factors before composing the body
             // with the additive glow. The webview has a collapsed lighting

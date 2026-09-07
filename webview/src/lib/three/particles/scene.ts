@@ -104,6 +104,7 @@ export class ParticleScene {
   private lastTickMs = -1;
   private sunDirection = DEFAULT_PARTICLE_SUN_DIR.clone();
   private sunColorNorm = DEFAULT_PARTICLE_SUN_COLOR_NORM.clone();
+  private lightingFactors: [number, number] = [0.25, 0.8];
   /** WebGL renderer used to issue DDS compressed-texture uploads.
    *  Provided once via `setRenderer`. Until set, particle systems load
    *  with the procedural-disc fallback. */
@@ -170,6 +171,15 @@ export class ParticleScene {
     }
     for (const effect of this.spawnedEffects) {
       for (const system of effect.systems) this.applySunLighting(system.material);
+    }
+  }
+
+  /** Saved GK capture profile; native environment SH/shadows remain approximate. */
+  setLightingFactors(direct: number, ambient: number): void {
+    if (!Number.isFinite(direct) || !Number.isFinite(ambient)) return;
+    this.lightingFactors = [Math.max(0, direct), Math.max(0, ambient)];
+    for (const system of this.debugAllSystems()) {
+      system.material.uniforms.uParticleLightingFactors.value.set(...this.lightingFactors);
     }
   }
 
@@ -335,6 +345,8 @@ export class ParticleScene {
         velocityOriented: r?.velocityOriented,
         billboard: r?.billboard,
         lightingAmbient: r?.lightingAmbient,
+        lightingShineness: r?.lightingShineness,
+        particleLightingFactors: this.lightingFactors,
         lightingDiffuse: r?.lightingDiffuse,
         lightingTransmission: r?.lightingTransmission,
         lightWrapAmount: r?.lightWrapAmount,
@@ -494,21 +506,11 @@ export class ParticleScene {
     }
   }
 
-  /** Native particle samplers CLAMP (byte-proven consequence of the DXBC ramp
-   *  law): GRADIENT_MAP samples the LUT at U = 1 − key, which is exactly 1.0
-   *  on every zero-emission texel — with the DDS loader's default
-   *  RepeatWrapping, bilinear filtering at U=1.0 wraps and blends in texel 0,
-   *  the ramp's HOT HDR end, tinting the whole quad rectangle a faint glow
-   *  (squareish sprites: GK_Shot_Gouden_Leeuw_KOTS cyan dust). Sheet/MVEA
-   *  cell UVs and the slightly-overshooting MV warp likewise must clamp at
-   *  the sheet edge, not wrap to the opposite frame. Local-UV tiling
-   *  (uUvTiling) is fract()-applied in the shader, so clamp loses nothing.
-   *  The texture cache is particles-private, so this never affects ship
-   *  materials (which do tile via texture wrap). */
-  private static clampParticleTexture<T extends THREE.Texture | null>(tex: T): T {
+  /** Capture30663 PS312: base/MV sampler s0 wraps; ramp sampler s1 clamps.
+   *  Applying the ramp's clamp requirement to every sampler was incorrect. */
+  private static configureParticleTexture<T extends THREE.Texture | null>(tex: T, ramp = false): T {
     if (tex) {
-      tex.wrapS = THREE.ClampToEdgeWrapping;
-      tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.wrapS = tex.wrapT = ramp ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
     }
     return tex;
   }
@@ -531,7 +533,7 @@ export class ParticleScene {
           console.warn('[particles] DDS load failed', workspaceRelPath, err);
           return null;
         })
-        .then((tex) => ParticleScene.clampParticleTexture(tex));
+        .then((tex) => ParticleScene.configureParticleTexture(tex));
       this.textureCache.set(url, pending);
     }
     const tex = await pending;
@@ -551,15 +553,15 @@ export class ParticleScene {
     const r = this.renderer;
     if (!r) return;
     const url = repoUrl(workspaceRelPath);
-    let pending = this.textureCache.get(url);
+    let pending = this.textureCache.get(`${url}|ramp`);
     if (!pending) {
       pending = loadDdsMipChain([url], false, r)
         .catch((err) => {
           console.warn('[particles] LUT DDS load failed', workspaceRelPath, err);
           return null;
         })
-        .then((tex) => ParticleScene.clampParticleTexture(tex));
-      this.textureCache.set(url, pending);
+        .then((tex) => ParticleScene.configureParticleTexture(tex, true));
+      this.textureCache.set(`${url}|ramp`, pending);
     }
     const tex = await pending;
     if (!tex) return;
@@ -588,7 +590,7 @@ export class ParticleScene {
           console.warn('[particles] MV DDS load failed', workspaceRelPath, err);
           return null;
         })
-        .then((tex) => ParticleScene.clampParticleTexture(tex));
+        .then((tex) => ParticleScene.configureParticleTexture(tex));
       this.textureCache.set(url, pending);
     }
     const tex = await pending;
@@ -599,25 +601,27 @@ export class ParticleScene {
   }
 
   /** Step every emitter forward by `dt`. Call this from the render loop. */
-  tick(nowMs?: number): void {
+  tick(nowMs?: number, paused = false): void {
     this.updateViewportHeightUniforms();
     const now = nowMs ?? performance.now();
     if (this.lastTickMs < 0) {
       this.lastTickMs = now;
       return;
     }
-    const dt = Math.min(0.1, (now - this.lastTickMs) * 0.001); // clamp big gaps
+    const dt = paused ? 0 : Math.min(0.1, (now - this.lastTickMs) * 0.001); // clamp big gaps
     this.lastTickMs = now;
-    if (dt <= 0) return;
+    // Pausing retains visible buffers and still re-sorts when the camera moves.
+    // Refresh lastTickMs above so resuming never consumes the paused interval.
+    if (dt <= 0 && !paused) return;
     for (const handle of this.attachments.values()) {
       if (!handle.active) continue;
-      for (const s of handle.systems) s.tick(dt);
-      for (const l of handle.lights) l.tick(dt);
+      if (!paused) for (const s of handle.systems) s.tick(dt);
+      if (!paused) for (const l of handle.lights) l.tick(dt);
     }
     for (const effect of this.spawnedEffects) {
       if (!effect.parent.active) continue;
-      for (const s of effect.systems) s.tick(dt);
-      for (const l of effect.lights) l.tick(dt);
+      if (!paused) for (const s of effect.systems) s.tick(dt);
+      if (!paused) for (const l of effect.lights) l.tick(dt);
     }
     this.pruneFinishedSpawnedEffects();
     // Native shared list-0: one back-to-front sort across every main-bucket
