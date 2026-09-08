@@ -92,8 +92,52 @@ try {
     close(particle.framePhase, 1);
     sim.dispose();
   }
+  // Fire_medium's Unity flicker regression: emission happens after survivor
+  // updates, but a newborn must already have its authored age-zero appearance.
+  for (const initialAlpha of [0, 1]) {
+    const renderer = { blendType: 'BLENDED' };
+    const system = {
+      renderer,
+      general: { capacity: 1, maxParticleAge: 4, coordinateStyle: 2 },
+      emitter: {
+        rateGenerator: { type: 'constant', value: 60 },
+        sizeGenerator: { type: 'constant', value: 2 },
+      },
+      components: [
+        {
+          kind: 'PCAT', action: 'tint',
+          body: { tint: { points: [
+            { time: 0, r: 8, g: 8, b: 0, a: initialAlpha },
+            { time: 1, r: 1, g: 1, b: 1, a: 1 },
+          ] }, period: 1, repeat: false, delay: 0 },
+        },
+        {
+          kind: 'PCAT', action: 'scaler',
+          body: { delay: 0,
+            sizeGenerator: { type: 'constant', value: 0.0878 },
+            scaleXGenerator: { type: 'constant', value: 0.3 },
+          },
+        },
+      ],
+    };
+    const sim = new SystemRenderer(system, buildParticleMaterial(renderer), 1, {
+      loopOneShot: false,
+    });
+    try {
+      sim.setActive(true);
+      sim.tick(1 / 60);
+      const newborn = sim.debugSnapshot()[0];
+      assert.ok(newborn, 'Expected a particle on the first emission step');
+      close(newborn.age, 0);
+      close(newborn.alpha, initialAlpha);
+      close(newborn.size, 2 * 0.0878);
+      close(newborn.scaleX, 0.3);
+    } finally {
+      sim.dispose();
+    }
+  }
   console.log(
-    'Particle temporal checks passed: knot crossing, end clamp, aux tint clock, independent flipbook clock.',
+    'Particle temporal checks passed: knot crossing, end clamp, aux tint clock, independent flipbook clock, newborn appearance.',
   );
 } finally {
   await rm(temp, { recursive: true, force: true });
