@@ -12,6 +12,17 @@ import { ShaderChunk } from 'three';
 import { makeCamoUniforms, type CamoUniforms } from './uniforms';
 import { makeWetnessUniforms, sharedWetTime } from '../wetness';
 
+// DXBC Path A chunk001:9-18 / Path B chunk024:134-147. Rotation is
+// centered and precedes scale/offset; shared by all camo texture samples.
+export const CAMO_UV_GLSL = `
+vec2 wgCamoUv( vec2 uv, vec4 repeats, float rotate ) {
+  vec2 p = uv - vec2( 0.5 );
+  float s = sin( rotate ), c = cos( rotate );
+  vec2 rotated = vec2( c * p.x - s * p.y, s * p.x + c * p.y ) + vec2( 0.5 );
+  return rotated * repeats.xy + repeats.zw;
+}
+`;
+
 // Procedural deck-puddle helpers (Layer 3, wg_render_ship_water.md §5b.2). The
 // engine generates a `PuddlesMap` coverage mask + a `RipplesMap` tangent normal
 // at runtime; the consumer has neither, so we stand in with value-noise coverage
@@ -68,6 +79,7 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.uniforms.camoColors = uniforms.camoColors;
     shader.uniforms.maskMap = uniforms.maskMap;
     shader.uniforms.camoUV = uniforms.camoUV;
+    shader.uniforms.camoRotate = uniforms.camoRotate;
     shader.uniforms.camoMaskMap = uniforms.camoMaskMap;
     shader.uniforms.camoMaskBound = uniforms.camoMaskBound;
     shader.uniforms.camoExclusionMap = uniforms.camoExclusionMap;
@@ -75,10 +87,13 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.uniforms.matAlbedoEnable = uniforms.matAlbedoEnable;
     shader.uniforms.matAlbedoMap = uniforms.matAlbedoMap;
     shader.uniforms.matAlbedoUv = uniforms.matAlbedoUv;
+    shader.uniforms.matAlbedoRotate = uniforms.matAlbedoRotate;
     shader.uniforms.matAlbedoMode = uniforms.matAlbedoMode;
     shader.uniforms.matAlbedoAo = uniforms.matAlbedoAo;
     shader.uniforms.catMgnMap = uniforms.catMgnMap;
+    shader.uniforms.catMgnUv = uniforms.catMgnUv;
     shader.uniforms.catMgnBound = uniforms.catMgnBound;
+    shader.uniforms.catMgnRotate = uniforms.catMgnRotate;
     shader.uniforms.catMgnInfluence = uniforms.catMgnInfluence;
     shader.uniforms.catUseCamoMaskGlobal = uniforms.catUseCamoMaskGlobal;
     shader.uniforms.wgPackMG = uniforms.wgPackMG;
@@ -126,12 +141,14 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
     shader.vertexShader =
       'varying vec2 vCamoUv;\n' +
       'uniform vec4 camoUV;\n' +
+      'uniform float camoRotate;\n' +
+      CAMO_UV_GLSL +
       'varying vec3 vWetWorldPos;\n' +
       shader.vertexShader.replace(
         '#include <project_vertex>',
         `#include <project_vertex>
 #ifdef USE_MAP
-  vCamoUv = vMapUv * camoUV.xy + camoUV.zw;
+  vCamoUv = wgCamoUv( vMapUv, camoUV, camoRotate );
 #else
   vCamoUv = vec2( 0.0 );
 #endif
@@ -148,6 +165,7 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
       'uniform float matAlbedoEnable;\n' +
       'uniform sampler2D matAlbedoMap;\n' +
       'uniform vec4 matAlbedoUv;\n' +
+      'uniform float matAlbedoRotate;\n' +
       'uniform float matAlbedoMode;\n' +
       'uniform float matAlbedoAo;\n' +
       'uniform sampler2D camoMaskMap;\n' +
@@ -155,6 +173,8 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
       'uniform sampler2D camoExclusionMap;\n' +
       'uniform float camoExclusionBound;\n' +
       'uniform sampler2D catMgnMap;\n' +
+      'uniform vec4 catMgnUv;\n' +
+      'uniform float catMgnRotate;\n' +
       'uniform float catMgnBound;\n' +
       'uniform vec3 catMgnInfluence;\n' +
       'uniform float catUseCamoMaskGlobal;\n' +
@@ -191,6 +211,7 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
       'uniform float wetTime;\n' +
       'varying vec3 vWetWorldPos;\n' +
       'varying vec2 vCamoUv;\n' +
+      CAMO_UV_GLSL +
       WET_PUDDLE_GLSL +
       shader.fragmentShader
         .replace(
@@ -215,9 +236,45 @@ export function attachCamoChunk(mat: THREE.MeshStandardMaterial): CamoUniforms {
 //                   anisotropy probe across 5/5 sampled textures.
 float catPaintMask = 1.0;
 vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
+vec3 wgDetailSample = vec3( 0.5 );
+float wgDetailFade = 0.0;
+float wgDetailAlbedo = 1.0;
+float wgDetailGloss = 1.0;
+vec3 wgDetailDiffuseDelta = vec3( 0.0 );
+#if defined( USE_MAP ) && defined( USE_NORMALMAP_TANGENTSPACE )
+if ( detailMapBound > 0.5 ) {
+  // Native ship_camo_mgn chunk012:87-123. Normal.B selects one of 16 tiles.
+  // Conformant normals recover this packed byte from the companion nbmask.
+  float detailIndex = wgPackN > 0.5
+    ? texture2D( normalMap, vNormalMapUv ).b
+    : texture2D( camoMaskMap, vMapUv ).r;
+  float tile = min( floor( detailIndex * 15.0 + 0.5 ), 15.0 );
+  float row = floor( tile / 4.0 );
+  vec2 origin = vec2( tile / 4.0 - row, row / 4.0 ) + vec2( 1.0 / 256.0 );
+  vec2 scaled = vMapUv * detailScale;
+  vec2 gradientUv = scaled * ( 31.0 / 128.0 );
+  wgDetailSample = texture2DGradEXT( detailMap,
+    fract( scaled ) * ( 31.0 / 128.0 ) + origin,
+    dFdx( gradientUv ), dFdy( gradientUv ) ).rgb;
+  // World metres -> native units. Native zoom factor is assumed 1 here.
+  wgDetailFade = 1.0 - clamp( ( vViewPosition.z / 15.0 - detailFadeDistance ) / 15.0, 0.0, 1.0 );
+  wgDetailAlbedo = 1.0 + ( 2.0 * wgDetailSample.b - 1.0 ) * wgDetailFade * detailInfluence.y;
+  wgDetailGloss = 1.0 + ( 2.0 * wgDetailSample.b - 1.0 ) * wgDetailFade * detailInfluence.z;
+}
+#endif
 
 #ifdef USE_MAP
   vec4 baseSample = texture2D( map, vMapUv );
+  // Carry detail's diffuse-only delta through paint coverage; F0 stays unchanged.
+  float wgDetailBaseMetal = metalness;
+  #ifdef USE_METALNESSMAP
+    vec4 detailBaseMg = texture2D( metalnessMap, vMetalnessMapUv );
+    float detailMetalTexel = mix( detailBaseMg.b, detailBaseMg.g, wgPackMG );
+    detailMetalTexel = mix( detailMetalTexel, min( pow( detailMetalTexel * 3.0, 4.0 ), 1.0 ), wgLegacyRemap );
+    wgDetailBaseMetal *= detailMetalTexel;
+  #endif
+  wgDetailDiffuseDelta = diffuseColor.rgb * baseSample.rgb
+    * ( 1.0 - wgDetailBaseMetal ) * ( wgDetailAlbedo - 1.0 );
 
   // ── nbmask paint factor (Path B only) ────────────────────────────────
   // The ship's _n.B channel is repacked at toolkit emit time as the BC4
@@ -289,12 +346,9 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
   // gate redundant.
 
   // ── Path B MGN texture sample ────────────────────────────────────────
-  // Sampled at the same UV transform as camoAlbedo (matAlbedoUv) since
-  // the engine treats them as a paired texture pair. For hull_palette
-  // hybrid (Path B-only, no camoAlbedo), matAlbedoUv defaults to identity
-  // (1,1,0,0) → sample at vMapUv directly.
+  // MGN retains its selected category transform even without an albedo map.
   if ( catMgnBound > 0.5 ) {
-    vec2 mgnUv = vMapUv * matAlbedoUv.xy + matAlbedoUv.zw;
+    vec2 mgnUv = wgCamoUv( vMapUv, catMgnUv, catMgnRotate );
     catMgnSample = texture2D( catMgnMap, mgnUv );
   }
 
@@ -304,13 +358,14 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
     // reference/topics/camo/camo_path_b_render_re.md §4. Mode 1 bypasses
     // useCamoMaskGlobal (raw nbPaint, not catPaintMask); modes 0/2/3 gate
     // by catPaintMask. Mode 2 dominates the corpus; mode 3 is rare/zero.
-    vec2 matUv = vMapUv * matAlbedoUv.xy + matAlbedoUv.zw;
+    vec2 matUv = wgCamoUv( vMapUv, matAlbedoUv, matAlbedoRotate );
     vec4 matSample = texture2D( matAlbedoMap, matUv );
     vec3 natural = diffuseColor.rgb * baseSample.rgb;
     float coverage = matSample.a;
 
     vec3 painted;
     float blendT;
+    float detailPaintRetention = 0.0;
     if ( matAlbedoMode > 0.5 && matAlbedoMode < 1.5 ) {
       // Mode 1: paint*ca.a — engine bypasses useCamoMaskGlobal here.
       painted = matSample.rgb;
@@ -326,10 +381,12 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
     } else {
       // Mode -1 / 0: aoMod-modulated base, gated by paintMask.
       float aoMod = mix( 1.0, coverage, matAlbedoAo );
+      detailPaintRetention = aoMod * ( 1.0 - coverage );
       painted = mix( natural * aoMod, matSample.rgb, coverage );
       blendT  = catPaintMask;
     }
     diffuseColor.rgb = mix( natural, painted, blendT );
+    wgDetailDiffuseDelta *= mix( 1.0, detailPaintRetention, blendT );
     diffuseColor.a   = baseSample.a;
   } else if ( camoEnable > 0.5 ) {
     // Path A — sequential 4-row palette lerp weighted by mask.RGB,
@@ -378,6 +435,10 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
     vec3 step1 = mix( P0,    P1, mask.r );
     vec3 step2 = mix( step1, P2, mask.g );
     vec3 step3 = mix( step2, P3, mask.b );
+    float detailRetention = mix( 1.0 - camoColors[0].a, 1.0 - camoColors[1].a, mask.r );
+    detailRetention = mix( detailRetention, 1.0 - camoColors[2].a, mask.g );
+    detailRetention = mix( detailRetention, 1.0 - camoColors[3].a, mask.b );
+    wgDetailDiffuseDelta *= mix( 1.0, detailRetention, mgB );
     diffuseColor.rgb = mix( baseRgb, step3, mgB );
     diffuseColor.a    = baseSample.a;
   } else {
@@ -394,6 +455,7 @@ vec4 catMgnSample = vec4( 0.0, 0.0, 0.5, 0.5 );
 // (waterline band) + Layer 3 (deck puddles, §5b.2) extend this block.
 float wetGlobal = clamp( wetOverall, 0.0, 1.0 );
 diffuseColor.rgb = mix( diffuseColor.rgb, wetColor, wetGlobal * 0.5 );
+wgDetailDiffuseDelta *= 1.0 - wetGlobal * 0.5;
 
 // ── Rain wetness Layer 2: waterline band (wg_render_ship_water.md §4/§9a) ───
 // Approximates the per-ship WetnessManager mask: the hull darkens + glosses
@@ -404,6 +466,7 @@ diffuseColor.rgb = mix( diffuseColor.rgb, wetColor, wetGlobal * 0.5 );
 // roughness chunk below (same main() scope; map_fragment runs before it).
 float wetBandF = clamp( ( wetWaterY + wetWaveAmp - vWetWorldPos.y ) / max( wetBand, 1e-3 ), 0.0, 1.0 );
 diffuseColor.rgb *= mix( 1.0, 0.6, wetBandF );
+wgDetailDiffuseDelta *= mix( 1.0, 0.6, wetBandF );
 `,
         )
         // ── Animated camo emission (ship_camo_mgn_material.fx chunk024) ──────
@@ -422,18 +485,20 @@ diffuseColor.rgb *= mix( 1.0, 0.6, wetBandF );
 vec3 exEmStaticForAnim = totalEmissiveRadiance;   // static emissive (diffuse*mgB*power), pre-overlay
 #ifdef USE_MAP
 if ( emissionAnimEnable > 0.5 && matAlbedoEnable > 0.5 ) {
-  vec2 emMatUv = vMapUv * matAlbedoUv.xy + matAlbedoUv.zw;
+  vec2 emMatUv = wgCamoUv( vMapUv, matAlbedoUv, matAlbedoRotate );
   vec4 emTex = texture2D( matAlbedoMap, emMatUv );
   float emCoverage = emTex.a;          // camoAlbedo.a — emission mask
   vec3  emAlbedo   = emTex.rgb;         // sRGB tex -> linear on sample
   vec3  emSpeed    = emissionMaskSpeed;
   vec3  emScale    = emissionAnimScale;
+  // chunk024:163-164 / 179-180: animScale.z scales repeats, never offset.
+  vec2 emStaticUv = wgCamoUv( vMapUv, vec4( matAlbedoUv.xy * emScale.z, matAlbedoUv.zw ), matAlbedoRotate );
   float emT        = wetTime;           // shared animated clock (== g_time)
   float emScalar = 0.0;
   if ( emissionAnimMode > 0.5 && emissionAnimMode < 1.5 ) {
     // Mode 1 — sine pulse x animMap tap.
     float s   = sin( emSpeed.x * emT * 6.2831853 ) * 0.5 + 0.5;
-    float tap = texture2D( emissionAnimMap, emMatUv * emScale.z ).r;
+    float tap = texture2D( emissionAnimMap, emStaticUv ).r;
     emScalar  = s * tap;
   } else if ( emissionAnimMode > 1.5 && emissionAnimMode < 2.5 ) {
     // Mode 2 — 1-D timeline lookup at U = maskSpeed.x*t.
@@ -443,7 +508,7 @@ if ( emissionAnimEnable > 0.5 && matAlbedoEnable > 0.5 ) {
     // Mode 3 — three scrolling taps, multiplied + saturated.
     float tap0 = texture2D( emissionAnimMap, vMapUv * emScale.x + emSpeed.xy * emT ).r;
     float tap1 = texture2D( emissionAnimMap, vMapUv * emScale.y + emSpeed.xy * emT * emSpeed.z ).r;
-    float tap2 = texture2D( emissionAnimMap, emMatUv * emScale.z ).r;
+    float tap2 = texture2D( emissionAnimMap, emStaticUv ).r;
     emScalar   = clamp( tap0 * tap1 * tap2, 0.0, 1.0 );
   }
   float emAnim = pow( clamp( emScalar, 0.0, 1.0 ), max( emissionMaskSmooth, 1e-4 ) );
@@ -517,8 +582,6 @@ if ( exEmissiveAnimEnable > 0.5 ) {
   // Engine recipe (chunk001:97-99): r0.y = lerp(base_gloss, cm.r, mask*infl.y)
   // then roughness = 1 - gloss. Lerp by 0 leaves roughTexel untouched
   // (factor = 0 when catMgnBound = 0 or Influence_g = 0).
-  float catGlossMix = catPaintMask * catMgnInfluence.y * catMgnBound;
-  roughTexel = mix( roughTexel, 1.0 - catMgnSample.r, catGlossMix );
   // PBS_ship.fx "legacy" gloss remap (engine §6b, build 12506899,
   // PBS_ship chunk046 i49-51): the base/no-camo material family applies
   //   roughness = 1 - pow(gloss, g_legacyGlossRemap = 0.75)
@@ -527,6 +590,9 @@ if ( exEmissiveAnimEnable > 0.5 ) {
   // g_legacy* constants in all 48 camo chunks). Off by default; see
   // uniforms.ts 'wgLegacyRemap'.
   roughTexel = mix( roughTexel, 1.0 - pow( max( 1.0 - roughTexel, 0.0 ), 0.75 ), wgLegacyRemap );
+  roughTexel = 1.0 - ( 1.0 - roughTexel ) * wgDetailGloss;
+  float catGlossMix = catPaintMask * catMgnInfluence.y * catMgnBound;
+  roughTexel = mix( roughTexel, 1.0 - catMgnSample.r, catGlossMix );
   roughnessFactor *= roughTexel;
 #endif
 
@@ -614,22 +680,11 @@ roughnessFactor *= mix( 1.0, 0.35, wetBandF );
   float nzRecon = sqrt( max( 0.0, 1.0 - mapN.x * mapN.x - mapN.y * mapN.y ) );
   mapN.z = mix( mapN.z, nzRecon, wgPackN );
   // ── Detail-normal overlay (shared atlas) ──────────────────────────────
-  // Sample WG's 'ship_atlas_detail.dds' at the per-material UV scale.
-  // RG decoded as signed tangent XY (×2-1). The engine adds it to the
-  // base tangent normal, weighted by 'detailInfluence.x' × a
-  // view-distance fade. Without the exact engine DXBC for the fade we
-  // approximate with 'saturate(1 - |viewPos|/detailFadeDistance)' —
-  // close-up gives full detail, far approaches zero. Gated on
-  // 'detailMapBound' so materials whose MFM didn't opt in pay no
-  // sample cost.
+  // Reuse the native atlas sample. These packed detail permutations use
+  // tangent Z=1 and normalize after TBN, not hemisphere sqrt-Z reconstruction.
   if ( detailMapBound > 0.5 ) {
-    vec2 detailUv = vMapUv * detailScale;
-    vec2 detailTangent = texture2D( detailMap, detailUv ).xy * 2.0 - 1.0;
-    float detailDist = length( vViewPosition );
-    float detailFade = clamp( 1.0 - detailDist / detailFadeDistance, 0.0, 1.0 );
-    float detailNormalWeight = detailInfluence.x * detailFade;
-    mapN.xy += detailTangent * detailNormalWeight;
-    mapN.z = sqrt( max( 0.0, 1.0 - dot( mapN.xy, mapN.xy ) ) );
+    mapN.xy += ( wgDetailSample.rg * 2.0 - 1.0 ) * detailInfluence.x * wgDetailFade;
+    mapN.z = 1.0;
   }
   // Path B normal perturbation: camoMGN packs two signed tangent-space
   // axis offsets in .B and .A (each via 2x-1). Engine recipe
@@ -646,6 +701,7 @@ roughnessFactor *= mix( 1.0, 0.35, wetBandF );
   vec2 camoNormalXY = catMgnSample.ba * 2.0 - 1.0;  // .B → X (nx), .A → Y (ny)
   mapN.xy = mix( mapN.xy, camoNormalXY, catNormalMix );
   mapN.z = mix( mapN.z, sqrt( max( 0.0, 1.0 - dot( mapN.xy, mapN.xy ) ) ), catNormalMix );
+  if ( detailMapBound > 0.5 ) mapN.z = 1.0;
   mapN.xy *= normalScale;
   // r165: 'tbn' is defined in <normal_fragment_begin> as
   //   mat3(vTangent, vBitangent, normal)   when USE_TANGENT is set
@@ -683,6 +739,7 @@ if ( wetPuddles > 0.001 ) {
   float pud = clamp( wetPuddles * puddleCov * upGate, 0.0, 1.0 );
   if ( pud > 0.001 ) {
     diffuseColor.rgb *= ( 1.0 - 0.6 * pud );               // wet pools darken
+    wgDetailDiffuseDelta *= ( 1.0 - 0.6 * pud );
     roughnessFactor   = mix( roughnessFactor, 0.05, pud ); // -> mirror sheen
     metalnessFactor   = mix( metalnessFactor, 0.0, pud );  // water is dielectric
     // Flatten the shading normal toward world-up, then tilt by an ANIMATED ripple
@@ -716,6 +773,10 @@ if ( wetPuddles > 0.001 ) {
         .replace(
           '#include <lights_physical_fragment>',
           ShaderChunk.lights_physical_fragment
+            .replace(
+              'material.diffuseColor = diffuseColor.rgb * ( 1.0 - metalnessFactor );',
+              'material.diffuseColor = diffuseColor.rgb * ( 1.0 - metalnessFactor ) + wgDetailDiffuseDelta;',
+            )
             .replace(
               'material.roughness = max( roughnessFactor, 0.0525 );',
               'material.roughness = max( roughnessFactor, 0.005 ); // WG floor (engine 0.005, §6b)',

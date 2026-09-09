@@ -72,6 +72,8 @@ export interface SkinCategoryMask {
   uv: {
     scale: [number, number];
     offset: [number, number];
+    /** Radians; rotate around (0.5, 0.5) before scale and offset. */
+    rotate?: number;
   };
   /**
    * Path B optional fields. When `mgn` is present the consumer follows
@@ -93,6 +95,8 @@ export interface SkinMatCategoryAlbedo {
   uv: {
     scale: [number, number];
     offset: [number, number];
+    /** Radians; rotate around (0.5, 0.5) before scale and offset. */
+    rotate?: number;
   };
   mgn?: { dds_mips: string[] };
   anim_map?: { dds_mips: string[] };

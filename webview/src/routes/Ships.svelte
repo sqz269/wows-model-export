@@ -122,6 +122,9 @@
           toast.loading(msg, { id: skinToastId, duration: Number.POSITIVE_INFINITY });
         }
       });
+      activeExteriorId = viewer.getActiveExteriorId();
+      activeSkin = viewer.getActiveSkinId();
+      selectedPick = null;
       if (skinToastId !== null) {
         toast.success(`Skin: ${skinId}`, { id: skinToastId, duration: 2000 });
         skinToastId = null;

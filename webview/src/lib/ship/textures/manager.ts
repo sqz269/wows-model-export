@@ -20,7 +20,7 @@
 import type * as THREE from 'three';
 import { resolveDdsMipUrls } from '$lib/dds';
 import { classifyPartCategory, classifyPlacementCategory } from '$lib/types';
-import type { ShipPlacement, Skin, SidecarDoc, SidecarTextureScheme, SkinMatCategoryParams, TextureSet } from '$lib/types';
+import type { ShipPlacement, Skin, SidecarDoc, SidecarTextureScheme, SkinCategoryMask, TextureSet } from '$lib/types';
 import { dummyMaskTexture, dummyMatAlbedoTexture, uniformsOf } from '../camo';
 import { wetnessUniformsOf, setWetTime } from '../wetness';
 import {
@@ -147,13 +147,9 @@ export class TextureManager {
   private variantSwappedAssetIds = new Set<string>();
 
   private aoEnabled = true;
-  private mrMapEnabled = false;
-  // WG hull normal maps are intrinsically subtle (mean tilt 2-3°; see
-  // tmp/detail_test/probe_normal_intensity.py). Default 2.0 doubles
-  // the apparent perturbation so detail reads under diffuse-dominated
-  // lighting. 1.0 = engine-faithful, 0.0 = flat (normal map disabled
-  // visually). Live-updatable via setNormalScale.
-  private normalScale = 2.0;
+  private mrMapEnabled = true;
+  // Native normal amplitude by default; explicit user overrides remain available.
+  private normalScale = 1.0;
   // Cached rain wetness. The env is applied in the viewer ctor — before any
   // ship loads — so the params are cached and re-pushed to clones as they're
   // built (and rebuilt on skin swap). `wetnessColor` is built by the viewer
@@ -1010,6 +1006,7 @@ export class TextureManager {
         uvScaleY = 1.0,
         uvOffsetX = 0.0,
         uvOffsetY = 0.0;
+      let uvRotate = 0.0;
 
       // Variant-swapped accessories opt out of overlays so their bespoke
       // `*_Azur_a.dds` albedo wins over generic camo / mat_camo.
@@ -1022,7 +1019,7 @@ export class TextureManager {
       // wins over `categories` when both exist; the two record shapes
       // diverge in their non-MGN fields, but both carry `.mgn` + `.params`
       // identically, so the downstream uniform writes are the same.
-      const pathB: { mgn?: { dds_mips: string[] }; params?: SkinMatCategoryParams } | null =
+      const pathB: Pick<SkinCategoryMask, 'mgn' | 'params' | 'uv'> | null =
         noCamo
           ? null
           : matTextures && entry.category in matTextures && matTextures[entry.category].mgn
@@ -1060,6 +1057,7 @@ export class TextureManager {
           uvScaleY = cat.uv.scale[1];
           uvOffsetX = cat.uv.offset[0];
           uvOffsetY = cat.uv.offset[1];
+          uvRotate = cat.uv.rotate ?? 0;
         }
       } else if (!noCamo && palette) {
         // Step 2: per-stem `_camo_NN.dds` cascade.
@@ -1071,6 +1069,7 @@ export class TextureManager {
         matUy = 1.0,
         matOx = 0.0,
         matOy = 0.0;
+      let matRotate = 0.0;
       let matMode = -1.0;
       let matAo = 0.0;
       // Animated camo emission — rides the mat_albedo paint (gated on matTex).
@@ -1101,6 +1100,7 @@ export class TextureManager {
           matUy = matCat.uv.scale[1];
           matOx = matCat.uv.offset[0];
           matOy = matCat.uv.offset[1];
+          matRotate = matCat.uv.rotate ?? 0;
           if (params) {
             matMode = params.camo_mode;
             matAo = params.ao_influence;
@@ -1136,20 +1136,24 @@ export class TextureManager {
             u.matAlbedoEnable.value = 1.0;
             u.matAlbedoMap.value = matTex;
             u.matAlbedoUv.value.set(matUx, matUy, matOx, matOy);
+            u.matAlbedoRotate.value = matRotate;
             u.matAlbedoMode.value = matMode;
             u.matAlbedoAo.value = matAo;
             u.camoEnable.value = 0.0;
             u.maskMap.value = dummyMaskTexture;
             u.camoUV.value.set(1, 1, 0, 0);
+            u.camoRotate.value = 0;
           } else if (mask && palette) {
             u.matAlbedoEnable.value = 0.0;
             u.matAlbedoMap.value = dummyMatAlbedoTexture;
             u.matAlbedoUv.value.set(1, 1, 0, 0);
+            u.matAlbedoRotate.value = 0;
             u.matAlbedoMode.value = -1.0;
             u.matAlbedoAo.value = 0.0;
             u.camoEnable.value = 1.0;
             u.maskMap.value = mask;
             u.camoUV.value.set(uvScaleX, uvScaleY, uvOffsetX, uvOffsetY);
+            u.camoRotate.value = uvRotate;
             for (let i = 0; i < 4; i++) {
               const c = palette.colors[i] ?? [0, 0, 0, 1];
               u.camoColors.value[i].set(c[0], c[1], c[2], c[3]);
@@ -1158,11 +1162,13 @@ export class TextureManager {
             u.matAlbedoEnable.value = 0.0;
             u.matAlbedoMap.value = dummyMatAlbedoTexture;
             u.matAlbedoUv.value.set(1, 1, 0, 0);
+            u.matAlbedoRotate.value = 0;
             u.matAlbedoMode.value = -1.0;
             u.matAlbedoAo.value = 0.0;
             u.camoEnable.value = 0.0;
             u.maskMap.value = dummyMaskTexture;
             u.camoUV.value.set(1, 1, 0, 0);
+            u.camoRotate.value = 0;
           }
 
           // Path B MGN override — bound independently of the matAlbedo
@@ -1171,11 +1177,16 @@ export class TextureManager {
           // influence is a no-op. When the sidecar carries an `mgn`
           // texture but the cache didn't load it (missing DDS, etc.),
           // mgnTex is null → catMgnBound = 0 → safe fallback to base.
-          if (mgnTex) {
+          if (mgnTex && pathB) {
+            const mgnUv = pathB.uv;
+            u.catMgnUv.value.set(mgnUv.scale[0], mgnUv.scale[1], mgnUv.offset[0], mgnUv.offset[1]);
+            u.catMgnRotate.value = mgnUv.rotate ?? 0;
             u.catMgnMap.value = mgnTex;
             u.catMgnBound.value = 1.0;
             u.catMgnInfluence.value.set(mgnInfluence[0], mgnInfluence[1], mgnInfluence[2]);
           } else {
+            u.catMgnUv.value.set(1, 1, 0, 0);
+            u.catMgnRotate.value = 0;
             u.catMgnBound.value = 0.0;
             u.catMgnInfluence.value.set(0, 0, 0);
           }

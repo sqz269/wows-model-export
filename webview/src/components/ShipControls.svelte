@@ -160,8 +160,8 @@
   });
   let showTextures = $state(false);
   let aoMaps = $state(true);
-  let mrMaps = $state(false);
-  let normalScale = $state(2.0);
+  let mrMaps = $state(true);
+  let normalScale = $state(1.0);
   let bloomEnabled = $state(false);
   let bloomStrength = $state(DEFAULT_BLOOM_PARAMS.strength);
   let bloomRadius = $state(DEFAULT_BLOOM_PARAMS.radius);

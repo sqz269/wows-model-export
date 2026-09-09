@@ -14,6 +14,7 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test:particles": "node scripts/test-particle-parity.mjs && node scripts/test-particle-temporal.mjs && node scripts/test-exterior-effects.mjs",
+    "test:camo": "node scripts/test-camo-parity.mjs",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write ."
   },

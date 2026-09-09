@@ -15,10 +15,11 @@ export interface CamoUniforms {
   maskMap: { value: THREE.Texture };
   /**
    * Per-mesh UV transform applied to the mask sample
-   * (`vCamoUv = vMapUv * camoUV.xy + camoUV.zw`). Identity `(1,1,0,0)`
+   * (centered rotation, then scale and offset). Identity `(1,1,0,0)`
    * for hull meshes; non-identity for accessory tile-pattern masks.
    */
   camoUV: { value: THREE.Vector4 };
+  camoRotate: { value: number };
   /**
    * BC4 single-channel no-camo region mask (`_nbmask.dds`, derived
    * from the WG normal-map B channel). Gates the camo overlay
@@ -47,6 +48,7 @@ export interface CamoUniforms {
   matAlbedoEnable: { value: number };
   matAlbedoMap: { value: THREE.Texture };
   matAlbedoUv: { value: THREE.Vector4 };
+  matAlbedoRotate: { value: number };
   /**
    * Path A vs Path B discriminator. Mirrors
    * `Skin.mat_textures[<cat>].params.camo_mode` from the sidecar:
@@ -76,6 +78,8 @@ export interface CamoUniforms {
   // The mask is in camoAlbedo.a, NOT camoMGN.a — camoMGN has no alpha mask.
   /** Camo MGN override texture. 1×1 neutral default. */
   catMgnMap: { value: THREE.Texture };
+  catMgnUv: { value: THREE.Vector4 };
+  catMgnRotate: { value: number };
   /** 1.0 when a real MGN texture is bound. */
   catMgnBound: { value: number };
   /**
@@ -223,6 +227,7 @@ export function makeCamoUniforms(): CamoUniforms {
     },
     maskMap: { value: dummyMaskTexture },
     camoUV: { value: new THREE.Vector4(1, 1, 0, 0) },
+    camoRotate: { value: 0 },
     camoMaskMap: { value: dummyMaskTexture },
     camoMaskBound: { value: 0.0 },
     camoExclusionMap: { value: dummyMaskTexture },
@@ -230,9 +235,12 @@ export function makeCamoUniforms(): CamoUniforms {
     matAlbedoEnable: { value: 0.0 },
     matAlbedoMap: { value: dummyMatAlbedoTexture },
     matAlbedoUv: { value: new THREE.Vector4(1, 1, 0, 0) },
+    matAlbedoRotate: { value: 0 },
     matAlbedoMode: { value: -1.0 },
     matAlbedoAo: { value: 0.0 },
     catMgnMap: { value: dummyMgnTexture },
+    catMgnUv: { value: new THREE.Vector4(1, 1, 0, 0) },
+    catMgnRotate: { value: 0 },
     catMgnBound: { value: 0.0 },
     catMgnInfluence: { value: new THREE.Vector3(0, 0, 0) },
     catUseCamoMaskGlobal: { value: 0.0 },

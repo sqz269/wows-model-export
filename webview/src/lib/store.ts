@@ -98,7 +98,7 @@ export function defaultState(): PersistedState {
     showTextures: false,
     aoMaps: true,
     mrMaps: true,
-    normalScale: 2.0,
+    normalScale: 1.0,
     bloomEnabled: false,
     bloomStrength: 0.6,
     bloomRadius: 0.35,

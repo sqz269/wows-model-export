@@ -12,7 +12,7 @@ export interface MaterialClonePolicy {
   /** Current AO toggle. Drives `aoMapIntensity` on the new clone. */
   aoEnabled: boolean;
   /**
-   * Current MR-maps toggle. Off by default — when the bound texture is
+   * Current MR-maps toggle. On by default — when the bound texture is
    * raw WG `_mg.dd0` (R=gloss, G=metallic, B=paint mask) Three.js's
    * stock glTF MR chunks read the wrong channels and the painted
    * dielectric reads as a shiny conductor. shader.ts overrides the
@@ -21,7 +21,7 @@ export interface MaterialClonePolicy {
    */
   mgMapEnabled: boolean;
   /**
-   * Three.js `MeshStandardMaterial.normalScale` factor. Default 2.0 —
+   * Three.js `MeshStandardMaterial.normalScale` factor. Default 1.0 —
    * WG hull normal maps are authored very subtly (mean tilt 2-3°, p95
    * ~16°; intentional art style for smooth steel plating). Engine-
    * faithful is 1.0; bumping to 2-3x makes the surface detail readable
@@ -207,8 +207,8 @@ export function applyTexturesToMaterial(
   // `detailParams` implies `tex.detail` is also present. The shader
   // sums detail onto the base tangent normal weighted by a distance
   // fade — see `camo/shader.ts` for the engine recipe.
-  if (detailParams) {
-    camoUniforms.detailMap.value = tex.detail!;
+  if (detailParams && tex.detail && tex.normal && (camoUniforms.wgPackN.value > 0.5 || tex.camoMask)) {
+    camoUniforms.detailMap.value = tex.detail;
     camoUniforms.detailMapBound.value = 1.0;
     camoUniforms.detailScale.value.set(detailParams.scale_u, detailParams.scale_v);
     camoUniforms.detailInfluence.value.set(
