@@ -103,6 +103,21 @@ const CAMERA_ATTACHED_SORT_KEY = -1000;
 /** Native minimum folded alpha for a particle to be cooked into the draw
  *  list at all (DAT_142556328 ≈ 0.15/255; cookDrawRecords culls below it). */
 const MIN_DRAW_ALPHA = 0.000588;
+const SOURCE_BURST_PERIOD_EPSILON = Math.fround(0.0004);
+
+/** Native burst source reads payload[0], not the evaluated/randomized VG. */
+function firstSourceValue(vg: ParticleValueGenerator | undefined): number {
+  switch (vg?.type) {
+    case 'constant':
+      return vg.value ?? 0;
+    case 'linear':
+      return vg.from ?? 0;
+    case 'ramp':
+      return vg.ramp?.points?.[0]?.value ?? 0;
+    default:
+      return 0;
+  }
+}
 
 /** Packed draw-attribute target — either the system's own mesh arrays or one
  *  pooled run mesh's arrays (composed main bucket). */
@@ -111,6 +126,7 @@ interface RunDrawArrays {
   vel: Float32Array;
   col: Float32Array;
   size: Float32Array;
+  softDepthExtent: Float32Array;
   glow: Float32Array;
   scaleX: Float32Array;
   age: Float32Array;
@@ -248,6 +264,13 @@ export class SystemRenderer {
   private emitterActivePeriod: number;
   private emitterDelay = 0;
   private emitterSleepPeriod = Number.NaN;
+  private readonly emitterBurstPeriod: number;
+  private readonly emitterBurstMode: boolean;
+  private readonly emitterSleepVg: ParticleValueGenerator | undefined;
+  private burstSourceCreated = false;
+  private burstSourceAge = 0;
+  private burstSourceStart = 0;
+  private burstSourceRetired = false;
   private inheritVelocityFactor = 0;
   private snapToSeaLevel = false;
   // Per-action driver fields.
@@ -379,11 +402,16 @@ export class SystemRenderer {
   private lifetime: Float32Array;
   private colorRGBA: Float32Array;
   private sizeArr: Float32Array;
+  // Native draw v5.z: base size × scaler × authored soft-depth coefficient.
+  // Kept separate from final height, which also contains SCALE_Y.
+  private softDepthExtentArr: Float32Array;
+  private readonly authoredSoftDepthScale: number;
   private glowStrengthArr: Float32Array;
   private spriteScaleXArr: Float32Array;
   private drawPos: Float32Array;
   private drawColorRGBA: Float32Array;
   private drawSizeArr: Float32Array;
+  private drawSoftDepthExtent: Float32Array;
   private drawGlowStrength: Float32Array;
   private drawSpriteScaleX: Float32Array;
   private drawFrameSeed: Float32Array;
@@ -402,6 +430,7 @@ export class SystemRenderer {
   private velocityAttr: THREE.BufferAttribute;
   private colorAttr: THREE.BufferAttribute;
   private sizeAttr: THREE.BufferAttribute;
+  private softDepthExtentAttr: THREE.BufferAttribute;
   private glowStrengthAttr: THREE.BufferAttribute;
   private spriteScaleXAttr: THREE.BufferAttribute;
   /** Packed (compacted to the front, matching pos/color/size) age values
@@ -560,6 +589,8 @@ export class SystemRenderer {
     options: SystemRendererOptions = {},
   ) {
     this.material = material;
+    const softDepth = system.renderer?.softParticleDepthScale ?? 0;
+    this.authoredSoftDepthScale = Number.isFinite(softDepth) && softDepth > 0 ? softDepth : 0;
     this.name = system.name ?? '';
     this.maxEmittingDuration = maxEmittingDuration;
     this.spawnEffect = options.spawnEffect;
@@ -785,15 +816,16 @@ export class SystemRenderer {
     this.emitterPosVg = system.emitter?.initialPositionGenerator;
     this.emitterVelVg = system.emitter?.initialVelocityGenerator;
     this.emitterActivePeriod = Math.max(0, system.emitter?.activePeriod ?? 0);
-    // Emitter duty cycle (BigWorld source_psa.cpp:398-434; live-verified vs
-    // build 12506899 — see emitterActive()): the active/sleep cycle applies
-    // ONLY when sleepPeriod>0 (emit `activePeriod`, sleep `sleepPeriod`,
-    // repeat). sleepPeriod<=0 (e.g. -1) = active the WHOLE emission window —
-    // continuous to maxEmittingDuration; activePeriod does NOT bound it (it
-    // is the rate ramp's wrap period). Absent (NaN) or activePeriod<=0 ⇒ no
-    // gate. The per-emitter delay staggers ignition regardless of duty mode.
-    // GK_Shot.xml systems[1] (0-based): rate ramp 200/s over [0,0.275s],
-    // sleepPeriod=-1, maxAge=2.25 (verified against assets.bin).
+    // Only an explicitly authored near-zero period selects the native count
+    // branch. Older sparse fixtures without activePeriod keep their default.
+    this.emitterBurstPeriod = system.emitter?.activePeriod ?? Infinity;
+    this.emitterBurstMode =
+      this.emitterBurstPeriod > -SOURCE_BURST_PERIOD_EPSILON &&
+      this.emitterBurstPeriod < SOURCE_BURST_PERIOD_EPSILON;
+    this.emitterSleepVg = system.emitter?.sleepPeriodGenerator;
+    // Positive periods with negative sleep use a finite active window.
+    // Near-zero periods instead emit a count per eligible source tick; their
+    // separate source clock preserves creation/delay/retirement ordering.
     this.emitterDelay = Math.max(0, sampleScalarVg(system.emitter?.delayGenerator, 0, 0));
     this.emitterSleepPeriod = sampleScalarVg(system.emitter?.sleepPeriodGenerator, 0, Number.NaN);
     this.inheritVelocityFactor = system.emitter?.inheritVelocityFactor ?? 0;
@@ -883,11 +915,13 @@ export class SystemRenderer {
     this.ageRate = new Float32Array(this.capacity);
     this.colorRGBA = new Float32Array(this.capacity * 4);
     this.sizeArr = new Float32Array(this.capacity);
+    this.softDepthExtentArr = new Float32Array(this.capacity);
     this.glowStrengthArr = new Float32Array(this.capacity);
     this.spriteScaleXArr = new Float32Array(this.capacity);
     this.drawPos = new Float32Array(this.capacity * 3);
     this.drawColorRGBA = new Float32Array(this.capacity * 4);
     this.drawSizeArr = new Float32Array(this.capacity);
+    this.drawSoftDepthExtent = new Float32Array(this.capacity);
     this.drawGlowStrength = new Float32Array(this.capacity);
     this.drawSpriteScaleX = new Float32Array(this.capacity);
     this.drawFrameSeed = new Float32Array(this.capacity);
@@ -903,6 +937,7 @@ export class SystemRenderer {
       vel: this.velGpu,
       col: this.drawColorRGBA,
       size: this.drawSizeArr,
+      softDepthExtent: this.drawSoftDepthExtent,
       glow: this.drawGlowStrength,
       scaleX: this.drawSpriteScaleX,
       age: this.ageGpu,
@@ -937,6 +972,8 @@ export class SystemRenderer {
     this.colorAttr.setUsage(THREE.DynamicDrawUsage);
     this.sizeAttr = new THREE.InstancedBufferAttribute(this.drawSizeArr, 1);
     this.sizeAttr.setUsage(THREE.DynamicDrawUsage);
+    this.softDepthExtentAttr = new THREE.InstancedBufferAttribute(this.drawSoftDepthExtent, 1);
+    this.softDepthExtentAttr.setUsage(THREE.DynamicDrawUsage);
     this.glowStrengthAttr = new THREE.InstancedBufferAttribute(this.drawGlowStrength, 1);
     this.glowStrengthAttr.setUsage(THREE.DynamicDrawUsage);
     this.spriteScaleXAttr = new THREE.InstancedBufferAttribute(this.drawSpriteScaleX, 1);
@@ -953,6 +990,7 @@ export class SystemRenderer {
     geom.setAttribute('velocity', this.velocityAttr);
     geom.setAttribute('color', this.colorAttr);
     geom.setAttribute('size', this.sizeAttr);
+    geom.setAttribute('softDepthExtent', this.softDepthExtentAttr);
     geom.setAttribute('glowStrength', this.glowStrengthAttr);
     geom.setAttribute('spriteScaleX', this.spriteScaleXAttr);
     geom.setAttribute('age', this.ageAttr);
@@ -1005,6 +1043,7 @@ export class SystemRenderer {
     this.finished = false;
     this.points.visible = true;
     this.elapsed = 0;
+    this.burstSourceCreated = false;
     this.prewarmed = false;
     this.alive = 0;
     this.emitAccum = 0;
@@ -1619,6 +1658,7 @@ export class SystemRenderer {
         return;
       }
       this.elapsed = 0;
+      this.burstSourceCreated = false;
       // Re-warm the next burst (prewarm-authored systems only; engine
       // re-warms on re-activation).
       this.prewarmed = false;
@@ -1793,11 +1833,11 @@ export class SystemRenderer {
       // Byte-proven build 12506899: rec[0x20] size reads ONLY block[23]
       // (PARTICLE_SIZE); the age slots block[8]/block[14] go to rec[0x08]/rec[0x0c].
       sz *=
-        this.intensitySizeMultiplier *
-        this.distanceSizeMultiplier *
-        this.intensityScaleYMultiplier *
-        this.distanceScaleYMultiplier *
-        this.barrierScaleMultiplier;
+        this.intensitySizeMultiplier * this.distanceSizeMultiplier * this.barrierScaleMultiplier;
+      // cookDrawRecords: v5.z = B * renderer.softParticleDepthScale. B includes
+      // PARTICLE_SIZE and scaler changes, but not the width/height draw factors.
+      this.softDepthExtentArr[i] = Math.max(0, sz) * this.authoredSoftDepthScale;
+      sz *= this.intensityScaleYMultiplier * this.distanceScaleYMultiplier;
       this.sizeArr[i] = Math.max(0, sz);
       this.glowStrengthArr[i] = Number.isFinite(glowScale) ? glowScale : 1;
       this.spriteScaleXArr[i] = Number.isFinite(scalerScaleX)
@@ -1812,7 +1852,9 @@ export class SystemRenderer {
     // system can't exceed `capacity`. A source whose rate is 0 spawns nothing.
     if (emitting) {
       const emitterDt = this.emitterStepDuration(previousElapsed, dt);
-      if (this.emitterRateVg && emitterDt > 0) {
+      if (this.emitterBurstMode) {
+        this.emitBurstSource(dt);
+      } else if (this.emitterRateVg && emitterDt > 0) {
         // Emitter ramp keyed in SECONDS against systemAge, sampled at
         // `elapsed mod activePeriod` (constant/linear VGs ignore t; ramp VGs
         // hold their last value past the tail; activePeriod==0 ⇒ raw elapsed).
@@ -1882,6 +1924,7 @@ export class SystemRenderer {
     this.velocityAttr.needsUpdate = true;
     this.colorAttr.needsUpdate = true;
     this.sizeAttr.needsUpdate = true;
+    this.softDepthExtentAttr.needsUpdate = true;
     this.glowStrengthAttr.needsUpdate = true;
     this.spriteScaleXAttr.needsUpdate = true;
     this.ageAttr.needsUpdate = true;
@@ -1938,6 +1981,8 @@ export class SystemRenderer {
     // both the per-system and composed-bucket draw paths. Keep sim lengths,
     // positions, velocities and light radii in their existing units.
     t.size[drawSlot] = this.sizeArr[sourceSlot] * (2 * NATIVE_TO_METRES);
+    // This is an extent, not a quad diameter. Native VS uses 1 / (0.3 * v5.z).
+    t.softDepthExtent[drawSlot] = this.softDepthExtentArr[sourceSlot] * NATIVE_TO_METRES;
     t.glow[drawSlot] = this.glowStrengthArr[sourceSlot];
     t.scaleX[drawSlot] = this.spriteScaleXArr[sourceSlot];
     t.age[drawSlot] = this.age[sourceSlot];
@@ -2080,6 +2125,7 @@ export class SystemRenderer {
       vel: new Float32Array(cap * 3),
       col: new Float32Array(cap * 4),
       size: new Float32Array(cap),
+      softDepthExtent: new Float32Array(cap),
       glow: new Float32Array(cap),
       scaleX: new Float32Array(cap),
       age: new Float32Array(cap),
@@ -2103,6 +2149,7 @@ export class SystemRenderer {
       mk(arrays.frameSeed, 1),
       mk(arrays.framePhase, 1),
       mk(arrays.rotationPhase, 1),
+      mk(arrays.softDepthExtent, 1),
     ];
     geom.setAttribute('iPosition', attrs[0]);
     geom.setAttribute('velocity', attrs[1]);
@@ -2114,6 +2161,7 @@ export class SystemRenderer {
     geom.setAttribute('frameSeed', attrs[7]);
     geom.setAttribute('framePhase', attrs[8]);
     geom.setAttribute('rotationPhase', attrs[9]);
+    geom.setAttribute('softDepthExtent', attrs[10]);
     geom.instanceCount = 0;
     const mesh = new THREE.Mesh(geom, this.material);
     mesh.frustumCulled = false;
@@ -2141,6 +2189,45 @@ export class SystemRenderer {
     const STEPS = 10;
     const dt = horizon / STEPS;
     for (let s = 0; s < STEPS; s++) this.advanceBy(dt, false);
+  }
+
+  /** Native near-zero-active-period branch (tick 14071c223-14071c2bd).
+   * sourcesUpdate retires/ages existing sources before tick, but a newly
+   * appended source stays age zero on its creation tick. No hasFired gate:
+   * delay look-ahead can make consecutive ticks eligible before retirement. */
+  private emitBurstSource(dt: number): void {
+    // Native source clocks are float32; keep inclusive delay boundaries aligned.
+    dt = Math.fround(dt);
+    if (!this.burstSourceCreated) {
+      this.burstSourceCreated = true;
+      this.burstSourceAge = 0;
+      this.burstSourceStart = Math.fround(this.emitterDelay);
+      this.burstSourceRetired = false;
+    } else if (!this.burstSourceRetired) {
+      const repeats = firstSourceValue(this.emitterSleepVg) >= 0;
+      const testAge = Math.fround(this.burstSourceAge + (repeats ? dt : 0));
+      if (testAge >= Math.fround(this.burstSourceStart + this.emitterBurstPeriod)) {
+        if (repeats) {
+          this.burstSourceStart = Math.fround(
+            this.burstSourceStart +
+              Math.fround(this.emitterBurstPeriod + sampleScalarVg(this.emitterSleepVg, 0, 0)),
+          );
+        } else {
+          this.burstSourceRetired = true;
+        }
+      }
+      this.burstSourceAge = Math.fround(this.burstSourceAge + dt);
+    }
+    if (this.burstSourceRetired || this.burstSourceStart > Math.fround(this.burstSourceAge + dt)) return;
+    const amount = Math.fround(
+      firstSourceValue(this.emitterRateVg) *
+        Math.fround(this.intensityRateMultiplier * this.distanceRateMultiplier),
+    );
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    // Truncate before capacity, without dt, randomization or accumulated
+    // fractions. Rejected whole particles cannot leak into later frames.
+    const count = Math.min(Math.trunc(amount), this.capacity - this.alive);
+    for (let i = 0; i < count; i++) this.spawnParticle(this.emitterPosVg, this.emitterVelVg);
   }
 
   /** Spawn whole particles from one emission source at ``rate`` Hz, carrying
@@ -2346,11 +2433,9 @@ export class SystemRenderer {
     }
     let sz0 = this.psize[slot] * sizeScale0;
     // AGE_SCALE/AGE_AUX folded into the age clock above, not size (byte-proven).
-    sz0 *=
-      this.intensitySizeMultiplier *
-      this.distanceSizeMultiplier *
-      this.intensityScaleYMultiplier *
-      this.distanceScaleYMultiplier;
+    sz0 *= this.intensitySizeMultiplier * this.distanceSizeMultiplier;
+    this.softDepthExtentArr[slot] = Math.max(0, sz0) * this.authoredSoftDepthScale;
+    sz0 *= this.intensityScaleYMultiplier * this.distanceScaleYMultiplier;
     this.sizeArr[slot] = Math.max(0, sz0);
     this.glowStrengthArr[slot] = Number.isFinite(glowScale0) ? glowScale0 : 1;
     this.spriteScaleXArr[slot] = Number.isFinite(scalerScaleX0)

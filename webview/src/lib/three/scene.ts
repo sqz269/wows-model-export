@@ -79,7 +79,7 @@ function objectMaterials(object: THREE.Object3D): THREE.Material[] {
 
 function materialHasSoftParticleUniform(material: THREE.Material): material is THREE.ShaderMaterial {
   const uniforms = (material as THREE.ShaderMaterial).uniforms;
-  return !!uniforms?.uSoftParticleDepthScale;
+  return !!uniforms?.uSoftParticleEnabled;
 }
 
 function materialIsDistortionParticle(material: THREE.Material): material is THREE.ShaderMaterial {
@@ -587,8 +587,8 @@ export function createSceneEnvironment(
       if (!object.visible) return;
       for (const mat of objectMaterials(object)) {
         if (!materialHasSoftParticleUniform(mat)) continue;
-        const scale = Number(mat.uniforms.uSoftParticleDepthScale?.value ?? 0);
-        if (Number.isFinite(scale) && scale > 0) consumers.add(mat);
+        const enabled = Number(mat.uniforms.uSoftParticleEnabled?.value ?? 0);
+        if (Number.isFinite(enabled) && enabled > 0) consumers.add(mat);
       }
     });
     return [...consumers];

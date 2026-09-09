@@ -95,6 +95,125 @@ try {
         }
         console.log('Passed ' + checked + ' particle size fixtures (all orientation modes, both draw paths).');
 
+        // Raw input TEXCOORD5.z and actual post-VS TEXCOORD10.z from
+        // gk_frame39398.rdc E6984/I0 and E7004/I0. Native VS instructions
+        // 993-995 use reciprocal(.3 * v5.z); the extent is NOT final height.
+        const softFixtures = [
+          {payload: 1.9035370349884033, soft: 1.5, nativeSlope: 1.7511260509490967},
+          {payload: 0.06630577147006989, soft: 2, nativeSlope: 50.27214431762695},
+        ];
+        let softChecked = 0;
+        for (const fixture of softFixtures) {
+          for (const blendType of ['BLENDED', 'SHIMMER']) {
+            for (const orientation of ['camera', 'axial', 'fixed']) {
+              for (const [drawScale, sizeFactor, distanceSize] of [[0, .5, 2], [.25, .5, 1], [3, 1, 3]]) {
+                const renderer = {blendType, softParticleDepthScale: fixture.soft,
+                  billboard: orientation === 'axial',
+                  explicitOrientation: orientation === 'camera' ? [0, 0, 0] : [0, 0, 1]};
+                const config = (flags, value) => ({flags, ramp: {points: [{time: 0, value}]}});
+                const system = {renderer,
+                  general: {capacity: 1, maxParticleAge: 2, coordinateStyle: 2},
+                  emitter: {rateGenerator: {type: 'constant', value: 60},
+                    // SIZE intensity and distance SIZE both belong in B.
+                    sizeGenerator: {type: 'constant', value: fixture.payload / fixture.soft}},
+                  intensities: {channels: [{configs: [config([23], sizeFactor), config([3, 16], drawScale)]}]},
+                  distance: {configs: [config([23], distanceSize), config([3, 16], 2)]},
+                  components: [{action: 'scaler', body: {sizeGenerator: {type: 'ramp',
+                    parameterType: 'particleAge', samplingType: 'once',
+                    ramp: {points: [{time: 0, value: 1}, {time: .2, value: 2}]}}}}],
+                };
+                const material = buildParticleMaterial(renderer);
+                const sim = new SystemRenderer(system, material, 1, {loopOneShot: false});
+                const group = new THREE.Group(); group.add(sim.points);
+                const camera = new THREE.PerspectiveCamera(); camera.position.z = 100;
+                sim.setSortCamera(camera); sim.setActive(true);
+                const close = (a, b, label) => assert.ok(Math.abs(a-b) < 1e-5 * Math.max(1, Math.abs(b)),
+                  label + ': ' + a + ' != ' + b);
+                try {
+                  for (const [dt, growth] of [[1/60, 1], [.1, 1.5]]) {
+                    sim.tick(dt);
+                    if (sim.composedMainBucket) composeMainBucket([sim], camera);
+                    const mesh = group.children.find(x => x.geometry?.instanceCount === 1);
+                    assert.ok(mesh, 'soft-depth fixture must pack one particle');
+                    const baseFactor = sizeFactor * distanceSize;
+                    const extent = mesh.geometry.getAttribute('softDepthExtent').getX(0);
+                    close(extent, fixture.payload * baseFactor * growth * 15, 'native soft extent in metres');
+                    const slope = 1 / (.3 * extent);
+                    close(slope, fixture.nativeSlope / (15 * baseFactor * growth), 'captured reciprocal slope');
+                    close(mesh.geometry.getAttribute('size').getX(0),
+                      fixture.payload / fixture.soft * baseFactor * growth * 30 * drawScale * 2,
+                      'draw SCALE_Y affects height only, including zero');
+                    // Half a native fade band must produce alpha .5 in metre space.
+                    close((.15 * fixture.payload * baseFactor * growth * 15) * slope, .5, 'intersection half alpha');
+                  }
+                  assert.equal(material.uniforms.uSoftParticleEnabled.value, 1);
+                  assert.ok(material.vertexShader.includes('1.0 / (0.3 * softDepthExtent)'));
+                  assert.ok(material.fragmentShader.includes('(sceneLinear - particleLinear) * vSoftDepthSlope'));
+                } finally { sim.dispose(); }
+                softChecked++;
+              }
+            }
+          }
+        }
+        for (const softParticleDepthScale of [undefined, 0, -1, NaN]) {
+          const material = buildParticleMaterial({softParticleDepthScale});
+          assert.equal(material.uniforms.uSoftParticleEnabled.value, 0, 'no authored fade remains opt-out');
+          material.dispose();
+        }
+        console.log('Passed ' + softChecked + ' native soft-depth fixtures (spawn/update, draw paths, orientations, size/distance and zero-height factors).');
+
+        // Native zero-active source ordering/count fixtures. GK_Lens is a
+        // delayed water-deformation burst, not a rate-1-per-second emitter.
+        const burstCases = [
+          {label: 'creation before retirement', rate: {type: 'constant', value: 1}, delay: 0,
+            steps: [.125, .125], counts: [1, 1]},
+          {label: 'delay look-ahead allows two ticks', rate: {type: 'constant', value: 1}, delay: .25,
+            steps: [.125, .125, .125, .125], counts: [0, 1, 2, 2]},
+          {label: 'variable dt source age', rate: {type: 'constant', value: 1}, delay: .125,
+            steps: [.05, .125, .025], counts: [0, 1, 1]},
+          {label: 'GK_Lens capacity', rate: {type: 'constant', value: 1}, delay: .1, capacity: 1,
+            steps: Array(12).fill(1/60), counts: [0,0,0,0,0,1,1,1,1,1,1,1]},
+          {label: 'linear reads first raw value', rate: {type: 'linear', from: 3, to: 99}, delay: 0,
+            steps: [.01], counts: [3]},
+          {label: 'ramp reads first value before time zero', rate: {type: 'ramp', ramp: {points: [
+            {time: -1, value: 3}, {time: 0, value: 99}]}}, delay: 0,
+            steps: [.01], counts: [3]},
+          {label: 'fraction is never accumulated', rate: {type: 'constant', value: .9}, delay: 0, sleep: 0,
+            steps: [.1,.1,.1,.1], counts: [0,0,0,0]},
+          {label: 'count has no rate-per-second cap', rate: {type: 'constant', value: 300}, delay: 0, capacity: 400,
+            steps: [.01], counts: [300]},
+          {label: 'rate intensity before truncation', rate: {type: 'constant', value: 1.9}, multiplier: 2, delay: 0,
+            steps: [.01], counts: [3]},
+          {label: 'positive sleep phase advance', rate: {type: 'constant', value: 1}, delay: 0, sleep: .25,
+            steps: [.125,.125,.125,.125,.125], counts: [1,2,2,3,3]},
+          {label: 'strict epsilon inside', rate: {type: 'constant', value: 200}, delay: 0,
+            period: Math.fround(.0004) * .5, capacity: 256, steps: [.001], counts: [200]},
+          {label: 'strict epsilon edge is continuous', rate: {type: 'constant', value: 200}, delay: 0,
+            period: Math.fround(.0004), capacity: 256, steps: [.001], counts: [0]},
+        ];
+        for (const fixture of burstCases) {
+          const renderer = {blendType: 'SHIMMER'};
+          const system = {renderer, components: [],
+            general: {capacity: fixture.capacity ?? 8, maxParticleAge: 4},
+            emitter: {rateGenerator: fixture.rate, activePeriod: fixture.period ?? 0,
+              delayGenerator: {type: 'constant', value: fixture.delay},
+              sleepPeriodGenerator: {type: 'constant', value: fixture.sleep ?? -1}},
+            intensities: {channels: [{configs: [{flags: [19], ramp: {points: [
+              {time: 0, value: fixture.multiplier ?? 1} ]}}]}]},
+          };
+          const sim = new SystemRenderer(system, buildParticleMaterial(renderer), 2, {loopOneShot: false});
+          try {
+            sim.setActive(true);
+            fixture.steps.forEach((dt, i) => {
+              sim.tick(dt);
+              assert.equal(sim.debugSnapshot().length, fixture.counts[i], fixture.label + ' tick ' + i);
+            });
+            sim.restart(); sim.tick(fixture.steps[0]);
+            assert.equal(sim.debugSnapshot().length, fixture.counts[0], fixture.label + ' restart');
+          } finally {sim.dispose();}
+        }
+        console.log('Passed ' + burstCases.length + ' native near-zero-active burst fixtures.');
+
         const cases = [
           {rate: 11, active: .1, delay: 0, dt: 1/60, count: 1},
           {rate: 11, active: .1, delay: .025, dt: 1/60, count: 1},

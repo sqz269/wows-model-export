@@ -3,11 +3,7 @@
 
 import * as THREE from 'three';
 import type { ParticleRamp } from '$lib/types/sidecar';
-import {
-  DEFAULT_PARTICLE_SUN_COLOR_NORM,
-  DEFAULT_PARTICLE_SUN_DIR,
-  NATIVE_TO_METRES,
-} from './constants';
+import { DEFAULT_PARTICLE_SUN_COLOR_NORM, DEFAULT_PARTICLE_SUN_DIR } from './constants';
 import { finiteNumber, particleByteStepCount, vectorHasLength } from './sampling';
 
 // ---------------------------------------------------------------------------
@@ -127,7 +123,8 @@ interface ParticleMaterialOptions {
   explicitOrientationLocal?: boolean;
   hideStartCos?: number;
   hideSpeed?: number;
-  /** Renderer.softParticleDepthScale (+0x7c): alpha fade against opaque scene depth. */
+  /** Renderer.softParticleDepthScale (+0x7c): coefficient on per-particle base extent,
+   * consumed by SystemRenderer when packing the opaque-depth intersection fade. */
   softParticleDepthScale?: number;
   /** Live key-light direction, world-space, pointing toward the sun. */
   sunDirection?: THREE.Vector3;
@@ -372,17 +369,6 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
   const hideIsAxialMode = opts.billboard === true ? 1 : 0;
   const hideStartCos = opts.hideStartCos ?? 1;
   const hideFadeBase = hideIsAxialMode ? hideStartCos : 1 - hideStartCos - 1 / hideSpeed;
-  // Soft-particle fade slope: authored against NATIVE (BW) depth deltas
-  // (fade = saturate(Δdepth_bw × k)); the shader computes Δdepth in eye METRES,
-  // so divide by NATIVE_TO_METRES. Raw-authored (pre-2026-07-01) made the fade
-  // band 15× too narrow — soft particles hardened much closer to surfaces than
-  // native.
-  const softParticleDepthScale =
-    opts.softParticleDepthScale !== undefined &&
-    Number.isFinite(opts.softParticleDepthScale) &&
-    opts.softParticleDepthScale > 0
-      ? opts.softParticleDepthScale / NATIVE_TO_METRES
-      : 0;
   const distortionMode =
     opts.blendType === 'DEFORM_WATER_SURFACE' ? 1 : opts.blendType === 'SHIMMER' ? 2 : 0;
   // mode 1 = DEFORM_WATER_SURFACE (steady warp), 2 = SHIMMER (heat haze, a
@@ -487,7 +473,13 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       // Native uses an opaque-only depth copy for soft particles/fog. The
       // scene environment binds a WebGL DepthTexture here before each render;
       // when absent, uSoftDepthSize stays 1x1 and the shader skips the fade.
-      uSoftParticleDepthScale: { value: softParticleDepthScale },
+      // Scene-depth copy opt-in only; fade slope is a per-particle VS output.
+      uSoftParticleEnabled: {
+        value:
+          Number.isFinite(opts.softParticleDepthScale) && (opts.softParticleDepthScale ?? 0) > 0
+            ? 1
+            : 0,
+      },
       uSoftDepthTexture: { value: null as THREE.DepthTexture | null },
       uSoftDepthSize: { value: new THREE.Vector2(1, 1) },
       uSoftCameraNear: { value: 0.1 },
@@ -575,6 +567,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       attribute vec4 color;
       attribute vec3 velocity;
       attribute float size;
+      attribute float softDepthExtent;
       attribute float glowStrength;
       attribute float spriteScaleX;
       attribute float age;
@@ -608,11 +601,15 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       varying float vSpriteAspectX;
       varying float vPointExtent;
       varying vec2 vLocalUV;
+      varying float vSoftDepthSlope;
       varying vec3 vLightingRight;
       varying vec3 vLightingUp;
       varying vec3 vLightingToCamera;
 
       void main() {
+        // Native VS: reciprocal(0.3 * v5.z), with v5.z = B * authoredSoft.
+        // CPU converted the extent to metres; width/height intensity is absent.
+        vSoftDepthSlope = softDepthExtent > 0.0 ? 1.0 / (0.3 * softDepthExtent) : 0.0;
         vColor = color;
         vGlowStrength = glowStrength;
         vAge = age;
@@ -785,7 +782,6 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uniform vec2 uUvFlip;
       uniform sampler2D uSoftDepthTexture;
       uniform vec2 uSoftDepthSize;
-      uniform float uSoftParticleDepthScale;
       uniform float uSoftCameraNear;
       uniform float uSoftCameraFar;
       uniform float uLightingMode;
@@ -820,6 +816,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       varying float vSpriteAspectX;
       varying float vPointExtent;
       varying vec2 vLocalUV;
+      varying float vSoftDepthSlope;
 
       float perspectiveDepthToViewZ(const in float invClipZ, const in float near, const in float far) {
         return (near * far) / ((far - near) * invClipZ - far);
@@ -1277,7 +1274,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           }
         }
         if (
-          uSoftParticleDepthScale > 0.0 &&
+          vSoftDepthSlope > 0.0 &&
           uSoftDepthSize.x > 1.0 &&
           uSoftDepthSize.y > 1.0
         ) {
@@ -1286,7 +1283,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           if (sceneDepth < 0.999999) {
             float sceneLinear = -perspectiveDepthToViewZ(sceneDepth, uSoftCameraNear, uSoftCameraFar);
             float particleLinear = -perspectiveDepthToViewZ(gl_FragCoord.z, uSoftCameraNear, uSoftCameraFar);
-            outA *= clamp((sceneLinear - particleLinear) * uSoftParticleDepthScale, 0.0, 1.0);
+            outA *= clamp((sceneLinear - particleLinear) * vSoftDepthSlope, 0.0, 1.0);
           }
         }
         if (uPremultiply > 0.5) {
