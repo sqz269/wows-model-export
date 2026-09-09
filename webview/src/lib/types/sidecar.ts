@@ -809,6 +809,9 @@ export interface ExteriorHullDelta {
 }
 
 export interface ExteriorRecord {
+  /** Complete effective attachment list for this exterior. Absent inherits
+   * the ship list; an explicit empty list suppresses all attachments. */
+  effects?: SidecarEffects;
   /** WG Exterior param-name (`PAES488_Azur_Baltimore`) — the index key.
    *  Index 0 is always the synthesised `default` (vanilla composition). */
   exterior_id: string;

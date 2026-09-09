@@ -53,6 +53,7 @@ import {
 import { applyAllStates } from './damage_cascade';
 import { classifyHullScene, type ClassifiedHull } from './classify_hull';
 import { defaultSeamStates } from './visibility';
+import { exteriorParticleAttachments } from './exterior_effects';
 import {
   applyAttachedMatrix,
   applyPlacementMatrix,
@@ -957,7 +958,7 @@ export class ShipViewer {
     // scene graph (accessory bones + hardpoints + gun-fire anchors) plus
     // the sidecar's resolved hull EP_ positions. Markers stay hidden until
     // the user enables the overlay.
-    this.nodeOverlay.rebuild(this.shipRoot, this.sidecar?.effects?.attachments ?? null);
+    this.nodeOverlay.rebuild(this.shipRoot, [...this.getActiveParticleAttachments()]);
 
     // Re-push the active weather's rain wetness onto the freshly-built hull/
     // accessory materials — the WG environment is applied in the constructor,
@@ -1744,13 +1745,18 @@ export class ShipViewer {
   /** Re-capture accessory marker positions (e.g. after the user aims the
    *  turrets). Hull EP_ points are static. */
   refreshNodes(): void {
-    this.nodeOverlay.refresh(this.shipRoot, this.sidecar?.effects?.attachments ?? null);
+    this.nodeOverlay.refresh(this.shipRoot, [...this.getActiveParticleAttachments()]);
   }
 
   // ── Ship particle layer ───────────────────────────────────────────────
 
   hasShipParticleData(): boolean {
-    return (this.sidecar?.effects?.attachments?.length ?? 0) > 0;
+    return this.getActiveParticleAttachments().length > 0;
+  }
+
+  /** Effective exterior selection, also used by the VFX node overlay. */
+  getActiveParticleAttachments(): readonly ParticleAttachment[] {
+    return exteriorParticleAttachments(this.sidecar, this.activeExteriorId);
   }
 
   getShipParticlesVisible(): boolean {
@@ -1807,7 +1813,7 @@ export class ShipViewer {
    *  is wanted — either the user's explicit choice (the "Water surface"
    *  checkbox) or, when unset, the auto-default (ships whose particles include
    *  a SHIMMER / DEFORM_WATER distortion that needs an ocean to refract). The
-   *  plane (scene.ts) is non-occluding and animates inside env.render(), which
+   *  plane (scene.ts) occludes submerged geometry and animates inside env.render(), which
    *  the ship render loop already drives. */
   private updateParticleWaterPlane(): void {
     const want = this.shipWaterEnabled ?? this.particleHasWaterDistortion;
@@ -1838,7 +1844,7 @@ export class ShipViewer {
       return this.particleStats;
     }
 
-    if (!this.sidecar?.effects?.attachments?.length) {
+    if (!this.getActiveParticleAttachments().length) {
       this.particleStats = emptyShipParticleStats();
       return this.particleStats;
     }
@@ -2094,6 +2100,16 @@ export class ShipViewer {
   }
 
   async setActiveSkin(skinId: string, onProgress?: (msg: string) => void): Promise<void> {
+    // A linked skin is the paint component of a complete exterior. Selecting
+    // it from Skins must also load that exterior's hull and accessory swaps.
+    const targetSkin = this.textures.getSkins().find((s) => s.skin_id === skinId);
+    const linkedExterior = targetSkin?.exterior_id
+      ? this.getExteriors().find((e) => e.exterior_id === targetSkin.exterior_id)
+      : undefined;
+    if (linkedExterior && linkedExterior.exterior_id !== this.activeExteriorId) {
+      await this.setActiveExterior(linkedExterior.exterior_id, onProgress);
+    }
+
     // In game, camouflages and mesh-swap exteriors are MUTUALLY EXCLUSIVE —
     // mounting a camo unequips the permoflage. Mirror that: picking any
     // skin other than the active exterior's own cross-linked scheme first
@@ -2105,8 +2121,8 @@ export class ShipViewer {
       );
       const ownKey = active?.camo_scheme_key ?? null;
       const target = this.textures.getSkins().find((s) => s.skin_id === skinId);
-      const isOwn =
-        !!ownKey && !!target && (target.skin_id === ownKey || target.scheme_key === ownKey);
+      const isOwn = target?.exterior_id === active?.exterior_id ||
+        (!!ownKey && !!target && (target.skin_id === ownKey || target.scheme_key === ownKey));
       if (!isOwn) {
         await this.setActiveExterior('default', onProgress);
       }
@@ -2142,6 +2158,10 @@ export class ShipViewer {
     const library = this.shipCtx?.library;
     if (!ship || !library) return;
     const wasShowing = this.textures.isShowingTextures();
+    const particlesEnabled = this.particleLayerEnabled;
+    const particleMode = this.particleMode;
+    const particleLoops = [...this.particleLoopKeys];
+    const waterEnabled = this.shipWaterEnabled;
     this.exteriorOverrideId = exteriorId;
     try {
       await this.loadShip(ship, library, onProgress);
@@ -2152,6 +2172,10 @@ export class ShipViewer {
       await this.textures.setShowTextures(true, onProgress);
       this.textures.reapplyWetness();
     }
+    this.particleMode = particleMode;
+    this.particleLoopKeys = new Set(particleLoops);
+    this.shipWaterEnabled = waterEnabled;
+    if (particlesEnabled) await this.setShipParticlesVisible(true);
   }
 
   /**
@@ -2223,6 +2247,9 @@ export class ShipViewer {
       }
     }
 
+    // Cancel in-flight record fetches and discard handles to the old mounts.
+    // Keep the user's layer, loop and water choices across the selection.
+    this.disposeParticleLayer({ preserveEnabled: true });
     this.disposeMounts(toRebuild);
 
     // Compose the effective placement per mount and group by asset so each
@@ -2356,9 +2383,12 @@ export class ShipViewer {
       applyColorMode(this.placementColorEntries, this.colorMode);
     }
 
-    // 7. Node overlay anchors were captured by world position from the old
+    // 7. Rebuild effects against both the new definition and live mount graph.
+    if (this.particleLayerEnabled) await this.setShipParticlesVisible(true);
+
+    // Node overlay anchors were captured by world position from the old
     //    Object3Ds — re-derive against the live graph.
-    this.nodeOverlay.refresh(this.shipRoot, this.sidecar?.effects?.attachments ?? null);
+    this.nodeOverlay.refresh(this.shipRoot, [...this.getActiveParticleAttachments()]);
   }
 
   setAoEnabled(on: boolean): void {
@@ -2628,7 +2658,7 @@ export class ShipViewer {
   }
 
   private async buildShipParticleLayer(token: number): Promise<ShipParticleStats> {
-    const attachments = this.sidecar?.effects?.attachments ?? [];
+    const attachments = [...this.getActiveParticleAttachments()];
     const renderable = attachments.filter((a) => this.canAnchorParticleAttachment(a));
     const unanchored = attachments.length - renderable.length;
     const paths = [...new Set(renderable.map((a) => a.particle_path).filter(Boolean))].sort();
@@ -2721,7 +2751,7 @@ export class ShipViewer {
     }
     this.particleScene = null;
     this.particleHasWaterDistortion = false;
-    this.shipWaterEnabled = null;
+    if (!opts.preserveEnabled) this.shipWaterEnabled = null;
     this.env.setWaterPlaneVisible(false);
     this.particleHandles = [];
     this.particleAnchorObjects.clear();

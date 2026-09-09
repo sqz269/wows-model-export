@@ -476,10 +476,10 @@
 
   // ── Particles tab (effect attachments) ───────────────────────────────
   // Lists every particle effect this ship attaches, keyed by its VFS
-  // `particle_path` (the `.xml` id). Read straight off the sidecar's
-  // `effects.attachments`, so the list is available whether or not the
+  // `particle_path` (the `.xml` id). Uses the active exterior's resolved
+  // attachments, so the list is available whether or not the
   // live particle layer is toggled on. Bumped by `revision` for ship
-  // swaps. Each id deep-links to the standalone `#/particles/<path>`
+  // and exterior swaps. Each id deep-links to the standalone `#/particles/<path>`
   // inspector for lookup.
   interface ShipParticleRow {
     /** Full VFS id, e.g. `particles/vehicles/Fire_small.xml`. */
@@ -495,7 +495,7 @@
   }
   const shipParticleRows: ShipParticleRow[] = $derived.by(() => {
     void revision;
-    const attachments = (viewer?.getSidecar() as SidecarDoc | null)?.effects?.attachments ?? [];
+    const attachments = viewer?.getActiveParticleAttachments() ?? [];
     const byPath = new Map<
       string,
       { sources: Set<string>; groups: Set<string>; nodes: Set<string>; count: number }
@@ -1044,13 +1044,9 @@
       {:else if activeTab === 'exteriors'}
         <div class="flex flex-col gap-2">
           <div class="text-muted-foreground max-w-[64ch] text-[11px]">
-            Mesh-swap permoflages (WG <code class="font-mono text-[10px]">Exterior</code> records).
-            Selecting one swaps the affected mounts to the variant models and applies the matching
-            camo. Entries marked <span class="text-amber-500">hull differs</span> also swap the hull:
-            when the HullDelta export exists the ship reloads on the variant hull and mounts re-anchor
-            to its HP nodes (WG hides unused base accessories by parking their nodes inside the hull);
-            otherwise mounts render on the base hull until the ship is re-extracted with exterior hulls
-            on.
+            Selecting an exterior applies its models, camouflage and particle effects.
+            Enable Particles to preview smoke and other effects. Hull variants require an export
+            with exterior hulls enabled; otherwise the base hull remains visible.
           </div>
           {#each exteriorGroups as group (group.peculiarity)}
             <div>
@@ -1096,10 +1092,20 @@
                         {ext.mounts?.length} mounts
                       </span>
                     {/if}
+                    {#if ext.effects}
+                      <span
+                        class="flex-none rounded bg-primary/15 px-1 text-[9px] uppercase tracking-wider text-primary"
+                        title="Particle attachments are available for this exterior. Enable Particles to preview them."
+                      >
+                        effects
+                      </span>
+                    {/if}
                     {#if ext.wg_asset_id}
                       <span
                         class="flex-none rounded bg-amber-500/15 px-1 text-[9px] uppercase tracking-wider text-amber-500"
-                        title="This exterior also swaps the hull model in game; the variant hull GLB isn't extracted into the unified folder yet."
+                        title={ext.hull?.hull_glb
+                          ? 'This exterior uses its own exported hull.'
+                          : 'Re-extract with exterior hulls enabled to load this hull variant.'}
                       >
                         hull differs
                       </span>
@@ -1264,8 +1270,7 @@
       {:else if activeTab === 'particles'}
         {#if shipParticleRows.length === 0}
           <div class="text-muted-foreground">
-            This ship attaches no particle effects — no
-            <code class="font-mono text-[11px]">effects.attachments</code> in the sidecar.
+            No particle attachments are available for the selected exterior.
           </div>
         {:else}
           <div class="flex flex-col gap-2">

@@ -13,7 +13,7 @@
     "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test:particles": "node scripts/test-particle-parity.mjs && node scripts/test-particle-temporal.mjs",
+    "test:particles": "node scripts/test-particle-parity.mjs && node scripts/test-particle-temporal.mjs && node scripts/test-exterior-effects.mjs",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write ."
   },

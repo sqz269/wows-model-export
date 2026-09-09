@@ -386,11 +386,10 @@ export function createSceneEnvironment(
   // structured, animated surface to warp. The waves live entirely in the
   // fragment shader (procedural from world XZ) so a single quad suffices.
   //
-  // depthTest:false + depthWrite:false + renderOrder -1 make it a pure
-  // background layer: it IS captured into the scene-color RTT (the cards
-  // refract it) but it neither occludes the cards nor feeds the soft-particle
-  // depth snapshot (shouldHideForOpaqueDepth hides depthWrite:false meshes),
-  // so the wake sprites do not soft-fade against the surface they sit on.
+  // Water participates in scene depth so submerged hull geometry cannot draw
+  // over it, independent of draw order. It is explicitly excluded from the
+  // soft-particle depth snapshot below: wakes must not fade against their own
+  // surface. A small depth bias lets coplanar wake cards pass the depth test.
   const waterUniforms = {
     uTime: { value: 0 },
     uSunDir: { value: sunDirectionState.clone() },
@@ -398,8 +397,11 @@ export function createSceneEnvironment(
   const waterMaterial = new THREE.ShaderMaterial({
     uniforms: waterUniforms,
     transparent: false,
-    depthWrite: false,
-    depthTest: false,
+    depthWrite: true,
+    depthTest: true,
+    polygonOffset: true,
+    polygonOffsetFactor: 1,
+    polygonOffsetUnits: 1,
     vertexShader: /* glsl */ `
       varying vec3 vWorld;
       void main() {
@@ -654,7 +656,7 @@ export function createSceneEnvironment(
     const target = ensureOpaqueDepthTarget();
     const hidden: THREE.Object3D[] = [];
     scene.traverse((object) => {
-      if (shouldHideForOpaqueDepth(object)) {
+      if (object.visible && (object === waterPlane || shouldHideForOpaqueDepth(object))) {
         hidden.push(object);
         object.visible = false;
       }

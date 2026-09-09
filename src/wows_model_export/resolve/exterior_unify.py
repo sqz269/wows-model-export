@@ -89,6 +89,7 @@ def build_exterior_record(
     is_native: bool = False,
     camo_scheme_key: str | None = None,
     hull: dict[str, Any] | None = None,
+    effects: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one ``exteriors[]`` record by diffing the base ship's placements
     against the already-swapped *variant* placements (the output of the existing
@@ -213,7 +214,7 @@ def build_exterior_record(
         if aid
     })
 
-    return {
+    record = {
         "exterior_id": exterior_id,
         "display_name": display_name,
         "wg_asset_id": wg_asset_id,
@@ -226,6 +227,9 @@ def build_exterior_record(
         "mounts": mounts,
         "variant_swapped_asset_ids": swapped_ids,
     }
+    if effects is not None:
+        record["effects"] = copy.deepcopy(effects)
+    return record
 
 
 def _swap_table_from_mounts(mounts: Sequence[Mapping[str, Any]]) -> dict[str, dict]:
@@ -364,8 +368,8 @@ def build_exteriors_block(
     peculiarity?, is_native?, camo_scheme_key?, hull?}`` — the GameParams + GLB
     resolution that produces ``variant_placements`` is done by the existing
     pipeline functions and injected here (see :func:`collect_exteriors_for_vehicle`).
-    Records whose diff yields no ``mounts`` and no ``hull`` are dropped (a
-    texture-only camo is a ``skins[]`` entry, not an exterior).
+    Records with no geometry or effect override are dropped (a texture-only
+    camo is a ``skins[]`` entry). Effects-only themed exteriors are retained.
 
     Exactly ONE entry carries ``is_native: true``: when a real mesh-swap
     exterior is the Vehicle's ``nativePermoflage`` (ARP / Azur-style ships,
@@ -378,7 +382,8 @@ def build_exteriors_block(
     ``hull`` (HullDelta), or a hull-swap marker (``wg_asset_id`` — the
     lowercased variant model_dir). The last keeps hull-only exteriors
     (~14% of the corpus) visible even before their hull GLB is exported;
-    a texture-only camo (none of the three) stays a ``skins[]`` entry.
+    a resolved ``effects`` block also keeps an effects-only exterior; an
+    explicit empty attachments list is a valid replacement.
     """
     out = [default_exterior_record()]
     for vr in variant_records:
@@ -393,8 +398,9 @@ def build_exteriors_block(
             is_native=vr.get("is_native", False),
             camo_scheme_key=vr.get("camo_scheme_key"),
             hull=vr.get("hull"),
+            effects=vr.get("effects"),
         )
-        if rec["mounts"] or rec["hull"] or rec["wg_asset_id"]:
+        if rec["mounts"] or rec["hull"] or rec["wg_asset_id"] or "effects" in rec:
             out.append(rec)
     if any(rec.get("is_native") for rec in out[1:]):
         out[0]["is_native"] = False
@@ -418,6 +424,7 @@ def collect_exteriors_for_vehicle(
     camo_scheme_for: Callable[[str], str | None] | None = None,
     resolve_model_dir: Callable[..., str | None] | None = None,
     hp_transforms_for: Callable[[str], Mapping[str, Any] | None] | None = None,
+    effects_for: Callable[[str], dict[str, Any] | None] | None = None,
 ) -> list[dict[str, Any]]:
     """Enumerate a Vehicle's ``permoflages[]`` (plus its ``nativePermoflage``,
     which is not always listed there) and build the ``exteriors[]`` block,
@@ -465,7 +472,8 @@ def collect_exteriors_for_vehicle(
                 model_dir: str | None = None
                 if resolve_model_dir is not None:
                     model_dir = resolve_model_dir(vehicle_id, permoflage_id=ext_id)
-                if not _has_mesh_swap(swaps) and not model_dir:
+                effects = effects_for(ext_id) if effects_for else None
+                if not _has_mesh_swap(swaps) and not model_dir and effects is None:
                     continue  # texture-only camo -> skins[], not an exterior row
                 anchor = hp_transforms_for(ext_id) if hp_transforms_for else None
                 eff_base = (
@@ -485,6 +493,7 @@ def collect_exteriors_for_vehicle(
                     "is_native": ext_id == native,
                     "camo_scheme_key": camo_scheme_for(ext_id) if camo_scheme_for else None,
                     "hull": None,  # HullDelta resolution is a later step
+                    "effects": effects,
                 })
             except Exception as exc:
                 import logging

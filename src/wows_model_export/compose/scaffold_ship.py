@@ -310,6 +310,26 @@ def _collect_exteriors_block(
         ht = d.get("hp_transforms") if isinstance(d, dict) else None
         return ht if isinstance(ht, dict) and ht else None
 
+    from ..resolve.exterior_effects import resolve_exterior_effects
+    _effect_ship = _gp_read.get_ship(vehicle_id) or {}
+    _hull_key = (doc.get("variants") or {}).get("active_hull")
+    if not _hull_key:
+        _hull_key = _gp_autofill.resolve_components(_effect_ship).get("__active_hull_id__")
+
+    def _effects_for(ext_id: str) -> dict[str, Any] | None:
+        candidates = None
+        if exteriors_dir is not None:
+            if ext_id in model_dirs:
+                candidates = exteriors_dir / f"{ext_id}_effect_points.json"
+            else:
+                candidates = next(exteriors_dir.parent.glob("*_skel_ext.json"), None)
+        return resolve_exterior_effects(
+            (doc.get("effects") or {}).get("attachments") or [],
+            _gp_read.get_exterior(ext_id) or {}, _hull_key or "",
+            exterior_id=ext_id, variant_hull=ext_id in model_dirs,
+            skel_ext_json=candidates,
+        )
+
     block = _exterior_unify.collect_exteriors_for_vehicle(
         vehicle_id,
         base_sections,
@@ -320,6 +340,7 @@ def _collect_exteriors_block(
         camo_scheme_for=_camo_scheme_for,
         resolve_model_dir=_resolve_model_dir,
         hp_transforms_for=_hp_transforms_for,
+        effects_for=_effects_for,
     )
 
     for rec in block:
@@ -444,12 +465,14 @@ def _export_exterior_hulls(
         mappings_path = ext_dir / f"{ext_id}_material_mappings.json"
         deco_path = ext_dir / f"{ext_id}_decoratives.json"
         need_deco = not deco_path.is_file()
+        effect_points_path = ext_dir / f"{ext_id}_effect_points.json"
+        need_effect_points = not effect_points_path.is_file()
         # Temp homes for the export's side JSONs (the skel_ext candidates
         # file is ~35 MB per hull — resolve immediately, never persist).
         _tmp_dir: Path | None = None
         pl_tmp: Path | None = None
         cand_tmp: Path | None = None
-        if need_deco:
+        if need_deco or need_effect_points:
             _tmp_dir = Path(tempfile.mkdtemp(prefix=f"extdeco_{ext_id}_"))
             pl_tmp = _tmp_dir / f"{ext_id}_placements.json"
             cand_tmp = _tmp_dir / f"{ext_id}_skel_ext.json"
@@ -468,7 +491,7 @@ def _export_exterior_hulls(
                     config=cfg,
                 )
                 exported += 1
-            elif need_deco:
+            elif need_deco or need_effect_points:
                 # Hull GLB already on disk (skip-on-existence) but the
                 # decoratives doc is missing — run a JSON-only harvest
                 # export to a throwaway GLB, mirroring the per-hull
@@ -551,6 +574,20 @@ def _export_exterior_hulls(
                     f"exterior decoratives resolve failed for {ext_id} ({e}); "
                     f"base decoratives kept",
                 )
+        if cand_tmp is not None and cand_tmp.is_file():
+            try:
+                candidate_doc = json.loads(cand_tmp.read_text(encoding="utf-8"))
+                effect_points = {"candidates": [
+                    {k: c[k] for k in ("segment", "p0_hash", "record_offset", "transform") if k in c}
+                    for c in candidate_doc.get("candidates", [])
+                    if str(c.get("segment", "")).endswith("_ep")]}
+                effect_points_path.write_text(json.dumps(effect_points), encoding="utf-8")
+                if "effects" in rec:
+                    _gp_autofill.resolve_hull_effect_positions(
+                        rec["effects"]["attachments"], effect_points_path,
+                    )
+            except (OSError, ValueError) as e:
+                _warn(warnings, f"exterior effect points failed for {ext_id} ({e})")
         if _tmp_dir is not None:
             shutil.rmtree(_tmp_dir, ignore_errors=True)
         if deco_path.is_file() and isinstance(rec.get("hull"), dict):
@@ -2748,6 +2785,16 @@ def scaffold_ship(
                 if _rec.get("hull") is None:
                     _rec.pop("hull", None)
             doc = sidecar.merge_preserving(doc, {"exteriors": _ext_block})
+            # Effect payloads are complete replacements, unlike additive
+            # exterior geometry metadata. Do not retain removed attachments.
+            _effects_by_ext = {r["exterior_id"]: r.get("effects") for r in _ext_block}
+            for _rec in doc.get("exteriors") or []:
+                _eid = _rec.get("exterior_id")
+                if _eid in _effects_by_ext:
+                    if _effects_by_ext[_eid] is None:
+                        _rec.pop("effects", None)
+                    else:
+                        _rec["effects"] = _effects_by_ext[_eid]
         except Exception as e:
             warnings.append(f"exteriors[] emit failed ({e}); prior value kept")
 
@@ -2761,6 +2808,16 @@ def scaffold_ship(
     # (no mount/placement derivation), safe for variant-routed ships and a
     # no-op for non-variant ones (the full block already rebuilt them).
     if variant_perm_for_swap:
+        try:
+            from .refresh_exterior_effects import apply_loaded_exterior_effects
+            _loaded_hull = (doc.get("variants") or {}).get("active_hull")
+            _loaded_exterior = _gp_read.get_exterior(variant_perm_for_swap)
+            if _loaded_exterior and _loaded_hull:
+                doc = apply_loaded_exterior_effects(
+                    doc, _loaded_exterior, variant_perm_for_swap, _loaded_hull, gm3d_dir,
+                )
+        except Exception as e:
+            warnings.append(f"loaded exterior effects refresh failed ({e}); prior value kept")
         _ext_refresh_dir = gm3d_dir / "exteriors"
         for _rec in (doc.get("exteriors") or []):
             _ext_id = _rec.get("exterior_id")
