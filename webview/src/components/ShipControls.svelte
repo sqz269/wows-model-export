@@ -145,6 +145,8 @@
   let particleEvents = $state<readonly ShipParticleEventOption[]>([]);
   let particleLoops = $state<ReadonlySet<string>>(new Set());
   let waterEnabled = $state(false);
+  let seaWind = $state(0);
+  let seaHeight = $state(0);
   const PARTICLE_MODES: Array<{ value: ShipParticleMode; label: string }> = [
     { value: 'ambient', label: 'Ambient' },
     { value: 'all', label: 'All' },
@@ -314,6 +316,7 @@
       particleMode = viewer.getShipParticleMode();
       particleStats = viewer.getShipParticleStats();
       waterEnabled = viewer.isShipWaterEnabled();
+      if (waterEnabled) refreshSea();
       refreshParticleEvents();
 
       // Honor the persisted Show-textures choice. Each ship's viewer
@@ -458,6 +461,7 @@
     try {
       particleStats = await viewer.setShipParticlesVisible(v);
       waterEnabled = viewer.isShipWaterEnabled();
+      if (waterEnabled) refreshSea();
       refreshParticleEvents();
     } catch (err) {
       particlesView = viewer.getShipParticlesVisible();
@@ -470,6 +474,16 @@
   function toggleWater(v: boolean) {
     waterEnabled = v;
     viewer.setShipWaterEnabled(v);
+    refreshSea();
+  }
+  function refreshSea() {
+    seaWind = viewer.getSeaWindSpeed();
+    seaHeight = viewer.getSeaWaveHeight();
+  }
+  function setSeaWind(v: number) {
+    seaWind = v;
+    viewer.setSeaWindSpeed(v);
+    seaHeight = viewer.getSeaWaveHeight();
   }
   async function setParticleMode(mode: ShipParticleMode) {
     particleMode = mode;
@@ -1015,6 +1029,24 @@
             />
             Water surface
           </label>
+          {#if waterEnabled}
+            <label class={`${labelCls} ml-5`} title="Local wind speed of the FFT ocean spectrum (JONSWAP). Hs = significant wave height.">
+              <span class="flex items-center justify-between">
+                Wind
+                <span class="text-muted-foreground tabular-nums text-[10px]">
+                  {seaWind.toFixed(1)} m/s · Hs {seaHeight.toFixed(1)} m
+                </span>
+              </span>
+              <input
+                type="range"
+                min="1"
+                max="15"
+                step="0.5"
+                value={seaWind}
+                onchange={(e) => setSeaWind(parseFloat(e.currentTarget.value))}
+              />
+            </label>
+          {/if}
         {/if}
         {#if particlesView && particleEvents.length > 0}
           <div class="ml-5 flex flex-col gap-0.5">

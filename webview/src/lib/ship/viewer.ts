@@ -277,7 +277,7 @@ function isWakeParticleGroup(group: string): boolean {
 
 // Screen-space distortion blend modes (heat-haze / water-deform): they refract
 // the scene-color snapshot rather than painting a sprite, so with no ocean
-// behind them they read as flat squares. The ship view drops the faux water
+// behind them they read as flat squares. The ship view drops the FFT ocean
 // surface when a ship's particles include one of these (see SHIMMER funnel
 // haze, DEFORM_WATER_SURFACE wakes/splashes). Mirrors Particles.svelte's
 // recordHasDeformWater, broadened to SHIMMER.
@@ -1809,7 +1809,7 @@ export class ShipViewer {
     return this.particleStats;
   }
 
-  /** Show the faux ocean surface while the ship particle layer is on and water
+  /** Show the FFT ocean while the ship particle layer is on and water
    *  is wanted — either the user's explicit choice (the "Water surface"
    *  checkbox) or, when unset, the auto-default (ships whose particles include
    *  a SHIMMER / DEFORM_WATER distortion that needs an ocean to refract). The
@@ -1830,6 +1830,20 @@ export class ShipViewer {
   setShipWaterEnabled(on: boolean): void {
     this.shipWaterEnabled = on;
     this.updateParticleWaterPlane();
+  }
+
+  /** Local wind speed (m/s) driving the FFT ocean's main wave band. */
+  getSeaWindSpeed(): number {
+    return this.env.getOceanParams().spectrum.local.windSpeed;
+  }
+
+  setSeaWindSpeed(metresPerSecond: number): void {
+    this.env.setOceanParams({ spectrum: { local: { windSpeed: metresPerSecond } } });
+  }
+
+  /** Significant wave height Hs (m) of the current sea spectrum. */
+  getSeaWaveHeight(): number {
+    return this.env.getOcean()?.significantWaveHeight() ?? 0;
   }
 
   async setShipParticlesVisible(on: boolean): Promise<ShipParticleStats> {

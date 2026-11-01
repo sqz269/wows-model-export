@@ -4,7 +4,13 @@ import * as THREE from 'three';
 
 export function verifyWaterDepth(viewer) {
   const env = viewer.env;
-  const water = env.scene.getObjectByName('FauxWaterSurface');
+  const wasVisible = env.isWaterPlaneVisible();
+  // The ocean is built lazily on first show.
+  if (!env.getOcean()) {
+    env.setWaterPlaneVisible(true);
+    env.setWaterPlaneVisible(wasVisible);
+  }
+  const water = env.getOcean().mesh;
   const renderer = env.renderer;
   const previousTarget = renderer.getRenderTarget();
   const target = new THREE.WebGLRenderTarget(16, 16);
@@ -14,13 +20,17 @@ export function verifyWaterDepth(viewer) {
   camera.up.set(0, 0, -1);
   camera.lookAt(0, 0, 0);
   const waterMaterial = water.material.clone();
-  // Constant colors isolate depth behavior from procedural lighting.
+  // Constant colors isolate depth behavior from procedural lighting, and a
+  // zero displacement scale pins the FFT surface to its mean plane (y = 0)
+  // centred on the test camera.
   waterMaterial.fragmentShader = 'void main() { gl_FragColor = vec4(0., 0., 1., 1.); }';
+  waterMaterial.uniforms.uDispScale.value = 0;
+  waterMaterial.uniforms.uCenter.value.set(0, 0);
   const surface = new THREE.Mesh(water.geometry, waterMaterial);
-  surface.rotation.copy(water.rotation);
+  surface.frustumCulled = false;
   const hullMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000, toneMapped: false });
   const hull = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), hullMaterial);
-  hull.rotation.copy(water.rotation);
+  hull.rotation.x = -Math.PI / 2;
   scene.add(surface, hull);
   const results = [];
   try {
@@ -51,14 +61,13 @@ export function verifyWaterDepth(viewer) {
   // while retaining it in the color snapshot used by wake distortion.
   const draws = [];
   const oldHook = water.onBeforeRender;
-  const oldVisible = water.visible;
   try {
-    water.visible = true;
+    env.setWaterPlaneVisible(true);
     water.onBeforeRender = () => draws.push(renderer.getRenderTarget()?.texture.name ?? 'screen');
     env.render();
   } finally {
     water.onBeforeRender = oldHook;
-    water.visible = oldVisible;
+    env.setWaterPlaneVisible(wasVisible);
   }
   if (draws.includes('WowsOpaqueDepthColorDiscard')) throw new Error('Water entered soft-particle depth');
   if (!draws.includes('WowsDistortionSceneColor')) throw new Error('Enable ship particles before testing distortion capture');

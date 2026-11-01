@@ -14,6 +14,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { Ocean, type OceanParams, type OceanParamsPatch } from './ocean';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
@@ -272,14 +273,19 @@ export interface SceneEnvironment {
    *  inspector between a night sky and a daylit sky so occluding,
    *  alpha-blended smoke is actually visible). */
   setBackground(color: number): void;
-  /** Show/hide the faux animated water surface. DEFORM_WATER_SURFACE
+  /** Show/hide the FFT ocean (mean surface at y=0). DEFORM_WATER_SURFACE
    *  particles (ship wakes, splashes) author a water DISTORTION, not a
-   *  sprite — with no ocean to refract they read as flat squares. Enabling
-   *  this drops a structured, animated water plane at y=0 that the
-   *  screen-space distortion pass can warp, so the wake reads as ripples.
-   *  Hidden by default; the particle inspector turns it on only for records
-   *  that contain a DEFORM_WATER_SURFACE system. */
+   *  sprite — with no ocean to refract they read as flat squares. The ocean
+   *  is built lazily on first show; hidden by default. */
   setWaterPlaneVisible(on: boolean): void;
+  isWaterPlaneVisible(): boolean;
+  /** Patch the ocean's spectrum / shading parameters (deep-merged). Safe to
+   *  call before the ocean exists; a spectrum change rebuilds h0 on the CPU. */
+  setOceanParams(patch: OceanParamsPatch): void;
+  /** Current ocean parameters (a copy). Builds the ocean if needed. */
+  getOceanParams(): OceanParams;
+  /** The live ocean, or null before it has first been shown. */
+  getOcean(): Ocean | null;
   /** Dispose every resource created here. Idempotent. */
   dispose(): void;
 }
@@ -309,6 +315,20 @@ export interface SceneOptions {
   pixelRatio?: number;
   /** Use the postprocess composer by default (default: true). */
   postprocess?: boolean;
+}
+
+function mergeOceanPatch(a: OceanParamsPatch, b: OceanParamsPatch): OceanParamsPatch {
+  return {
+    ...a,
+    ...b,
+    spectrum: {
+      ...a.spectrum,
+      ...b.spectrum,
+      local: { ...a.spectrum?.local, ...b.spectrum?.local },
+      largeWave: { ...a.spectrum?.largeWave, ...b.spectrum?.largeWave },
+    },
+    shading: { ...a.shading, ...b.shading },
+  };
 }
 
 export function createSceneEnvironment(
@@ -378,124 +398,60 @@ export function createSceneEnvironment(
   const axes = new THREE.AxesHelper(axesSize);
   scene.add(grid, axes);
 
-  // ── Faux water surface (opt-in; particle inspector) ───────────────────
-  // DEFORM_WATER_SURFACE particles only EXIST in-game as a refraction of the
-  // ocean surface. The inspector has no ocean, so the screen-space distortion
-  // approximation (particles.ts uDistortion path) has nothing to bend and the
-  // wake cards read as faint flat squares. This plane gives the refraction a
-  // structured, animated surface to warp. The waves live entirely in the
-  // fragment shader (procedural from world XZ) so a single quad suffices.
+  // ── FFT ocean (opt-in) ────────────────────────────────────────────
+  // Tessendorf/JONSWAP three-cascade FFT ocean (./ocean), modelled on WG's
+  // native sea (reference/engine/wg_render_ocean_fft.md). Built lazily on
+  // first show. DEFORM_WATER_SURFACE particles (ship wakes, splashes) only
+  // exist in-game as a refraction of this surface, so the particle views
+  // enable it for records that carry one.
   //
   // Water participates in scene depth so submerged hull geometry cannot draw
   // over it, independent of draw order. It is explicitly excluded from the
   // soft-particle depth snapshot below: wakes must not fade against their own
   // surface. A small depth bias lets coplanar wake cards pass the depth test.
-  const waterUniforms = {
-    uTime: { value: 0 },
-    uSunDir: { value: sunDirectionState.clone() },
+  let ocean: Ocean | null = null;
+  let oceanParamsPatch: OceanParamsPatch = {};
+  let customEnvironment: THREE.Texture | null = null;
+  // While the sea is shown under a real (WG) sky cube, that cube is also the
+  // background, so the bright grazing-angle sea meets a matching sky instead
+  // of the flat UI colour. `backgroundColor` keeps the flat colour to restore.
+  const backgroundColor = new THREE.Color(background);
+  let skyBackgroundActive = false;
+  const applyOceanBackground = () => {
+    if (!ocean) return;
+    const wantSky = ocean.mesh.visible && !!customEnvironment;
+    if (wantSky) {
+      scene.background = customEnvironment;
+      skyBackgroundActive = true;
+    } else if (skyBackgroundActive) {
+      scene.background = backgroundColor;
+      skyBackgroundActive = false;
+    }
   };
-  const waterMaterial = new THREE.ShaderMaterial({
-    uniforms: waterUniforms,
-    transparent: false,
-    depthWrite: true,
-    depthTest: true,
-    polygonOffset: true,
-    polygonOffsetFactor: 1,
-    polygonOffsetUnits: 1,
-    vertexShader: /* glsl */ `
-      varying vec3 vWorld;
-      void main() {
-        vec4 wp = modelMatrix * vec4(position, 1.0);
-        vWorld = wp.xyz;
-        gl_Position = projectionMatrix * viewMatrix * wp;
-      }
-    `,
-    fragmentShader: /* glsl */ `
-      precision highp float;
-      uniform float uTime;
-      uniform vec3 uSunDir;
-      varying vec3 vWorld;
-
-      // Summed directional sines -> a cheap, structured wave height field.
-      // Mixed wavelengths give both broad swell and fine sparkle ripples;
-      // the high-frequency terms also keep the screen-space refraction legible
-      // at the small warp magnitude the distortion pass applies.
-      float waveH(vec2 p, float t) {
-        float h = 0.0;
-        // Broad swell (wavelength ~22-33 m).
-        h += sin(p.x * 0.28 + t * 1.30) * 0.40;
-        h += sin((p.x * 0.19 + p.y * 0.33) + t * 1.00) * 0.34;
-        h += sin((p.x * 0.41 - p.y * 0.22) + t * 1.70) * 0.26;
-        // Finer chop (~6-10 m).
-        h += sin((p.x * 0.75 + p.y * 0.62) + t * 2.40) * 0.16;
-        h += sin((p.x * 0.60 - p.y * 1.05) + t * 2.90) * 0.12;
-        // Sparkle detail.
-        h += sin((p.x * 1.50 + p.y * 1.20) + t * 3.60) * 0.06;
-        h += sin((p.x * 2.30 - p.y * 1.90) + t * 4.50) * 0.035;
-        return h;
-      }
-
-      // Procedural daytime sky used as the reflection probe — gives the surface
-      // a real horizon-graded reflection + sun glow WITHOUT a planar reflector
-      // (which would not compose with the depth/distortion snapshot passes).
-      vec3 skyColor(vec3 dir, vec3 sun) {
-        float up = clamp(dir.y, 0.0, 1.0);
-        vec3 horizon = vec3(0.62, 0.74, 0.88);
-        vec3 zenith = vec3(0.13, 0.33, 0.60);
-        vec3 sky = mix(horizon, zenith, pow(up, 0.55));
-        float s = clamp(dot(dir, sun), 0.0, 1.0);
-        sky += vec3(1.0, 0.92, 0.74) * pow(s, 90.0) * 1.1;   // sun reflection
-        sky += vec3(1.0, 0.85, 0.65) * pow(s, 6.0) * 0.06;   // broad glare
-        return sky;
-      }
-
-      void main() {
-        vec2 p = vWorld.xz;
-        float t = uTime;
-        float e = 0.6;
-        float h0 = waveH(p, t);
-        float hx = (waveH(p + vec2(e, 0.0), t) - h0) * 3.0;
-        float hz = (waveH(p + vec2(0.0, e), t) - h0) * 3.0;
-        vec3 n = normalize(vec3(-hx / e, 1.0, -hz / e));
-
-        vec3 viewDir = normalize(cameraPosition - vWorld);
-        vec3 sun = normalize(uSunDir);
-
-        // Deep-ocean body: dark teal-blue near the viewer, slightly lifted on
-        // the wave faces that catch the sky.
-        vec3 deep = vec3(0.004, 0.045, 0.072);
-        vec3 shallow = vec3(0.02, 0.13, 0.17);
-        vec3 body = mix(deep, shallow, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
-
-        // Sky reflection off the perturbed surface, blended by Schlick fresnel
-        // (mostly body looking straight down, mostly sky toward the horizon).
-        vec3 refl = reflect(-viewDir, n);
-        refl.y = abs(refl.y);
-        vec3 sky = skyColor(refl, sun);
-        float fres = 0.02 + 0.98 * pow(1.0 - clamp(dot(viewDir, n), 0.0, 1.0), 5.0);
-        vec3 col = mix(body, sky, fres);
-
-        // Sharp sun specular on the crests.
-        vec3 halfv = normalize(sun + viewDir);
-        float spec = pow(clamp(dot(n, halfv), 0.0, 1.0), 220.0);
-        col += vec3(1.0, 0.96, 0.85) * spec * 0.5;
-
-        // A hint of foam on the steepest crests (kept low so it stays under the
-        // bloom threshold and the wake disturbance still reads).
-        float crest = smoothstep(0.55, 0.95, h0 * 0.5 + 0.5);
-        col = mix(col, vec3(0.78, 0.86, 0.92), crest * 0.06);
-
-        gl_FragColor = vec4(col, 1.0);
-      }
-    `,
-  });
-  const waterPlane = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), waterMaterial);
-  waterPlane.rotation.x = -Math.PI / 2;
-  waterPlane.renderOrder = -1;
-  waterPlane.frustumCulled = false;
-  waterPlane.visible = false;
-  waterPlane.name = 'FauxWaterSurface';
-  scene.add(waterPlane);
+  const oceanSunColor = new THREE.Color();
+  const oceanSkyColor = new THREE.Color();
+  const oceanBackground = new THREE.Color();
+  const ensureOcean = (): Ocean => {
+    if (ocean) return ocean;
+    ocean = new Ocean(renderer, oceanParamsPatch);
+    ocean.setEnvironment(customEnvironment);
+    ocean.mesh.visible = false;
+    scene.add(ocean.mesh);
+    return ocean;
+  };
+  const updateOcean = () => {
+    if (!ocean || !ocean.mesh.visible) return;
+    oceanSunColor.copy(dir.color).multiplyScalar(dir.intensity);
+    oceanSkyColor.copy(hemi.color).multiplyScalar(hemi.intensity);
+    if (scene.background instanceof THREE.Color) oceanBackground.copy(scene.background);
+    ocean.update(camera, {
+      sunDir: sunDirectionState,
+      sunColor: oceanSunColor,
+      skyColor: oceanSkyColor,
+      background: oceanBackground,
+      skyBackground: skyBackgroundActive,
+    });
+  };
 
   // ── Post-FX (always-on composer) ──────────────────────────────────
   // The composer is the SOLE render path: RenderPass -> UnrealBloomPass
@@ -656,7 +612,7 @@ export function createSceneEnvironment(
     const target = ensureOpaqueDepthTarget();
     const hidden: THREE.Object3D[] = [];
     scene.traverse((object) => {
-      if (object.visible && (object === waterPlane || shouldHideForOpaqueDepth(object))) {
+      if (object.visible && ((ocean && object === ocean.mesh) || shouldHideForOpaqueDepth(object))) {
         hidden.push(object);
         object.visible = false;
       }
@@ -732,13 +688,9 @@ export function createSceneEnvironment(
     grid,
     axes,
     render() {
-      if (waterPlane.visible) {
-        // Ambient surface animation, independent of the sim transport so the
-        // ocean keeps moving even when the effect is paused. Keep the sun in
-        // sync with the scene key light so the glints match the lighting.
-        waterUniforms.uTime.value = performance.now() * 0.001;
-        waterUniforms.uSunDir.value.copy(sunDirectionState);
-      }
+      // Ambient surface animation runs on wall clock, independent of the
+      // particle transport, so the sea keeps moving while an effect is paused.
+      updateOcean();
       renderOpaqueDepthSnapshot(collectSoftDepthConsumers());
       renderDistortionSceneColor(collectDistortionConsumers());
       if (!postprocessEnabled && !bloomEnabled) {
@@ -797,6 +749,11 @@ export function createSceneEnvironment(
     },
     setEnvironment(tex: THREE.Texture | null) {
       scene.environment = tex ?? envRT.texture;
+      // The studio RoomEnvironment would reflect as a room on the sea; only a
+      // real (WG sky-cube) environment feeds the ocean's reflections.
+      customEnvironment = tex;
+      ocean?.setEnvironment(tex);
+      applyOceanBackground();
     },
     setFillLights(hemisphere: number, directional?: number) {
       hemi.intensity = hemisphere;
@@ -827,6 +784,8 @@ export function createSceneEnvironment(
       };
     },
     setBackground(color: number) {
+      backgroundColor.set(color);
+      if (skyBackgroundActive) return;
       if (scene.background instanceof THREE.Color) {
         scene.background.set(color);
       } else {
@@ -834,7 +793,22 @@ export function createSceneEnvironment(
       }
     },
     setWaterPlaneVisible(on: boolean) {
-      waterPlane.visible = on;
+      if (!on && !ocean) return;
+      ensureOcean().mesh.visible = on;
+      applyOceanBackground();
+    },
+    isWaterPlaneVisible() {
+      return !!ocean && ocean.mesh.visible;
+    },
+    setOceanParams(patch: OceanParamsPatch) {
+      if (ocean) ocean.setParams(patch);
+      else oceanParamsPatch = mergeOceanPatch(oceanParamsPatch, patch);
+    },
+    getOceanParams() {
+      return (ocean ?? ensureOcean()).getParams();
+    },
+    getOcean() {
+      return ocean;
     },
     dispose() {
       if (disposed) return;
@@ -844,8 +818,11 @@ export function createSceneEnvironment(
       (grid.material as THREE.Material).dispose();
       axes.geometry.dispose();
       (axes.material as THREE.Material).dispose();
-      waterPlane.geometry.dispose();
-      waterMaterial.dispose();
+      if (ocean) {
+        scene.remove(ocean.mesh);
+        ocean.dispose();
+        ocean = null;
+      }
       envRT.dispose();
       pmrem.dispose();
       opaqueDepthMaterial.dispose();
