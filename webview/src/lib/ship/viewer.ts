@@ -2720,6 +2720,10 @@ export class ShipViewer {
       if (obj) {
         this.particleAnchorObjects.set(h, obj);
         this.copyParticleAnchorTransform(h, obj);
+      } else if (h.attachment.rotation?.length === 4) {
+        // Position-only hull EP_ row: its record turn (e.g. port-side flood
+        // points yawed 180° to face outboard) applies before the frame mirror.
+        h.group.quaternion.fromArray(h.attachment.rotation);
       }
       // Caliber-scaled muzzle blast: feed the pipeline's per-mount shotEffect
       // intensity as the effect's channel-0 value (drives PARTICLE_SIZE), so a

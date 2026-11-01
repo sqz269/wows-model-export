@@ -2137,11 +2137,55 @@ def collect_all_particle_attachments(
     return out
 
 
+def _matrix_rotation_quat(matrix: Any) -> list[float] | None:
+    """Unit quaternion ``[x, y, z, w]`` of a column-major 4×4's rotation.
+
+    Columns are normalised first, so a uniform or per-axis scale does not
+    leak into the result. Returns ``None`` for a malformed matrix, a
+    degenerate column, or a mirror (det < 0), which a quaternion cannot hold.
+    """
+    if not isinstance(matrix, list) or len(matrix) != 16:
+        return None
+    try:
+        cols = [[float(matrix[c * 4 + r]) for r in range(3)] for c in range(3)]
+    except (TypeError, ValueError):
+        return None
+    for col in cols:
+        length = (col[0] ** 2 + col[1] ** 2 + col[2] ** 2) ** 0.5
+        if length < 1e-6:
+            return None
+        col[:] = [v / length for v in col]
+    # m[r][c] in row/column terms.
+    m = [[cols[c][r] for c in range(3)] for r in range(3)]
+    det = (
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    )
+    if det <= 0:
+        return None
+    trace = m[0][0] + m[1][1] + m[2][2]
+    if trace > 0:
+        s = 2.0 * (trace + 1.0) ** 0.5
+        q = [(m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s, 0.25 * s]
+    elif m[0][0] > m[1][1] and m[0][0] > m[2][2]:
+        s = 2.0 * (1.0 + m[0][0] - m[1][1] - m[2][2]) ** 0.5
+        q = [0.25 * s, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s, (m[2][1] - m[1][2]) / s]
+    elif m[1][1] > m[2][2]:
+        s = 2.0 * (1.0 + m[1][1] - m[0][0] - m[2][2]) ** 0.5
+        q = [(m[0][1] + m[1][0]) / s, 0.25 * s, (m[1][2] + m[2][1]) / s, (m[0][2] - m[2][0]) / s]
+    else:
+        s = 2.0 * (1.0 + m[2][2] - m[0][0] - m[1][1]) ** 0.5
+        q = [(m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25 * s, (m[1][0] - m[0][1]) / s]
+    norm = sum(v * v for v in q) ** 0.5
+    return [v / norm for v in q]
+
+
 def resolve_hull_effect_positions(
     attachments: list[dict[str, Any]],
     skel_ext_candidates_json: Path | str | None,
 ) -> dict[str, int]:
-    """Stamp a ``position`` (and ``matrix``) onto hull effect attachments.
+    """Stamp ``position`` and ``rotation`` onto hull effect attachments.
 
     Hull VFX nodes (``EP_Fire_1``, ``EP_Death_1``, ``EP_WakeTrace``, …)
     carry no transform in GameParams nor in the ``.visual`` node tree —
@@ -2157,7 +2201,10 @@ def resolve_hull_effect_positions(
     z-mirror + ×15), the SAME frame the hull GLB vertices use, and
     ``EP_*`` records are parented to ``Scene Root`` — so the candidate
     ``transform.position`` is already in hull-GLB metric space and is
-    copied verbatim (no extra composition).
+    copied verbatim (no extra composition). ``rotation`` is the record
+    matrix's rotation as a unit quaternion ``[x, y, z, w]`` in that same
+    frame; about a third of effect points carry one (e.g. the port-side
+    flood points are turned 180° so a shared effect faces outboard).
 
     Mutates ``attachments`` in place (only rows whose ``node`` resolves).
     Returns ``{"hull": <hull rows>, "resolved": <rows stamped>}`` for
@@ -2223,6 +2270,11 @@ def resolve_hull_effect_positions(
         pos = transform.get("position")
         if isinstance(pos, list) and len(pos) == 3:
             a["position"] = [float(pos[0]), float(pos[1]), float(pos[2])]
+            rotation = _matrix_rotation_quat(transform.get("matrix"))
+            if rotation is not None:
+                a["rotation"] = [round(v, 6) + 0.0 for v in rotation]  # no -0.0
+            else:
+                a.pop("rotation", None)
             stats["resolved"] += 1
 
     return stats

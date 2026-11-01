@@ -67,11 +67,11 @@ def resolve_exterior_effects(
     for row in rows:
         if row.get("source", "hull") == "hull":
             if variant_hull:
-                row.pop("position", None)
-                row.pop("matrix", None)
+                for key in ("position", "rotation", "matrix"):
+                    row.pop(key, None)
             elif replace_hull:
                 original = base_by_node.get(row.get("node"), {})
-                for key in ("position", "matrix"):
+                for key in ("position", "rotation", "matrix"):
                     if key in original:
                         row[key] = copy.deepcopy(original[key])
         elif ((row.get("source") in {"artillery", "atba", "airDefense"}

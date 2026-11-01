@@ -726,6 +726,15 @@ export interface ParticleAttachment {
    */
   position?: [number, number, number];
   /**
+   * Hull effect-point orientation as a unit quaternion `[x, y, z, w]`, in the
+   * same hull-GLB frame as `position` (from the same `_ep.skel_ext` record).
+   * About a third of `EP_*` points are turned, e.g. port-side flood points
+   * face outboard by a 180° yaw. Absent means identity. Particle records
+   * are authored in the engine frame, so consumers still compose
+   * `EFFECT_FRAME_FROM_GLB` after this rotation.
+   */
+  rotation?: [number, number, number, number];
+  /**
    * Caliber-scaled muzzle-blast intensity (gun `shotEffect` rows only).
    * The pipeline replicates WG's gun shooter: at runtime
    * `ClientShooterEffects` sets the muzzle effect's intensity from the
