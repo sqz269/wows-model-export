@@ -318,7 +318,9 @@
           <p class="text-destructive text-xs m-0">{diffError}</p>
         {:else if diff}
           {@const s = diff.summary}
-          <table class="text-xs w-auto border-collapse [&_td]:px-2 [&_td]:py-0.5 [&_th]:px-2">
+          <table
+            class="self-start text-xs w-auto border-collapse [&_td]:px-3 [&_td]:py-0.5 [&_th]:px-3"
+          >
             <thead>
               <tr class="text-muted-foreground text-[11px]">
                 <th class="text-left font-normal"></th>
