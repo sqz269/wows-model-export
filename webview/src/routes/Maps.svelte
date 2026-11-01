@@ -437,9 +437,11 @@
     return true;
   }
 
-  // Map-authored particle anchors from `space.bin.particles[]`. These are
-  // distinct from ship-side Effect attachments: placement comes from the map
-  // scene extras, while effect prototypes still come from /api/particles.
+  // Map-authored particle anchors: `space.bin.particles[]` records plus the
+  // effects attached to model instances (foam, chimney smoke, light beams).
+  // These are distinct from ship-side Effect attachments: placement comes
+  // from the map scene extras, while effect prototypes still come from
+  // /api/particles.
   let showMapParticles = $state(false);
   let mapParticleAnchors = $state<MapParticleAnchor[]>([]);
   let mapParticleLoading = $state(false);
@@ -554,10 +556,15 @@
   }
 
   interface MapParticleAnchor {
+    /** `space` = a space.bin.particles[] record; `decor` = an effect
+     *  attached to model instance `model_instance_index` (transform is
+     *  already world space). Absent on exports made before decor effects. */
+    source?: 'space' | 'decor';
+    model_instance_index?: number | null;
     position?: [number, number, number];
     transform?: number[];
-    resource_id?: number;
-    resource_id_hex?: string;
+    resource_id?: number | null;
+    resource_id_hex?: string | null;
     resource_path?: string | null;
     intensity_count?: number;
     intensity_values?: number[];
@@ -1463,7 +1470,9 @@
       const renderable = usable.filter((a) => records[a.resource_path as string]);
       const attachments: ParticleAttachment[] = renderable.map((a, i) => ({
         group: `map_${i}`,
-        node: a.resource_id_hex ?? 'anchor',
+        node:
+          a.resource_id_hex ??
+          (a.model_instance_index != null ? `model_${a.model_instance_index}` : 'anchor'),
         particle_path: a.resource_path as string,
         source: 'map',
       }));
@@ -2508,7 +2517,7 @@
             {#if viewerStats.mapParticleAnchors > 0}
               <label
                 class="flex items-center gap-1.5"
-                title="Map-authored space.bin.particles[] anchors. Preview uses the shared particle renderer and applies authored EffectManager channel intensities."
+                title="Map-authored particle anchors: space.bin.particles[] plus effects attached to models. Preview uses the shared particle renderer and applies authored EffectManager channel intensities."
               >
                 <input type="checkbox" bind:checked={showMapParticles} />
                 <span>

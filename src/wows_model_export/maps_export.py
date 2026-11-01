@@ -34,6 +34,7 @@ import re
 import struct
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -143,9 +144,12 @@ def primary_scene_extras(gltf: dict[str, Any]) -> dict[str, Any]:
 def write_particle_manifest_from_glb(name: str, glb_path: Path, out_path: Path) -> dict[str, Any]:
     """Extract `scene.extras.particles[]` into a direct JSON sidecar.
 
-    The toolkit owns the byte-level `space.bin.particles[]` parser. This helper
-    consumes only the exported GLB scene extras so the Python server does not
-    grow a duplicate map parser.
+    Anchors come from `space.bin.particles[]` (``source: "space"``) and from
+    the particle effects attached to model instances (``source: "decor"``,
+    already placed in world space, with ``model_instance_index`` naming the
+    instance). The toolkit owns the byte-level parsing. This helper consumes
+    only the exported GLB scene extras so the Python server does not grow a
+    duplicate map parser.
     """
     gltf = read_glb_json(glb_path)
     extras = primary_scene_extras(gltf)
@@ -180,6 +184,13 @@ def write_particle_manifest_from_glb(name: str, glb_path: Path, out_path: Path) 
         "generated_at": now_iso(),
         "source_glb": glb_path.name,
         "anchor_count": len(particles),
+        "anchor_count_by_source": dict(
+            Counter(
+                str(anchor.get("source") or "space")
+                for anchor in particles
+                if isinstance(anchor, dict)
+            )
+        ),
         "resolved_anchor_count": sum(1 for anchor in particles if _is_resolved(anchor)),
         "unique_resource_path_count": len(paths),
         "resource_paths": paths,
