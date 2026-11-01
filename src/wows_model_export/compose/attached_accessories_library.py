@@ -349,7 +349,7 @@ def _ensure_hash_table(
     cfg = config or PipelineConfig.load()
     cache_dir = cfg.require_cache_dir()
     return skel_ext_hashes.load_or_build(
-        cache=cache_dir / "skel_ext_hashes.json",
+        cache=cache_dir / "skel_ext_hashes.json", config=cfg,
     )
 
 

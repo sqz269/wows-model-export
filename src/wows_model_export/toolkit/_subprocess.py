@@ -19,11 +19,14 @@ captured stderr + the elapsed time. Callers don't need to invoke
 
 from __future__ import annotations
 
+import json
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
+from .. import build_deps
 from ..config import PipelineConfig
 from ..errors import ToolkitError
 from ..types import ToolkitResult
@@ -39,6 +42,43 @@ DEFAULT_TIMEOUT_S: float = 600.0
 # forever". A bare `None` default would conflict with that semantics.
 _USE_CONFIG_DEFAULT: Any = object()
 
+# Per-binary ``capabilities --json`` output, keyed by (path, mtime, size)
+# so a rebuilt binary is re-probed.
+_CAPABILITIES: dict[tuple[str, float, int], dict[str, Any]] = {}
+_CAPABILITIES_LOCK = threading.Lock()
+
+
+def toolkit_capabilities(bin_path: Path) -> dict[str, Any]:
+    """``wowsunpack capabilities --json`` for ``bin_path`` (``{}`` if the
+    binary is missing or too old to have the command)."""
+    try:
+        st = bin_path.stat()
+    except OSError:
+        return {}
+    key = (str(bin_path), st.st_mtime, st.st_size)
+    with _CAPABILITIES_LOCK:
+        cached = _CAPABILITIES.get(key)
+    if cached is not None:
+        return cached
+    caps: dict[str, Any] = {}
+    try:
+        proc = subprocess.run(
+            (str(bin_path), "capabilities", "--json"),
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0:
+            caps = json.loads(proc.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        caps = {}
+    with _CAPABILITIES_LOCK:
+        _CAPABILITIES[key] = caps
+    return caps
+
+
+def toolkit_supports(bin_path: Path, feature: str) -> bool:
+    """True if ``wowsunpack capabilities`` lists ``feature``."""
+    return feature in (toolkit_capabilities(bin_path).get("features") or [])
+
 
 def run_toolkit(
     argv: list[str],
@@ -47,6 +87,7 @@ def run_toolkit(
     expect_outputs: tuple[Path, ...] = (),
     timeout: float | None = _USE_CONFIG_DEFAULT,
     cwd: Path | None = None,
+    record_deps: bool = True,
 ) -> ToolkitResult:
     """Invoke `wowsunpack <argv>` and return a typed result.
 
@@ -67,6 +108,10 @@ def run_toolkit(
             override.
         cwd: working directory for the subprocess. Rarely needed —
             wowsunpack is path-absolute via `--game-dir`.
+        record_deps: inside a :func:`build_deps.recording` block, pass
+            ``--deps-out`` and merge what the call read into the active
+            collector. Set False for calls that read the whole game
+            (manifests, full dumps) rather than an export's inputs.
 
     Returns:
         `ToolkitResult` with `output_paths` = `expect_outputs`,
@@ -80,6 +125,12 @@ def run_toolkit(
     """
     cfg = config or PipelineConfig.load()
     bin_path = cfg.require_toolkit_bin()
+
+    collector = build_deps.active() if record_deps else None
+    deps_file: Path | None = None
+    if collector is not None and bin_path.is_file() and toolkit_supports(bin_path, "deps_out"):
+        deps_file = collector.new_deps_file()
+        argv = ["--deps-out", str(deps_file), *argv]
 
     cmd: tuple[str, ...] = (str(bin_path), *argv)
 
@@ -125,11 +176,16 @@ def run_toolkit(
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
     if proc.returncode != 0:
+        if deps_file is not None:
+            deps_file.unlink(missing_ok=True)
         raise ToolkitError(
             cmd=cmd,
             exit_code=proc.returncode,
             stderr=proc.stderr or "",
         )
+
+    if deps_file is not None and collector is not None:
+        collector.merge_toolkit_deps(deps_file)
 
     # Verify expected outputs landed on disk. The toolkit occasionally
     # exits 0 even though a target file is missing (bad VFS path that
@@ -155,4 +211,4 @@ def run_toolkit(
     )
 
 
-__all__ = ["run_toolkit", "DEFAULT_TIMEOUT_S"]
+__all__ = ["run_toolkit", "toolkit_supports", "DEFAULT_TIMEOUT_S"]

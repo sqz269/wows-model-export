@@ -64,6 +64,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .. import build_deps as _build_deps
 from ..config import PipelineConfig
 from ..errors import StepError
 from ..read import gameparams as _gp_read
@@ -2214,8 +2215,11 @@ def scaffold_ship(
             max_workers=len(tasks),
             thread_name_prefix="scaffold-toolkit",
         ) as ex:
+            # bind(): the toolkit calls in each task must see the
+            # caller's build-deps recording (thread pools don't copy
+            # context on their own).
             futures: dict[str, concurrent.futures.Future[Any]] = {
-                name: ex.submit(fn) for name, fn in tasks
+                name: ex.submit(_build_deps.bind(fn)) for name, fn in tasks
             }
             concurrent.futures.wait(futures.values())
 

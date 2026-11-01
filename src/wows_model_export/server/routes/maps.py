@@ -34,6 +34,7 @@ viewer (Maps.svelte) reads `/api/maps/{name}/glb` directly.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import traceback
@@ -42,6 +43,7 @@ from typing import Any
 from fastapi import APIRouter, Body
 from fastapi.responses import FileResponse, JSONResponse, Response
 
+from ... import build_deps
 from ...config import PipelineConfig
 from ...errors import ToolkitError
 from ...sky_assets import extract_sky_assets
@@ -73,6 +75,7 @@ from ...maps_export import (
     write_probe_manifest_from_glb as _write_probe_manifest_from_glb,
     write_static_decal_manifest_from_glb as _write_static_decal_manifest_from_glb,
     write_user_object_manifest_from_glb as _write_user_object_manifest_from_glb,
+    write_map_build_deps as _write_map_build_deps,
 )
 
 _MAP_EXPORT_BODY = Body(default={})
@@ -198,7 +201,34 @@ def make_router(config: PipelineConfig) -> APIRouter:
     #    "no_terrain": bool, "lod": int, "vegetation_density": float,
     #    "collision_manifest": bool}
     # All optional; defaults match the toolkit's defaults.
+    def _track_build_deps(fn):
+        """Record the export's game inputs into ``build_deps.json`` when
+        the route succeeds (same bookkeeping as ``maps_export.run_export``)."""
+
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any):
+            with build_deps.recording() as deps:
+                resp = fn(*args, **kwargs)
+            if getattr(resp, "status_code", 500) == 200:
+                name = kwargs.get("name", args[0] if args else "")
+                body = kwargs.get("body", args[1] if len(args) > 1 else {}) or {}
+                flags = {
+                    k: body[k] for k in (
+                        "lod", "terrain_step", "no_terrain", "no_water",
+                        "no_vegetation", "no_textures", "vegetation_density",
+                        "max_texture_size", "lightmap_density",
+                    ) if body.get(k) is not None
+                }
+                _write_map_build_deps(
+                    config, name, deps, flags=flags,
+                    collision_manifest=bool(body.get("collision_manifest")),
+                )
+            return resp
+
+        return wrapper
+
     @router.post("/maps/{name}/export")
+    @_track_build_deps
     def post_export_map(
         name: str, body: dict[str, Any] = _MAP_EXPORT_BODY
     ) -> JSONResponse:

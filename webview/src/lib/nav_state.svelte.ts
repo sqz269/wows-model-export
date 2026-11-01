@@ -86,6 +86,11 @@ export function projectilesHref(): string {
     : '#/projectiles';
 }
 
+/** Topnav href for the Updates tab (game-build diffs, stale exports). */
+export function updatesHref(): string {
+  return '#/updates';
+}
+
 /** Topnav href for the Settings tab. No sub-routes today — kept as a
  *  helper so the topnav reads identically to the other tabs. */
 export function settingsHref(): string {

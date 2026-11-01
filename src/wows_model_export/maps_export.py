@@ -37,6 +37,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import build_deps
 from .config import PipelineConfig
 from .errors import ToolkitError
 from .sky_assets import extract_sky_assets
@@ -851,7 +852,66 @@ def _slim_summary(doc: "dict[str, Any] | None") -> "dict[str, Any] | None":
     }
 
 
+def write_map_build_deps(
+    cfg: PipelineConfig,
+    name: str,
+    collector: "build_deps.DepsCollector",
+    *,
+    flags: "dict[str, Any]",
+    collision_manifest: bool,
+) -> "Path | None":
+    """Write the space's ``build_deps.json`` (see
+    :mod:`wows_model_export.compose.build_tracking`)."""
+    from .compose import build_tracking
+
+    return build_tracking.write_export_deps_safely(
+        space_cache_dir(cfg, name),
+        kind="map",
+        name=name,
+        collector=collector,
+        reexport={
+            "kind": "map",
+            "name": name,
+            "flags": {k: v for k, v in flags.items() if k != "collision_manifest"},
+            "collision_manifest": collision_manifest,
+        },
+        config=cfg,
+    )
+
+
 def run_export(
+    name: str,
+    *,
+    config: "PipelineConfig | None" = None,
+    flags: "dict[str, Any] | None" = None,
+    collision_manifest: bool = False,
+    skip_glb: bool = False,
+    skip_decal_textures: bool = False,
+) -> "dict[str, Any]":
+    """Export one space end-to-end and write ``export.json``.
+
+    A full run (no ``skip_*``) also records the game inputs it read in
+    ``build_deps.json``, so the export can be checked against later
+    game builds.
+    """
+    cfg = config or PipelineConfig.load()
+    with build_deps.recording() as deps:
+        meta = _run_export(
+            name,
+            config=cfg,
+            flags=flags,
+            collision_manifest=collision_manifest,
+            skip_glb=skip_glb,
+            skip_decal_textures=skip_decal_textures,
+        )
+    if not skip_glb and not skip_decal_textures:
+        write_map_build_deps(
+            cfg, name, deps, flags=dict(flags or {}), collision_manifest=collision_manifest
+        )
+    return meta
+
+
+def _run_export(
     name: str,
     *,
     config: "PipelineConfig | None" = None,

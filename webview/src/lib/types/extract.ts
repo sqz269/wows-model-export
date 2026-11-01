@@ -98,7 +98,14 @@ export interface GpStatus {
   hint?: string;
 }
 
-export type JobKind = 'extract' | 'skin' | 'bootstrap' | 'rig' | 'consumer' | 'cleanup';
+export type JobKind =
+  | 'extract'
+  | 'skin'
+  | 'bootstrap'
+  | 'rig'
+  | 'consumer'
+  | 'cleanup'
+  | 'builds';
 
 export interface JobState {
   id: string;

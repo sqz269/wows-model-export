@@ -14,6 +14,7 @@
     mapsHref,
     settingsHref,
     shipsHref,
+    updatesHref,
   } from '$lib/nav_state.svelte';
   import { hasModifier, isTypingContext } from '$lib/shortcuts';
   import Library from '$routes/Library.svelte';
@@ -25,6 +26,7 @@
   import Consumers from '$routes/Consumers.svelte';
   import Projectiles from '$routes/Projectiles.svelte';
   import Maps from '$routes/Maps.svelte';
+  import Updates from '$routes/Updates.svelte';
   import HelpDialog from '$components/HelpDialog.svelte';
 
   let route = $state<RouteState>(readRoute());
@@ -88,6 +90,10 @@
           e.preventDefault();
           return;
         case '9':
+          navigate(updatesHref());
+          e.preventDefault();
+          return;
+        case '0':
           navigate(settingsHref());
           e.preventDefault();
           return;
@@ -115,7 +121,8 @@
     { page: 'maps', href: mapsHref(), label: 'Maps', keyHint: '6' },
     { page: 'gameparams', href: gameParamsHref(), label: 'GameParams', keyHint: '7' },
     { page: 'consumers', href: consumersHref(), label: 'Consumers', keyHint: '8' },
-    { page: 'settings', href: settingsHref(), label: 'Settings', keyHint: '9' },
+    { page: 'updates', href: updatesHref(), label: 'Updates', keyHint: '9' },
+    { page: 'settings', href: settingsHref(), label: 'Settings', keyHint: '0' },
   ]);
 
   function go(e: MouseEvent, href: string) {
@@ -224,6 +231,9 @@
       spaceName={route.page === 'maps' ? route.spaceName : null}
       active={route.page === 'maps'}
     />
+  </div>
+  <div class={route.page === 'updates' ? 'flex flex-1 min-w-0' : 'hidden'}>
+    <Updates active={route.page === 'updates'} />
   </div>
   <div class={route.page === 'settings' ? 'flex flex-1 min-w-0' : 'hidden'}>
     <Settings />

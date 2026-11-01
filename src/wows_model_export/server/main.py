@@ -24,6 +24,7 @@ from ..config import PipelineConfig
 from . import queue as _queue
 from .routes import (
     bootstrap,
+    builds,
     cleanup,
     consumers,
     extract,
@@ -87,6 +88,7 @@ def create_app(config: PipelineConfig) -> FastAPI:
     app.include_router(settings.make_router(config), prefix="/api")
     app.include_router(bootstrap.make_router(config), prefix="/api")
     app.include_router(cleanup.make_router(config), prefix="/api")
+    app.include_router(builds.make_router(config), prefix="/api")
     app.include_router(queue.make_router(config), prefix="/api")
     app.include_router(jobs.make_router(), prefix="/api")
     app.include_router(rig.make_router(config), prefix="/api")

@@ -52,6 +52,7 @@ from pathlib import Path
 from ..config import PipelineConfig
 from ..read import gameparams as _gp
 from ..read import localization as _loc
+from ..toolkit import build as _build
 from ..toolkit import extract as _toolkit_extract
 
 # ---------------------------------------------------------------------------
@@ -117,8 +118,9 @@ def ensure_camouflages_xml(
     cfg = config or PipelineConfig.load()
     cache_dir = cfg.require_cache_dir()
     camo_xml = cache_dir / "camouflages.xml"
-    if camo_xml.is_file() and not refresh:
+    if not refresh and _build.cache_is_current(camo_xml, cfg):
         return camo_xml
+    build = _build.current_build(cfg)
     print(
         f"[wg_camo] extracting camouflages.xml -> {camo_xml} (~9s)...",
         file=sys.stderr,
@@ -127,7 +129,7 @@ def ensure_camouflages_xml(
     # Glob extract; wowsunpack writes to <out_dir>/<full vfs path>, but
     # camouflages.xml is at the VFS root so the output lands at
     # <out_dir>/camouflages.xml directly.
-    _toolkit_extract(["**/camouflages.xml"], out_dir=cache_dir, config=cfg)
+    _toolkit_extract(["**/camouflages.xml"], out_dir=cache_dir, config=cfg, record_deps=False)
     if not camo_xml.is_file():
         # Toolkit wrote it under the matched glob path — locate + move.
         for found in cache_dir.rglob("camouflages.xml"):
@@ -138,6 +140,7 @@ def ensure_camouflages_xml(
         raise RuntimeError(
             f"wg_camo: camouflages.xml not found after extract under {cache_dir}"
         )
+    _build.write_stamp(camo_xml, build)
     return camo_xml
 
 

@@ -27,6 +27,7 @@ from pathlib import Path
 
 from ..config import PipelineConfig
 from ..types import ToolkitResult
+from . import build as _build
 from ._subprocess import run_toolkit
 
 DEFAULT_MANIFEST_FILENAME = "wows_manifest.json"
@@ -39,8 +40,13 @@ def extract(
     flatten: bool = False,
     strip_prefix: bool = False,
     config: PipelineConfig | None = None,
+    record_deps: bool = True,
 ) -> ToolkitResult:
     """Extract files from the WoWS VFS to ``out_dir``.
+
+    ``record_deps=False`` keeps a cache fill (e.g. all of ``assets.bin``)
+    out of the active export's recorded inputs, see
+    :mod:`wows_model_export.build_deps`.
 
     ``files`` accepts glob patterns:
         - ``"**/camouflages.xml"``
@@ -75,7 +81,7 @@ def extract(
     # (run_toolkit's check uses `Path.is_file()` which would always fail
     # on a dir and raise even after a successful extract). Callers that
     # need a presence check should walk `out_dir`.
-    result = run_toolkit(argv, config=cfg)
+    result = run_toolkit(argv, config=cfg, record_deps=record_deps)
     # Re-stamp `output_paths` so the docstring contract holds even though
     # we skipped the post-exit existence check.
     return ToolkitResult(
@@ -105,7 +111,7 @@ def metadata_json(
         "--game-dir", str(cfg.require_game_dir()),
         "metadata", "--format", "json", str(out),
     ]
-    return run_toolkit(argv, config=cfg, expect_outputs=(out,))
+    return run_toolkit(argv, config=cfg, expect_outputs=(out,), record_deps=False)
 
 
 def default_manifest_path(config: PipelineConfig | None = None) -> Path:
@@ -151,10 +157,12 @@ def ensure_manifest(
         manifest_path = default_manifest_path(cfg)
     else:
         manifest_path = Path(manifest_path)
-    if manifest_path.is_file() and not refresh:
+    if not refresh and _build.cache_is_current(manifest_path, cfg):
         return manifest_path
+    build = _build.current_build(cfg)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     metadata_json(manifest_path, config=cfg)
+    _build.write_stamp(manifest_path, build)
     return manifest_path
 
 

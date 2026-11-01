@@ -26,6 +26,7 @@ import tempfile
 from pathlib import Path
 
 from ..config import PipelineConfig
+from . import build as _build
 from . import vfs as _vfs
 
 
@@ -56,15 +57,23 @@ def ensure_dump(
     Idempotent. The toolkit's ``extract`` subcommand pulls the file out
     of the WoWS VFS to a temp directory; we then ``os.replace`` it into
     place so a SIGINT mid-extract can't leave a truncated file.
+
+    The default cache is re-extracted when the game build changes (see
+    :mod:`wows_model_export.toolkit.build`). A path passed in, or set via
+    ``$WOWS_ASSETS_BIN``, is left to its owner.
     """
     cfg = config or PipelineConfig.load()
+    explicit = cache_path is not None or bool(os.environ.get("WOWS_ASSETS_BIN"))
     if cache_path is None:
         cache_path = default_path(cfg)
     else:
         cache_path = Path(cache_path)
 
     if cache_path.is_file() and not refresh:
-        return cache_path
+        if explicit or _build.cache_is_current(cache_path, cfg):
+            return cache_path
+    stale_existing = cache_path.is_file() and not refresh
+    build = _build.current_build(cfg)
 
     print(
         f"[assets_bin] extracting assets.bin -> {cache_path} "
@@ -78,7 +87,7 @@ def ensure_dump(
     # ``<tmp>/content/assets.bin``.
     with tempfile.TemporaryDirectory(prefix="wms-assetsbin-") as td:
         out_dir = Path(td)
-        _vfs.extract(["**/assets.bin"], out_dir=out_dir, config=cfg)
+        _vfs.extract(["**/assets.bin"], out_dir=out_dir, config=cfg, record_deps=False)
         candidates = list(out_dir.rglob("assets.bin"))
         if not candidates:
             raise RuntimeError(
@@ -101,9 +110,20 @@ def ensure_dump(
         shutil.move(str(src), str(tmp))
         try:
             os.replace(tmp, cache_path)
-        except OSError:
+        except OSError as err:
             tmp.unlink(missing_ok=True)
+            if stale_existing:
+                # Typically a running server has the old file memory-mapped.
+                # Keep serving it; the stamp stays old so the next call
+                # retries.
+                print(
+                    f"[assets_bin] could not replace {cache_path} with build "
+                    f"{build} ({err}); still using the previous build's copy",
+                    file=sys.stderr,
+                )
+                return cache_path
             raise
+        _build.write_stamp(cache_path, build)
     return cache_path
 
 

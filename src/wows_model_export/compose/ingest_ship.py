@@ -71,19 +71,23 @@ Refactor notes vs the I:-side ``ingest(*, ship_input=, out_root=, ...)``:
 """
 from __future__ import annotations
 
+import functools
 import re
 import sys
 import tempfile
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+from .. import build_deps as _build_deps
 from ..config import PipelineConfig
 from ..errors import StepError, ToolkitError
 from ..resolve import sidecar as _sidecar
 from ..toolkit import armor_json as _toolkit_armor_json
 from ..types import IngestResult, OnEvent, ScaffoldResult
 from . import accessory_library as _accessory_library_mod
+from . import build_tracking as _build_tracking
 from . import publish as _publish_mod
 from . import scaffold_ship as _scaffold_ship_mod
 from . import skel_ext_resolve as _skel_ext_resolve_mod
@@ -402,6 +406,54 @@ def build_library_and_refresh(
 # ---------------------------------------------------------------------------
 
 
+def _record_build_deps(fn):
+    """Record the game inputs an ingest reads into ``build_deps.json``.
+
+    Wraps the whole ingest in a :func:`build_deps.recording` block, then
+    writes the ship's deps (with fingerprints from the current build's
+    manifest) as a final ``record_build_deps`` step. A failure there is
+    logged, never raised: tracking must not fail an export."""
+
+    @functools.wraps(fn)
+    def wrapper(ship_input: str, **kwargs: Any) -> IngestResult:
+        with _build_deps.recording() as deps:
+            result = fn(ship_input, **kwargs)
+        cfg = kwargs.get("config") or PipelineConfig.load()
+        timer = StepRunner(kwargs.get("on_event"))
+        timer.start("record_build_deps", detail=result.label)
+        written = _build_tracking.write_export_deps_safely(
+            result.workspace_dir,
+            kind="ship",
+            name=result.label,
+            collector=deps,
+            reexport={
+                "kind": "ship",
+                "ship_input": ship_input,
+                "label": result.label,
+                "permoflage": kwargs.get("variant_permoflage", "auto"),
+                # The library-build intent, as in provenance.extract_args:
+                # the queue runs every item with build_library=False and
+                # builds the library once when it drains.
+                "build_library": bool(
+                    kwargs["provenance_build_library"]
+                    if kwargs.get("provenance_build_library") is not None
+                    else kwargs.get("build_library", False)
+                ),
+                "export_exterior_hulls": bool(kwargs.get("export_exterior_hulls", False)),
+                "toolkit_ship_override": kwargs.get("toolkit_ship_override"),
+                "gameparams_ship_id": kwargs.get("gameparams_ship_id"),
+                "class_override": kwargs.get("class_override"),
+                "ship_key_suffix": kwargs.get("ship_key_suffix"),
+            },
+            config=cfg,
+        )
+        timer.complete(detail=str(written) if written else "not written (see log)")
+        return result
+
+    return wrapper
+
+
+@_record_build_deps
 def ingest_ship(
     ship_input: str,
     *,

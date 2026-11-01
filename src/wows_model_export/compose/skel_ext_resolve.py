@@ -421,7 +421,7 @@ def _resolve_hash_mode(
     # ── Step: resolve_hashes ──────────────────────────────────────────
     with runner.step("resolve_hashes", detail=f"{len(candidates):,} candidates") as st:
         cache_path = config.require_cache_dir() / "skel_ext_hashes.json"
-        table = skel_ext_hashes.load_or_build(cache=cache_path)
+        table = skel_ext_hashes.load_or_build(cache=cache_path, config=config)
         resolved = skel_ext_hashes.resolve_candidates(candidates, table)
         st.annotate(
             f"resolved {resolved['summary']['resolved']:,}/{len(candidates):,} "

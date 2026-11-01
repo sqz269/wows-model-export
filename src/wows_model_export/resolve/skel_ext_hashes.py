@@ -36,6 +36,10 @@ import re
 import struct
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..config import PipelineConfig
 
 # ---------------------------------------------------------------------------
 # Murmur3_32 (seed=0) - verified against "Scene Root" -> 0x10C30510
@@ -228,8 +232,15 @@ def load_or_build(
     cache: Path | str,
     assets_bin_path: Path | str | None = None,
     refresh: bool = False,
+    config: "PipelineConfig | None" = None,
 ) -> dict[int, dict]:
     """Return the table, building (and caching) on first use.
+
+    The cache carries a build stamp (see
+    :mod:`wows_model_export.toolkit.build`): a table made from an older
+    game build is rebuilt, from the pipeline's current ``assets.bin``
+    when no path is given. With an explicit ``assets_bin_path`` the
+    caller owns freshness and any existing cache is used.
 
     `cache` is the on-disk path the table is read from / written to;
     callers typically pass ``PipelineConfig.require_cache_dir() /
@@ -241,9 +252,24 @@ def load_or_build(
     ``wowsunpack extract --out-dir <somewhere> '**/assets.bin'`` if
     missing.
     """
+    from ..toolkit import build as _build
+
     cache = Path(cache)
-    if cache.is_file() and not refresh:
+    if cache.is_file() and not refresh and (
+        assets_bin_path is not None or _build.cache_is_current(cache, config)
+    ):
         return load_table(cache)
+    build: int | None = None
+    if assets_bin_path is None and not os.environ.get("WOWS_ASSETS_BIN"):
+        try:
+            from ..toolkit import assets_bin as _assets_bin
+
+            build = _build.current_build(config)
+            assets_bin_path = _assets_bin.ensure_dump(config=config)
+        except Exception as exc:  # noqa: BLE001 - fall back to the old lookup
+            print(f"[skel_ext_hashes] pipeline assets.bin unavailable: {exc}",
+                  file=sys.stderr)
+            build = None
     if assets_bin_path is None:
         # Conventional locations the toolkit tends to write to. Override
         # with WOWS_ASSETS_BIN for non-default workflows.
@@ -267,6 +293,7 @@ def load_or_build(
             )
     table = build_table(assets_bin_path)
     save_table(table, cache)
+    _build.write_stamp(cache, build)
     return table
 
 

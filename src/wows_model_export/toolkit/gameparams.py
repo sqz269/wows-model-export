@@ -19,6 +19,7 @@ from pathlib import Path
 
 from ..config import PipelineConfig
 from ..types import ToolkitResult
+from . import build as _build
 from ._subprocess import run_toolkit
 
 
@@ -63,7 +64,8 @@ def dump_gameparams(
         argv += ["--id", ship_id]
     argv.append(str(out))
 
-    return run_toolkit(argv, config=cfg, expect_outputs=(out,))
+    # A full dump reads all of GameParams, not one export's inputs.
+    return run_toolkit(argv, config=cfg, expect_outputs=(out,), record_deps=not full)
 
 
 def ensure_dump(
@@ -76,9 +78,10 @@ def ensure_dump(
 
     ``cache_path`` defaults to ``<config.cache_dir>/gameparams.json``.
 
-    Idempotent: if the file already exists and ``refresh`` is False the
-    existing path is returned without re-extracting. Pass ``refresh=True``
-    after a game patch (or delete the file) to force a fresh dump.
+    Idempotent: if the file already exists, was dumped from the current
+    game build (see :mod:`wows_model_export.toolkit.build`) and ``refresh``
+    is False, the existing path is returned without re-extracting. A game
+    update makes the next call re-dump.
 
     The build calls :func:`dump_gameparams` with ``full=True`` and writes
     atomically through a sibling ``.tmp`` path so a SIGINT mid-write
@@ -91,9 +94,10 @@ def ensure_dump(
     else:
         cache_path = Path(cache_path)
 
-    if cache_path.is_file() and not refresh:
+    if not refresh and _build.cache_is_current(cache_path, cfg):
         return cache_path
 
+    build = _build.current_build(cfg)
     print(
         f"[gameparams] dumping GameParams.json -> {cache_path} "
         "(~30-90s, ~2.8 GB)...",
@@ -115,6 +119,7 @@ def ensure_dump(
                 f"gameparams: dump did not produce {tmp_path}"
             )
         os.replace(tmp_path, cache_path)
+        _build.write_stamp(cache_path, build)
     finally:
         # Best-effort cleanup if the toolkit succeeded but replace raised
         # (e.g. permission denied on the final path).

@@ -74,6 +74,11 @@ export type ParticlesRoute = {
   particlePath: string | null;
 };
 
+export type UpdatesRoute = {
+  page: 'updates';
+  path: string;
+};
+
 export type MapsRoute = {
   page: 'maps';
   path: string;
@@ -90,7 +95,8 @@ export type RouteState =
   | ConsumersRoute
   | ProjectilesRoute
   | ParticlesRoute
-  | MapsRoute;
+  | MapsRoute
+  | UpdatesRoute;
 
 function parseHash(hash: string): RouteState {
   const path = hash.replace(/^#\/?/, '');
@@ -113,6 +119,9 @@ function parseHash(hash: string): RouteState {
   }
   if (head === 'consumers') {
     return { page: 'consumers', path };
+  }
+  if (head === 'updates') {
+    return { page: 'updates', path };
   }
   if (head === 'projectiles' || head === 'projectile') {
     return { page: 'projectiles', path, projectileId: rest ?? null };

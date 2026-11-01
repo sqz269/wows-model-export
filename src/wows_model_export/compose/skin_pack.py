@@ -63,6 +63,7 @@ Inline dependencies lifted alongside this composer:
 """
 from __future__ import annotations
 
+import functools
 import json
 import shutil
 import sys
@@ -70,8 +71,9 @@ import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
+from .. import build_deps as _build_deps
 from .. import toolkit
 from ..config import PipelineConfig
 from ..errors import StepError
@@ -88,6 +90,7 @@ from ..resolve.sidecar._dds_channels import (
     SUFFIX_PRIORITY as _SUFFIX_PRIORITY,
 )
 from ..types import OnEvent, SkinPackResult
+from . import build_tracking as _build_tracking
 from ._step_runner import StepRunner
 
 # ---------------------------------------------------------------------------
@@ -1143,6 +1146,32 @@ def _apply_plan(
 # ---------------------------------------------------------------------------
 
 
+def _record_build_deps(fn):
+    """Add the game inputs a skin pack reads to its ship's ``build_deps.json``.
+
+    Only merges into a ship that is already tracked: a deps file holding
+    just the skin's inputs would make an untracked ship look current."""
+
+    @functools.wraps(fn)
+    def wrapper(skin_source: Path | str, **kwargs: Any) -> SkinPackResult:
+        with _build_deps.recording() as deps:
+            result = fn(skin_source, **kwargs)
+        ship_dir = result.sidecar_path.parent
+        if (ship_dir / _build_tracking.DEPS_FILENAME).is_file():
+            _build_tracking.write_export_deps_safely(
+                ship_dir,
+                kind="ship",
+                name=result.ship_id,
+                collector=deps,
+                config=kwargs.get("config"),
+                merge=True,
+            )
+        return result
+
+    return wrapper
+
+
+@_record_build_deps
 def ingest_skin_pack(
     skin_source: Path | str,
     *,

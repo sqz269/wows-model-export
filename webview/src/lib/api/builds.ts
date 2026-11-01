@@ -1,0 +1,140 @@
+// `/api/builds` client for the Updates page: what changed between game
+// builds, and which exports a game update made stale.
+//
+//   GET  /api/builds            builds on disk, saved manifests, cache stamps,
+//                               every export's state vs the current build
+//   GET  /api/builds/diff       build-to-build diff summary (?from=&to=)
+//   POST /api/builds/snapshot   job: save the current build's manifest
+//   POST /api/builds/reexport   job: re-run stale / named exports
+
+import { fetchJson } from './client';
+
+export type ExportState = 'current' | 'stale' | 'untracked' | 'error';
+export type ExportKind = 'ship' | 'map';
+export type BuildSection = 'files' | 'records' | 'gameparams' | 'camouflages';
+
+export interface BuildCacheStatus {
+  name: string;
+  exists: boolean;
+  /** Build the cache was made from (null = made before stamps existed). */
+  build: number | null;
+  current: boolean;
+}
+
+export interface ExportStatus {
+  kind: ExportKind;
+  name: string;
+  path: string;
+  state: ExportState;
+  /** Game build the export was made from (null when untracked). */
+  build: number | null;
+  exported_at: string | null;
+  changed_count: number;
+  /** Changed inputs per section (capped server-side). */
+  changed: Partial<Record<BuildSection, string[]>>;
+  /** Inputs that no longer exist in the current build. */
+  removed: Partial<Record<BuildSection, string[]>>;
+  counts: Partial<Record<BuildSection, number>>;
+  /** Arguments a re-export replays. */
+  reexport: Record<string, unknown>;
+  note: string;
+  /** Sections not checked because the hashing changed since export. */
+  incomparable: BuildSection[];
+}
+
+export interface BuildsStatus {
+  current_build: number | null;
+  builds_with_idx: number[];
+  stored_manifests: number[];
+  caches: BuildCacheStatus[];
+  /** The current build has no saved manifest yet: run a snapshot first. */
+  needs_snapshot: boolean;
+  /** Null while `needs_snapshot`. */
+  exports: ExportStatus[] | null;
+  counts: Partial<Record<ExportState, number>>;
+}
+
+export interface CappedList {
+  total: number;
+  items: string[];
+}
+
+export interface SectionCounts {
+  added: number;
+  removed: number;
+  changed: number;
+}
+
+export interface BuildDiff {
+  from_build: number;
+  to_build: number;
+  summary: {
+    files: SectionCounts;
+    records: SectionCounts;
+    gameparams: SectionCounts;
+    camouflages: SectionCounts;
+    records_changed_by_type: Record<string, number>;
+    shallow_records: number;
+  };
+  by_area: {
+    files_changed: Record<string, number>;
+    files_added: Record<string, number>;
+    records_changed: Record<string, number>;
+    records_added: Record<string, number>;
+  };
+  /** Groups where nearly every file of a kind changed: likely a format change. */
+  format_signals: { kind: string; changed: number; total: number }[];
+  /** Sections whose hashing differs between the two manifests. */
+  incomparable: BuildSection[];
+  /** Space name -> {added|removed|changed: file count}. */
+  spaces: Record<string, Partial<Record<'added' | 'removed' | 'changed', number>>>;
+  /** Ship model dir -> changed/added file + record count. */
+  ship_model_dirs: Record<string, number>;
+  particles: CappedList;
+  gameparams: Record<'added' | 'removed' | 'changed', CappedList>;
+  camouflages: Record<'added' | 'removed' | 'changed', CappedList>;
+  sections: { from: Record<string, string>; to: Record<string, string> };
+}
+
+export function fetchBuildsStatus(): Promise<BuildsStatus> {
+  return fetchJson<BuildsStatus>('/api/builds');
+}
+
+export function fetchBuildDiff(from?: number, to?: number): Promise<BuildDiff> {
+  const q = new URLSearchParams();
+  if (from) q.set('from', String(from));
+  if (to) q.set('to', String(to));
+  const qs = q.toString();
+  return fetchJson<BuildDiff>(`/api/builds/diff${qs ? `?${qs}` : ''}`);
+}
+
+export interface BuildsJobResponse {
+  ok: true;
+  job_id: string;
+  cmd: string[];
+}
+
+export function runBuildSnapshot(refresh = false): Promise<BuildsJobResponse> {
+  return fetchJson<BuildsJobResponse>('/api/builds/snapshot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh }),
+  });
+}
+
+export interface ReexportBody {
+  /** Only these exports (ship label / map name). Empty = all stale. */
+  names?: string[];
+  kind?: ExportKind | null;
+  include_untracked?: boolean;
+  replay_skins?: boolean;
+  build_library?: boolean;
+}
+
+export function runReexport(body: ReexportBody): Promise<BuildsJobResponse> {
+  return fetchJson<BuildsJobResponse>('/api/builds/reexport', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}

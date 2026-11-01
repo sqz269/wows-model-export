@@ -38,6 +38,7 @@ from fastapi.responses import JSONResponse
 
 from ... import compose
 from ...config import PipelineConfig
+from ...toolkit import build as _build
 from ..jobs import (
     JobLockedError,
     cancel_job,
@@ -130,7 +131,13 @@ def make_router(config: PipelineConfig) -> APIRouter:
             # Skip the dump when an existing snapshot.json is at least
             # as fresh as gameparams.json — saves the ~30 s parse on
             # cold start when a previous run already wrote one.
-            if not snapshot_cache_path.exists() or snap_mtime < gp_mtime:
+            # A GameParams cache from an older game build also forces a
+            # rebuild: compose.snapshot re-dumps GameParams first.
+            if (
+                not snapshot_cache_path.exists()
+                or snap_mtime < gp_mtime
+                or not _build.cache_is_current(gp_cache_path, config)
+            ):
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 # asyncio.to_thread keeps the event loop responsive
                 # while the composer parses GameParams. We don't gate
