@@ -20,6 +20,20 @@ export const ABSOLUTE_MAX_CAPACITY = 512; // hard cap per system
 // times, dimensionless multipliers (dampfer/ageScale), sprite-space offsets
 // (customCenterOffset, tiling), or colour.
 export const NATIVE_TO_METRES = 15;
+// Particle records are authored in the engine's native left-handed frame: a
+// muzzle blast fires along its anchor's +Z (out of the barrel) and a port-side
+// wake sprays along -X. The toolkit converts every exported node to glTF by
+// negating Z, so in a GLB the same anchor's barrel runs along -Z while X is
+// unchanged. The sim reads record axes as-is, so an effect parented straight
+// to a GLB node or a converted space.bin transform plays backwards. Compose
+// the Z mirror onto any GLB-frame anchor before handing it to an effect
+// group: anchor * EFFECT_FRAME_FROM_GLB, or scale an Object3D group by
+// EFFECT_FRAME_SCALE_FROM_GLB. The sim converts directions between frames
+// with worldBasis() (system-renderer.ts), which keeps the mirror; positions
+// and the shaders already use the full matrices. Not for the standalone
+// inspector, which has no GLB anchor.
+export const EFFECT_FRAME_SCALE_FROM_GLB = new THREE.Vector3(1, 1, -1);
+export const EFFECT_FRAME_FROM_GLB = new THREE.Matrix4().makeScale(1, 1, -1);
 // Native per-particle update substep ceiling, seconds (FUN_140718f00 clamps
 // every integration substep to DAT_142556548 = 0.25; RE 2026-06-09).
 export const NATIVE_SUBSTEP_MAX_S = 0.25;

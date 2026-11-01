@@ -21,7 +21,11 @@ import {
   type BloomParams,
   type SceneEnvironment,
 } from '$lib/three/scene';
-import { ParticleScene, type ParticleAttachmentHandle } from '$lib/three/particles';
+import {
+  EFFECT_FRAME_SCALE_FROM_GLB,
+  ParticleScene,
+  type ParticleAttachmentHandle,
+} from '$lib/three/particles';
 import { observeResize } from '$lib/three/resize';
 import { startRenderLoop } from '$lib/three/render_loop';
 import { disposeTree } from '$lib/three/dispose';
@@ -2708,6 +2712,10 @@ export class ShipViewer {
     this.particleHandles = handles;
     this.particleAnchorObjects.clear();
     for (const h of handles) {
+      // Every anchor here (GLB nodes, and the hull frame behind position-only
+      // EP_ rows) is Z-converted from the engine frame the effect is authored
+      // in. Without the mirror a muzzle blast fires back into the turret.
+      h.group.scale.copy(EFFECT_FRAME_SCALE_FROM_GLB);
       const obj = this.resolveParticleAnchorObject(h.attachment);
       if (obj) {
         this.particleAnchorObjects.set(h, obj);

@@ -37,7 +37,7 @@
   import { observeResize } from '$lib/three/resize';
   import { startRenderLoop } from '$lib/three/render_loop';
   import { disposeTree } from '$lib/three/dispose';
-  import { ParticleScene } from '$lib/three/particles';
+  import { EFFECT_FRAME_FROM_GLB, ParticleScene } from '$lib/three/particles';
   import type { ParticleAttachment, ParticleRecord } from '$lib/types/sidecar';
 
   interface Props {
@@ -1481,7 +1481,9 @@
       let systems = 0;
       for (let i = 0; i < handles.length; i++) {
         const anchor = renderable[i];
-        matrix.fromArray(anchor.transform as number[]);
+        // Anchor transforms are Z-converted to the glTF frame; effects are
+        // authored in the engine frame (see EFFECT_FRAME_FROM_GLB).
+        matrix.fromArray(anchor.transform as number[]).multiply(EFFECT_FRAME_FROM_GLB);
         handles[i].group.matrix.copy(matrix);
         handles[i].group.matrixAutoUpdate = false;
         handles[i].group.matrixWorldNeedsUpdate = true;

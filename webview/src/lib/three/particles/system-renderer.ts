@@ -105,6 +105,24 @@ const CAMERA_ATTACHED_SORT_KEY = -1000;
 const MIN_DRAW_ALPHA = 0.000588;
 const SOURCE_BURST_PERIOD_EPSILON = Math.fround(0.0004);
 
+/** Orthonormal world basis of `obj`: its world rotation, plus the mirror when
+ *  the world matrix has one (det < 0). Directions moving between frames go
+ *  through this rather than getWorldQuaternion, which cannot hold a mirror:
+ *  effects on GLB anchors carry the engine-frame Z mirror
+ *  (EFFECT_FRAME_FROM_GLB), and positions already cross frames through the
+ *  full matrices. The inverse is the transpose. Call updateWorldMatrix first. */
+function worldBasis(obj: THREE.Object3D, out: THREE.Matrix3): THREE.Matrix3 {
+  out.setFromMatrix4(obj.matrixWorld);
+  const e = out.elements;
+  for (let c = 0; c < 9; c += 3) {
+    const len = Math.hypot(e[c], e[c + 1], e[c + 2]) || 1;
+    e[c] /= len;
+    e[c + 1] /= len;
+    e[c + 2] /= len;
+  }
+  return out;
+}
+
 /** Native burst source reads payload[0], not the evaluated/randomized VG. */
 function firstSourceValue(vg: ParticleValueGenerator | undefined): number {
   switch (vg?.type) {
@@ -525,7 +543,7 @@ export class SystemRenderer {
   private static readonly TMP_SCALE = new THREE.Vector3();
   private static readonly TMP_BOUNDS_VEC = new THREE.Vector3();
   private static readonly TMP_VIEW_SORT = new THREE.Matrix4();
-  private static readonly TMP_QUAT = new THREE.Quaternion();
+  private static readonly TMP_BASIS = new THREE.Matrix3();
   private static readonly TMP_COL = new Float32Array(4);
   // Reused per-particle clock scratch (mutated in tick/spawn; the per-particle
   // update loop and the emit/spawn phase run sequentially, never concurrently).
@@ -1393,8 +1411,7 @@ export class SystemRenderer {
     const source = this.sourceFrame();
     if (!source) return;
     source.updateWorldMatrix(true, false);
-    source.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
-    this.parentVelocityLocal.applyQuaternion(SystemRenderer.TMP_QUAT);
+    this.parentVelocityLocal.applyMatrix3(worldBasis(source, SystemRenderer.TMP_BASIS).transpose());
   }
 
   /** Step the simulation by `dt` seconds. Updates the GPU buffers. */
@@ -2470,8 +2487,7 @@ export class SystemRenderer {
     const dy = (SEA_LEVEL_Y - SystemRenderer.TMP_WORLD.y) / this.nativeToWorld;
     if (Math.abs(dy) <= 1e-6) return;
     const offset = SystemRenderer.TMP_POS2.set(0, dy, 0);
-    source.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
-    offset.applyQuaternion(SystemRenderer.TMP_QUAT);
+    offset.applyMatrix3(worldBasis(source, SystemRenderer.TMP_BASIS).transpose());
     pos.add(offset);
   }
 
@@ -2498,10 +2514,8 @@ export class SystemRenderer {
     source.localToWorld(pos);
     target.worldToLocal(pos);
     pos.multiplyScalar(1 / this.nativeToWorld);
-    source.getWorldQuaternion(SystemRenderer.TMP_QUAT);
-    vel.applyQuaternion(SystemRenderer.TMP_QUAT);
-    target.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
-    vel.applyQuaternion(SystemRenderer.TMP_QUAT);
+    vel.applyMatrix3(worldBasis(source, SystemRenderer.TMP_BASIS));
+    vel.applyMatrix3(worldBasis(target, SystemRenderer.TMP_BASIS).transpose());
   }
 
   private convertSimulationPositionToSourceFrame(pos: THREE.Vector3): void {
@@ -2536,10 +2550,8 @@ export class SystemRenderer {
     if (!source || !target || source === target) return out;
     source.updateWorldMatrix(true, false);
     target.updateWorldMatrix(true, false);
-    source.getWorldQuaternion(SystemRenderer.TMP_QUAT);
-    out.applyQuaternion(SystemRenderer.TMP_QUAT);
-    target.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
-    out.applyQuaternion(SystemRenderer.TMP_QUAT);
+    out.applyMatrix3(worldBasis(source, SystemRenderer.TMP_BASIS));
+    out.applyMatrix3(worldBasis(target, SystemRenderer.TMP_BASIS).transpose());
     return out;
   }
 
@@ -2940,8 +2952,7 @@ export class SystemRenderer {
           sim.localToWorld(next);
           next.y -= SEA_LEVEL_Y;
           next.multiplyScalar(1 / this.nativeToWorld);
-          sim.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
-          normalOut.applyQuaternion(SystemRenderer.TMP_QUAT);
+          normalOut.applyMatrix3(worldBasis(sim, SystemRenderer.TMP_BASIS).transpose());
         }
         const sideNow = action.planeNormal.dot(cur) - action.planeConstant;
         const sideNext = action.planeNormal.dot(next) - action.planeConstant;
