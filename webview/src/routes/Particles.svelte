@@ -801,18 +801,30 @@
   </aside>
 
   <!-- ── Centre: scene + controls ─────────────────────────────────── -->
-  <section class="relative flex flex-1 min-w-0 flex-col">
-    <!-- Toolbar -->
-    <div class="bg-card border-border flex flex-none items-center gap-2 border-b px-4 py-2 text-xs">
-      {#if selectedPath}
-        <code class="text-foreground font-mono">{shortName(selectedPath)}</code>
-        <span class="text-muted-foreground/60">·</span>
-        <code class="text-muted-foreground font-mono text-[10px]">{selectedPath}</code>
-      {:else}
-        <span class="text-muted-foreground">no particle selected</span>
-      {/if}
+  <!-- overflow-hidden: this section is positioned, so anything spilling out
+       of it would paint over the inspector panel. -->
+  <section class="relative flex flex-1 min-w-0 flex-col overflow-hidden">
+    <!-- Toolbar: the name/path truncate first; when the column is too narrow
+         for the controls they wrap onto a second row. -->
+    <div
+      class="bg-card border-border flex flex-none flex-wrap items-center gap-x-2 gap-y-1 border-b px-4 py-2 text-xs"
+    >
+      <div class="flex min-w-0 flex-1 basis-40 items-center gap-2">
+        {#if selectedPath}
+          <code class="text-foreground min-w-0 truncate font-mono" title={shortName(selectedPath)}
+            >{shortName(selectedPath)}</code
+          >
+          <span class="text-muted-foreground/60 flex-none">·</span>
+          <code
+            class="text-muted-foreground min-w-0 shrink-[2] truncate font-mono text-[10px]"
+            title={selectedPath}>{selectedPath}</code
+          >
+        {:else}
+          <span class="text-muted-foreground truncate">no particle selected</span>
+        {/if}
+      </div>
 
-      <div class="ml-auto flex items-center gap-2">
+      <div class="ml-auto flex flex-wrap items-center justify-end gap-2">
         <Button
           variant="outline"
           size="sm"
