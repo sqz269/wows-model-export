@@ -1450,7 +1450,10 @@
       if (token !== mapParticleLoadToken) return;
 
       disposeMapParticleScene(env);
-      const scene = new ParticleScene(env.renderer);
+      // Map spaces are in native BW units (anchor transforms are rigid, no
+      // ×15), so particle lengths stay native: nativeToWorld = 1, not the
+      // ship viewer's metre factor.
+      const scene = new ParticleScene(env.renderer, { nativeToWorld: 1 });
       scene.root.name = 'MapParticleEffects';
       scene.setSortCamera(env.camera);
       const sun = env.getSunLight();

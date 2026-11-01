@@ -73,6 +73,8 @@ export class LightRenderer {
     private readonly body: ParticleComponentBody,
     private readonly intensityChannels: ParticleSystemIntensityChannel[] = [],
     private readonly intensityDefaults: readonly number[] = [],
+    /** Scene world units per native BW unit (see SystemRenderer). */
+    private readonly nativeToWorld: number = NATIVE_TO_METRES,
   ) {
     this.group = new THREE.Group();
     this.group.name = 'particle-light';
@@ -80,9 +82,9 @@ export class LightRenderer {
     if (Array.isArray(pos) && pos.length === 3) {
       // Light offset is a native BW-unit length placed in the ×15 metre frame.
       this.group.position.set(
-        pos[0] * NATIVE_TO_METRES,
-        pos[1] * NATIVE_TO_METRES,
-        pos[2] * NATIVE_TO_METRES,
+        pos[0] * this.nativeToWorld,
+        pos[1] * this.nativeToWorld,
+        pos[2] * this.nativeToWorld,
       );
     }
     this.material = new THREE.SpriteMaterial({
@@ -203,7 +205,7 @@ export class LightRenderer {
     // (drives both the clamped preview flare and the point-light range).
     const radius = Math.max(
       0.01,
-      this.sampleRadiusAt(t) * this.lightRadiusMultiplier * NATIVE_TO_METRES,
+      this.sampleRadiusAt(t) * this.lightRadiusMultiplier * this.nativeToWorld,
     );
     const r = Math.max(0, color[0] * this.lightTintRMultiplier);
     const g = Math.max(0, color[1] * this.lightTintGMultiplier);
@@ -217,10 +219,12 @@ export class LightRenderer {
     this.material.opacity = Math.max(0, Math.min(1, color[3] * LightRenderer.SPRITE_OPACITY_SCALE));
     // The decoded radius is a point-light influence distance, not the diameter
     // of a visible billboard. Keep the preview flare compact so light metadata
-    // does not mask the authored smoke/fire/debris systems.
+    // does not mask the authored smoke/fire/debris systems. The clamp is
+    // authored in metres; rescale it for scenes in other units.
+    const unit = this.nativeToWorld / NATIVE_TO_METRES;
     const spriteSize = Math.max(
-      0.08,
-      Math.min(radius * LightRenderer.SPRITE_RADIUS_SCALE, LightRenderer.SPRITE_MAX_SIZE),
+      0.08 * unit,
+      Math.min(radius * LightRenderer.SPRITE_RADIUS_SCALE, LightRenderer.SPRITE_MAX_SIZE * unit),
     );
     this.sprite.scale.set(spriteSize, spriteSize, spriteSize);
     if (!this.pointLight) return;

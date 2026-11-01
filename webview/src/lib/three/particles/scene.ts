@@ -11,6 +11,7 @@ import {
   DEFAULT_PARTICLE_LIFETIME,
   DEFAULT_PARTICLE_SUN_COLOR_NORM,
   DEFAULT_PARTICLE_SUN_DIR,
+  NATIVE_TO_METRES,
   PARTICLE_POINT_LIGHT_BUDGET,
 } from './constants';
 import {
@@ -98,6 +99,13 @@ function intensityDefaultsForRecord(record: ParticleRecord): number[] {
  * Two systems pointing at the same `Fire01.dds` share the THREE.Texture
  * instance and the cache disposes them all on `dispose()`.
  */
+export interface ParticleSceneOptions {
+  /** Scene world units per native BW unit (default NATIVE_TO_METRES = 15,
+   *  the ship viewer's metre world). Pass 1 when the scene's world is
+   *  already native BW units (map spaces). */
+  nativeToWorld?: number;
+}
+
 export class ParticleScene {
   readonly root: THREE.Group;
   private attachments = new Map<string, ParticleAttachmentHandle>();
@@ -118,8 +126,17 @@ export class ParticleScene {
   private sortCamera: THREE.Camera | null = null;
   private viewportSize = new THREE.Vector2();
 
-  constructor(renderer?: THREE.WebGLRenderer) {
+  /** Scene world units per native BW unit. Particle records carry raw native
+   *  lengths; the ship viewer's world is metres (×NATIVE_TO_METRES = 15),
+   *  map spaces stay in native units (1). */
+  readonly nativeToWorld: number;
+
+  constructor(renderer?: THREE.WebGLRenderer, options: ParticleSceneOptions = {}) {
     this.root = new THREE.Group();
+    this.nativeToWorld =
+      options.nativeToWorld !== undefined && options.nativeToWorld > 0
+        ? options.nativeToWorld
+        : NATIVE_TO_METRES;
     this.root.name = 'ParticleEffects';
     if (renderer) this.renderer = renderer;
     // DEV ONLY: expose the live scene to the native↔webview particle parity
@@ -367,6 +384,7 @@ export class ParticleScene {
         intensityDefaults,
         sourceGroup: group,
         rootGroup: this.root,
+        nativeToWorld: this.nativeToWorld,
       });
       renderer.setSortCamera(this.sortCamera);
       if (intensityValues) renderer.setIntensityValues(intensityValues);
@@ -375,7 +393,12 @@ export class ParticleScene {
       systems.push(renderer);
       for (const c of sys.components ?? []) {
         if (c.kind !== 'light' || !c.body) continue;
-        const light = new LightRenderer(c.body, sys.intensities?.channels ?? [], intensityDefaults);
+        const light = new LightRenderer(
+          c.body,
+          sys.intensities?.channels ?? [],
+          intensityDefaults,
+          this.nativeToWorld,
+        );
         light.ownerSystemIndex = systems.length - 1;
         if (intensityValues) light.setIntensityValues(intensityValues);
         light.setActive(active);

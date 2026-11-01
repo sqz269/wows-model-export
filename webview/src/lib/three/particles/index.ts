@@ -31,4 +31,4 @@
 //   material.ts        per-system ShaderMaterial builder (blend + GLSL)
 //   scene.ts           ParticleScene — the public entry point
 
-export { ParticleScene, type ParticleAttachmentHandle } from './scene';
+export { ParticleScene, type ParticleAttachmentHandle, type ParticleSceneOptions } from './scene';

@@ -154,6 +154,10 @@ interface SystemRendererOptions {
   sourceGroup?: THREE.Object3D;
   /** Scene-level particle root used as the alternate stream vector frame. */
   rootGroup?: THREE.Object3D;
+  /** Scene world units per native BW unit (default NATIVE_TO_METRES = 15 for
+   *  the metre-scale ship world; 1 for scenes already in native units, e.g.
+   *  map spaces). */
+  nativeToWorld?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -495,6 +499,10 @@ export class SystemRenderer {
   private readonly spawnEffect?: ParticleEffectSpawnCallback;
   private readonly loopOneShot: boolean;
   private readonly sourceGroup?: THREE.Object3D;
+  /** Scene world units per native BW unit — the factor every length-
+   *  dimensioned sim OUTPUT is scaled by, and world-frame INPUTS divided by
+   *  (see NATIVE_TO_METRES). */
+  private readonly nativeToWorld: number;
   private readonly rootGroup?: THREE.Object3D;
   private readonly coordinateStyle: number;
   private readonly detachedCoordinateFrame: boolean;
@@ -599,6 +607,10 @@ export class SystemRenderer {
     const gen = system.general;
     this.authoredPrewarm = !!gen?.prewarm;
     this.sourceGroup = options.sourceGroup;
+    this.nativeToWorld =
+      options.nativeToWorld !== undefined && options.nativeToWorld > 0
+        ? options.nativeToWorld
+        : NATIVE_TO_METRES;
     this.rootGroup = options.rootGroup;
     this.coordinateStyle = gen?.coordinateStyle ?? 2;
     this.detachedCoordinateFrame = coordinateStyleUsesDetachedFrame(this.coordinateStyle);
@@ -1377,7 +1389,7 @@ export class SystemRenderer {
     // World velocity is metres/s (×15); divide back into the record-unit sim
     // frame so it composes with the raw spawn velocity (re-scaled ×15 at the
     // draw boundary). See NATIVE_TO_METRES.
-    this.parentVelocityLocal.copy(velocity).multiplyScalar(1 / NATIVE_TO_METRES);
+    this.parentVelocityLocal.copy(velocity).multiplyScalar(1 / this.nativeToWorld);
     const source = this.sourceFrame();
     if (!source) return;
     source.updateWorldMatrix(true, false);
@@ -1464,7 +1476,7 @@ export class SystemRenderer {
     // fade spans ~0.5-15 km of apparent range, a plausible LOD. Sampling raw
     // metres (pre-2026-07-01) hit the ramps ~15× too early on every effect.
     const distance =
-      SystemRenderer.TMP_WORLD.distanceTo(SystemRenderer.TMP_POS2) / NATIVE_TO_METRES;
+      SystemRenderer.TMP_WORLD.distanceTo(SystemRenderer.TMP_POS2) / this.nativeToWorld;
     for (const config of this.distanceConfigs) {
       const factor = sampleRamp(config.ramp, distance, 1);
       if (!Number.isFinite(factor)) continue;
@@ -1620,7 +1632,7 @@ export class SystemRenderer {
       row[0] = -e[2];
       row[1] = -e[6];
       row[2] = -e[10];
-      row[3] = -e[14] / NATIVE_TO_METRES;
+      row[3] = -e[14] / this.nativeToWorld;
     } else {
       this.alphaDepthRow = null;
     }
@@ -1955,9 +1967,9 @@ export class SystemRenderer {
     // sprite footprint without touching every per-frame input. (World-frame
     // INPUTS — sea-level snap, parent velocity — are divided back at their
     // source so they enter the record-unit sim consistently.)
-    t.pos[dst3 + 0] = this.pos[src3 + 0] * NATIVE_TO_METRES;
-    t.pos[dst3 + 1] = this.pos[src3 + 1] * NATIVE_TO_METRES;
-    t.pos[dst3 + 2] = this.pos[src3 + 2] * NATIVE_TO_METRES;
+    t.pos[dst3 + 0] = this.pos[src3 + 0] * this.nativeToWorld;
+    t.pos[dst3 + 1] = this.pos[src3 + 1] * this.nativeToWorld;
+    t.pos[dst3 + 2] = this.pos[src3 + 2] * this.nativeToWorld;
     if (this.velocityAxial) {
       // Spawn-seeded unit axis (native sim+0x70) — the VS only normalizes it,
       // so no NATIVE_TO_METRES scale; a zero axis falls back to eo in the VS.
@@ -1965,9 +1977,9 @@ export class SystemRenderer {
       t.vel[dst3 + 1] = this.spawnAxis[src3 + 1];
       t.vel[dst3 + 2] = this.spawnAxis[src3 + 2];
     } else {
-      t.vel[dst3 + 0] = this.vel[src3 + 0] * NATIVE_TO_METRES;
-      t.vel[dst3 + 1] = this.vel[src3 + 1] * NATIVE_TO_METRES;
-      t.vel[dst3 + 2] = this.vel[src3 + 2] * NATIVE_TO_METRES;
+      t.vel[dst3 + 0] = this.vel[src3 + 0] * this.nativeToWorld;
+      t.vel[dst3 + 1] = this.vel[src3 + 1] * this.nativeToWorld;
+      t.vel[dst3 + 2] = this.vel[src3 + 2] * this.nativeToWorld;
     }
     t.col[dst4 + 0] = this.colorRGBA[src4 + 0];
     t.col[dst4 + 1] = this.colorRGBA[src4 + 1];
@@ -1980,9 +1992,9 @@ export class SystemRenderer {
     // including the rotationCenter anchor's diameter*.5. Convert here for
     // both the per-system and composed-bucket draw paths. Keep sim lengths,
     // positions, velocities and light radii in their existing units.
-    t.size[drawSlot] = this.sizeArr[sourceSlot] * (2 * NATIVE_TO_METRES);
+    t.size[drawSlot] = this.sizeArr[sourceSlot] * (2 * this.nativeToWorld);
     // This is an extent, not a quad diameter. Native VS uses 1 / (0.3 * v5.z).
-    t.softDepthExtent[drawSlot] = this.softDepthExtentArr[sourceSlot] * NATIVE_TO_METRES;
+    t.softDepthExtent[drawSlot] = this.softDepthExtentArr[sourceSlot] * this.nativeToWorld;
     t.glow[drawSlot] = this.glowStrengthArr[sourceSlot];
     t.scaleX[drawSlot] = this.spriteScaleXArr[sourceSlot];
     t.age[drawSlot] = this.age[sourceSlot];
@@ -2043,13 +2055,13 @@ export class SystemRenderer {
     let max = -Infinity;
     for (const s of slots) {
       const ix = s * 3;
-      const x = this.pos[ix + 0] * NATIVE_TO_METRES;
-      const y = this.pos[ix + 1] * NATIVE_TO_METRES;
-      const z = this.pos[ix + 2] * NATIVE_TO_METRES;
+      const x = this.pos[ix + 0] * this.nativeToWorld;
+      const y = this.pos[ix + 1] * this.nativeToWorld;
+      const z = this.pos[ix + 2] * this.nativeToWorld;
       // three.js view space looks down −Z; negate for the native positive-far
       // key, ÷15 back to native units so the −1000 sentinel keeps its native
       // relationship.
-      const key = -(m[2] * x + m[6] * y + m[10] * z + m[14]) / NATIVE_TO_METRES;
+      const key = -(m[2] * x + m[6] * y + m[10] * z + m[14]) / this.nativeToWorld;
       if (key < min) min = key;
       if (key > max) max = key;
       out.push({ sys: this, slot: s, key });
@@ -2455,7 +2467,7 @@ export class SystemRenderer {
     source.getWorldPosition(SystemRenderer.TMP_WORLD);
     // The world Y is in metres (×15); the sim runs in raw record units, so the
     // snap delta is divided back by NATIVE_TO_METRES before entering it.
-    const dy = (SEA_LEVEL_Y - SystemRenderer.TMP_WORLD.y) / NATIVE_TO_METRES;
+    const dy = (SEA_LEVEL_Y - SystemRenderer.TMP_WORLD.y) / this.nativeToWorld;
     if (Math.abs(dy) <= 1e-6) return;
     const offset = SystemRenderer.TMP_POS2.set(0, dy, 0);
     source.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
@@ -2482,10 +2494,10 @@ export class SystemRenderer {
     // writeDrawSlot). Without this, a detached hull effect (e.g. floodLight,
     // coordinateStyle=3) keeps the group's metre offset as if it were native
     // units, then gets ×15 again at draw → ~15× too far from the ship.
-    pos.multiplyScalar(NATIVE_TO_METRES);
+    pos.multiplyScalar(this.nativeToWorld);
     source.localToWorld(pos);
     target.worldToLocal(pos);
-    pos.multiplyScalar(1 / NATIVE_TO_METRES);
+    pos.multiplyScalar(1 / this.nativeToWorld);
     source.getWorldQuaternion(SystemRenderer.TMP_QUAT);
     vel.applyQuaternion(SystemRenderer.TMP_QUAT);
     target.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
@@ -2502,10 +2514,10 @@ export class SystemRenderer {
     // Same native↔metre unit bridge as convertSpawnToSimulationFrame: the
     // localToWorld/worldToLocal hop runs in metres, but `pos` is a native-unit
     // sim position and the caller re-scales the result ×NATIVE_TO_METRES.
-    pos.multiplyScalar(NATIVE_TO_METRES);
+    pos.multiplyScalar(this.nativeToWorld);
     simulation.localToWorld(pos);
     source.worldToLocal(pos);
-    pos.multiplyScalar(1 / NATIVE_TO_METRES);
+    pos.multiplyScalar(1 / this.nativeToWorld);
   }
 
   private streamVectorForSimulationFrame(action: StreamAction, out: THREE.Vector3): THREE.Vector3 {
@@ -2782,9 +2794,9 @@ export class SystemRenderer {
             this.spawnEffect({
               effectName: action.effectName,
               position: [
-                spawnPos.x * NATIVE_TO_METRES,
-                spawnPos.y * NATIVE_TO_METRES,
-                spawnPos.z * NATIVE_TO_METRES,
+                spawnPos.x * this.nativeToWorld,
+                spawnPos.y * this.nativeToWorld,
+                spawnPos.z * this.nativeToWorld,
               ],
             });
           }
@@ -2920,14 +2932,14 @@ export class SystemRenderer {
           // the sim frame so bounce/force reactions stay sim-space (unused in
           // corpus — all 92 plane barriers are reaction-3 spawns).
           sim.updateWorldMatrix(true, false);
-          cur = SystemRenderer.TMP_REL.copy(current).multiplyScalar(NATIVE_TO_METRES);
+          cur = SystemRenderer.TMP_REL.copy(current).multiplyScalar(this.nativeToWorld);
           sim.localToWorld(cur);
           cur.y -= SEA_LEVEL_Y;
-          cur.multiplyScalar(1 / NATIVE_TO_METRES);
-          next = SystemRenderer.TMP_REL2.copy(predicted).multiplyScalar(NATIVE_TO_METRES);
+          cur.multiplyScalar(1 / this.nativeToWorld);
+          next = SystemRenderer.TMP_REL2.copy(predicted).multiplyScalar(this.nativeToWorld);
           sim.localToWorld(next);
           next.y -= SEA_LEVEL_Y;
-          next.multiplyScalar(1 / NATIVE_TO_METRES);
+          next.multiplyScalar(1 / this.nativeToWorld);
           sim.getWorldQuaternion(SystemRenderer.TMP_QUAT).invert();
           normalOut.applyQuaternion(SystemRenderer.TMP_QUAT);
         }
