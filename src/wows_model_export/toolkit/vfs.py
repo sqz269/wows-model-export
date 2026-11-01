@@ -32,6 +32,30 @@ from ._subprocess import run_toolkit
 
 DEFAULT_MANIFEST_FILENAME = "wows_manifest.json"
 
+# Characters allowed for one toolkit command line: Windows caps it at
+# 32767, minus room for the executable path and quoting.
+_ARGV_BUDGET = 30000
+
+
+def _argv_len(args: list[str]) -> int:
+    # Each argument plus a separator and possible quotes.
+    return sum(len(a) + 3 for a in args)
+
+
+def _chunk_args(args: list[str], *, budget: int) -> list[list[str]]:
+    """Split ``args`` into runs whose command-line length fits ``budget``.
+    Always returns at least one (possibly empty) run."""
+    chunks: list[list[str]] = [[]]
+    used = 0
+    for a in args:
+        n = len(a) + 3
+        if chunks[-1] and used + n > budget:
+            chunks.append([])
+            used = 0
+        chunks[-1].append(a)
+        used += n
+    return chunks
+
 
 def extract(
     files: list[str],
@@ -74,20 +98,28 @@ def extract(
         argv.append("--flatten")
     if strip_prefix:
         argv.append("--strip-prefix")
-    argv.extend(files)
 
     # Don't pass expect_outputs — extract can succeed without writing
     # anything if the glob matches nothing, AND `out` is a directory
     # (run_toolkit's check uses `Path.is_file()` which would always fail
     # on a dir and raise even after a successful extract). Callers that
     # need a presence check should walk `out_dir`.
-    result = run_toolkit(argv, config=cfg, record_deps=record_deps)
+    #
+    # A long pattern list (a whole-library emissive pass names ~1000
+    # materials) is split over several calls: Windows caps a command line
+    # at 32767 characters.
+    stderr_parts: list[str] = []
+    elapsed = 0.0
+    for chunk in _chunk_args(files, budget=_ARGV_BUDGET - _argv_len(argv)):
+        result = run_toolkit([*argv, *chunk], config=cfg, record_deps=record_deps)
+        stderr_parts.append(result.stderr)
+        elapsed += result.elapsed_ms
     # Re-stamp `output_paths` so the docstring contract holds even though
     # we skipped the post-exit existence check.
     return ToolkitResult(
         output_paths=(out,),
-        stderr=result.stderr,
-        elapsed_ms=result.elapsed_ms,
+        stderr="".join(stderr_parts),
+        elapsed_ms=elapsed,
         data=result.data,
         stdout=result.stdout,
     )
