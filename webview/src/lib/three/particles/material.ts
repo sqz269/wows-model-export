@@ -1296,6 +1296,12 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           // applies the alpha weighting itself.
           gl_FragColor = vec4(outRgb, outA);
         }
+        // Shading is linear. Into the postprocess composer's HDR target this
+        // is a no-op; straight to the canvas (map viewer with PostFX off) it
+        // applies the sRGB encode every built-in material gets. Without it
+        // the particles, and the DEFORM_WATER refraction of the linear
+        // scene-colour copy, drew dark there.
+        #include <colorspace_fragment>
       }
     `,
     blending: blend.blending,
