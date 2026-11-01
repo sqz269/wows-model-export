@@ -1159,10 +1159,11 @@ export class ShipViewer {
     // gun/main and gun/secondary mounts have them; AA and static
     // miscs return null silently.
     const arcLimits = ctx?.arcLimitsByInstanceId.get(placement.instance_id) ?? null;
+    // The rig is registered after the attached children are parented to
+    // its yaw bone (below): registering applies the fleet's current aim,
+    // and the children must be attached while the mount is still at rest.
     const rig = extractTurretRig(inst, placement.asset_id, placement.instance_id, arcLimits);
-    if (rig) {
-      this.turretRigs.register(rig);
-    } else if (arcLimits?.yawRangeDeg) {
+    if (!rig && arcLimits?.yawRangeDeg) {
       // Static mount with a traverse arc — torpedo tubes are static
       // meshes (no Rotate_Y bone), so draw their firing arc without
       // animating them.
@@ -1209,6 +1210,12 @@ export class ShipViewer {
     const attachedDoc = bundle.attachedDoc;
     const attList =
       (bundle.dead ? attachedDoc?.attachments_dead : attachedDoc?.attachments_live) ?? [];
+    // Children of a rotating mount (rangefinders, floater baskets, ammo
+    // boxes on a turret) hang from its yaw bone so they turn with the
+    // housing. Their matrices are host-local at rest, so they are placed
+    // under the mount root first and then re-parented keeping that pose.
+    const yawHost = rig?.yaw ?? null;
+    if (yawHost && attList.length > 0) inst.updateMatrixWorld(true);
     if (attList.length > 0) {
       const filterSet = miscFilter && miscFilter.length > 0 ? new Set(miscFilter) : null;
       const dropAll = miscFilter !== null && miscFilter.length === 0;
@@ -1236,6 +1243,7 @@ export class ShipViewer {
         childInst.userData.attached_asset_id = att.asset_id;
         childInst.userData.section = section;
         inst.add(childInst);
+        if (yawHost) yawHost.attach(childInst);
 
         // Build a per-child placement so camo classification reads
         // the child's own scope/category (catches misc/plane/float
@@ -1264,6 +1272,7 @@ export class ShipViewer {
         stats.attachmentsRendered++;
       }
     }
+    if (rig) this.turretRigs.register(rig);
 
     // Record the mount for per-HP teardown on exterior switch.
     const subtree = new Set<THREE.Object3D>();
