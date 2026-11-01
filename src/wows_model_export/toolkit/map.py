@@ -16,6 +16,7 @@ manifest sidecar for obstacle/collision-model inspection.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -149,56 +150,59 @@ def export_decal_textures(
     return run_toolkit(argv, config=cfg, expect_outputs=(out / "decal_textures.json",))
 
 
-# ── space-listing helper (no toolkit dep, fast) ───────────────────────
+# ── space listing (cached per game build) ─────── ───────────────────────
+
+
+_SPACES_LIST_FILENAME = "spaces_list.json"
+
+
+def _spaces_from_manifest(manifest_path: Path) -> list[str]:
+    """``spaces/<name>`` for every space directory holding files in a VFS
+    manifest (``wowsunpack metadata --format json``: a list of rows with a
+    leading-slash ``path``)."""
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        paths = (row.get("path", "") if isinstance(row, dict) else str(row) for row in data)
+    else:
+        paths = iter(data)
+    seen: set[str] = set()
+    for vfs_path in paths:
+        parts = vfs_path.replace("\\", "/").lstrip("/").split("/", 2)
+        if len(parts) == 3 and parts[0] == "spaces" and parts[1]:
+            seen.add(f"spaces/{parts[1]}")
+    return sorted(seen)
 
 
 def list_spaces(config: PipelineConfig | None = None) -> list[str]:
-    """Enumerate available space VFS paths (``"spaces/14_Atlantic"`` …).
+    """Enumerate the current game build's space VFS paths
+    (``"spaces/14_Atlantic"`` ...), sorted.
 
-    Prefers a local ``res_unpack/spaces/`` directory under
-    ``--game-dir`` when present (most game installs unpack on first
-    launch; a 1-stat directory scan is ~ms). Falls back to the cached
-    VFS manifest under ``cache_dir`` when ``res_unpack`` is absent.
-
-    Returns the list sorted alphabetically. Empty list signals "neither
-    source is available" — the caller should surface that as a 503 with
-    setup guidance, not a 500.
+    Read from the VFS manifest and kept in a build-stamped
+    ``spaces_list.json`` beside it, so only the first call after a game
+    update pays for the manifest. ``res_unpack/`` is not consulted: it is a
+    one-off manual unpack that misses spaces later updates add and still
+    lists the ones they remove.
     """
+    from . import build as _build
+    from .vfs import ensure_manifest
+
     cfg = config or PipelineConfig.load()
-    game_dir = cfg.require_game_dir()
-
-    unpacked = Path(game_dir) / "res_unpack" / "spaces"
-    if unpacked.is_dir():
-        return sorted(
-            f"spaces/{p.name}"
-            for p in unpacked.iterdir()
-            if p.is_dir() and not p.name.startswith(".")
-        )
-
-    # Fallback: scan the cached VFS manifest. Same shape as `metadata_json`
-    # output. We don't auto-build it here — that's a multi-second op and
-    # belongs to a separate "build manifest" endpoint.
-    from .vfs import default_manifest_path
-
-    manifest_path = default_manifest_path(cfg)
-    if not manifest_path.is_file():
-        return []
-
-    import json
+    cfg.require_game_dir()
+    cache_dir = cfg.cache_dir or (cfg.workspace / ".cache")
+    cache = cache_dir / _SPACES_LIST_FILENAME
+    if not _build.cache_is_current(cache, cfg):
+        with _build.cache_lock(cache):
+            if not _build.cache_is_current(cache, cfg):
+                spaces = _spaces_from_manifest(ensure_manifest(config=cfg))
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                tmp = cache.with_name(cache.name + ".tmp")
+                tmp.write_text(json.dumps(spaces, indent=0) + "\n", encoding="utf-8")
+                os.replace(tmp, cache)
+                _build.write_stamp(cache, _build.current_build(cfg))
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return list(json.loads(cache.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
         return []
-
-    # Manifest is `{path: {size, crc32, ...}}`. Spaces are directories
-    # so we collect the parent of any file under `spaces/<name>/`.
-    seen: set[str] = set()
-    for vfs_path in manifest:
-        if vfs_path.startswith("spaces/"):
-            parts = vfs_path.split("/", 2)
-            if len(parts) >= 2:
-                seen.add(f"spaces/{parts[1]}")
-    return sorted(seen)
 
 
 __all__ = ["export_map", "export_decal_textures", "list_spaces"]

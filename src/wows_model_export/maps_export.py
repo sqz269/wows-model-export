@@ -40,7 +40,7 @@ from typing import Any
 from . import build_deps
 from .config import PipelineConfig
 from .errors import ToolkitError
-from .sky_assets import extract_sky_assets
+from .sky_assets import extract_sky_assets_from_vfs
 from .toolkit import export_decal_textures, export_map
 from .toolkit import extract as vfs_extract
 
@@ -1040,9 +1040,7 @@ def _run_export(
     try:
         gltf_doc = read_glb_json(glb_out)
         scene_extras = primary_scene_extras(gltf_doc)
-        sky_doc = extract_sky_assets(
-            scene_extras, cfg.require_game_dir() / "res_unpack", cache_dir
-        )
+        sky_doc = extract_sky_assets_from_vfs(scene_extras, cache_dir, config=cfg)
         (cache_dir / "sky_manifest.json").write_text(
             json.dumps(sky_doc, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",

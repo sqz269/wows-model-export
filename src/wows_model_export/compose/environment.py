@@ -40,6 +40,7 @@ from typing import Any
 from ..config import PipelineConfig
 from ..read import ubersettings as _ubersettings
 from ..resolve.sidecar._helpers import _now_iso
+from ..toolkit import build as _build
 from ..toolkit import vfs as _vfs
 
 # Workspace-relative cache root for extracted env DDS (cubes + BRDF LUT),
@@ -145,6 +146,19 @@ def _cache_url(vfs_path: str) -> str:
     return (CACHE_ROOT / _strip_content_prefix(vfs_path)).as_posix()
 
 
+def _current_build(config: PipelineConfig) -> int | None:
+    try:
+        return _build.current_build(config)
+    except Exception:  # noqa: BLE001 - no game dir: accept what is cached
+        return None
+
+
+def _from_build(path: Path, build: int | None) -> bool:
+    """True if the cached ``path`` was extracted from ``build`` (always
+    true when the build is unknown)."""
+    return build is None or _build.read_stamp(path) == build
+
+
 def _extract_to_cache(
     vfs_paths: list[str],
     *,
@@ -154,7 +168,9 @@ def _extract_to_cache(
 ) -> dict[str, str]:
     """Extract each VFS path into the env cache; return ``{vfs_path: url}``.
 
-    Idempotent (already-cached paths skipped) and atomic per file. The
+    Idempotent per game build (a cached file is reused only if it was
+    extracted from the current build; each extraction writes a ``.build``
+    stamp next to it) and atomic per file. The
     leading-``/`` prepend works around the toolkit glob matcher (VFS keys
     carry a leading slash; a slash-less literal never matches) — same fix as
     ``effects_textures``.
@@ -165,6 +181,7 @@ def _extract_to_cache(
     """
     cache_root = (workspace / CACHE_ROOT).resolve()
     cache_root.mkdir(parents=True, exist_ok=True)
+    build = _current_build(config)
 
     resolved: dict[str, str] = {}
     to_extract: list[tuple[str, Path, str]] = []
@@ -172,7 +189,7 @@ def _extract_to_cache(
         rel = _strip_content_prefix(vfs_path)
         on_disk = (cache_root / rel).resolve()
         url = (CACHE_ROOT / rel).as_posix()
-        if on_disk.is_file():
+        if on_disk.is_file() and (not extract or _from_build(on_disk, build)):
             resolved[vfs_path] = url
         else:
             to_extract.append((vfs_path, on_disk, url))
@@ -216,6 +233,7 @@ def _extract_to_cache(
                 import shutil
 
                 shutil.copyfile(src, on_disk)
+            _build.write_stamp(on_disk, build)
             resolved[vfs_path] = url
 
     return resolved
@@ -268,6 +286,7 @@ def _extract_cube_fallback(
             import shutil
 
             shutil.copyfile(src, on_disk)
+        _build.write_stamp(on_disk, _current_build(config))
         return vfs_path, _cache_url(vfs_path)
 
 
@@ -281,51 +300,58 @@ def _space_name(space: str) -> str:
     return space.replace("\\", "/").rstrip("/").split("/")[-1]
 
 
-def _ubersettings_path(
-    space_name: str, *, config: PipelineConfig
-) -> Path | None:
-    """Locate a space's ``space.ubersettings`` — res_unpack first, else extract.
+def _ubersettings_paths(
+    space_names: list[str], *, config: PipelineConfig
+) -> dict[str, Path]:
+    """The current build's ``space.ubersettings`` for each space, extracted
+    from the VFS into the environment cache (re-extracted after a game
+    update). Everything that needs extracting goes in one toolkit call.
 
-    Returns ``None`` if it can't be produced (space has no ubersettings).
+    Spaces without an ubersettings file are left out of the result.
     """
-    game_dir = config.game_dir
-    if game_dir is not None:
-        unpacked = (
-            Path(game_dir)
-            / "res_unpack"
-            / "spaces"
-            / space_name
-            / "space.ubersettings"
-        )
-        if unpacked.is_file():
-            return unpacked
-
-    # Fallback: pull it from the VFS into the cache.
-    vfs_path = f"spaces/{space_name}/space.ubersettings"
     cache_root = (config.workspace / CACHE_ROOT).resolve()
-    on_disk = cache_root / "spaces" / space_name / "space.ubersettings"
-    if on_disk.is_file():
-        return on_disk
+    build = _current_build(config)
+
+    def cached(name: str) -> Path:
+        return cache_root / "spaces" / name / "space.ubersettings"
+
+    found: dict[str, Path] = {}
+    missing: list[str] = []
+    for name in space_names:
+        on_disk = cached(name)
+        if on_disk.is_file() and _from_build(on_disk, build):
+            found[name] = on_disk
+        else:
+            missing.append(name)
+    if not missing:
+        return found
+
     with tempfile.TemporaryDirectory(prefix="wms-env-ubs-") as td:
         out_dir = Path(td)
         try:
-            _vfs.extract([f"/{vfs_path}"], out_dir=out_dir, config=config)
-        except Exception:
-            return None
-        src = out_dir / vfs_path
-        if not src.is_file():
-            matches = list(out_dir.rglob("space.ubersettings"))
-            src = matches[0] if matches else None
-        if src is None or not src.is_file():
-            return None
-        on_disk.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.replace(src, on_disk)
-        except OSError:
-            import shutil
+            _vfs.extract(
+                [f"/spaces/{name}/space.ubersettings" for name in missing],
+                out_dir=out_dir,
+                config=config,
+            )
+        except Exception as e:  # toolkit unconfigured / exec missing
+            print(f"  warn: environment: ubersettings extract failed: {e}", file=sys.stderr)
+            return found
+        for name in missing:
+            src = out_dir / "spaces" / name / "space.ubersettings"
+            if not src.is_file():
+                continue
+            on_disk = cached(name)
+            on_disk.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.replace(src, on_disk)
+            except OSError:
+                import shutil
 
-            shutil.copyfile(src, on_disk)
-        return on_disk
+                shutil.copyfile(src, on_disk)
+            _build.write_stamp(on_disk, build)
+            found[name] = on_disk
+    return found
 
 
 def _list_spaces(config: PipelineConfig) -> list[str]:
@@ -382,8 +408,9 @@ def build(
     parsed: dict[str, dict[str, Any]] = {}
     cube_candidates: set[str] = set()
     warnings: list[str] = []
+    ubersettings = _ubersettings_paths(space_names, config=cfg)
     for name in space_names:
-        ubs = _ubersettings_path(name, config=cfg)
+        ubs = ubersettings.get(name)
         if ubs is None:
             warnings.append(f"{name}: no space.ubersettings")
             continue

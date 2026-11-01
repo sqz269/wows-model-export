@@ -46,7 +46,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from ... import build_deps
 from ...config import PipelineConfig
 from ...errors import ToolkitError
-from ...sky_assets import extract_sky_assets
+from ...sky_assets import extract_sky_assets_from_vfs
 from ...toolkit import export_decal_textures, export_map, list_spaces
 
 # The manifest/sidecar writers live in ``wows_model_export.maps_export``
@@ -86,8 +86,8 @@ def make_router(config: PipelineConfig) -> APIRouter:
     maps_root = _maps_root(config)
 
     # ── GET /api/maps ──────────────────────────────────────────────────
-    # Lists every space visible via list_spaces() (res_unpack scan or
-    # VFS-manifest fallback). Tags each entry with its on-disk cache
+    # Lists every space in the current game build (list_spaces() reads the
+    # VFS manifest, cached per build). Tags each entry with its on-disk cache
     # state so the webview can show "exported / not exported" without a
     # second round-trip per row.
     @router.get("/maps")
@@ -110,10 +110,8 @@ def make_router(config: PipelineConfig) -> APIRouter:
                     "ok": False,
                     "error": "no_spaces_found",
                     "hint": (
-                        "Couldn't find spaces/ under <game_dir>/res_unpack/ "
-                        "and no cached VFS manifest exists. Launch WoWS once "
-                        "(populates res_unpack/) or build the manifest via "
-                        "the VFS endpoint."
+                        "The game's VFS manifest lists no spaces/. Check "
+                        "that the game directory points at a WoWS install."
                     ),
                 },
             )
@@ -421,8 +419,9 @@ def make_router(config: PipelineConfig) -> APIRouter:
             sky_extras = _primary_scene_extras(gltf_doc)
             if isinstance(sky_extras, dict):
                 scene_extras_doc = sky_extras
-            res_unpack = config.require_game_dir() / "res_unpack"
-            sky_manifest_doc = extract_sky_assets(sky_extras, res_unpack, glb_out.parent)
+            sky_manifest_doc = extract_sky_assets_from_vfs(
+                sky_extras, glb_out.parent, config=config
+            )
             # Same byte format as maps_export.run_export (ensure_ascii off,
             # trailing newline) so route/CLI runs produce identical files.
             (glb_out.parent / "sky_manifest.json").write_text(
