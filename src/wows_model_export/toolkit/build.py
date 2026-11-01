@@ -181,3 +181,17 @@ def cache_is_current(cache_file: Path, config: PipelineConfig | None = None) -> 
     if build is None:
         return True
     return read_stamp(cache_file) == build
+
+
+_cache_locks: dict[str, threading.RLock] = {}
+_cache_locks_guard = threading.Lock()
+
+
+def cache_lock(cache_file: Path) -> threading.RLock:
+    """Lock for rebuilding one cache file. Exports running in parallel can
+    all find a cache stale at once; the first rebuilds it and the rest
+    wait, then find it current (rebuilds write a fixed temp file next to
+    the cache, so two at once would collide)."""
+    key = os.path.normcase(os.path.abspath(cache_file))
+    with _cache_locks_guard:
+        return _cache_locks.setdefault(key, threading.RLock())

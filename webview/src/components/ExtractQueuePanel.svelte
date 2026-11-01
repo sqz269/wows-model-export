@@ -24,6 +24,7 @@
     pauseQueue,
     reorderQueue,
     resumeQueue,
+    setQueueParallel,
     type QueueItem,
     type QueueSnapshot,
     type QueueStatus,
@@ -134,6 +135,15 @@
     }
   }
 
+  async function onSetParallel(n: number) {
+    try {
+      await setQueueParallel(n);
+      await reload();
+    } catch (err) {
+      toast.error('Could not change parallel runs', { description: String(err) });
+    }
+  }
+
   async function onTogglePause() {
     if (pauseBusy || !snap) return;
     pauseBusy = true;
@@ -184,7 +194,7 @@
       <span class="text-muted-foreground text-[11px]">
         {snap.pending_count} pending
         {#if running.length}
-          · 1 running
+          · {running.length} running
         {/if}
         {#if snap.completed_count}
           · {snap.completed_count} completed
@@ -207,7 +217,7 @@
   {:else if snap.items.length === 0}
     <p class="text-muted-foreground m-0 text-[11px]">
       Empty. Use <strong>+ Queue</strong> in the panel above to add ships;
-      the worker runs them one at a time in the background.
+      the worker runs up to {snap.parallel} at a time in the background.
     </p>
   {:else}
     <!-- Header controls -->
@@ -222,8 +232,23 @@
           ? 'Updating…'
           : snap.paused
             ? 'Resume worker'
-            : 'Pause after current'}
+            : 'Pause after running'}
       </button>
+      <label
+        class="text-muted-foreground inline-flex items-center gap-1 text-[11px]"
+        title="Ships extracted at once"
+      >
+        Parallel
+        <select
+          class="border border-border rounded bg-transparent px-1 py-0 text-[11px] text-foreground"
+          value={snap.parallel}
+          onchange={(e) => onSetParallel(Number((e.currentTarget as HTMLSelectElement).value))}
+        >
+          {#each Array.from({ length: snap.max_parallel }, (_, i) => i + 1) as n (n)}
+            <option value={n}>{n}</option>
+          {/each}
+        </select>
+      </label>
       {#if completed.length > 0}
         <button
           type="button"
@@ -237,8 +262,7 @@
     </div>
 
     <!-- Running section -->
-    {#if running.length > 0}
-      {@const item = running[0]}
+    {#each running as item (item.queue_id)}
       <div
         class="rounded border border-sky-900/40 bg-sky-950/20 px-2.5 py-1.5 text-xs mb-2"
       >
@@ -257,7 +281,7 @@
           </span>
         </div>
       </div>
-    {/if}
+    {/each}
 
     <!-- Pending section -->
     {#if pending.length > 0}

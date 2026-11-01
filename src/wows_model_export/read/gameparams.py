@@ -62,7 +62,7 @@ _CACHE_KEY_T = tuple[float, int]
 _FULL_DATA: tuple[_CACHE_KEY_T, dict[str, Any]] | None = None
 
 # Serializes the cold 2.8 GB ``json.load`` so two concurrent first-loads
-# (the jobs ThreadPoolExecutor is max_workers=4, and FastAPI
+# (the jobs ThreadPoolExecutor is max_workers=8, and FastAPI
 # ``/api/gameparams/*`` handlers call ``load_full`` on the anyio thread
 # pool) can't each build a ~12 GB resident set in parallel (OOM on
 # low-RAM boxes) or silently overwrite ``_FULL_DATA`` mid-parse. The warm

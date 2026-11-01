@@ -13,13 +13,17 @@ Threading model:
 
     1. Wait on a :class:`threading.Condition` until something is pending
        (and ``_paused`` is False).
-    2. Pick the head of the pending list. Spawn an ``ingest_ship`` job
-       via :func:`spawn_job`. Stamp ``job_id`` + ``started_at`` on the
-       queue item.
-    3. Poll the underlying job until it leaves ``running``. Copy the
+    2. Start pending items from the head of the list, up to ``_parallel``
+       at once, each as an ``ingest_ship`` job via :func:`spawn_job`.
+       Stamp ``job_id`` + ``started_at`` on each queue item.
+    3. Poll the running jobs. As each leaves ``running``, copy its
        terminal state (``done`` / ``failed`` / ``cancelled``) + error
-       blurb onto the queue item.
+       blurb onto its queue item, and start the next pending item.
     4. Persist + loop.
+  Each ingest writes only its own ship folder; the caches and shared
+  libraries several ingests touch are locked where they are built
+  (``toolkit.build.cache_lock``, the camo-library and particle-library
+  locks), so parallel ingests are safe.
 
 * Routes / public-API callers acquire the same Condition's lock when
   reading or mutating. ``Condition.notify_all`` wakes the worker after
@@ -86,6 +90,12 @@ _LIBRARY_JOB_LABEL = "__library_drain__"
 # persistently-failing build can't hot-loop the idle worker (owed items
 # stay un-built and would otherwise be re-detected on every wake).
 _LIBRARY_RETRY_COOLDOWN_S = 60.0
+
+# Ingests run at once by default, and the most allowed. Two to three is
+# where a 16-core machine stops getting faster (each ingest already runs
+# two toolkit processes).
+_DEFAULT_PARALLEL = 3
+_MAX_PARALLEL = 6
 
 # Soft cap on completed-item history kept in the persistence file. Past
 # this we drop the oldest completed entries so the file doesn't grow
@@ -203,8 +213,15 @@ _worker_thread: threading.Thread | None = None
 _worker_stop = threading.Event()
 
 # Paused state — when True the worker doesn't pull the next pending,
-# but lets the in-flight item finish naturally.
+# but lets the in-flight items finish naturally.
 _paused: bool = False
+
+# How many ingests the worker runs at once (persisted with the queue).
+_parallel: int = _DEFAULT_PARALLEL
+
+# perf_counter time before which the worker won't retry starting the
+# head item, after its label was locked by a direct "Run extract".
+_busy_until: float = 0.0
 
 # Set at configure() time; the worker needs it to pass into
 # compose.ingest_ship as the `config` kwarg.
@@ -287,8 +304,9 @@ def _persist() -> None:
         ]
 
     payload = {
-        "version": _SCHEMA_VERSION,
-        "items":   [_item_to_dict(it) for it in _items],
+        "version":  _SCHEMA_VERSION,
+        "parallel": _parallel,
+        "items":    [_item_to_dict(it) for it in _items],
     }
 
     _persistence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -317,7 +335,7 @@ def _load() -> None:
     re-attach to that job. We keep ``pending`` items as-is so the
     worker picks them up.
     """
-    global _items
+    global _items, _parallel
     _items = []
     if _persistence_path is None or not _persistence_path.is_file():
         return
@@ -334,6 +352,9 @@ def _load() -> None:
             _SCHEMA_VERSION, payload.get("version") if isinstance(payload, dict) else None,
         )
         return
+    parallel = payload.get("parallel")
+    if isinstance(parallel, int) and 1 <= parallel <= _MAX_PARALLEL:
+        _parallel = parallel
     raw_items = payload.get("items") or []
     for d in raw_items:
         if not isinstance(d, dict):
@@ -454,113 +475,158 @@ def _spawn_library_drain(owed: list[QueueItem]) -> str | None:
     return job.id
 
 
+def _ingests_running(inflight: dict[str, tuple[str, Any]]) -> int:
+    return sum(1 for kind, _ in inflight.values() if kind == "ingest")
+
+
+def _library_running(inflight: dict[str, tuple[str, Any]]) -> bool:
+    return any(kind == "library" for kind, _ in inflight.values())
+
+
+def _can_start_ingest(inflight: dict[str, tuple[str, Any]]) -> bool:
+    """A pending item could start now. Caller holds the lock."""
+    return (
+        not _paused
+        and not _library_running(inflight)
+        and _ingests_running(inflight) < _parallel
+        and time.perf_counter() >= _busy_until
+        and _next_pending() is not None
+    )
+
+
+def _start_work(inflight: dict[str, tuple[str, Any]]) -> float:
+    """Start whatever the limits allow, adding it to ``inflight``. Caller
+    holds the lock. Returns how long to wait before trying again when
+    nothing is running.
+
+    Ingests start from the head of the pending list until ``_parallel``
+    are running. The library build waits until nothing is pending or
+    running, then covers every completed item that wanted one, so the
+    fleet library is scanned once per drain instead of once per item.
+    """
+    global _busy_until, _last_library_attempt
+    if _paused or _library_running(inflight):
+        return 10.0
+    started = False
+    while _can_start_ingest(inflight):
+        item = _next_pending()
+        assert item is not None
+        spawn = _spawn_for_item(item)
+        if spawn is None:
+            # Label busy (a direct "Run extract" holds it) — leave the
+            # item pending and back off.
+            _busy_until = time.perf_counter() + _LABEL_BUSY_BACKOFF_S
+            break
+        job_id, _cmd = spawn
+        item.status = "running"
+        item.job_id = job_id
+        item.started_at = _now_ms()
+        inflight[job_id] = ("ingest", item)
+        started = True
+    if started:
+        _persist()
+        _cond.notify_all()
+    if inflight or _next_pending() is not None:
+        return _LABEL_BUSY_BACKOFF_S
+
+    owed = _owed_library_items()
+    if not owed:
+        return 10.0
+    since = time.perf_counter() - _last_library_attempt
+    if since < _LIBRARY_RETRY_COOLDOWN_S:
+        # In the post-failure cooldown — idle until it elapses (or an
+        # enqueue/resume wakes us early).
+        return min(10.0, _LIBRARY_RETRY_COOLDOWN_S - since)
+    _last_library_attempt = time.perf_counter()
+    job_id = _spawn_library_drain(owed)
+    if job_id is None:
+        return _LABEL_BUSY_BACKOFF_S
+    inflight[job_id] = ("library", owed)
+    _cond.notify_all()
+    return 0.0
+
+
+def _job_finished(job_id: str) -> bool:
+    j = get_job(job_id)
+    return j is None or j.state != "running"
+
+
+def _record_finished(kind: str, payload: Any, job_id: str) -> None:
+    """Copy a finished job's state onto its queue item(s). Caller holds
+    the lock."""
+    j = get_job(job_id)
+    if kind == "ingest":
+        item = payload
+        if j is None:
+            # Should be rare — gc_jobs only drops completed jobs past
+            # JOB_RETENTION_MS, and we just polled it as running.
+            item.status = "failed"
+            item.error = "underlying job vanished from runner"
+        elif j.state == "done":
+            item.status = "done"
+        elif j.state == "cancelled":
+            item.status = "cancelled"
+            item.error = "cancelled"
+        else:
+            item.status = "failed"
+            if isinstance(j.error, dict):
+                item.error = str(j.error.get("message") or "unknown")
+            else:
+                item.error = "unknown"
+        item.finished_at = _now_ms()
+        _persist()
+    elif j is not None and j.state == "done":
+        # The drain build (and per-ship post-library refresh) succeeded —
+        # these items are now in the library.
+        for it in payload:
+            it.library_built = True
+        _persist()
+    # A failed/cancelled library build leaves library_built False. The
+    # _last_library_attempt cooldown stops a hot retry loop; a later
+    # enqueue (or cooldown expiry) re-attempts.
+
+
 def _worker_loop() -> None:
     """Main worker loop. Daemon thread; ends only on process exit.
 
-    Two kinds of work, both run through the same spawn/poll/finalize
-    machinery: per-ship ``ingest`` (the head of the pending list) and,
-    once the queue has drained, a single ``library`` build covering every
-    completed item that wanted one. Deferring the library build to the
-    drain avoids re-scanning the whole fleet library once per item.
+    Two kinds of work, both run as jobs: per-ship ``ingest`` (up to
+    ``_parallel`` at once, from the head of the pending list) and, once
+    the queue has drained, a single ``library`` build covering every
+    completed item that wanted one.
     """
-    global _last_library_attempt
+    # job id -> ("ingest", QueueItem) | ("library", [QueueItem, ...])
+    inflight: dict[str, tuple[str, Any]] = {}
     while not _worker_stop.is_set():
-        # ── Phase 1: decide the next action under the lock ──
-        action: tuple[str, Any] | None = None
+        # ── Phase 1: start what the limits allow (under the lock) ──
         with _cond:
             while not _worker_stop.is_set():
-                if not _paused:
-                    item = _next_pending()
-                    if item is not None:
-                        action = ("ingest", item)
-                        break
-                    owed = _owed_library_items()
-                    if owed:
-                        since = time.perf_counter() - _last_library_attempt
-                        if since >= _LIBRARY_RETRY_COOLDOWN_S:
-                            action = ("library", owed)
-                            break
-                        # In the post-failure cooldown — idle until it
-                        # elapses (or an enqueue/resume wakes us early).
-                        _cond.wait(
-                            timeout=min(10.0, _LIBRARY_RETRY_COOLDOWN_S - since)
-                        )
-                        continue
+                wait = _start_work(inflight)
+                if inflight:
+                    break
                 # Idle: sleep until enqueue / resume / cancel wakes us.
-                _cond.wait(timeout=10.0)
+                _cond.wait(timeout=wait)
             if _worker_stop.is_set():
                 return
-            assert action is not None
 
-            if action[0] == "ingest":
-                item = action[1]
-                # Try to spawn under the lock — spawn_job is fast (~µs) and
-                # holding the lock keeps "I'm about to start this" atomic
-                # against a concurrent remove/cancel.
-                spawn = _spawn_for_item(item)
-                if spawn is None:
-                    # Label busy — leave the item pending and back off.
-                    _cond.wait(timeout=_LABEL_BUSY_BACKOFF_S)
-                    continue
-                job_id, _cmd = spawn
-                item.status = "running"
-                item.job_id = job_id
-                item.started_at = _now_ms()
-                _persist()
-                _cond.notify_all()
-            else:  # "library"
-                owed = action[1]
-                _last_library_attempt = time.perf_counter()
-                job_id = _spawn_library_drain(owed)
-                if job_id is None:
-                    _cond.wait(timeout=_LABEL_BUSY_BACKOFF_S)
-                    continue
-                _cond.notify_all()
-
-        # ── Phase 2: wait for the underlying job to terminate ──
-        # Released the lock so /api/queue/* routes stay responsive.
+        # ── Phase 2: wait for a job to finish, or for a free slot to be
+        # usable (an enqueue, a resume, or a raised parallel limit).
+        # Polls without the lock so /api/queue/* routes stay responsive.
+        finished: list[str] = []
         while not _worker_stop.is_set():
-            j = get_job(job_id)
-            if j is None or j.state != "running":
+            finished = [jid for jid in inflight if _job_finished(jid)]
+            if finished:
                 break
+            with _cond:
+                if _can_start_ingest(inflight):
+                    break
             time.sleep(_JOB_POLL_INTERVAL_S)
 
-        # ── Phase 3: record terminal state ──
+        # ── Phase 3: record terminal states ──
         with _cond:
-            j = get_job(job_id)
-            if action[0] == "ingest":
-                item = action[1]
-                if j is None:
-                    # Should be rare — gc_jobs only drops completed jobs
-                    # past JOB_RETENTION_MS, and we just polled it as
-                    # running. Treat as failed.
-                    item.status = "failed"
-                    item.error = "underlying job vanished from runner"
-                elif j.state == "done":
-                    item.status = "done"
-                elif j.state == "cancelled":
-                    item.status = "cancelled"
-                    item.error = "cancelled"
-                else:
-                    item.status = "failed"
-                    if isinstance(j.error, dict):
-                        item.error = str(j.error.get("message") or "unknown")
-                    else:
-                        item.error = "unknown"
-                item.finished_at = _now_ms()
-                _persist()
-                _cond.notify_all()
-            else:  # "library"
-                owed = action[1]
-                if j is not None and j.state == "done":
-                    # The drain build (and per-ship post-library refresh)
-                    # succeeded — these items are now in the library.
-                    for it in owed:
-                        it.library_built = True
-                    _persist()
-                # On failure/cancel: leave library_built False. The
-                # _last_library_attempt cooldown stops a hot retry loop;
-                # a later enqueue (or cooldown expiry) re-attempts.
+            for jid in finished:
+                kind, payload = inflight.pop(jid)
+                _record_finished(kind, payload, jid)
+            if finished:
                 _cond.notify_all()
 
 
@@ -730,6 +796,18 @@ def set_paused(paused: bool) -> bool:
         return _paused
 
 
+def set_parallel(n: int) -> int:
+    """Set how many ingests run at once (clamped to 1..``_MAX_PARALLEL``).
+    Running ingests are unaffected; the limit applies to new starts.
+    Returns the new value."""
+    global _parallel
+    with _cond:
+        _parallel = max(1, min(int(n), _MAX_PARALLEL))
+        _persist()
+        _cond.notify_all()
+        return _parallel
+
+
 def list_items() -> list[QueueItem]:
     """Snapshot copy of the queue. Order matches the on-disk list."""
     with _cond:
@@ -747,17 +825,21 @@ def get_item(queue_id: str) -> QueueItem | None:
 def snapshot() -> dict[str, Any]:
     """Composite payload for ``GET /api/queue``.
 
-    Returns ``items`` (in queue order), ``paused``, and the running
-    item's underlying ``job_id`` (or None) so the client can decide
-    whether to poll the jobs endpoint for live log output.
+    Returns ``items`` (in queue order), ``paused``, ``parallel``, and the
+    running items' underlying job ids so the client can decide whether to
+    poll the jobs endpoint for live log output. ``running_job_id`` is the
+    first of them (older clients follow one job).
     """
     with _cond:
         items = list(_items)
-        running = next((it for it in items if it.status == "running"), None)
+        running = [it.job_id for it in items if it.status == "running" and it.job_id]
         return {
             "items":           [_item_to_dict(it) for it in items],
             "paused":          _paused,
-            "running_job_id":  running.job_id if running else None,
+            "parallel":        _parallel,
+            "max_parallel":    _MAX_PARALLEL,
+            "running_job_id":  running[0] if running else None,
+            "running_job_ids": running,
             "pending_count":   sum(1 for it in items if it.status == "pending"),
             "completed_count": sum(
                 1 for it in items if it.status in ("done", "failed", "cancelled")
@@ -795,6 +877,7 @@ __all__ = [
     "reorder",
     "clear_completed",
     "set_paused",
+    "set_parallel",
     "list_items",
     "get_item",
     "snapshot",

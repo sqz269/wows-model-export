@@ -29,10 +29,10 @@ Threading model:
 * ``_jobs`` and ``_job_locks`` are protected by ``_lock``. Touched
   from request handlers (FastAPI thread pool) AND from the executor's
   worker threads via the ``on_event`` closure / ``add_done_callback``.
-* ``_executor = ThreadPoolExecutor(max_workers=4, ...)`` at module
-  scope bounds concurrency. The single-user dev tool doesn't need
-  more, and capping protects against e.g. four ``snapshot`` jobs
-  each loading a 2.8 GB GameParams blob simultaneously.
+* ``_executor = ThreadPoolExecutor(max_workers=8, ...)`` at module
+  scope bounds concurrency. GameParams is parsed once per process
+  (``read.gameparams.load_full`` serializes the cold load), so
+  concurrent jobs share one copy instead of each loading 2.8 GB.
 * Each job's ``cancel_event`` is a per-job :class:`threading.Event`
   the route handler flips on POST to ``/api/jobs/{id}/cancel``;
   the StepRunner sees it at the next step boundary and raises
@@ -161,12 +161,11 @@ _lock = threading.Lock()
 # matching ``future`` would race with ``gc_jobs``.
 _jobs_by_future: dict[Future[Any], Job] = {}
 
-# Bounded worker pool. Four feels right for a single-user dev tool:
-# concurrent skin-pack + extract + bootstrap is realistic, plus headroom
-# for a snapshot rebuild. Higher fan-out invites OOM on the ~200 MB
-# wowsunpack subprocess (each ``compose.scaffold_ship`` peaks ~3
-# wowsunpack children for hull + armor + ammo).
-_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="job-")
+# Bounded worker pool. The extract queue runs up to 6 ingests at once
+# (3 by default), and a skin pack, bootstrap or snapshot job can run
+# beside them. Each ingest peaks at 2-3 wowsunpack children (~200 MB
+# each) for hull + armor + ammo.
+_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="job-")
 
 
 def _now_ms() -> int:

@@ -130,6 +130,8 @@ export interface ReexportBody {
   include_untracked?: boolean;
   replay_skins?: boolean;
   build_library?: boolean;
+  /** Exports to run at once (server default 3). */
+  jobs?: number;
 }
 
 export function runReexport(body: ReexportBody): Promise<BuildsJobResponse> {

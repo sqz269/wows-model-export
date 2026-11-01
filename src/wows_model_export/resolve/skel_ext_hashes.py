@@ -259,6 +259,22 @@ def load_or_build(
         assets_bin_path is not None or _build.cache_is_current(cache, config)
     ):
         return load_table(cache)
+    with _build.cache_lock(cache):
+        # Another thread may have built it while this one waited.
+        if cache.is_file() and not refresh and (
+            assets_bin_path is not None or _build.cache_is_current(cache, config)
+        ):
+            return load_table(cache)
+        return _build_and_save(cache, assets_bin_path, config)
+
+
+def _build_and_save(
+    cache: Path,
+    assets_bin_path: Path | str | None,
+    config: PipelineConfig | None,
+) -> dict[int, dict]:
+    from ..toolkit import build as _build
+
     build: int | None = None
     if assets_bin_path is None and not os.environ.get("WOWS_ASSETS_BIN"):
         try:

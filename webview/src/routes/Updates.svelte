@@ -44,6 +44,7 @@
   let includeUntracked = $state(false);
   let replaySkins = $state(true);
   let buildLibrary = $state(true);
+  let jobs = $state(3);
 
   const exports = $derived(status?.exports ?? []);
   const shown = $derived(
@@ -158,7 +159,7 @@
     if (!names.length) return;
     if (!confirm(`Re-export ${names.length} export(s)?\n\n${names.join('\n')}`)) return;
     void runJob(`Re-export ${names.length}`, () =>
-      runReexport({ names, replay_skins: replaySkins, build_library: buildLibrary }),
+      runReexport({ names, replay_skins: replaySkins, build_library: buildLibrary, jobs }),
     );
   }
 
@@ -173,6 +174,7 @@
         kind: kindFilter === 'all' ? null : kindFilter,
         replay_skins: replaySkins,
         build_library: buildLibrary,
+        jobs,
       }),
     );
   }
@@ -485,7 +487,8 @@
           An export is <strong>stale</strong> when a game file, assets.bin record, GameParams
           entity or camouflage entry it read has changed since it was made.
           <strong>Untracked</strong> exports were made before tracking existed; re-export once to
-          start tracking them.
+          start tracking them. <strong>Removed</strong> exports came from a ship or map the
+          game no longer has, so they can't be re-exported.
         </p>
 
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
@@ -504,6 +507,17 @@
               disabled={jobRunning !== null}
             />
             "Re-export all" includes untracked
+          </label>
+          <label class="inline-flex items-center gap-1.5" title="Exports to run at once">
+            Parallel
+            <input
+              type="number"
+              min="1"
+              max="8"
+              bind:value={jobs}
+              disabled={jobRunning !== null}
+              class="w-12 rounded border border-border bg-transparent px-1 py-0.5"
+            />
           </label>
           <div class="ml-auto flex gap-2">
             <Button

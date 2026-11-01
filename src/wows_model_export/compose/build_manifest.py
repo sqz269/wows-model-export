@@ -135,11 +135,19 @@ class BuildManifest:
     def particle_records(self, base: str) -> dict[str, str]:
         """Fingerprints of every record under a particle ``.xml`` path
         (``/particles/x.xml`` -> ``/particles/x.xml/high`` etc.)."""
-        prefix = base.rstrip("/") + "/"
-        return {
-            p: r[0] for p, r in self.records.items()
-            if p.startswith(prefix) and r[2] in PARTICLE_TYPES
-        }
+        return dict(self._particle_index.get(base.rstrip("/"), {}))
+
+    @cached_property
+    def _particle_index(self) -> dict[str, dict[str, str]]:
+        """Particle records grouped by their ``.xml`` path."""
+        index: dict[str, dict[str, str]] = {}
+        for p, r in self.records.items():
+            if r[2] not in PARTICLE_TYPES:
+                continue
+            i = p.find(".xml/")
+            if i >= 0:
+                index.setdefault(p[:i + 4], {})[p] = r[0]
+        return index
 
     @cached_property
     def space_names(self) -> frozenset[str]:

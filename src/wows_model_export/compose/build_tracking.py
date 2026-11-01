@@ -81,19 +81,22 @@ class OutputRefs:
     camouflages: set[str] = field(default_factory=set)
 
 
-def _strings(o: Any) -> Iterator[str]:
-    stack = [o]
-    while stack:
-        cur = stack.pop()
-        if isinstance(cur, str):
-            yield cur
-        elif isinstance(cur, dict):
-            for k, v in cur.items():
-                if isinstance(k, str):
-                    yield k
-                stack.append(v)
-        elif isinstance(cur, list):
-            stack.extend(cur)
+# A JSON string literal (keys and values). Sidecars are mostly numbers, so
+# matching the literals in the raw text is much faster than parsing the
+# document and walking every value.
+_JSON_STRING = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
+
+
+def _json_strings(text: str) -> set[str]:
+    out: set[str] = set()
+    for s in set(_JSON_STRING.findall(text)):
+        if "\\" in s:
+            try:
+                s = json.loads(f'"{s}"')
+            except ValueError:
+                continue
+        out.add(s)
+    return out
 
 
 def _json_outputs(out_dir: Path) -> Iterator[Path]:
@@ -119,10 +122,10 @@ def scan_output_refs(out_dir: Path, manifest: _bm.BuildManifest) -> OutputRefs:
     seen: set[str] = set()
     for path in _json_outputs(out_dir):
         try:
-            doc = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, UnicodeDecodeError):
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
             continue
-        for s in _strings(doc):
+        for s in _json_strings(text):
             if s in seen or not s or len(s) > 300:
                 continue
             seen.add(s)
@@ -589,12 +592,55 @@ def reexport_plan(status: ExportStatus, config: PipelineConfig | None = None) ->
     }
 
 
+DEFAULT_REEXPORT_JOBS = 3
+
+
+def prewarm_caches(cfg: PipelineConfig, *, ships: bool) -> None:
+    """Bring the shared caches up to the current build before exports run
+    in parallel, so workers find them current instead of each rebuilding
+    the same file (gameparams.json, assets.bin, camouflages.xml, the VFS
+    manifest, the skel_ext hash table, the particle library). With
+    ``ships``, also parse GameParams into memory once."""
+    from ..read import gameparams as _gp_read
+    from ..resolve import camo as _camo
+    from ..resolve import skel_ext_hashes as _sxh
+    from ..toolkit import assets_bin as _assets_bin
+    from ..toolkit import vfs as _vfs
+    from ..toolkit._subprocess import toolkit_capabilities
+    from . import library_particles as _lib_particles
+
+    toolkit_capabilities(cfg.require_toolkit_bin())
+    _assets_bin.ensure_dump(config=cfg)
+    _vfs.ensure_manifest(config=cfg)
+    _camo.ensure_camouflages_xml(config=cfg)
+    _sxh.load_or_build(cache=cfg.require_cache_dir() / "skel_ext_hashes.json", config=cfg)
+    if ships:
+        _gp_read.load_full(config=cfg)
+        _lib_particles.ensure_built(config=cfg)
+
+
+def _labelled(on_event: Any, name: str) -> Any:
+    """``on_event`` with every event tagged with the export it came from
+    (events from parallel exports interleave)."""
+    from dataclasses import replace
+
+    def emit(ev: Any) -> None:
+        on_event(replace(
+            ev,
+            detail=f"[{name}] {ev.detail}" if ev.detail else f"[{name}]",
+            data={**(ev.data or {}), "export": name},
+        ))
+
+    return emit
+
+
 def reexport_exports(
     statuses: list[ExportStatus],
     *,
     config: PipelineConfig | None = None,
     replay_skins: bool = True,
     build_library: bool = True,
+    jobs: int = 1,
     on_event: Any = None,
     cancel: Any = None,
     on_progress: Any = None,
@@ -606,7 +652,15 @@ def reexport_exports(
     ``build_deps.json``. Ships that asked for the accessory library get it
     built once at the end, as the extract queue does. Per-export failures
     are collected, not raised. ``on_progress(index, total, status)`` is
-    called before each export starts."""
+    called as each export starts.
+
+    ``jobs`` > 1 runs that many exports at once. Each export writes only
+    its own folder; the shared caches are brought current first and the
+    shared libraries they extract into are locked. A ship's skin packs run
+    in the same worker, after the ship."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     from ..errors import CancelledError
     from .clean_workspace import _load_model_dir_index
     from .ingest_ship import build_library_and_refresh, ingest_ship
@@ -620,17 +674,37 @@ def reexport_exports(
         if st.state == "removed":
             report["skipped"].append({"kind": st.kind, "name": st.name, "reason": st.note})
     statuses = [st for st in statuses if st.state != "removed"]
-    library_specs: list[dict[str, Any]] = []
-    model_dir_index: dict[str, str] | None = None
     total = len(statuses)
+    jobs = max(1, min(int(jobs or 1), total or 1))
+    report["jobs"] = jobs
 
-    for i, st in enumerate(statuses):
-        if on_progress is not None:
-            on_progress(i, total, st)
+    model_dir_index: dict[str, str] | None = None
+    if any(st.kind == "ship" and not (st.reexport or {}).get("ship_input") for st in statuses):
+        model_dir_index = _load_model_dir_index(cfg.workspace, cfg)
+    if jobs > 1:
+        prewarm_caches(cfg, ships=any(st.kind == "ship" for st in statuses))
+
+    lock = threading.Lock()
+    stop = threading.Event()
+    library_specs: list[dict[str, Any]] = []
+    started = 0
+
+    def record(key: str, entry: dict[str, Any]) -> None:
+        with lock:
+            report[key].append(entry)
+
+    def run_one(st: ExportStatus) -> None:
+        nonlocal started
+        if stop.is_set():
+            return
+        with lock:
+            index = started
+            started += 1
+            if on_progress is not None:
+                on_progress(index, total, st)
+        emit = _labelled(on_event, st.name) if jobs > 1 and on_event is not None else on_event
         try:
             if st.kind == "ship":
-                if model_dir_index is None and not (st.reexport or {}).get("ship_input"):
-                    model_dir_index = _load_model_dir_index(cfg.workspace, cfg)
                 kwargs, skins, wants_library, source = _ship_ingest_plan(st, cfg, model_dir_index)
                 ship_input = kwargs.pop("ship_input")
                 result = ingest_ship(
@@ -639,18 +713,20 @@ def reexport_exports(
                     interactive=False,
                     build_library=False,
                     provenance_build_library=wants_library,
-                    on_event=on_event,
+                    on_event=emit,
                     cancel=cancel,
                     **{k: v for k, v in kwargs.items() if v is not None},
                 )
-                report["reexported"].append({"kind": "ship", "name": st.name, "plan": source})
+                record("reexported", {"kind": "ship", "name": st.name, "plan": source})
                 if wants_library:
-                    library_specs.append({
+                    record_spec = {
                         "label": result.label,
                         "toolkit_ship": kwargs.get("toolkit_ship_override") or ship_input,
                         "gameparams_ship_id": kwargs.get("gameparams_ship_id"),
                         "permoflage": kwargs.get("variant_permoflage") or "auto",
-                    })
+                    }
+                    with lock:
+                        library_specs.append(record_spec)
                 if replay_skins:
                     for skin in skins:
                         try:
@@ -661,16 +737,14 @@ def reexport_exports(
                                 skin_id=skin.skin_id,
                                 display_name=skin.display_name,
                                 source_kind=skin.source_kind,
-                                on_event=on_event,
+                                on_event=emit,
                                 cancel=cancel,
                             )
-                            report["skins_replayed"].append(
-                                {"ship": result.label, "skin_id": skin.skin_id}
-                            )
+                            record("skins_replayed", {"ship": result.label, "skin_id": skin.skin_id})
                         except CancelledError:
                             raise
                         except Exception as err:  # noqa: BLE001
-                            report["failed"].append({
+                            record("failed", {
                                 "kind": "skin", "name": f"{result.label}::{skin.skin_id}",
                                 "error": f"{type(err).__name__}: {err}",
                             })
@@ -684,15 +758,31 @@ def reexport_exports(
                     flags=plan["flags"],
                     collision_manifest=plan["collision_manifest"],
                 )
-                report["reexported"].append({"kind": "map", "name": st.name})
+                record("reexported", {"kind": "map", "name": st.name})
             else:
                 raise ValueError(f"unknown export kind {st.kind!r}")
         except CancelledError:
+            stop.set()
             raise
         except Exception as err:  # noqa: BLE001
-            report["failed"].append({
+            record("failed", {
                 "kind": st.kind, "name": st.name, "error": f"{type(err).__name__}: {err}",
             })
+
+    if jobs == 1:
+        for st in statuses:
+            run_one(st)
+    else:
+        cancelled: CancelledError | None = None
+        with ThreadPoolExecutor(max_workers=jobs, thread_name_prefix="reexport") as pool:
+            futures = [pool.submit(run_one, st) for st in statuses]
+            for fut in futures:
+                try:
+                    fut.result()
+                except CancelledError as err:
+                    cancelled = cancelled or err
+        if cancelled is not None:
+            raise cancelled
 
     if build_library and library_specs:
         try:

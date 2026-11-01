@@ -44,6 +44,7 @@ uniform + per-channel mix.  See the user's memory
 from __future__ import annotations
 
 import sys
+import threading
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -120,6 +121,13 @@ def ensure_camouflages_xml(
     camo_xml = cache_dir / "camouflages.xml"
     if not refresh and _build.cache_is_current(camo_xml, cfg):
         return camo_xml
+    with _build.cache_lock(camo_xml):
+        if not refresh and _build.cache_is_current(camo_xml, cfg):
+            return camo_xml
+        return _extract_camouflages_xml(camo_xml, cache_dir, cfg)
+
+
+def _extract_camouflages_xml(camo_xml: Path, cache_dir: Path, cfg: PipelineConfig) -> Path:
     build = _build.current_build(cfg)
     print(
         f"[wg_camo] extracting camouflages.xml -> {camo_xml} (~9s)...",
@@ -405,6 +413,19 @@ _MIP_ORDER = {"dd0": 0, "dd1": 1, "dd2": 2, "dds": 3}
 # 50 patterns × ~100 chars + flags + paths leaves comfortable headroom.
 _EXTRACT_CHUNK = 50
 
+# The mask / mat libraries are shared by every ship. Parallel ingests
+# would race the "already on disk?" check and extract the same file in
+# two processes at once, so the check and the extract run under a
+# per-directory lock.
+_EXTRACT_LOCKS: dict[Path, threading.Lock] = {}
+_EXTRACT_LOCKS_GUARD = threading.Lock()
+
+
+def _extract_lock(directory: Path) -> threading.Lock:
+    key = directory.resolve()
+    with _EXTRACT_LOCKS_GUARD:
+        return _EXTRACT_LOCKS.setdefault(key, threading.Lock())
+
 
 def ensure_camo_masks_for_entries(
     entries: Iterable[CamoEntry],
@@ -451,7 +472,12 @@ def ensure_camo_masks_for_entries(
             paths.add(path)
     if not paths:
         return masks_dir
+    with _extract_lock(masks_dir):
+        _extract_masks(paths, masks_dir, refresh=refresh, cfg=cfg)
+    return masks_dir
 
+
+def _extract_masks(paths: set[str], masks_dir: Path, *, refresh: bool, cfg: PipelineConfig) -> None:
     if not refresh:
         # Skip masks whose `.dds` is already cached. We treat the `.dds`
         # presence as the cache marker — if a mask has any extra mips,
@@ -464,7 +490,7 @@ def ensure_camo_masks_for_entries(
                 already.add(path)
         paths -= already
     if not paths:
-        return masks_dir
+        return
 
     # Toolkit's `wowsunpack extract` only matches glob patterns rooted at
     # `**/<basename>` — full-path patterns and partial-globbed paths
@@ -485,7 +511,6 @@ def ensure_camo_masks_for_entries(
     for i in range(0, len(patterns), _EXTRACT_CHUNK):
         chunk = patterns[i:i + _EXTRACT_CHUNK]
         _toolkit_extract(chunk, out_dir=masks_dir, flatten=True, config=cfg)
-    return masks_dir
 
 
 def ensure_mat_camo_textures(
@@ -549,7 +574,12 @@ def ensure_mat_camo_textures(
             paths.add(path)
     if not paths:
         return mat_dir
+    with _extract_lock(mat_dir):
+        _extract_mat(paths, mat_dir, refresh=refresh, cfg=cfg)
+    return mat_dir
 
+
+def _extract_mat(paths: set[str], mat_dir: Path, *, refresh: bool, cfg: PipelineConfig) -> None:
     if not refresh:
         already: set[str] = set()
         for path in paths:
@@ -559,7 +589,7 @@ def ensure_mat_camo_textures(
                 already.add(path)
         paths -= already
     if not paths:
-        return mat_dir
+        return
 
     patterns: list[str] = []
     for path in sorted(paths):
@@ -574,7 +604,6 @@ def ensure_mat_camo_textures(
     for i in range(0, len(patterns), _EXTRACT_CHUNK):
         chunk = patterns[i:i + _EXTRACT_CHUNK]
         _toolkit_extract(chunk, out_dir=mat_dir, flatten=True, config=cfg)
-    return mat_dir
 
 
 def list_extracted_mips(masks_dir: Path | None = None) -> dict[str, list[str]]:

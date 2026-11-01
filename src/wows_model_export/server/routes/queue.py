@@ -225,6 +225,14 @@ def make_router(config: PipelineConfig) -> APIRouter:
         paused = queue_mod.set_paused(False)
         return JSONResponse(content={"ok": True, "paused": paused})
 
+    @router.post("/queue/parallel")
+    def post_parallel(body: dict[str, Any] = Body(default={})) -> JSONResponse:
+        try:
+            n = int(body.get("parallel"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="parallel must be an integer") from None
+        return JSONResponse(content={"ok": True, "parallel": queue_mod.set_parallel(n)})
+
     return router
 
 

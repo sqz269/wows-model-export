@@ -363,6 +363,7 @@ def _cmd_reexport(args: argparse.Namespace, cfg) -> int:
         config=cfg,
         replay_skins=not args.no_skins,
         build_library=not args.no_library,
+        jobs=args.jobs,
         on_event=build_printer(args),
         on_progress=progress,
     )
@@ -428,6 +429,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-skins", action="store_true", help="Don't replay skin packs.")
     p.add_argument("--no-library", action="store_true",
                    help="Skip the accessory-library build at the end.")
+    p.add_argument("--jobs", "-j", type=int, default=bt.DEFAULT_REEXPORT_JOBS,
+                   help=f"Exports to run at once (default {bt.DEFAULT_REEXPORT_JOBS}).")
     p.add_argument("--json", action="store_true")
     add_common_args(p)
     return ap

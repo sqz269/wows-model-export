@@ -159,10 +159,13 @@ def ensure_manifest(
         manifest_path = Path(manifest_path)
     if not refresh and _build.cache_is_current(manifest_path, cfg):
         return manifest_path
-    build = _build.current_build(cfg)
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    metadata_json(manifest_path, config=cfg)
-    _build.write_stamp(manifest_path, build)
+    with _build.cache_lock(manifest_path):
+        if not refresh and _build.cache_is_current(manifest_path, cfg):
+            return manifest_path
+        build = _build.current_build(cfg)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_json(manifest_path, config=cfg)
+        _build.write_stamp(manifest_path, build)
     return manifest_path
 
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -222,14 +223,19 @@ def ensure_built(
     paths = library_paths(workspace)
 
     assets_bin_path = _assets_bin.default_path(cfg)
-    if is_current(paths["records"], assets_bin_path, paths["index"]):
-        return {
-            "status": "cached",
-            "records_path": str(paths["records"]),
-            "index_path": str(paths["index"]),
-        }
+    # Ship ingests running in parallel all call this; the first stale
+    # check builds, the rest wait and then find it current.
+    with _BUILD_LOCK:
+        if is_current(paths["records"], assets_bin_path, paths["index"]):
+            return {
+                "status": "cached",
+                "records_path": str(paths["records"]),
+                "index_path": str(paths["index"]),
+            }
+        return build(config=cfg)
 
-    return build(config=cfg)
+
+_BUILD_LOCK = threading.Lock()
 
 
 __all__ = [

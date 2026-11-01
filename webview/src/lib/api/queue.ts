@@ -40,9 +40,14 @@ export interface QueueItem {
 export interface QueueSnapshot {
   items: QueueItem[];
   paused: boolean;
-  /** Convenience: the running item's job_id (or null). Lets the UI
+  /** How many ingests the worker runs at once, and the most allowed. */
+  parallel: number;
+  max_parallel: number;
+  /** Convenience: the first running item's job_id (or null). Lets the UI
    *  drive its job-poll loop without re-scanning items[]. */
   running_job_id: string | null;
+  /** Job ids of every running item, in queue order. */
+  running_job_ids: string[];
   pending_count: number;
   completed_count: number;
 }
@@ -126,4 +131,12 @@ export function pauseQueue(): Promise<PauseResponse> {
 
 export function resumeQueue(): Promise<PauseResponse> {
   return fetchJson<PauseResponse>('/api/queue/resume', { method: 'POST' });
+}
+
+export function setQueueParallel(parallel: number): Promise<{ ok: true; parallel: number }> {
+  return fetchJson('/api/queue/parallel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ parallel }),
+  });
 }

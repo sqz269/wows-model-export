@@ -72,7 +72,17 @@ def ensure_dump(
     if cache_path.is_file() and not refresh:
         if explicit or _build.cache_is_current(cache_path, cfg):
             return cache_path
-    stale_existing = cache_path.is_file() and not refresh
+    with _build.cache_lock(cache_path):
+        # Another thread may have extracted it while this one waited.
+        if cache_path.is_file() and not refresh:
+            if explicit or _build.cache_is_current(cache_path, cfg):
+                return cache_path
+        return _extract_assets_bin(
+            cache_path, cfg, stale_existing=cache_path.is_file() and not refresh,
+        )
+
+
+def _extract_assets_bin(cache_path: Path, cfg: PipelineConfig, *, stale_existing: bool) -> Path:
     build = _build.current_build(cfg)
 
     print(

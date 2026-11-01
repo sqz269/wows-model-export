@@ -96,7 +96,14 @@ def ensure_dump(
 
     if not refresh and _build.cache_is_current(cache_path, cfg):
         return cache_path
+    with _build.cache_lock(cache_path):
+        # Another thread may have dumped it while this one waited.
+        if not refresh and _build.cache_is_current(cache_path, cfg):
+            return cache_path
+        return _dump_full(cache_path, cfg)
 
+
+def _dump_full(cache_path: Path, cfg: PipelineConfig) -> Path:
     build = _build.current_build(cfg)
     print(
         f"[gameparams] dumping GameParams.json -> {cache_path} "

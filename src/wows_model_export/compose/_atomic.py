@@ -4,7 +4,7 @@ Several library writers (``accessory_library._write_index``,
 ``dead_variant_audit``, ``attached_accessories_library``) emit JSON that
 is read back by sibling composers in the same build. Under concurrent
 builds (reachable today: ``/api/extract/run`` + ``/api/bootstrap/build``
-both dispatch into the ``jobs`` ThreadPoolExecutor, max_workers=4, with
+both dispatch into the ``jobs`` ThreadPoolExecutor, max_workers=8, with
 only a per-LABEL lock) a bare ``write_text`` lets a reader observe a
 torn / truncated file mid-write -> ``JSONDecodeError`` -> silently
 missing metadata.

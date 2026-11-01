@@ -55,6 +55,7 @@ class ReexportBody(BaseModel):
     include_untracked: bool = False
     replay_skins: bool = True
     build_library: bool = True
+    jobs: int = Field(default=bt.DEFAULT_REEXPORT_JOBS, ge=1, le=16)
 
 
 def _cap(items: list[str], n: int = _LIST_CAP) -> dict[str, Any]:
@@ -105,6 +106,7 @@ def _reexport_job(
         config=config,
         replay_skins=bool(body.get("replay_skins", True)),
         build_library=bool(body.get("build_library", True)),
+        jobs=int(body.get("jobs") or bt.DEFAULT_REEXPORT_JOBS),
         on_event=on_event,
         cancel=cancel,
         on_progress=progress,
@@ -232,6 +234,7 @@ def make_router(config: PipelineConfig) -> APIRouter:
             cmd.append("--no-skins")
         if not body.build_library:
             cmd.append("--no-library")
+        cmd += ["--jobs", str(body.jobs)]
         return _spawn(_reexport_job, {"config": config, "body": body.model_dump()}, cmd)
 
     return router
