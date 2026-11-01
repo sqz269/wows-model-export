@@ -188,11 +188,21 @@
   let hasTerrain = $state(false);
   let terrainObject: THREE.Object3D | null = null;
 
-  // Whether to render water opaquely (engine-faithful: water plane
-  // occludes underwater geometry from above-water camera angles).
-  // Default ON — the engine doesn't show-through; the GLB's alpha=0.85
-  // is a producer artefact. Toggle OFF to inspect submerged geometry.
-  let opaqueWater = $state(true);
+  // Water rendering. 'fft' (default) hides the toolkit's flat `Water` quad
+  // and shows the shared FFT ocean (lib/three/ocean, as in the engine:
+  // opaque, depth-writing, infinite). 'opaque' keeps the flat quad but
+  // forces it opaque (the GLB's alpha=0.85 is a producer artefact);
+  // 'see-through' restores that alpha to inspect submerged geometry.
+  type WaterMode = 'fft' | 'opaque' | 'see-through';
+  const WATER_MODE_OPTIONS: Array<{ value: WaterMode; label: string }> = [
+    { value: 'fft', label: 'FFT ocean' },
+    { value: 'opaque', label: 'Flat' },
+    { value: 'see-through', label: 'See-through' },
+  ];
+  let waterMode = $state<WaterMode>('fft');
+  // Map geometry is in BW units at the 15 m/unit geometry domain (trees
+  // 0.4–2 units tall); the ocean simulates in metres.
+  const MAP_WORLD_UNITS_PER_METRE = 1 / 15;
 
   // Per-LOD extent culling. Engine semantics: when camera distance to an
   // instance exceeds the instance's outermost LOD extent (last element of
@@ -1724,17 +1734,21 @@
     }
   }
 
-  /** Force the Water plane to write depth so underwater geometry is
-   *  occluded from an overview camera — matching how the engine renders
-   *  water opaquely + writes depth (refraction is in the water shader,
-   *  not in glTF alpha-blend). The toolkit emits Water as alphaMode=BLEND
-   *  with alpha=0.85, which three.js maps to transparent=true,
-   *  depthWrite=false — so submerged LNR landmasses + obstacles show
-   *  through from above and create apparent "overlap". */
-  function fixupWaterDepth(root: THREE.Object3D, opaqueWater: boolean): void {
+  /** Apply the water mode. FFT: hide the toolkit's flat `Water` quad and
+   *  show the scene's FFT ocean. Flat modes: force the quad to write depth
+   *  so underwater geometry is occluded from an overview camera — matching
+   *  how the engine renders water opaquely + writes depth (refraction is in
+   *  the water shader, not in glTF alpha-blend). The toolkit emits Water as
+   *  alphaMode=BLEND with alpha=0.85, which three.js maps to
+   *  transparent=true, depthWrite=false — so submerged LNR landmasses +
+   *  obstacles show through from above and create apparent "overlap". */
+  function applyWaterMode(root: THREE.Object3D, mode: WaterMode, sceneEnv: SceneEnvironment | null): void {
+    sceneEnv?.setWaterPlaneVisible(mode === 'fft');
+    const opaqueWater = mode !== 'see-through';
     root.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh || mesh.name !== 'Water') return;
+      mesh.visible = mode !== 'fft' && !isManuallyHidden(mesh);
       const mat = mesh.material as THREE.MeshStandardMaterial;
       if (Array.isArray(mat)) return;
       if (opaqueWater) {
@@ -1817,7 +1831,10 @@
           antialias: false,
           pixelRatio: mapRenderScale,
           postprocess: mapPostprocess,
+          // Maps owns its background (fog colour or sky cube, per toggle).
+          oceanSkyBackground: false,
         });
+        env.setOceanParams({ worldUnitsPerMetre: MAP_WORLD_UNITS_PER_METRE });
         env.controls.target.set(0, 0, 0);
         env.controls.update();
         activeEnv = env;
@@ -1908,7 +1925,7 @@
 
         // Apply current fixed material state + expose the root so the
         // toggle effects below can re-apply without a full reload.
-        fixupWaterDepth(loadedRoot, opaqueWater);
+        applyWaterMode(loadedRoot, waterMode, env);
         terrainObject = loadedRoot.getObjectByName('Terrain') ?? null;
         hasTerrain = terrainObject != null;
         if (terrainObject) terrainObject.visible = showTerrain;
@@ -2083,11 +2100,12 @@
     }
   });
 
-  // Live toggle for water opacity.
+  // Live toggle for the water mode.
   $effect(() => {
     const root = activeRoot;
+    const mode = waterMode;
     if (!root) return;
-    fixupWaterDepth(root, opaqueWater);
+    applyWaterMode(root, mode, activeEnv);
   });
 
   // Live toggle for engine point lights. Native point-light minQuality is
@@ -2364,9 +2382,19 @@
                 <span>Terrain</span>
               </label>
             {/if}
-            <label class="flex items-center gap-1.5">
-              <input type="checkbox" bind:checked={opaqueWater} />
-              <span>Opaque water</span>
+            <label
+              class="flex items-center gap-1.5"
+              title="FFT ocean: animated JONSWAP sea (opaque, extends to the horizon). Flat: the map's water quad forced opaque. See-through: the quad at its authored alpha, to inspect submerged geometry."
+            >
+              <span>Water</span>
+              <select
+                bind:value={waterMode}
+                class="bg-input border-border rounded border px-1 py-0.5 text-xs"
+              >
+                {#each WATER_MODE_OPTIONS as w}
+                  <option value={w.value}>{w.label}</option>
+                {/each}
+              </select>
             </label>
             {#if viewerStats.lodCullableCount > 0}
               <label

@@ -45,7 +45,9 @@ export const DEFAULT_SHADING_PARAMS: OceanShadingParams = {
 
 const MIN_SPACING = 0.35;
 const SEGMENTS = 256;
-const OUTER_RADIUS = 60000;
+// Metres. Large enough to reach the far plane of a map viewer at 1/15 world
+// units per metre (~108 km); the coarse outer rings make this ~15 extra rings.
+const OUTER_RADIUS = 2.5e6;
 const COARSE_RADIUS = 400;
 
 export function buildPolarGrid(
@@ -126,9 +128,11 @@ uniform float uMinSpacing;
 uniform float uAngularStep;
 uniform float uCoarseRadius;
 uniform float uDispScale;
+uniform float uUnitScale;
 
 varying vec3 vWorld;
 varying vec2 vOffset;
+varying float vViewDepth;
 
 float lodFor(float spacing, float texel) {
   return max(0.0, log2(spacing / texel) + 0.5);
@@ -143,10 +147,14 @@ void main() {
   vec3 d = textureLod(uDisp0, uCenterUv0 + off / uLengths.x, lodFor(spacing, uTexel.x)).xyz
          + textureLod(uDisp1, uCenterUv1 + off / uLengths.y, lodFor(spacing, uTexel.y)).xyz
          + textureLod(uDisp2, uCenterUv2 + off / uLengths.z, lodFor(spacing, uTexel.z)).xyz;
-  vec3 world = vec3(uCenter.x + off.x, 0.0, uCenter.y + off.y) + d * uDispScale;
+  // The simulation and grid live in metres; uUnitScale maps them into the
+  // scene's world units (1 for metre scenes, 1/15 for BW-unit maps).
+  vec3 world = (vec3(uCenter.x + off.x, 0.0, uCenter.y + off.y) + d * uDispScale) * uUnitScale;
   vWorld = world;
   vOffset = off;
-  gl_Position = projectionMatrix * viewMatrix * vec4(world, 1.0);
+  vec4 mv = viewMatrix * vec4(world, 1.0);
+  vViewDepth = -mv.z;
+  gl_Position = projectionMatrix * mv;
 }
 `;
 
@@ -181,14 +189,24 @@ uniform float uFoamCoverage;
 uniform float uFoamIntensity;
 uniform float uSunRoughness;
 uniform float uTime;
+uniform float uUnitScale;
+uniform int uFogMode;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+uniform float uFogNear;
+uniform float uFogFar;
 
 varying vec3 vWorld;
 varying vec2 vOffset;
+varying float vViewDepth;
 
 vec3 proceduralSky(vec3 dir, vec3 sun) {
   float up = clamp(dir.y, 0.0, 1.0);
-  vec3 horizon = vec3(0.62, 0.74, 0.88);
-  vec3 zenith = vec3(0.13, 0.33, 0.60);
+  // In a fogged scene (Maps) the fog colour IS the visible horizon, so the
+  // reflected horizon takes it (no sea/sky seam) and the zenith takes the
+  // hemisphere sky that lights the terrain. Otherwise a fixed daylight sky.
+  vec3 horizon = uFogMode != 0 ? uFogColor : vec3(0.62, 0.74, 0.88);
+  vec3 zenith = uFogMode != 0 ? uSkyColor : vec3(0.13, 0.33, 0.60);
   vec3 sky = mix(horizon, zenith, pow(up, 0.55));
   float s = clamp(dot(dir, sun), 0.0, 1.0);
   sky += vec3(1.0, 0.85, 0.65) * pow(s, 6.0) * 0.06;
@@ -239,7 +257,8 @@ void main() {
 
   vec3 toCam = cameraPosition - vWorld;
   float dist = length(toCam);
-  vec3 V = toCam / max(dist, 1e-4);
+  vec3 V = toCam / max(dist, 1e-9);
+  float distM = dist / uUnitScale;
   vec3 L = normalize(uSunDir);
   // Steep, choppy faces can tilt the interpolated normal away from the
   // viewer; bend it back so Fresnel/reflection stay defined.
@@ -248,7 +267,7 @@ void main() {
 
   // Mip-filtering flattens distant normals; hand the lost slope variance to
   // roughness so the horizon glitters/blurs instead of turning into a mirror.
-  float roughness = mix(uSunRoughness, 0.35, smoothstep(30.0, 4000.0, dist));
+  float roughness = mix(uSunRoughness, 0.35, smoothstep(30.0, 4000.0, distM));
   float NoV = clamp(dot(n, V), 1e-3, 1.0);
   float NoL = clamp(dot(n, L), 0.0, 1.0);
   vec3 H = normalize(L + V);
@@ -269,7 +288,7 @@ void main() {
   // Atlas-style subsurface scattering (GDC 2019, as popularised by
   // gasgiant / Acerola): light transmitted through crests seen against the
   // sun, a view-facing glow, and a sun-facing lift. Height = displaced y.
-  float height = max(0.0, vWorld.y);
+  float height = max(0.0, vWorld.y / uUnitScale);
   float k1 = 2.0 * height * pow(clamp(dot(L, -V), 0.0, 1.0), 4.0) * pow(0.5 - 0.5 * dot(L, n), 3.0);
   float k2 = 0.6 * pow(NoV, 2.0);
   float k3 = 0.35 * NoL;
@@ -294,16 +313,27 @@ void main() {
   vec2 fp = uCenter + vOffset;
   float pattern = 0.55 * valueNoise(fp * 0.9 + uTime * 0.05) + 0.45 * valueNoise(fp * 3.1 - uTime * 0.08);
   foam = clamp(foam * (0.35 + 1.1 * pattern), 0.0, 1.0) * uFoamIntensity;
-  foam *= 1.0 - smoothstep(1500.0, 6000.0, dist);
+  foam *= 1.0 - smoothstep(1500.0, 6000.0, distM);
   vec3 foamLit = vec3(0.85) * (ambient * 0.6 + uSunColor * (0.3 + 0.7 * NoL));
   color = mix(color, foamLit, foam);
 
-  // Distance haze into the background (reaching ~1 at the far plane) so the
-  // finite grid / far clip never shows a seam. With a sky-cube background the
-  // haze colour is that sky's horizon radiance along this view azimuth.
-  vec3 horizonDir = normalize(vec3(-V.x, 0.0, -V.z) + vec3(0.0, 0.03, 0.0));
-  vec3 haze = mix(uBackground, skyRadiance(horizonDir, 0.15), uFadeToSky);
-  float fog = 1.0 - exp(-pow(dist / uFogDistance, 2.0));
+  // Scene fog when the scene has one (same law as three's Fog/FogExp2, so the
+  // sea matches the terrain); otherwise a distance haze into the background
+  // that reaches ~1 at the far plane so the far clip never shows a seam.
+  // With a sky-cube background that haze takes the sky's horizon radiance.
+  float fog;
+  vec3 haze;
+  if (uFogMode == 1) {
+    fog = 1.0 - exp(-uFogDensity * uFogDensity * vViewDepth * vViewDepth);
+    haze = uFogColor;
+  } else if (uFogMode == 2) {
+    fog = smoothstep(uFogNear, uFogFar, vViewDepth);
+    haze = uFogColor;
+  } else {
+    vec3 horizonDir = normalize(vec3(-V.x, 0.0, -V.z) + vec3(0.0, 0.03, 0.0));
+    haze = mix(uBackground, skyRadiance(horizonDir, 0.15), uFadeToSky);
+    fog = 1.0 - exp(-pow(dist / uFogDistance, 2.0));
+  }
   color = mix(color, haze, fog);
 
   gl_FragColor = vec4(color, 1.0);
@@ -348,6 +378,12 @@ export class OceanSurface {
       uFoamIntensity: { value: DEFAULT_SHADING_PARAMS.foamIntensity },
       uSunRoughness: { value: DEFAULT_SHADING_PARAMS.sunRoughness },
       uTime: { value: 0 },
+      uUnitScale: { value: 1 },
+      uFogMode: { value: 0 },
+      uFogColor: { value: new THREE.Color() },
+      uFogDensity: { value: 0 },
+      uFogNear: { value: 0 },
+      uFogFar: { value: 1 },
       envMap: { value: null },
     };
     this.material = new THREE.ShaderMaterial({
@@ -406,12 +442,17 @@ export class OceanSurface {
       background: THREE.Color;
       /** Background is the bound sky cube, not a flat colour. */
       skyBackground: boolean;
+      /** The scene's fog, honoured instead of the built-in haze. */
+      fog: THREE.Fog | THREE.FogExp2 | null;
       time: number;
     },
+    worldUnitsPerMetre = 1,
   ): void {
     const u = this.uniforms;
-    const cx = camera.position.x;
-    const cz = camera.position.z;
+    u.uUnitScale.value = worldUnitsPerMetre;
+    // Grid centre and texture phase in metres (simulation space).
+    const cx = camera.position.x / worldUnitsPerMetre;
+    const cz = camera.position.z / worldUnitsPerMetre;
     (u.uCenter.value as THREE.Vector2).set(cx, cz);
     const lengths = u.uLengths.value as THREE.Vector3;
     const texel = u.uTexel.value as THREE.Vector3;
@@ -430,6 +471,18 @@ export class OceanSurface {
     (u.uBackground.value as THREE.Color).copy(lighting.background);
     u.uFadeToSky.value = lighting.skyBackground && this.boundEnv ? 1 : 0;
     u.uFogDistance.value = camera.far * 0.5;
+    const fog = lighting.fog;
+    if (fog && (fog as THREE.FogExp2).isFogExp2) {
+      u.uFogMode.value = 1;
+      u.uFogDensity.value = (fog as THREE.FogExp2).density;
+    } else if (fog && (fog as THREE.Fog).isFog) {
+      u.uFogMode.value = 2;
+      u.uFogNear.value = (fog as THREE.Fog).near;
+      u.uFogFar.value = (fog as THREE.Fog).far;
+    } else {
+      u.uFogMode.value = 0;
+    }
+    if (fog) (u.uFogColor.value as THREE.Color).copy(fog.color);
     u.uTime.value = lighting.time;
   }
 

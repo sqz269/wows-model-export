@@ -315,6 +315,10 @@ export interface SceneOptions {
   pixelRatio?: number;
   /** Use the postprocess composer by default (default: true). */
   postprocess?: boolean;
+  /** While the ocean is shown under a WG sky cube, also use that cube as the
+   *  background (default: true). Views that manage their own background
+   *  (Maps) turn this off. */
+  oceanSkyBackground?: boolean;
 }
 
 function mergeOceanPatch(a: OceanParamsPatch, b: OceanParamsPatch): OceanParamsPatch {
@@ -347,6 +351,7 @@ export function createSceneEnvironment(
     antialias = true,
     pixelRatio = Math.min(window.devicePixelRatio, 2),
     postprocess = true,
+    oceanSkyBackground = true,
   } = opts;
 
   // GT tonemap curve + keyed exposure (seeded from WG 14_Atlantic / Default;
@@ -419,7 +424,7 @@ export function createSceneEnvironment(
   let skyBackgroundActive = false;
   const applyOceanBackground = () => {
     if (!ocean) return;
-    const wantSky = ocean.mesh.visible && !!customEnvironment;
+    const wantSky = oceanSkyBackground && ocean.mesh.visible && !!customEnvironment;
     if (wantSky) {
       scene.background = customEnvironment;
       skyBackgroundActive = true;
@@ -450,6 +455,7 @@ export function createSceneEnvironment(
       skyColor: oceanSkyColor,
       background: oceanBackground,
       skyBackground: skyBackgroundActive,
+      fog: scene.fog instanceof THREE.Fog || scene.fog instanceof THREE.FogExp2 ? scene.fog : null,
     });
   };
 

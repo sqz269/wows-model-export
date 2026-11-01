@@ -27,6 +27,10 @@ export interface OceanParams {
   /** FFT intermediate precision. Half is ~2% max error vs a float64 DFT and
    *  half the memory traffic; float only matters for numeric checks. */
   fftPrecision: 'half' | 'float';
+  /** Scene world units per metre. The sea is simulated in metres (gravity,
+   *  JONSWAP); metre scenes use 1, BW-unit map scenes 1/15 (the 15 m/unit
+   *  geometry domain shared with ship models). */
+  worldUnitsPerMetre: number;
 }
 
 export type OceanParamsPatch = {
@@ -38,6 +42,7 @@ export type OceanParamsPatch = {
   choppiness?: number;
   foamDecay?: number;
   fftPrecision?: 'half' | 'float';
+  worldUnitsPerMetre?: number;
 };
 
 export const DEFAULT_OCEAN_PARAMS: OceanParams = {
@@ -46,6 +51,7 @@ export const DEFAULT_OCEAN_PARAMS: OceanParams = {
   choppiness: 0.9,
   foamDecay: 0.25,
   fftPrecision: 'half',
+  worldUnitsPerMetre: 1,
 };
 
 function cloneParams(p: OceanParams): OceanParams {
@@ -64,6 +70,7 @@ function cloneParams(p: OceanParams): OceanParams {
     choppiness: p.choppiness,
     foamDecay: p.foamDecay,
     fftPrecision: p.fftPrecision,
+    worldUnitsPerMetre: p.worldUnitsPerMetre,
   };
 }
 
@@ -73,6 +80,7 @@ export interface OceanLighting {
   skyColor: THREE.Color;
   background: THREE.Color;
   skyBackground: boolean;
+  fog: THREE.Fog | THREE.FogExp2 | null;
 }
 
 export class Ocean {
@@ -113,6 +121,9 @@ export class Ocean {
     if (patch.choppiness !== undefined) p.choppiness = patch.choppiness;
     if (patch.foamDecay !== undefined) p.foamDecay = patch.foamDecay;
     if (patch.fftPrecision !== undefined) p.fftPrecision = patch.fftPrecision;
+    if (patch.worldUnitsPerMetre !== undefined && patch.worldUnitsPerMetre > 0) {
+      p.worldUnitsPerMetre = patch.worldUnitsPerMetre;
+    }
     const key = JSON.stringify([p.spectrum, p.fftPrecision]);
     if (key !== this.spectrumKey) {
       this.spectrumKey = key;
@@ -167,7 +178,7 @@ export class Ocean {
     sim.lambda = this.params.choppiness;
     sim.foamDecay = this.params.foamDecay;
     sim.update(time, dt);
-    this.surface.update(camera, sim.outputs(), sim.size, { ...lighting, time });
+    this.surface.update(camera, sim.outputs(), sim.size, { ...lighting, time }, this.params.worldUnitsPerMetre);
   }
 
   /** Test hook: the underlying simulation (null until first update). */
