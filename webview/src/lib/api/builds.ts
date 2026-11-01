@@ -53,6 +53,21 @@ export interface BuildsStatus {
   /** Null while `needs_snapshot`. */
   exports: ExportStatus[] | null;
   counts: Partial<Record<ExportState, number>>;
+  /** Game-build state of the shared accessory library (null while
+   *  `needs_snapshot`). Stale and untracked assets are rebuilt by the
+   *  library build at the end of a re-export. */
+  library: LibraryStatus | null;
+}
+
+export interface LibraryStatus {
+  current?: number;
+  /** Assets with no build record (exported before tracking). */
+  untracked?: number;
+  stale_count?: number;
+  /** Library GLBs no ship in the workspace uses (left by removed ships). */
+  unused?: number;
+  stale?: { asset_id: string; reason: string }[];
+  error?: string;
 }
 
 export interface CappedList {

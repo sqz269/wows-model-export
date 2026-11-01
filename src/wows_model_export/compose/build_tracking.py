@@ -331,18 +331,180 @@ def check_deps(
     return changed, removed, incomparable
 
 
+# ---------------------------------------------------------------------------
+# Accessory library assets
+# ---------------------------------------------------------------------------
+
+LIBRARY_ASSET_KIND = "library_asset"
+
+
+class LibraryStaleness:
+    """Build tracking for accessory-library assets (turrets, directors,
+    boats, ...), which are shared across ships and exported once each.
+
+    Each asset folder gets a ``build_deps.json`` listing the game files
+    and records the asset is built from (:meth:`BuildManifest.asset_sources`)
+    with their fingerprints in the build it was exported from. An asset
+    must be exported again when any of them changed in the current build,
+    when its source set gained an entry, or when it has no record at all
+    (exported before tracking, so the game build is unknown). WG does
+    re-author shared assets: AGM034's turret bone lost its Z-mirror between
+    builds, and a library GLB from the older build then rendered 180° off
+    against placements computed from the new one.
+    """
+
+    def __init__(self, manifest: _bm.BuildManifest, config: PipelineConfig):
+        self.manifest = manifest
+        self._cfg = config
+        self._stored = set(_bm.stored_builds(config))
+        self._bases: dict[int, _bm.BuildManifest | None] = {manifest.build: manifest}
+
+    @classmethod
+    def for_current_build(cls, config: PipelineConfig) -> LibraryStaleness:
+        build = _build.current_build(config)
+        return cls(_bm.load_manifest(build, config=config), config)
+
+    def _base(self, build: Any) -> _bm.BuildManifest | None:
+        if not isinstance(build, int):
+            return None
+        if build not in self._bases:
+            base = None
+            if build in self._stored:
+                try:
+                    base = _bm.load_manifest(build, config=self._cfg, create=False)
+                except Exception:  # noqa: BLE001 - fall back to stored fingerprints
+                    base = None
+            self._bases[build] = base
+        return self._bases[build]
+
+    def reason(self, out_dir: Path, *, asset_id: str, asset_dir: str) -> str | None:
+        """Why the asset in ``out_dir`` must be exported again, or None
+        when it is current."""
+        try:
+            doc = json.loads((Path(out_dir) / DEPS_FILENAME).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return "no build record"
+        except (OSError, ValueError):
+            return "unreadable build record"
+        changed, removed, incomparable = check_deps(doc, self.manifest, self._base(doc.get("build")))
+        n_changed = sum(len(v) for v in changed.values())
+        if n_changed:
+            return f"{n_changed} source(s) changed since build {doc.get('build')}"
+        if any(removed.values()):
+            return f"source(s) removed since build {doc.get('build')}"
+        if incomparable:
+            return "hashing changed since it was exported"
+        files, records = self.manifest.asset_sources(asset_dir, asset_id)
+        inputs = doc.get("inputs") or {}
+        known = set(inputs.get("files") or ()) | set(inputs.get("records") or ())
+        if any(p not in known for p in (*files, *records) if is_tracked_file(p)):
+            return f"new source(s) in build {self.manifest.build}"
+        return None
+
+    def write(self, out_dir: Path, *, asset_id: str, asset_dir: str) -> Path:
+        """Record the asset's sources as of the current build."""
+        files, records = self.manifest.asset_sources(asset_dir, asset_id)
+        fingerprints = _fingerprints(self.manifest, {
+            "files": [p for p in files if is_tracked_file(p)],
+            "records": records,
+            "gameparams": (),
+            "camouflages": (),
+        })
+        fingerprints = {k: v for k, v in fingerprints.items() if v}
+        now = _now()
+        doc = {
+            "schema": DEPS_SCHEMA,
+            "kind": LIBRARY_ASSET_KIND,
+            "name": asset_id,
+            "build": self.manifest.build,
+            "created_at": now,
+            "updated_at": now,
+            "asset_dir": "/" + asset_dir.strip("/"),
+            "counts": {k: len(v) for k, v in fingerprints.items()},
+            "schemes": dict(self.manifest.schemes),
+            "inputs": fingerprints,
+        }
+        out = Path(out_dir) / DEPS_FILENAME
+        tmp = out.with_name(f"{DEPS_FILENAME}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(doc, indent=1) + "\n", encoding="utf-8")
+        os.replace(tmp, out)
+        return out
+
+
+def library_deps_files(config: PipelineConfig) -> Iterator[Path]:
+    """``build_deps.json`` of every accessory-library asset."""
+    root = config.workspace / "libraries" / "accessories"
+    if root.is_dir():
+        yield from sorted(root.rglob(DEPS_FILENAME))
+
+
+def library_status(
+    config: PipelineConfig | None = None,
+    manifest: _bm.BuildManifest | None = None,
+) -> dict[str, Any]:
+    """Game-build state of the accessory library: how many assets are
+    current, which are stale (``{"asset_id", "reason"}``), and how many
+    have no build record (exported before tracking). Any library build
+    re-exports the stale and untracked ones.
+
+    Only assets in the library ``index.json`` count: the last library
+    build managed those. GLBs outside it belong to ships no longer in the
+    workspace; no build touches them, so they're reported as ``unused``."""
+    cfg = config or PipelineConfig.load()
+    out: dict[str, Any] = {"current": 0, "stale": [], "untracked": 0, "unused": 0}
+    root = cfg.workspace / "libraries" / "accessories"
+    if not root.is_dir():
+        return out
+    managed: set[str] | None = None
+    try:
+        index = json.loads((root / "index.json").read_text(encoding="utf-8"))
+        if isinstance(index.get("assets"), dict):
+            managed = set(index["assets"])
+    except (OSError, ValueError):
+        managed = None
+    tracker = (
+        LibraryStaleness(manifest, cfg) if manifest is not None
+        else LibraryStaleness.for_current_build(cfg)
+    )
+    for glb in sorted(root.rglob("*.glb")):
+        # Library layout: <asset_id>/<asset_id>.glb (+ <asset_id>_dead.glb).
+        if glb.parent.name != glb.stem:
+            continue
+        if managed is not None and glb.stem not in managed:
+            out["unused"] += 1
+            continue
+        try:
+            doc = json.loads((glb.parent / DEPS_FILENAME).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            out["untracked"] += 1
+            continue
+        except (OSError, ValueError):
+            doc = {}
+        asset_dir = doc.get("asset_dir")
+        why = (
+            tracker.reason(glb.parent, asset_id=glb.stem, asset_dir=asset_dir)
+            if isinstance(asset_dir, str) else "unreadable build record"
+        )
+        if why is None:
+            out["current"] += 1
+        else:
+            out["stale"].append({"asset_id": glb.stem, "reason": why})
+    return out
+
+
 def refresh_fingerprints(build: int, *, config: PipelineConfig | None = None) -> int:
-    """Re-take the stored fingerprints of every export made on ``build``
-    from that build's saved manifest. Run after rebuilding a manifest with
-    new hashing, so the exports' fingerprints use the same scheme. Returns
-    the number of deps files updated."""
+    """Re-take the stored fingerprints of every export (and library asset)
+    made on ``build`` from that build's saved manifest. Run after
+    rebuilding a manifest with new hashing, so the stored fingerprints use
+    the same scheme. Returns the number of deps files updated."""
     cfg = config or PipelineConfig.load()
     if build not in _bm.stored_builds(cfg):
         return 0
     manifest = _bm.load_manifest(build, config=cfg, create=False)
     updated = 0
-    for _kind, _name, d, _meta in _export_dirs(cfg):
-        path = d / DEPS_FILENAME
+    deps_files = [d / DEPS_FILENAME for _kind, _name, d, _meta in _export_dirs(cfg)]
+    deps_files += list(library_deps_files(cfg))
+    for path in deps_files:
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -592,6 +754,18 @@ def reexport_plan(status: ExportStatus, config: PipelineConfig | None = None) ->
     }
 
 
+def library_refresh_spec(status: ExportStatus, config: PipelineConfig) -> dict[str, Any]:
+    """The post-library sidecar refresh spec for a ship export (see
+    :func:`~.ingest_ship.build_library_and_refresh`)."""
+    kwargs = reexport_plan(status, config).get("ingest_ship") or {}
+    return {
+        "label": status.name,
+        "toolkit_ship": kwargs.get("toolkit_ship_override") or kwargs.get("ship_input"),
+        "gameparams_ship_id": kwargs.get("gameparams_ship_id"),
+        "permoflage": kwargs.get("variant_permoflage") or "auto",
+    }
+
+
 DEFAULT_REEXPORT_JOBS = 3
 
 
@@ -783,6 +957,22 @@ def reexport_exports(
                     cancelled = cancelled or err
         if cancelled is not None:
             raise cancelled
+
+    if build_library and not library_specs and not stop.is_set():
+        # Nothing re-exported here wants a library build, but the game
+        # update may still have changed shared library assets (turrets,
+        # directors, ...). Rebuild those, then refresh every ship's sidecar
+        # (mesh-swap bone corrections are read from the library GLBs).
+        try:
+            lib = library_status(cfg)
+            if lib["stale"] or lib["untracked"]:
+                _, all_statuses = workspace_status(config=cfg)
+                library_specs = [
+                    library_refresh_spec(s, cfg) for s in all_statuses
+                    if s.kind == "ship" and s.state != "removed"
+                ]
+        except Exception as err:  # noqa: BLE001 - the check never fails a re-export
+            report["library"] = {"ok": False, "error": f"library check failed: {err}"}
 
     if build_library and library_specs:
         try:

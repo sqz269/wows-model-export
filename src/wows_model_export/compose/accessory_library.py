@@ -51,6 +51,7 @@ from ..types import (
     OnEvent,
 )
 from . import attached_accessories_library, dead_variant_audit
+from . import build_tracking as _build_tracking
 from ._atomic import atomic_write_text as _atomic_write_text
 from ._step_runner import StepRunner
 
@@ -418,6 +419,11 @@ def vfs_geometry_path(key: AssetKey, variant: str = "") -> str:
     return f"{dir_path}/{key.asset_id}{variant}.geometry"
 
 
+def vfs_asset_dir(key: AssetKey) -> str:
+    """The VFS folder holding an asset's geometry, visual and model."""
+    return vfs_geometry_path(key).rsplit("/", 1)[0]
+
+
 def output_dir_for(library_root: Path, key: AssetKey) -> Path:
     parts = [key.scope, key.category]
     if key.subcategory:
@@ -724,16 +730,27 @@ def _build_assets_batch(
     config: PipelineConfig | None,
     manifest_path: Path,
     warnings: list[str],
+    staleness: _build_tracking.LibraryStaleness | None = None,
+    stale_out: list[str] | None = None,
 ) -> tuple[int, int, int, list[str], list[Path]]:
     """Batch-export every asset in ``records`` in a single wowsunpack
     invocation.
 
+    An asset whose GLB already exists is skipped unless ``force``, or
+    ``staleness`` reports that its game sources changed since it was
+    exported (or that it was exported before build tracking); those are
+    listed in ``stale_out`` as ``"<asset_id>: <reason>"``. Every asset
+    exported here gets its sources recorded through ``staleness``.
+
     Returns ``(built, skipped, failed, failure_strings, newly_built_glbs)``.
     Raises ToolkitError only on total-batch failure (per-item failures
-    propagate via the per-item GLB-exists check).
+    propagate via the per-item GLB check).
     """
     items: list[dict] = []
     record_for_geom: dict[str, tuple[AssetRecord, str]] = {}
+    # mtime of each output that existed before the batch: an output the
+    # batch was asked to replace but left untouched failed to export.
+    prior_mtime: dict[str, int] = {}
     skipped = 0
     for rec in sorted(records.values(), key=lambda r: r.key.asset_id):
         out_dir = output_dir_for(library_root, rec.key)
@@ -741,7 +758,20 @@ def _build_assets_batch(
         dead_glb_path = out_dir / f"{rec.key.asset_id}_dead.glb"
 
         intact_exists = glb_path.is_file()
-        if intact_exists and not force:
+        rebuild_rec = force
+        if intact_exists and not force and staleness is not None:
+            why = staleness.reason(
+                out_dir, asset_id=rec.key.asset_id,
+                asset_dir=vfs_asset_dir(rec.key),
+            )
+            if why is not None:
+                rebuild_rec = True
+                if stale_out is not None:
+                    stale_out.append(f"{rec.key.asset_id}: {why}")
+        for p in (glb_path, dead_glb_path):
+            if rebuild_rec and p.is_file():
+                prior_mtime[str(p)] = p.stat().st_mtime_ns
+        if intact_exists and not rebuild_rec:
             _post_build_rec(rec, library_root, out_dir, glb_path, warnings=warnings)
             skipped += 1
         else:
@@ -763,7 +793,7 @@ def _build_assets_batch(
 
         if has_dead_variant(rec.key, manifest_path=manifest_path):
             dead_exists = dead_glb_path.is_file()
-            if dead_exists and not force:
+            if dead_exists and not rebuild_rec:
                 pass
             else:
                 out_dir.mkdir(parents=True, exist_ok=True)
@@ -823,12 +853,19 @@ def _build_assets_batch(
 
     # Per-item finalisation.
     touched_recs: set[int] = set()
+    exported: dict[int, AssetRecord] = {}
+    failed_recs: set[int] = set()
     for entry in items:
         rec, variant = record_for_geom[entry["geometry"]]
         out_dir = output_dir_for(library_root, rec.key)
         expected_path = Path(entry["output"])
-        if not expected_path.is_file():
+        exported[id(rec)] = rec
+        prior = prior_mtime.get(str(expected_path))
+        if not expected_path.is_file() or (
+            prior is not None and expected_path.stat().st_mtime_ns == prior
+        ):
             failed += 1
+            failed_recs.add(id(rec))
             if len(failure_strings) < 5:
                 failure_strings.append(
                     f"{rec.key.asset_id} ({variant}): no GLB produced "
@@ -844,6 +881,23 @@ def _build_assets_batch(
         ):
             built += 1
             touched_recs.add(id(rec))
+
+    # Record the game sources of every asset exported in full, so the next
+    # library build can tell whether a game update changed it.
+    if staleness is not None:
+        for rid, rec in exported.items():
+            if rid in failed_recs:
+                continue
+            try:
+                staleness.write(
+                    output_dir_for(library_root, rec.key),
+                    asset_id=rec.key.asset_id,
+                    asset_dir=vfs_asset_dir(rec.key),
+                )
+            except Exception as e:  # noqa: BLE001 - tracking never fails a build
+                warnings.append(
+                    f"could not record build sources for {rec.key.asset_id}: {e}"
+                )
 
     return (built, skipped, failed, failure_strings, newly_built_glbs)
 
@@ -1101,6 +1155,19 @@ def build_accessory_library(
     except Exception as e:
         raise StepError(step="plan_batch", underlying=e, detail=str(e)) from e
 
+    # Game-build tracking: assets whose game sources changed since they
+    # were exported are rebuilt, not skipped. Without the current build's
+    # manifest, existing assets are kept as they are.
+    staleness: _build_tracking.LibraryStaleness | None = None
+    try:
+        staleness = _build_tracking.LibraryStaleness.for_current_build(cfg)
+    except Exception as e:  # noqa: BLE001
+        warnings.append(
+            f"game-build manifest unavailable ({e}); existing library "
+            f"assets are not checked for game updates"
+        )
+    stale: list[str] = []
+
     # ── Step: batch_export ────────────────────────────────────────────
     try:
         with runner.step("batch_export") as st:
@@ -1112,13 +1179,17 @@ def build_accessory_library(
                     config=cfg,
                     manifest_path=manifest_path,
                     warnings=warnings,
+                    staleness=staleness,
+                    stale_out=stale,
                 )
             )
             st.annotate(
-                f"built={built} skipped={skipped} failed={failed}",
+                f"built={built} (stale={len(stale)}) skipped={skipped} "
+                f"failed={failed}",
                 data={
                     "built": built, "skipped": skipped,
                     "failed": failed, "failures": fail_examples,
+                    "stale": len(stale), "stale_examples": stale[:20],
                 },
             )
     except ToolkitError as e:
@@ -1241,6 +1312,8 @@ def build_accessory_library(
                         config=cfg,
                         manifest_path=manifest_path,
                         warnings=warnings,
+                        staleness=staleness,
+                        stale_out=stale,
                     )
                 except ToolkitError as e:
                     warnings.append(f"attached-children batch failed: {e}")

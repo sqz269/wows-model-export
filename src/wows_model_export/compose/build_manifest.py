@@ -157,6 +157,33 @@ class BuildManifest:
             if p.startswith("/spaces/") and p.count("/") >= 3
         )
 
+    def asset_sources(self, asset_dir: str, asset_id: str) -> tuple[list[str], list[str]]:
+        """The files and records a model asset is exported from: everything
+        in its folder (``.../<asset_id>/``: geometry, visual, model,
+        skel_ext, the ``_dead`` variant) plus its ``<asset_id>.*`` /
+        ``<asset_id>_*`` entries in the sibling ``textures/`` folder
+        (material files and texture maps)."""
+        asset_dir = "/" + asset_dir.strip("/")
+        textures_dir = asset_dir.rsplit("/", 1)[0] + "/textures"
+        files: list[str] = []
+        records: list[str] = []
+        for path in self._paths_by_dir.get(asset_dir, ()):
+            (files if path in self.files else records).append(path)
+        for path in self._paths_by_dir.get(textures_dir, ()):
+            base = path.rsplit("/", 1)[1]
+            if base.startswith((asset_id + ".", asset_id + "_")):
+                (files if path in self.files else records).append(path)
+        return sorted(files), sorted(records)
+
+    @cached_property
+    def _paths_by_dir(self) -> dict[str, list[str]]:
+        """Every file and record path, grouped by its parent folder."""
+        index: dict[str, list[str]] = {}
+        for paths in (self.files, self.records):
+            for p in paths:
+                index.setdefault(p[:p.rfind("/")], []).append(p)
+        return index
+
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

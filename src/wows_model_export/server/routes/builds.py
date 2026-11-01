@@ -150,11 +150,23 @@ def make_router(config: PipelineConfig) -> APIRouter:
             "needs_snapshot": current is not None and current not in stored,
             "exports": None,
             "counts": {},
+            "library": None,
         }
         if current is not None and current in stored:
-            _, statuses = bt.workspace_status(config=config)
+            manifest, statuses = bt.workspace_status(config=config)
             doc["exports"] = [s.as_dict(limit=40) for s in statuses]
             doc["counts"] = dict(Counter(s.state for s in statuses))
+            try:
+                lib = bt.library_status(config, manifest)
+                doc["library"] = {
+                    "current": lib["current"],
+                    "untracked": lib["untracked"],
+                    "unused": lib["unused"],
+                    "stale_count": len(lib["stale"]),
+                    "stale": lib["stale"][:_LIST_CAP],
+                }
+            except Exception as err:  # noqa: BLE001 - status stays usable
+                doc["library"] = {"error": f"{type(err).__name__}: {err}"}
         return doc
 
     @router.get("/builds")

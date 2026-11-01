@@ -59,6 +59,10 @@
     exports.filter((e) => selectable(e) && selected[key(e)]).map((e) => e.name),
   );
   const staleCount = $derived(exports.filter((e) => e.state === 'stale').length);
+  /** Library assets the next library build will re-export. */
+  const libraryPending = $derived(
+    (status?.library?.stale_count ?? 0) + (status?.library?.untracked ?? 0),
+  );
   const exportedMaps = $derived(
     new Set(exports.filter((e) => e.kind === 'map').map((e) => e.name)),
   );
@@ -165,9 +169,13 @@
 
   function reexportAll() {
     const n = staleCount + (includeUntracked ? (status?.counts.untracked ?? 0) : 0);
-    if (!n) return;
+    const lib = buildLibrary ? libraryPending : 0;
+    if (!n && !lib) return;
     const what = includeUntracked ? 'stale and untracked' : 'stale';
-    if (!confirm(`Re-export all ${n} ${what} export(s)? This can take a long time.`)) return;
+    const msg = n
+      ? `Re-export all ${n} ${what} export(s)? This can take a long time.`
+      : `Rebuild ${lib} out-of-date accessory library asset(s)?`;
+    if (!confirm(msg)) return;
     void runJob(`Re-export ${n}`, () =>
       runReexport({
         include_untracked: includeUntracked,
@@ -491,6 +499,35 @@
           game no longer has, so they can't be re-exported.
         </p>
 
+        {#if status.library}
+          {@const lib = status.library}
+          <div class="text-xs">
+            <span class="text-muted-foreground">Accessory library:</span>
+            {#if lib.error}
+              <span class="text-destructive">{lib.error}</span>
+            {:else}
+              {lib.current ?? 0} current · {lib.stale_count ?? 0} stale · {lib.untracked ?? 0}
+              without a build record{#if lib.unused}
+                · {lib.unused} unused by any ship{/if}
+              {#if libraryPending}
+                <span class="text-muted-foreground">
+                  — rebuilt by the library build at the end of a re-export</span
+                >
+              {/if}
+              {#if lib.stale?.length}
+                <details class="mt-1">
+                  <summary class="cursor-pointer text-muted-foreground">Stale assets</summary>
+                  <ul class="m-0 mt-1 pl-4">
+                    {#each lib.stale as s (s.asset_id)}
+                      <li><code>{s.asset_id}</code> <span class="text-muted-foreground">{s.reason}</span></li>
+                    {/each}
+                  </ul>
+                </details>
+              {/if}
+            {/if}
+          </div>
+        {/if}
+
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
           <label class="inline-flex items-center gap-1.5">
             <input type="checkbox" bind:checked={replaySkins} disabled={jobRunning !== null} />
@@ -531,7 +568,8 @@
             <Button
               size="sm"
               disabled={jobRunning !== null ||
-                staleCount + (includeUntracked ? (status.counts.untracked ?? 0) : 0) === 0}
+                (staleCount + (includeUntracked ? (status.counts.untracked ?? 0) : 0) === 0 &&
+                  !(buildLibrary && libraryPending))}
               onclick={reexportAll}
             >
               {jobRunning !== null ? 'Running…' : 'Re-export all'}

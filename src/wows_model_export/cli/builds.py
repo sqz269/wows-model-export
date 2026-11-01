@@ -283,10 +283,12 @@ def _cmd_stale(args: argparse.Namespace, cfg) -> int:
     if args.kind:
         statuses = [s for s in statuses if s.kind == args.kind]
     shown = statuses if args.all else [s for s in statuses if s.state != "current"]
+    library = bt.library_status(cfg, manifest) if args.kind in (None, "ship") else None
     if args.json:
         _dump_json({
             "build": manifest.build,
             "exports": [s.as_dict(limit=None if args.all else 50) for s in shown],
+            "library": library,
         })
         return EXIT_OK
 
@@ -325,6 +327,20 @@ def _cmd_stale(args: argparse.Namespace, cfg) -> int:
         _out(f"removed from the game ({len(removed)}): can't be re-exported")
         for st in removed:
             _out(f"  {st.kind:<4} {st.name}  [{st.note}]")
+    if library is not None:
+        lib_stale = library["stale"]
+        _out("")
+        _out(f"accessory library: {library['current']} current, {len(lib_stale)} stale, "
+             f"{library['untracked']} without a build record"
+             + (f", {library['unused']} unused by any ship" if library.get("unused") else ""))
+        if lib_stale or library["untracked"]:
+            _out("  rebuilt by the next library build (`wows-builds reexport`, or "
+                 "`wows-build-accessory-library`)")
+        n = args.limit or len(lib_stale)
+        for entry in lib_stale[:n]:
+            _out(f"  {entry['asset_id']}  ({entry['reason']})")
+        if len(lib_stale) > n:
+            _out(f"  ... {len(lib_stale) - n} more")
     if args.all:
         current = [s for s in shown if s.state == "current"]
         if current:
@@ -338,8 +354,13 @@ def _cmd_stale(args: argparse.Namespace, cfg) -> int:
 def _cmd_reexport(args: argparse.Namespace, cfg) -> int:
     targets = _select(args, cfg, include_untracked=args.include_untracked)
     if not targets:
-        _out("nothing to re-export")
-        return EXIT_OK
+        lib = None if (args.no_library or args.names or args.kind == "map") else bt.library_status(cfg)
+        pending = (len(lib["stale"]) + lib["untracked"]) if lib else 0
+        if not pending or args.dry_run:
+            _out("nothing to re-export" + (
+                f"; the library build would rebuild {pending} accessory asset(s)" if pending else ""))
+            return EXIT_OK
+        _out(f"no exports to re-export; rebuilding {pending} out-of-date accessory library asset(s)")
     if args.dry_run:
         plans = []
         for st in targets:
