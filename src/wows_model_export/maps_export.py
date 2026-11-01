@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import re
 import struct
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ from .config import PipelineConfig
 from .errors import ToolkitError
 from .sky_assets import extract_sky_assets
 from .toolkit import export_decal_textures, export_map
+from .toolkit import extract as vfs_extract
 
 # Space names are filesystem-safe: digits, letters, underscore, dash.
 # Constrains URL path params, CLI args, and the on-disk cache dir name.
@@ -541,6 +543,60 @@ def write_model_instance_manifest_from_glb(name: str, glb_path: Path, out_path: 
     return doc
 
 
+def read_space_bin(config: PipelineConfig, name: str) -> bytes:
+    """Read ``spaces/<name>/space.bin`` from the live game VFS.
+
+    Always extracts through the toolkit so the bytes match the build that
+    ``export-map`` parsed. A loose ``res_unpack/`` copy is a one-off manual
+    unpack and goes stale on every game update (the record layout changed in
+    build 13357625).
+    """
+    vfs_path = f"spaces/{name}/space.bin"
+    with tempfile.TemporaryDirectory(prefix="wms-space-bin-") as td:
+        vfs_extract([f"/{vfs_path}"], out_dir=td, config=config)
+        src = Path(td) / vfs_path
+        if not src.is_file():
+            raise FileNotFoundError(f"{vfs_path} not found in the game VFS")
+        return src.read_bytes()
+
+
+def space_bin_layout(data: bytes) -> int:
+    """Return the ``space.bin`` record layout revision (1 or 2).
+
+    Mirrors the toolkit's ``detect_space_layout``: the header carries no
+    version, so each layout is scored by how many model / particle / point
+    light records hold an affine matrix (and, for models and particles, a
+    non-zero resource id) at that layout's stride. Ties go to the current
+    layout (2). V1 = clients up to 13187581 (model 0x70, particle 0x68,
+    light 0xc0); V2 = 13357625+ (0xb0, 0x58, 0xb0).
+    """
+    counts = struct.unpack_from("<8I", data, 0)
+    offsets = struct.unpack_from("<8q", data, 0x20)
+
+    def affine(base: int) -> bool:
+        if base < 0 or base + 0x40 > len(data):
+            return False
+        m = struct.unpack_from("<16f", data, base)
+        return m[3] == 0.0 and m[7] == 0.0 and m[11] == 0.0 and m[15] == 1.0
+
+    def with_id(base: int, id_offset: int) -> bool:
+        return (
+            affine(base)
+            and base + id_offset + 8 <= len(data)
+            and struct.unpack_from("<Q", data, base + id_offset)[0] != 0
+        )
+
+    def score(model_stride: int, model_id: int, particle_stride: int, particle_id: int, light_stride: int) -> int:
+        s = sum(with_id(offsets[0] + i * model_stride, model_id) for i in range(counts[0]))
+        s += sum(with_id(offsets[2] + i * particle_stride, particle_id) for i in range(counts[2]))
+        s += sum(affine(offsets[3] + i * light_stride) for i in range(counts[3]))
+        return s
+
+    v1 = score(0x70, 0x50, 0x68, 0x50, 0xC0)
+    v2 = score(0xB0, 0x40, 0x58, 0x40, 0xB0)
+    return 1 if v1 > v2 else 2
+
+
 def write_point_light_manifest_from_space_bin(
     config: PipelineConfig,
     name: str,
@@ -552,10 +608,12 @@ def write_point_light_manifest_from_space_bin(
     skips the two authored animation prototype blocks. This narrow parser keeps
     those descriptors and their resolved point payloads visible for downstream
     validation while matching the native reader's relative-pointer base.
+
+    Record layout (V1 0xc0 / V2 0xb0, see :func:`space_bin_layout`): V2 drops
+    the 16-byte block at +0x40, so every later field sits 0x10 lower.
     """
-    game_dir = config.require_game_dir()
-    space_bin = game_dir / "res_unpack" / "spaces" / name / "space.bin"
-    data = space_bin.read_bytes()
+    data = read_space_bin(config, name)
+    space_bin = f"spaces/{name}/space.bin"
     if len(data) < 0x60:
         raise ValueError(f"{space_bin} is too small for a space.bin header")
 
@@ -582,9 +640,12 @@ def write_point_light_manifest_from_space_bin(
             matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14],
         ]
 
+    layout = space_bin_layout(data)
+    # V2 removed the 16 bytes at +0x40; fields after it move up by `shift`.
+    shift = 0 if layout == 1 else -0x10
     point_light_count = _u32(0x0C)
     point_light_offset = struct.unpack_from("<Q", data, 0x38)[0]
-    record_stride = 0xC0
+    record_stride = 0xC0 if layout == 1 else 0xB0
     table_end = point_light_offset + point_light_count * record_stride
     valid_record_count = 0
     if point_light_offset <= len(data):
@@ -656,18 +717,19 @@ def write_point_light_manifest_from_space_bin(
     for index in range(valid_record_count):
         record_offset = point_light_offset + index * record_stride
         matrix = _f32s(record_offset, 16)
-        local_position = _f32s(record_offset + 0xA0, 3)
-        color = _f32s(record_offset + 0x90, 4)
-        radius = _f32(record_offset + 0xB0)
-        min_quality = _u32(record_offset + 0xB4)
-        flags_tail = data[record_offset + 0xB8:record_offset + 0xC0]
+        local_position = _f32s(record_offset + 0xA0 + shift, 3)
+        color = _f32s(record_offset + 0x90 + shift, 4)
+        radius = _f32(record_offset + 0xB0 + shift)
+        min_quality = _u32(record_offset + 0xB4 + shift)
+        flags_tail = data[record_offset + 0xB8 + shift:record_offset + record_stride]
         animated_color_flag = bool(flags_tail[0]) if len(flags_tail) >= 1 else False
         animated_radius_flag = bool(flags_tail[1]) if len(flags_tail) >= 2 else False
-        opaque_hex = _hex(record_offset + 0x40, 0x10)
-        color_animation = _read_animation(record_offset, 0x50, 4)
-        radius_animation = _read_animation(record_offset, 0x70, 1)
+        # The opaque V1 block at +0x40 does not exist in V2.
+        opaque_hex = _hex(record_offset + 0x40, 0x10) if layout == 1 else ""
+        color_animation = _read_animation(record_offset, 0x50 + shift, 4)
+        radius_animation = _read_animation(record_offset, 0x70 + shift, 1)
 
-        if opaque_hex != "00" * 0x10:
+        if opaque_hex and opaque_hex != "00" * 0x10:
             opaque_nonzero_count += 1
         if color_animation["point_count"] > 0:
             color_descriptor_count += 1
@@ -715,8 +777,9 @@ def write_point_light_manifest_from_space_bin(
         "schema": "wows.map.point_light_manifest.v1",
         "space": name,
         "generated_at": now_iso(),
-        "source_space_bin": f"spaces/{name}/space.bin",
-        "source_space_bin_path": str(space_bin),
+        "source_space_bin": space_bin,
+        "source_space_bin_path": f"vfs:/{space_bin}",
+        "space_bin_layout": layout,
         "record_stride": record_stride,
         "point_light_table_offset": point_light_offset,
         "point_light_table_offset_hex": f"0x{point_light_offset:X}",
