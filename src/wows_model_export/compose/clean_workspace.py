@@ -216,9 +216,18 @@ def _plan_from_sidecar(sidecar_path: Path) -> ShipReplayPlan | None:
     label = sidecar_path.parent.name  # ships/<label>/<label>.meta.json
 
     if isinstance(prov, dict) and prov.get("vehicle"):
+        vehicle = str(prov["vehicle"])
+        # Sidecars stamped before the resolved id was recorded fall back to
+        # the toolkit model name ("Montana"), which the toolkit's --vehicle
+        # rejects. A GameParams id stamp is the full key or a prefix of it
+        # ("PASB018" of "PASB018_Iowa_1944"); anything else is replaced by
+        # the id the scaffold actually resolved.
+        full_id = (doc.get("ship") or {}).get(_SIDECAR_FALLBACK_VEHICLE_FIELD)
+        if isinstance(full_id, str) and full_id and not full_id.startswith(vehicle):
+            vehicle = full_id
         plan = ShipReplayPlan(
             label=str(prov.get("label") or label),
-            vehicle=str(prov["vehicle"]),
+            vehicle=vehicle,
             permoflage=(
                 str(prov["permoflage"])
                 if isinstance(prov.get("permoflage"), str) else None

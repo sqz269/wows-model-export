@@ -110,11 +110,14 @@ def _reexport_job(
         on_progress=progress,
     )
     failed = report["failed"]
+    skipped = report["skipped"]
     runner.emit(
         "reexport_summary",
         "failed" if failed else "completed",
-        detail=f"re-exported {len(report['reexported'])}/{len(targets)}"
-        + (f"; failed: {', '.join(f['name'] for f in failed)}" if failed else ""),
+        detail=f"re-exported {len(report['reexported'])}/{len(targets) - len(skipped)}"
+        + (f"; failed: {', '.join(f['name'] for f in failed)}" if failed else "")
+        + (f"; skipped (removed from the game): {', '.join(s['name'] for s in skipped)}"
+           if skipped else ""),
     )
     return report
 

@@ -55,7 +55,7 @@
     ),
   );
   const selectedNames = $derived(
-    exports.filter((e) => selected[key(e)]).map((e) => e.name),
+    exports.filter((e) => selectable(e) && selected[key(e)]).map((e) => e.name),
   );
   const staleCount = $derived(exports.filter((e) => e.state === 'stale').length);
   const exportedMaps = $derived(
@@ -64,6 +64,11 @@
 
   function key(e: ExportStatus): string {
     return `${e.kind}:${e.name}`;
+  }
+
+  /** Removed exports have nothing left in the game to re-export from. */
+  function selectable(e: ExportStatus): boolean {
+    return e.state !== 'removed';
   }
 
   async function load() {
@@ -174,7 +179,7 @@
 
   function toggleAllShown(on: boolean) {
     const next = { ...selected };
-    for (const e of shown) next[key(e)] = on;
+    for (const e of shown) if (selectable(e)) next[key(e)] = on;
     selected = next;
   }
 
@@ -183,6 +188,7 @@
     stale: 'bg-amber-500/15 text-amber-400',
     untracked: 'bg-muted text-muted-foreground',
     error: 'bg-destructive/15 text-destructive',
+    removed: 'bg-muted text-muted-foreground line-through',
   };
 
   function topEntries(rec: Record<string, number>, n = 12): [string, number][] {
@@ -464,6 +470,7 @@
             <option value="attention">Needs attention</option>
             <option value="stale">Stale</option>
             <option value="untracked">Untracked</option>
+            <option value="removed">Removed from game</option>
             <option value="current">Current</option>
             <option value="all">All</option>
           </select>
@@ -532,7 +539,8 @@
                   <input
                     type="checkbox"
                     aria-label="Select all shown"
-                    checked={shown.every((e) => selected[key(e)])}
+                    checked={shown.some(selectable) &&
+                      shown.filter(selectable).every((e) => selected[key(e)])}
                     onchange={(ev) => toggleAllShown((ev.currentTarget as HTMLInputElement).checked)}
                   />
                 </th>
@@ -549,7 +557,13 @@
                 {@const k = key(e)}
                 <tr class="border-b border-border/50 hover:bg-popover/40">
                   <td class="py-1">
-                    <input type="checkbox" bind:checked={selected[k]} aria-label="Select {e.name}" />
+                    <input
+                      type="checkbox"
+                      bind:checked={selected[k]}
+                      disabled={!selectable(e)}
+                      title={selectable(e) ? undefined : e.note}
+                      aria-label="Select {e.name}"
+                    />
                   </td>
                   <td class="text-muted-foreground">{e.kind}</td>
                   <td class="font-mono">

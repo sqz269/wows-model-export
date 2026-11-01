@@ -319,6 +319,12 @@ def _cmd_stale(args: argparse.Namespace, cfg) -> int:
             when = f"  {st.exported_at}" if st.exported_at else ""
             note = f"  [{st.note}]" if st.state == "error" else ""
             _out(f"  {st.kind:<4} {st.name}{when}{note}")
+    removed = [s for s in shown if s.state == "removed"]
+    if removed:
+        _out("")
+        _out(f"removed from the game ({len(removed)}): can't be re-exported")
+        for st in removed:
+            _out(f"  {st.kind:<4} {st.name}  [{st.note}]")
     if args.all:
         current = [s for s in shown if s.state == "current"]
         if current:
@@ -363,7 +369,10 @@ def _cmd_reexport(args: argparse.Namespace, cfg) -> int:
     if args.json:
         _dump_json(report)
     else:
-        _out(f"re-exported {len(report['reexported'])}/{len(targets)}")
+        attempted = len(targets) - len(report["skipped"])
+        _out(f"re-exported {len(report['reexported'])}/{attempted}")
+        for s in report["skipped"]:
+            _out(f"skipped {s['kind']} {s['name']}: {s['reason']}")
         if report["skins_replayed"]:
             _out(f"skin packs replayed: {len(report['skins_replayed'])}")
         if report["library"]:

@@ -881,7 +881,14 @@ def ingest_ship(
             doc = _sidecar.read(sidecar_to_stamp)
             doc["provenance"] = {
                 "extract_args": {
-                    "vehicle":       gameparams_ship_id or toolkit_name,
+                    # Without an explicit id, record the one the scaffold
+                    # resolved: the toolkit model name is not a GameParams
+                    # id and fails --vehicle on replay.
+                    "vehicle":       (
+                        gameparams_ship_id
+                        or (doc.get("ship") or {}).get("wg_ship_full_id")
+                        or toolkit_name
+                    ),
                     # The resolved toolkit model directory name. `vehicle`
                     # above is the GameParams top_key, which the toolkit's
                     # find_ship REJECTS on replay; this is the identifier

@@ -40,6 +40,7 @@ import tempfile
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -139,6 +140,14 @@ class BuildManifest:
             p: r[0] for p, r in self.records.items()
             if p.startswith(prefix) and r[2] in PARTICLE_TYPES
         }
+
+    @cached_property
+    def space_names(self) -> frozenset[str]:
+        """Names of the map spaces this build ships (``/spaces/<name>/``)."""
+        return frozenset(
+            p.split("/", 3)[2] for p in self.files
+            if p.startswith("/spaces/") and p.count("/") >= 3
+        )
 
 
 def _now() -> str:

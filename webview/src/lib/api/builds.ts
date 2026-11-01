@@ -9,7 +9,8 @@
 
 import { fetchJson } from './client';
 
-export type ExportState = 'current' | 'stale' | 'untracked' | 'error';
+/** `removed`: the ship or map space is gone from the current build. */
+export type ExportState = 'current' | 'stale' | 'untracked' | 'error' | 'removed';
 export type ExportKind = 'ship' | 'map';
 export type BuildSection = 'files' | 'records' | 'gameparams' | 'camouflages';
 

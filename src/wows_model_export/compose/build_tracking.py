@@ -246,7 +246,7 @@ class ExportStatus:
     kind: str
     name: str
     path: str
-    state: str  # current | stale | untracked | error
+    state: str  # current | stale | untracked | error | removed
     build: int | None = None
     exported_at: str | None = None
     changed: dict[str, list[str]] = field(default_factory=dict)
@@ -410,6 +410,28 @@ def _map_reexport_from_meta(meta: Path) -> dict[str, Any]:
     }
 
 
+def _removed_from_build(
+    kind: str, name: str, meta: Path | None, reexport: dict[str, Any], manifest: _bm.BuildManifest,
+) -> str | None:
+    """What the export was made from, if ``manifest``'s build no longer
+    has it: a map whose space is gone (event maps are dropped from the
+    game) or a ship whose GameParams entity is gone."""
+    if kind == "map":
+        space = reexport.get("name") or name
+        if manifest.files and space not in manifest.space_names:
+            return f"space {space!r}"
+        return None
+    if kind == "ship" and meta is not None and manifest.gameparams:
+        try:
+            ship = json.loads(meta.read_text(encoding="utf-8")).get("ship") or {}
+        except (OSError, ValueError):
+            return None
+        entity = ship.get("wg_ship_full_id")
+        if isinstance(entity, str) and entity and entity not in manifest.gameparams:
+            return f"GameParams entity {entity!r}"
+    return None
+
+
 def export_status(
     kind: str, name: str, out_dir: Path, meta: Path | None, manifest: _bm.BuildManifest,
     base_manifest: Any = None,
@@ -423,6 +445,19 @@ def export_status(
         else _map_reexport_from_meta(meta) if kind == "map" and meta
         else {}
     )
+    gone = _removed_from_build(kind, name, meta, fallback_reexport, manifest)
+    if gone:
+        build = None
+        if deps_path.is_file():
+            try:
+                build = json.loads(deps_path.read_text(encoding="utf-8")).get("build")
+            except (OSError, ValueError):
+                pass
+        return ExportStatus(
+            kind=kind, name=name, path=str(out_dir), state="removed", build=build,
+            exported_at=exported_at, reexport=fallback_reexport,
+            note=f"{gone} is not in build {manifest.build}",
+        )
     if not deps_path.is_file():
         return ExportStatus(
             kind=kind, name=name, path=str(out_dir), state="untracked",
@@ -579,8 +614,12 @@ def reexport_exports(
 
     cfg = config or PipelineConfig.load()
     report: dict[str, Any] = {
-        "reexported": [], "failed": [], "skins_replayed": [], "library": None,
+        "reexported": [], "failed": [], "skipped": [], "skins_replayed": [], "library": None,
     }
+    for st in statuses:
+        if st.state == "removed":
+            report["skipped"].append({"kind": st.kind, "name": st.name, "reason": st.note})
+    statuses = [st for st in statuses if st.state != "removed"]
     library_specs: list[dict[str, Any]] = []
     model_dir_index: dict[str, str] | None = None
     total = len(statuses)
