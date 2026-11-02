@@ -170,6 +170,7 @@ const pickRaycaster = new THREE.Raycaster();
 const pickPointer = new THREE.Vector2();
 const particleWorldPos = new THREE.Vector3();
 const particleWorldQuat = new THREE.Quaternion();
+const shipMotionDelta = new THREE.Vector3();
 
 // Lighting when a WG IBL cube is active — the cube supplies ambient + specular,
 // so the hemisphere fill is killed and the key directional is driven from the
@@ -263,7 +264,68 @@ function muzzleIndex(name: string): number {
   return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
 }
 
-const SHIP_AMBIENT_PARTICLE_GROUPS = new Set(['idleport', 'smoke']);
+/** Ship state the hull's ambient effect groups are keyed on. Mirrors
+ *  `ShipEffects` (decompiled `exterior_ShipEffects.py`): `port` is the
+ *  portPreset branch of `__init__`; the battle states are what
+ *  `checkMovementEffects` derives from the signed speed. */
+export type ShipMotionState = 'port' | 'stopped' | 'ahead' | 'astern';
+
+// Hull effect groups ShipEffects plays per state (lower-cased sidecar
+// `group`). In port only `idlePort` is ever created (`ShipEffects.__init__`
+// returns before building the wake / smoke groups). In battle
+// `addIdleEffects` starts `idle` (empty for most ships, e.g. Montana),
+// `checkMovementEffects` picks `waketracefront` when v > 0.01 kn,
+// `waketraceback` when v < -0.01 kn and none otherwise, and starts `smoke`
+// while serverEnginePower > 0 — we treat "moving" as engine on; the
+// `_Damaged` / `_Forcing` smoke variants are not modelled.
+const SHIP_STATE_PARTICLE_GROUPS: Record<ShipMotionState, ReadonlySet<string>> = {
+  port: new Set(['idleport']),
+  stopped: new Set(['idle']),
+  ahead: new Set(['idle', 'waketracefront', 'smoke']),
+  astern: new Set(['idle', 'waketraceback', 'smoke']),
+};
+// Every group some state plays. These belong to the wake driver and are
+// never offered as loopable "event" effects.
+const SHIP_AMBIENT_PARTICLE_GROUPS = new Set(
+  Object.values(SHIP_STATE_PARTICLE_GROUPS).flatMap((s) => [...s]),
+);
+
+// EffectsConstants (findings_2026_06_04/60_fx_particle_pyc_crack §146-153):
+// the clampremap domains ShipEffects feeds into the wake intensity channels.
+const WAKE_MIN_INTENSITY = 0;
+const WAKE_MAX_INTENSITY = 10;
+const WAKE_MIN_SHIP_LENGTH_M = 4;
+const WAKE_MAX_SHIP_LENGTH_M = 375;
+const WAKE_MIN_SHIP_WIDTH_M = 1;
+const WAKE_MAX_SHIP_WIDTH_M = 60;
+const WAKE_MOVEMENT_EFFECTS_MAX_SPEED_KN = 70;
+const WAKE_MAX_SHIP_ANGULAR_SPEED = 0.2;
+/** `frequentUpdateShipEffects` remaps the front/back wave distance (−1..1)
+ *  onto ch2; a flat sea (distance 0) is 5. The ShipMotions source isn't
+ *  modelled here, so ch2 stays neutral. */
+const WAKE_NEUTRAL_WAVE_INTENSITY = 5;
+
+// Motion mode scale. 1 kn = 0.514444 m/s real and the viewer world is metres
+// at 15 m per native BW unit (geometry domain, memory
+// project_wg_scale_domains). WG hulls cover SHIP_TIME_SCALE (2.61) × more
+// model space per second than their knots imply (`getSpeed() *
+// SHIP_TIME_SCALE_INV` is the knots the effects see), and the particle
+// records are authored against that motion: the bow spray's VEL_Z ramp is
+// 0.089 BW/s per knot = 0.514444 / 15 × 2.61. The particle sim integrates
+// authored BW/s velocities per wall-clock second, so the hull has to cover
+// the same time-scaled distance for inherited velocity, spray and foam to
+// line up with it.
+const KNOTS_TO_MPS = 0.514444;
+const SHIP_TIME_SCALE = 2.61;
+const SHIP_WORLD_MPS_PER_KNOT = KNOTS_TO_MPS * SHIP_TIME_SCALE;
+const DEFAULT_SHIP_SPEED_KN = 30;
+
+/** WG's `clampremap`: linear remap with the input clamped to [inLo, inHi]. */
+function clampRemap(v: number, inLo: number, inHi: number, outLo: number, outHi: number): number {
+  const t = inHi === inLo ? 0 : Math.min(1, Math.max(0, (v - inLo) / (inHi - inLo)));
+  return outLo + (outHi - outLo) * t;
+}
+
 const SHIP_PARTICLE_SOURCE_ORDER = new Map<string, number>([
   ['hull', 0],
   ['artillery', 1],
@@ -273,11 +335,6 @@ const SHIP_PARTICLE_SOURCE_ORDER = new Map<string, number>([
   ['munition', 5],
   ['map', 6],
 ]);
-
-function isWakeParticleGroup(group: string): boolean {
-  const g = group.toLowerCase();
-  return g.startsWith('waketrace') || g.startsWith('propeller');
-}
 
 // Screen-space distortion blend modes (heat-haze / water-deform): they refract
 // the scene-color snapshot rather than painting a sprite, so with no ocean
@@ -323,6 +380,15 @@ export interface ShipParticleEventOption {
   label: string;
   handles: number;
   systems: number;
+}
+
+/** What the wake driver is currently feeding (UI readout). `wake` / `smoke`
+ *  are the channel arrays handed to the active wake / smoke handles, null
+ *  when that group isn't playing in the current state. */
+export interface ShipStateChannels {
+  groups: string[];
+  wake: number[] | null;
+  smoke: number[] | null;
 }
 
 export interface ShipParticleStats {
@@ -604,6 +670,21 @@ export class ShipViewer {
   private particleBuildPromise: Promise<ShipParticleStats> | null = null;
   private particleBuildToken = 0;
   private particleStats: ShipParticleStats = emptyShipParticleStats();
+  // Wake driver (ShipEffects port): which hull ambient groups play, and the
+  // speed / turn inputs that feed their intensity channels.
+  private shipMotionState: ShipMotionState = 'ahead';
+  private shipSpeedKn = DEFAULT_SHIP_SPEED_KN;
+  private shipMaxSpeedKn = DEFAULT_SHIP_SPEED_KN;
+  /** Yaw rate in the units `physics.main.angularVelocity.y` uses: ±0.2
+   *  saturates ch5. Treated as rad/s for the motion-mode yaw (E2 open). */
+  private shipTurnRate = 0;
+  // Motion mode: the hull translates along its bow axis at the chosen speed
+  // so world-space wake particles trail behind it.
+  private shipMotionEnabled = false;
+  private shipMotionLastMs = -1;
+  /** Proxies for position-only hull `EP_` rows, parented under shipRoot so
+   *  they ride the hull transform exactly like GLB-node anchors do. */
+  private particleAnchorRoot: THREE.Group;
 
   // Texture pipeline
   private textures: TextureManager;
@@ -633,6 +714,9 @@ export class ShipViewer {
     this.shipRoot.name = 'Ship';
     this.env.scene.add(this.shipRoot);
     this.env.scene.add(this.nodeOverlay.group);
+    this.particleAnchorRoot = new THREE.Group();
+    this.particleAnchorRoot.name = 'ParticleAnchors';
+    this.shipRoot.add(this.particleAnchorRoot);
 
     this.sectionGroups = Object.fromEntries(
       SHIP_SECTIONS.map((k) => {
@@ -665,6 +749,11 @@ export class ShipViewer {
     this.stopLoop = startRenderLoop(() => {
       this.env.controls.update();
       this.textures.tickRipples(performance.now() / 1000); // advance L3.5 rain ripples
+      // Order matters: move the hull, copy the moved anchors into the particle
+      // groups, then step the sim, so a spawn this frame sees the anchor's
+      // new matrix and its velocity (native 0x1406c8e10 samples the node
+      // matrix and Δtranslation/dt ahead of the emitter update).
+      this.advanceShipMotion();
       this.updateParticleAttachmentTransforms();
       this.particleScene?.tick();
       this.env.render();
@@ -779,6 +868,10 @@ export class ShipViewer {
     // Stash for the bottom panel's Textures tab (always the REAL sidecar —
     // the override only redirects the hull bind).
     this.sidecar = sidecar;
+    // Wake driver default: the hull's GameParams top speed, else 30 kn.
+    const maxKn = sidecar?.ship?.movement?.max_speed_kn;
+    this.shipMaxSpeedKn = typeof maxKn === 'number' && maxKn > 0 ? maxKn : DEFAULT_SHIP_SPEED_KN;
+    this.shipSpeedKn = this.shipMaxSpeedKn;
     this.hullBaseUrl = hullBaseUrl;
     // Always populate a skin table — synthesize the legacy default skin
     // when the sidecar is missing or empty. Keeps the active scheme key
@@ -1485,6 +1578,12 @@ export class ShipViewer {
     this.attachedDocCache.clear();
     this.turretRigs.clear();
     this.nodeOverlay.clear();
+    // Motion mode is per ship: hull back at the origin (camera carried
+    // along), motion off, turn input cleared. Speed is re-defaulted from the
+    // next sidecar in loadShip.
+    this.resetShipTransform();
+    this.shipMotionEnabled = false;
+    this.shipTurnRate = 0;
     this.disposeParticleLayer();
     this.placementRootByInstanceId.clear();
     this.placementRootByHp.clear();
@@ -1857,6 +1956,155 @@ export class ShipViewer {
   /** Significant wave height Hs (m) of the current sea spectrum. */
   getSeaWaveHeight(): number {
     return this.env.getOcean()?.significantWaveHeight() ?? 0;
+  }
+
+  // ── Wake driver (ShipEffects port) ────────────────────────────────────
+
+  getShipMotionState(): ShipMotionState {
+    return this.shipMotionState;
+  }
+
+  /** Pick which hull ambient groups play (SHIP_STATE_PARTICLE_GROUPS). As
+   *  in `checkMovementEffects`, a group that drops out stops at once and one
+   *  that comes in starts fresh with the current channel values. */
+  setShipMotionState(state: ShipMotionState): ShipParticleStats {
+    this.shipMotionState = state;
+    this.applyShipParticleActivation();
+    return this.particleStats;
+  }
+
+  getShipSpeedKn(): number {
+    return this.shipSpeedKn;
+  }
+
+  /** The hull's GameParams top speed (sidecar `ship.movement.max_speed_kn`),
+   *  else 30 kn. The speed control defaults to it. */
+  getShipMaxSpeedKn(): number {
+    return this.shipMaxSpeedKn;
+  }
+
+  /** Speed magnitude in knots; the state supplies the sign. Feeds ch0 of the
+   *  wake and smoke groups (`clamp(|v| / 70 × 10, 0, 10)`) and motion mode. */
+  setShipSpeedKn(kn: number): ShipParticleStats {
+    this.shipSpeedKn = Number.isFinite(kn) ? Math.max(0, kn) : 0;
+    this.applyShipParticleActivation();
+    return this.particleStats;
+  }
+
+  getShipTurnRate(): number {
+    return this.shipTurnRate;
+  }
+
+  /** Yaw-rate input in `angularVelocity.y` units; ±0.2 saturates ch5
+   *  (`clampremap(angVel.y, -0.2, 0.2, 0, 10)`). Positive = starboard turn
+   *  in motion mode. */
+  setShipTurnRate(rate: number): ShipParticleStats {
+    this.shipTurnRate = Number.isFinite(rate)
+      ? Math.max(-WAKE_MAX_SHIP_ANGULAR_SPEED, Math.min(WAKE_MAX_SHIP_ANGULAR_SPEED, rate))
+      : 0;
+    this.applyShipParticleActivation();
+    return this.particleStats;
+  }
+
+  /** Signed speed in knots — the quantity `checkMovementEffects` switches
+   *  the wake set on. Zero in port and when stopped. */
+  getShipSignedSpeedKn(): number {
+    switch (this.shipMotionState) {
+      case 'ahead':
+        return this.shipSpeedKn;
+      case 'astern':
+        return -this.shipSpeedKn;
+      default:
+        return 0;
+    }
+  }
+
+  isShipMotionEnabled(): boolean {
+    return this.shipMotionEnabled;
+  }
+
+  /** Motion mode: translate the hull along its bow axis at the chosen speed
+   *  (camera follows) so world-space wake particles trail behind it. */
+  setShipMotionEnabled(on: boolean): void {
+    this.shipMotionEnabled = on;
+    this.shipMotionLastMs = -1;
+  }
+
+  /** Distance the hull has travelled from its load position (world metres). */
+  getShipMotionDistance(): number {
+    return this.shipRoot.position.length();
+  }
+
+  /** Put the hull back at the origin with its load heading, carrying the
+   *  camera along so the view doesn't jump. Active hull groups restart so
+   *  world-space foam left behind at the old position is cleared. */
+  resetShipMotion(): void {
+    this.resetShipTransform();
+    // Fresh velocity samples: a several-hundred-metre jump must not be read
+    // as one frame's worth of anchor motion by the inherit-velocity path.
+    this.particleAnchorMotion.clear();
+    if (this.particleScene) {
+      for (const h of this.particleHandles) {
+        if (h.active && this.isShipStateParticleAttachment(h.attachment)) {
+          this.particleScene.restartAttachment(h);
+        }
+      }
+      this.updateParticleAttachmentTransforms();
+    }
+  }
+
+  /** Channel values the wake driver is feeding in the current state. */
+  getShipStateChannels(): ShipStateChannels {
+    const groups = [...this.activeShipStateGroups()];
+    const probe = (group: string): number[] | null =>
+      this.shipStateChannelsFor({ group, node: '', particle_path: '', source: 'hull' });
+    const wakeGroup = groups.find((g) => g.startsWith('waketrace'));
+    return {
+      groups,
+      wake: wakeGroup ? probe(wakeGroup) : null,
+      smoke: groups.includes('smoke') ? probe('smoke') : null,
+    };
+  }
+
+  /** Move the hull back to the origin and identity heading, shifting the
+   *  camera and orbit target by the same offset so the framing is kept. */
+  private resetShipTransform(): void {
+    shipMotionDelta.copy(this.shipRoot.position).negate();
+    this.shipRoot.position.set(0, 0, 0);
+    this.shipRoot.quaternion.identity();
+    this.shipRoot.updateMatrixWorld(true);
+    this.env.camera.position.add(shipMotionDelta);
+    this.env.controls.target.add(shipMotionDelta);
+    this.env.controls.update();
+    this.shipMotionLastMs = -1;
+  }
+
+  /** Motion mode step. Forward is −Z in the GLB frame (Montana's bow wake
+   *  point sits at z ≈ −135, the transom at +134.7), rotated by the hull's
+   *  current heading. The camera and orbit target ride along by the same
+   *  delta, which keeps the orbit offset and view direction unchanged. */
+  private advanceShipMotion(): void {
+    const now = performance.now();
+    const last = this.shipMotionLastMs;
+    this.shipMotionLastMs = now;
+    if (!this.shipMotionEnabled || last < 0) return;
+    const dt = Math.min(0.1, (now - last) * 0.001);
+    if (dt <= 0) return;
+    const speed = this.getShipSignedSpeedKn() * SHIP_WORLD_MPS_PER_KNOT;
+    if (speed === 0) return;
+    if (this.shipTurnRate !== 0) {
+      // Positive input = starboard turn. The GLB frame is the engine frame
+      // Z-mirrored, and the native angularVelocity.y sign is unverified (E2),
+      // so only the magnitude is meaningful; ch5 gets the signed input.
+      this.shipRoot.rotateY(-this.shipTurnRate * dt);
+    }
+    shipMotionDelta
+      .set(0, 0, -1)
+      .applyQuaternion(this.shipRoot.quaternion)
+      .multiplyScalar(speed * dt);
+    this.shipRoot.position.add(shipMotionDelta);
+    this.env.camera.position.add(shipMotionDelta);
+    this.env.controls.target.add(shipMotionDelta);
   }
 
   async setShipParticlesVisible(on: boolean): Promise<ShipParticleStats> {
@@ -2716,14 +2964,11 @@ export class ShipViewer {
       // EP_ rows) is Z-converted from the engine frame the effect is authored
       // in. Without the mirror a muzzle blast fires back into the turret.
       h.group.scale.copy(EFFECT_FRAME_SCALE_FROM_GLB);
-      const obj = this.resolveParticleAnchorObject(h.attachment);
+      const obj =
+        this.resolveParticleAnchorObject(h.attachment) ?? this.makeHullAnchorProxy(h.attachment);
       if (obj) {
         this.particleAnchorObjects.set(h, obj);
         this.copyParticleAnchorTransform(h, obj);
-      } else if (h.attachment.rotation?.length === 4) {
-        // Position-only hull EP_ row: its record turn (e.g. port-side flood
-        // points yawed 180° to face outboard) applies before the frame mirror.
-        h.group.quaternion.fromArray(h.attachment.rotation);
       }
       // Caliber-scaled muzzle blast: feed the pipeline's per-mount shotEffect
       // intensity as the effect's channel-0 value (drives PARTICLE_SIZE), so a
@@ -2790,6 +3035,7 @@ export class ShipViewer {
     this.env.setWaterPlaneVisible(false);
     this.particleHandles = [];
     this.particleAnchorObjects.clear();
+    this.particleAnchorRoot.clear();
     this.particleAnchorMotion.clear();
     this.particleAttachmentAnchors = new WeakMap<ParticleAttachment, THREE.Object3D>();
     this.particleEventOptions = [];
@@ -2803,12 +3049,84 @@ export class ShipViewer {
     return !!this.resolveParticleAnchorObject(a);
   }
 
+  /** Hull groups the wake driver owns in SOME state — never offered as
+   *  loopable events, counted as "ambient" in the stats. */
   private isAmbientParticleAttachment(a: ParticleAttachment): boolean {
     const source = a.source ?? 'hull';
     if (source === 'map') return true;
     if (source !== 'hull') return false;
+    return SHIP_AMBIENT_PARTICLE_GROUPS.has((a.group ?? '').toLowerCase());
+  }
+
+  /** Groups the CURRENT state plays. Battle states follow the signed speed
+   *  like `checkMovementEffects` (v > 0.01 → front, v < −0.01 → back, else
+   *  nothing), so Ahead at 0 kn plays no wake and no smoke. */
+  private activeShipStateGroups(): ReadonlySet<string> {
+    if (this.shipMotionState === 'port') return SHIP_STATE_PARTICLE_GROUPS.port;
+    const v = this.getShipSignedSpeedKn();
+    if (v > 0.01) return SHIP_STATE_PARTICLE_GROUPS.ahead;
+    if (v < -0.01) return SHIP_STATE_PARTICLE_GROUPS.astern;
+    return SHIP_STATE_PARTICLE_GROUPS.stopped;
+  }
+
+  private isShipStateParticleAttachment(a: ParticleAttachment): boolean {
+    const source = a.source ?? 'hull';
+    if (source === 'map') return true;
+    if (source !== 'hull') return false;
+    return this.activeShipStateGroups().has((a.group ?? '').toLowerCase());
+  }
+
+  /** Intensity channels ShipEffects feeds a hull group, or null to leave the
+   *  record's authored defaults alone. Wake groups (`checkMovementEffects`
+   *  + `frequentUpdateShipEffects`): ch0 speed, ch1 height intensity
+   *  (untouched — `hull.heightIntensityEffects` is empty for these ships),
+   *  ch2 wave distance (neutral), ch3 / ch4 hull length / width set once at
+   *  group start, ch5 turn rate. Smoke gets ch0 only (`setIntensity(v)` on
+   *  the default channel). NaN keeps the authored default for a channel. */
+  private shipStateChannelsFor(a: ParticleAttachment): number[] | null {
+    if ((a.source ?? 'hull') !== 'hull') return null;
     const group = (a.group ?? '').toLowerCase();
-    return SHIP_AMBIENT_PARTICLE_GROUPS.has(group) || isWakeParticleGroup(group);
+    const ch0 = clampRemap(
+      Math.abs(this.getShipSignedSpeedKn()),
+      0,
+      WAKE_MOVEMENT_EFFECTS_MAX_SPEED_KN,
+      WAKE_MIN_INTENSITY,
+      WAKE_MAX_INTENSITY,
+    );
+    if (group === 'smoke') return [ch0];
+    if (group !== 'waketracefront' && group !== 'waketraceback') return null;
+    const size = this.sidecar?.ship?.hull_size_m;
+    const ch3 = size
+      ? clampRemap(size[0], WAKE_MIN_SHIP_LENGTH_M, WAKE_MAX_SHIP_LENGTH_M, 0, 10)
+      : NaN;
+    const ch4 = size
+      ? clampRemap(size[1], WAKE_MIN_SHIP_WIDTH_M, WAKE_MAX_SHIP_WIDTH_M, 0, 10)
+      : NaN;
+    const ch5 = clampRemap(
+      this.shipTurnRate,
+      -WAKE_MAX_SHIP_ANGULAR_SPEED,
+      WAKE_MAX_SHIP_ANGULAR_SPEED,
+      WAKE_MIN_INTENSITY,
+      WAKE_MAX_INTENSITY,
+    );
+    return [ch0, 1, WAKE_NEUTRAL_WAVE_INTENSITY, ch3, ch4, ch5];
+  }
+
+  /** Position-only hull `EP_` rows (wake rows, deluges, smoke stacks) have
+   *  no GLB node. Give each a proxy under shipRoot at its sidecar position
+   *  and record turn (e.g. port-side flood points yawed 180° to face
+   *  outboard, applied before the frame mirror), so the per-frame anchor
+   *  copy sees the hull's world motion exactly like a mount node. Native
+   *  0x1406c8e10 reads the live node matrix every tick; the wake rows must
+   *  move with the ship for mode-2 foam to be left behind. */
+  private makeHullAnchorProxy(a: ParticleAttachment): THREE.Object3D | null {
+    if (a.position?.length !== 3) return null;
+    const proxy = new THREE.Object3D();
+    proxy.name = `anchor:${a.group}:${a.node}`;
+    proxy.position.fromArray(a.position);
+    if (a.rotation?.length === 4) proxy.quaternion.fromArray(a.rotation);
+    this.particleAnchorRoot.add(proxy);
+    return proxy;
   }
 
   private buildShipParticleEventOptions(
@@ -2856,9 +3174,29 @@ export class ShipViewer {
         this.particleLayerEnabled &&
         (this.particleMode === 'all' ||
           this.particleLoopKeys.has(key) ||
-          this.isAmbientParticleAttachment(h.attachment));
-      this.particleScene.setAttachmentActive(h, on);
-      if (on) active++;
+          this.isShipStateParticleAttachment(h.attachment));
+      if (on) {
+        // Channels before a (re)start so the prewarm uses them — ShipEffects
+        // calls setIntensity(…, 3 / 4) right after group.start().
+        const channels = this.shipStateChannelsFor(h.attachment);
+        if (channels) this.particleScene.setAttachmentIntensityValues(h, channels);
+        // A group coming in starts fresh like AttachedEffectsGroup.start();
+        // one that merely stays on keeps its particles.
+        if (!h.active || h.emitting === false) this.particleScene.restartAttachment(h);
+        active++;
+      } else if (h.active) {
+        // A gameplay group dropping out (`listStop`, e.g. the wake set
+        // switching or smoke on engine stop) stops spawning and lets its
+        // particles fade where they are, so a trail left behind the ship
+        // doesn't blink out. Whether native lets in-flight particles finish
+        // is open (E8). Event effects toggled off, and the whole layer being
+        // turned off, still hide at once.
+        if (this.particleLayerEnabled && this.isAmbientParticleAttachment(h.attachment)) {
+          if (h.emitting !== false) this.particleScene.setAttachmentEmitting(h, false);
+        } else {
+          this.particleScene.setAttachmentActive(h, false);
+        }
+      }
     }
     this.particleScene.root.visible = this.particleLayerEnabled;
     this.particleStats = { ...this.particleStats, activeAttachments: active };

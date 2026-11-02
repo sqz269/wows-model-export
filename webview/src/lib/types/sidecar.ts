@@ -258,7 +258,30 @@ export interface SidecarHitbox {
   hit_locations?: Record<string, SidecarHitLocation>;
 }
 
+/**
+ * Gameplay-active hull/engine maneuverability block (schema v3.x), from
+ * GameParams via the producer's `ship_movement_extras`. Only the fields the
+ * viewer reads are typed; the block carries more (mass, drag, rudder …).
+ */
+export interface SidecarShipMovement {
+  /** Hull `maxSpeed` in knots (GameParams unit). */
+  max_speed_kn?: number;
+  /** Same, converted to m/s by the producer. */
+  max_speed_mps?: number;
+}
+
 export interface SidecarShip {
+  display_name?: string;
+  /** See `SidecarShipMovement`. Absent on sidecars that predate v3.x. */
+  movement?: SidecarShipMovement;
+  /**
+   * Active hull `[length, width, height]` in metres (GameParams `Hull.size`).
+   * The game's `ShipEffects` remaps length (4–375 m) and width (1–60 m) into
+   * the wake effects' intensity channels 3 and 4 at group start, so the
+   * wake driver needs the raw dimensions. Absent on older sidecars; the
+   * viewer then leaves those channels at their authored default (1.0).
+   */
+  hull_size_m?: [number, number, number];
   /**
    * Asset_ids that were rewritten by the variant peculiarityModels /
    * nodesConfig swap. Consumers gate the variant mat-overlay fold

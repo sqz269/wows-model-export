@@ -28,9 +28,11 @@
     LodPolicy,
     NodeCategory,
     ShipViewer,
+    ShipMotionState,
     ShipParticleEventOption,
     ShipParticleMode,
     ShipParticleStats,
+    ShipStateChannels,
     WgEnvironmentInfo,
   } from '$lib/ship';
   import {
@@ -151,6 +153,21 @@
     { value: 'ambient', label: 'Ambient' },
     { value: 'all', label: 'All' },
   ];
+  // Wake driver (ShipEffects port): the ship state picks the hull groups,
+  // speed / turn feed their intensity channels, motion mode moves the hull.
+  let shipState = $state<ShipMotionState>('ahead');
+  let shipSpeed = $state(30);
+  let shipMaxSpeed = $state(30);
+  let shipTurn = $state(0);
+  let shipMotion = $state(false);
+  let shipChannels = $state<ShipStateChannels>({ groups: [], wake: null, smoke: null });
+  const SHIP_STATES: Array<{ value: ShipMotionState; label: string }> = [
+    { value: 'port', label: 'Port' },
+    { value: 'stopped', label: 'Stopped' },
+    { value: 'ahead', label: 'Ahead' },
+    { value: 'astern', label: 'Astern' },
+  ];
+  const fmtChannel = (v: number) => (Number.isFinite(v) ? v.toFixed(2) : 'default');
   // Color swatch CSS for the legend (hex int -> #rrggbb).
   function catSwatch(cat: NodeCategory): string {
     return '#' + NODE_CATEGORY_COLOR[cat].toString(16).padStart(6, '0');
@@ -318,6 +335,7 @@
       waterEnabled = viewer.isShipWaterEnabled();
       if (waterEnabled) refreshSea();
       refreshParticleEvents();
+      refreshShipMotion();
 
       // Honor the persisted Show-textures choice. Each ship's viewer
       // starts with textures off (TextureManager.clearShip()); kick off
@@ -484,6 +502,36 @@
     seaWind = v;
     viewer.setSeaWindSpeed(v);
     seaHeight = viewer.getSeaWaveHeight();
+  }
+  function refreshShipMotion() {
+    shipState = viewer.getShipMotionState();
+    shipSpeed = viewer.getShipSpeedKn();
+    shipMaxSpeed = viewer.getShipMaxSpeedKn();
+    shipTurn = viewer.getShipTurnRate();
+    shipMotion = viewer.isShipMotionEnabled();
+    shipChannels = viewer.getShipStateChannels();
+  }
+  function setShipState(state: ShipMotionState) {
+    shipState = state;
+    particleStats = viewer.setShipMotionState(state);
+    shipChannels = viewer.getShipStateChannels();
+  }
+  function setShipSpeed(v: number) {
+    shipSpeed = v;
+    particleStats = viewer.setShipSpeedKn(v);
+    shipChannels = viewer.getShipStateChannels();
+  }
+  function setShipTurn(v: number) {
+    shipTurn = v;
+    particleStats = viewer.setShipTurnRate(v);
+    shipChannels = viewer.getShipStateChannels();
+  }
+  function toggleShipMotion(v: boolean) {
+    shipMotion = v;
+    viewer.setShipMotionEnabled(v);
+  }
+  function resetShipMotion() {
+    viewer.resetShipMotion();
   }
   async function setParticleMode(mode: ShipParticleMode) {
     particleMode = mode;
@@ -1020,6 +1068,92 @@
           {/each}
         </div>
         {#if particlesView}
+          <div
+            class="ml-5 flex flex-col gap-1"
+            title="ShipEffects state. Port plays only idlePort; in battle the wake set follows the sign of the speed (none at rest) and smoke plays while moving."
+          >
+            <span class="text-muted-foreground text-[10px]">Ship state</span>
+            <div class="flex w-fit overflow-hidden rounded border border-border text-[10px]">
+              {#each SHIP_STATES as st}
+                <button
+                  type="button"
+                  class="px-2 py-0.5 transition-colors disabled:opacity-50 {shipState === st.value
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-background text-muted-foreground hover:bg-muted hover:text-foreground'}"
+                  aria-pressed={shipState === st.value}
+                  disabled={particlesLoading}
+                  onclick={() => setShipState(st.value)}
+                >
+                  {st.label}
+                </button>
+              {/each}
+            </div>
+            <label
+              class={labelCls}
+              title="Ship speed in knots (defaults to the hull's GameParams top speed). Wake and smoke channel 0 = clamp(|kn| / 70 × 10, 0, 10)."
+            >
+              <span class="flex items-center justify-between">
+                Speed
+                <span class="text-muted-foreground tabular-nums text-[10px]">
+                  {shipSpeed.toFixed(1)} kn
+                </span>
+              </span>
+              <input
+                type="range"
+                min="0"
+                max={Math.max(shipMaxSpeed, 1)}
+                step="0.5"
+                value={shipSpeed}
+                oninput={(e) => setShipSpeed(parseFloat(e.currentTarget.value))}
+              />
+            </label>
+            <label
+              class={labelCls}
+              title="Yaw rate in angularVelocity.y units; ±0.2 saturates wake channel 5 (5 = straight). Positive = starboard turn in motion mode."
+            >
+              <span class="flex items-center justify-between">
+                Turn
+                <span class="text-muted-foreground tabular-nums text-[10px]">
+                  {shipTurn.toFixed(2)}
+                </span>
+              </span>
+              <input
+                type="range"
+                min="-0.2"
+                max="0.2"
+                step="0.01"
+                value={shipTurn}
+                oninput={(e) => setShipTurn(parseFloat(e.currentTarget.value))}
+              />
+            </label>
+            <label
+              class={rowCls}
+              title="Move the hull along its bow axis at the chosen speed (×2.61 engine time scale); the camera follows. World-space wake foam is left behind."
+            >
+              <input
+                type="checkbox"
+                checked={shipMotion}
+                onchange={(e) => toggleShipMotion(e.currentTarget.checked)}
+              />
+              Move ship
+              <button
+                type="button"
+                class="ml-auto rounded border border-border px-1.5 py-0 text-[10px] text-muted-foreground hover:bg-muted hover:text-foreground"
+                onclick={resetShipMotion}
+              >
+                Reset position
+              </button>
+            </label>
+            <div class="text-muted-foreground text-[10px] tabular-nums">
+              groups: {shipChannels.groups.join(', ') || 'none'}
+              {#if shipChannels.wake}
+                <br />wake ch [{shipChannels.wake.map(fmtChannel).join(', ')}]
+              {/if}
+              {#if shipChannels.smoke}
+                <br />smoke ch [{shipChannels.smoke.map(fmtChannel).join(', ')}]
+              {/if}
+            </div>
+          </div>
           <label class={`${rowCls} ml-5`}>
             <input
               type="checkbox"

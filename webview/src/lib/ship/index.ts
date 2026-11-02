@@ -7,6 +7,8 @@ export type {
   ShipParticleEventOption,
   ShipParticleMode,
   ShipParticleStats,
+  ShipMotionState,
+  ShipStateChannels,
   PickedAssetInfo,
   PickResult,
   ArmorPickResult,
