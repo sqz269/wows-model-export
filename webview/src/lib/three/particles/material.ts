@@ -610,9 +610,16 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
         vFrameSeed = frameSeed;
         vFramePhase = framePhase;
         vRotationPhase = rotationPhase;
-        vec3 viewVel = (modelViewMatrix * vec4(velocity, 0.0)).xyz;
-        vVelocityAngle = (uVelocityOriented > 0.5 && length(viewVel.xy) > 0.00001)
-          ? atan(viewVel.y, viewVel.x)
+        // Camera-facing velocityOriented sprites (no billboard, eo = 0): native
+        // fx_Particle_initSpinAngle adds the SPAWN velocity's heading
+        // atan2(-v.x, v.z) — horizontal part only, record frame — to the start
+        // angle once, and adds nothing when that part is ~0. The renderer
+        // fills the velocity attribute with the unit spawn direction. The old
+        // per-frame screen-space angle of the LIVE velocity laid splash
+        // columns on their side as soon as gravity pulled them down
+        // (PROJ_HE_Explo_Water_1 main_top_2 spawns at rest).
+        vVelocityAngle = (uVelocityOriented > 0.5 && dot(velocity.xz, velocity.xz) > 1e-6)
+          ? atan(-velocity.x, velocity.z)
           : 0.0;
         vec3 worldPos = (modelMatrix * vec4(iPosition, 1.0)).xyz;
         vLightingToCamera = cameraPosition - worldPos;
@@ -856,9 +863,9 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
             // then sample the unrotated sprite UVs.
             vec2 rel = pointGeom - pivotGeom;
             // velocityOriented UV spin: only the camera-facing (eo = 0,
-            // non-billboard) population reaches here — an approximation of
-            // native's spawn-baked world velocity angle. Velocity-axial and
-            // fixed cards align to velocity in the VS, so the UV term would
+            // non-billboard) population reaches here; vVelocityAngle is its
+            // spawn-baked heading (see the VS). Velocity-axial and fixed
+            // cards align to velocity in the VS, so the UV term would
             // double-apply.
             float spriteAngle = vRotationPhase
               + ((uVelocityOriented > 0.5 && uVelocityAxial < 0.5) ? vVelocityAngle : 0.0);

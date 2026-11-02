@@ -417,10 +417,10 @@ export class SystemRenderer {
   // orientVec (sim+0x70) from the SPAWN velocity and never tracks the live
   // velocity, so cards keep their spawn axis while forces curve the path
   // (splash crowns under gravity). Zero = degenerate spawn speed -> the VS
-  // falls back to the authored eo axis. Filled for the two velocityOriented
-  // populations whose geometry follows the spawn velocity: velocity-axial
-  // (billboard) and flat explicitOrientation cards, whose in-plane angle
-  // fx_Particle_initSpinAngle bakes from the spawn velocity.
+  // falls back to the authored eo axis. Filled for every velocityOriented
+  // system: velocity-axial (billboard) cards use it as their axis; flat
+  // explicitOrientation cards and camera-facing sprites take the in-plane
+  // angle that fx_Particle_initSpinAngle bakes from the spawn velocity.
   private spawnAxis: Float32Array;
   private readonly seedsSpawnAxis: boolean;
   private age: Float32Array; // age in seconds; -1 = empty slot
@@ -942,12 +942,7 @@ export class SystemRenderer {
     this.vel = new Float32Array(this.capacity * 3);
     this.velGpu = new Float32Array(this.capacity * 3);
     this.spawnAxis = new Float32Array(this.capacity * 3);
-    {
-      const eo = renderer?.explicitOrientation;
-      const hasEo = Array.isArray(eo) && eo.some((c) => Number.isFinite(c) && c !== 0);
-      this.seedsSpawnAxis =
-        renderer?.velocityOriented === true && (renderer?.billboard === true || hasEo);
-    }
+    this.seedsSpawnAxis = renderer?.velocityOriented === true;
     this.age = new Float32Array(this.capacity);
     this.lifetime = new Float32Array(this.capacity);
     this.ageRate = new Float32Array(this.capacity);
