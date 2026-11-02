@@ -32,6 +32,23 @@ export interface OceanShadingParams {
   deepColor: [number, number, number];
   /** Minimum GGX roughness of the sun glint (caps its peak brightness). */
   sunRoughness: number;
+  /** Metres of surface displacement per unit of the DEFORM particle layer's
+   *  .y (height sheets + foam lift). Stands in for the native sea VS scale
+   *  g_waterParams[14].x, which is not yet read out. The sea VS works in BW
+   *  units (it folds the FFT metres by 1/15 first, sea_vs8.txt:717,844) and
+   *  adds .y * [14].x straight in, so [14].x = 1 would make one layer unit
+   *  one BW unit = 15 m; the authored amplitudes only read at that order
+   *  (a 420 mm shell ring peaks at 0.27 * 0.2 = 0.054 units, the stern sheet
+   *  at 0.48 * 0.07-0.25) and so does the 0.009 foam lift. Default 15. */
+  deformHeightScale: number;
+  /** Native g_deformFoamMult: the floor of the particle foam's whiteness at
+   *  full coverage, before the sea's own foam pattern adds to it. 0.6 on the
+   *  first `00_CO_ocean` weather, 0.2-1.0 across maps. */
+  deformFoamMult: number;
+  /** Native deformFoamDisplaceMult (PS66 cb[62].w): how much a unit of foam
+   *  coverage lifts the surface, in layer .y units. 0.007-0.010 across maps.
+   *  Pushed into the DEFORM particle materials by the scene environment. */
+  deformFoamDisplaceMult: number;
 }
 
 export const DEFAULT_SHADING_PARAMS: OceanShadingParams = {
@@ -41,6 +58,9 @@ export const DEFAULT_SHADING_PARAMS: OceanShadingParams = {
   scatterColor: [0.003, 0.016, 0.024],
   deepColor: [0.001, 0.006, 0.012],
   sunRoughness: 0.08,
+  deformHeightScale: 15,
+  deformFoamMult: 0.6,
+  deformFoamDisplaceMult: 0.009,
 };
 
 const MIN_SPACING = 0.35;
@@ -114,6 +134,32 @@ export function buildPolarGrid(
   return geometry;
 }
 
+// The DEFORM_WATER_SURFACE particle layer, the webview's stand-in for the
+// native g_waterDeformTexture. The scene environment draws every visible
+// DEFORM system into it just before the sea (three/scene.ts), with clip.xy *
+// 0.8 (VS64's guard band), accumulating .x = sum ln(1 - foam_i) and .y = sum
+// (height_i + foam_i * k) with ONE/ONE blending. The native sea reads it at
+// the screen projection of the UNDISPLACED grid point at sea level, uv =
+// ndc * 0.4 + 0.5 — the VS for displacement (sea_vs8.txt:969-1041) and the
+// PS for coverage and normals (sea_ps49.txt:866-925, 1792-1856). Nothing is
+// accumulated over time: the layer is redrawn every frame, so a wake lasts
+// exactly as long as its particles.
+const DEFORM_GLSL = /* glsl */ `
+uniform sampler2D uDeformTexture;
+uniform float uDeformEnabled;
+uniform mat4 uDeformViewProj;
+uniform float uDeformHeightScale;
+
+vec2 sampleDeformLayer(vec2 worldXZ) {
+  vec4 clip = uDeformViewProj * vec4(worldXZ.x, 0.0, worldXZ.y, 1.0);
+  // Behind the camera the projection folds over; there is no layer there.
+  if (clip.w <= 1e-4) return vec2(0.0);
+  // The layer sampler clamps, like the native g_RTLinearSampler.
+  vec2 uv = clamp(clip.xy / clip.w * 0.4 + 0.5, 0.0, 1.0);
+  return textureLod(uDeformTexture, uv, 0.0).xy;
+}
+`;
+
 const VERT = /* glsl */ `
 uniform sampler2D uDisp0;
 uniform sampler2D uDisp1;
@@ -129,6 +175,7 @@ uniform float uAngularStep;
 uniform float uCoarseRadius;
 uniform float uDispScale;
 uniform float uUnitScale;
+${DEFORM_GLSL}
 
 varying vec3 vWorld;
 varying vec2 vOffset;
@@ -150,6 +197,14 @@ void main() {
   // The simulation and grid live in metres; uUnitScale maps them into the
   // scene's world units (1 for metre scenes, 1/15 for BW-unit maps).
   vec3 world = (vec3(uCenter.x + off.x, 0.0, uCenter.y + off.y) + d * uDispScale) * uUnitScale;
+  if (uDeformEnabled > 0.5) {
+    // Particle height sheets (bow bulge, side troughs, stern trough) and the
+    // foam lift, added after the FFT height the way the native sea VS adds
+    // .y * g_waterParams[14].x (sea_vs8.txt:1041). That scale is unknown, so
+    // uDeformHeightScale (metres per layer unit) is a tunable.
+    vec2 gridXZ = (uCenter + off) * uUnitScale;
+    world.y += sampleDeformLayer(gridXZ).y * uDeformHeightScale * uUnitScale;
+  }
   vWorld = world;
   vOffset = off;
   vec4 mv = viewMatrix * vec4(world, 1.0);
@@ -195,6 +250,8 @@ uniform vec3 uFogColor;
 uniform float uFogDensity;
 uniform float uFogNear;
 uniform float uFogFar;
+uniform float uDeformFoamMult;
+${DEFORM_GLSL}
 
 varying vec3 vWorld;
 varying vec2 vOffset;
@@ -251,15 +308,35 @@ void main() {
   vec2 uv0 = uCenterUv0 + vOffset / uLengths.x;
   vec2 uv1 = uCenterUv1 + vOffset / uLengths.y;
   vec2 uv2 = uCenterUv2 + vOffset / uLengths.z;
-  vec4 der = texture(uDeriv0, uv0) + texture(uDeriv1, uv1) + texture(uDeriv2, uv2);
-  vec2 slope = uDispScale * der.xy / max(vec2(0.2), 1.0 + uDispScale * der.zw);
-  vec3 n = normalize(vec3(-slope.x, 1.0, -slope.y));
-
   vec3 toCam = cameraPosition - vWorld;
   float dist = length(toCam);
   vec3 V = toCam / max(dist, 1e-9);
   float distM = dist / uUnitScale;
   vec3 L = normalize(uSunDir);
+
+  vec4 der = texture(uDeriv0, uv0) + texture(uDeriv1, uv1) + texture(uDeriv2, uv2);
+  vec2 slope = uDispScale * der.xy / max(vec2(0.2), 1.0 + uDispScale * der.zw);
+  float deformCoverage = 0.0;
+  if (uDeformEnabled > 0.5) {
+    vec2 gridXZ = (uCenter + vOffset) * uUnitScale;
+    vec2 layer = sampleDeformLayer(gridXZ);
+    // Coverage D = 1 - e^x = 1 - product(1 - f_i) over every foam sheet at
+    // this point (sea_ps49.txt:1831-1856): the alpha-over union, order-free.
+    deformCoverage = 1.0 - exp(min(layer.x, 0.0));
+    // Normals: the sea PS finite-differences the layer's .y around the point
+    // and adds the slope, clamped to +-0.5, gated on a non-zero centre sample
+    // (sea_ps49.txt:925-1226). The difference is taken here in world space
+    // over a step that grows with distance so it always spans a few layer
+    // texels; the far field carries no deform anyway.
+    if (abs(layer.y) > 1e-6) {
+      float step = max(0.25, distM * 0.01) * uUnitScale;
+      float hx = sampleDeformLayer(gridXZ + vec2(step, 0.0)).y;
+      float hz = sampleDeformLayer(gridXZ + vec2(0.0, step)).y;
+      vec2 dSlope = (vec2(hx, hz) - layer.y) * uDeformHeightScale * uUnitScale / step;
+      slope += clamp(dSlope, -0.5, 0.5);
+    }
+  }
+  vec3 n = normalize(vec3(-slope.x, 1.0, -slope.y));
   // Steep, choppy faces can tilt the interpolated normal away from the
   // viewer; bend it back so Fresnel/reflection stay defined.
   float NoVraw = dot(n, V);
@@ -312,7 +389,19 @@ void main() {
   float foam = clamp((uFoamCoverage - (t0 + t1 + t2 - 2.0)) * 5.0, 0.0, 1.0);
   vec2 fp = uCenter + vOffset;
   float pattern = 0.55 * valueNoise(fp * 0.9 + uTime * 0.05) + 0.45 * valueNoise(fp * 3.1 - uTime * 0.08);
-  foam = clamp(foam * (0.35 + 1.1 * pattern), 0.0, 1.0) * uFoamIntensity;
+  foam = clamp(foam * (0.35 + 1.1 * pattern), 0.0, 1.0);
+  if (deformCoverage > 0.0) {
+    // Particle (wake, splash, ring) foam, sea_ps49.txt:2982-3051:
+    //   saturate((tile + g_deformFoamMult * max(variation, 0.15)) * D)
+    // union-blended with the whitecap foam as a + b - ab, then scaled by
+    // g_foamFadeFactor. tile is the sea's own FoamLowFreq/HighFreq pattern
+    // (the noise pattern above stands in) and variation the km-scale
+    // sea-state map, taken as 1 here (open sea).
+    float deformFoam = clamp((pattern + uDeformFoamMult) * deformCoverage, 0.0, 1.0);
+    foam = foam + deformFoam - foam * deformFoam;
+  }
+  // uFoamIntensity plays g_foamFadeFactor's part, on the union.
+  foam *= uFoamIntensity;
   foam *= 1.0 - smoothstep(1500.0, 6000.0, distM);
   vec3 foamLit = vec3(0.85) * (ambient * 0.6 + uSunColor * (0.3 + 0.7 * NoL));
   color = mix(color, foamLit, foam);
@@ -385,6 +474,13 @@ export class OceanSurface {
       uFogNear: { value: 0 },
       uFogFar: { value: 1 },
       envMap: { value: null },
+      // DEFORM particle layer (see DEFORM_GLSL); fed per frame by
+      // setDeformLayer, off until the scene has something to draw into it.
+      uDeformTexture: { value: null },
+      uDeformEnabled: { value: 0 },
+      uDeformViewProj: { value: new THREE.Matrix4() },
+      uDeformHeightScale: { value: DEFAULT_SHADING_PARAMS.deformHeightScale },
+      uDeformFoamMult: { value: DEFAULT_SHADING_PARAMS.deformFoamMult },
     };
     this.material = new THREE.ShaderMaterial({
       uniforms: this.uniforms,
@@ -394,8 +490,10 @@ export class OceanSurface {
       transparent: false,
       depthWrite: true,
       depthTest: true,
-      // Coplanar wake/splash cards (DEFORM_WATER_SURFACE) sit at y≈0; the
-      // bias lets them win the depth test against the mean surface.
+      // A small bias keeps coplanar y≈0 helpers and the fallback wake cards
+      // (drawn only when the sea is hidden) from z-fighting the mean surface.
+      // With the sea up, DEFORM_WATER_SURFACE particles are composed through
+      // the deform layer instead of drawn as cards.
       polygonOffset: true,
       polygonOffsetFactor: 1,
       polygonOffsetUnits: 1,
@@ -415,6 +513,18 @@ export class OceanSurface {
     (u.uScatterColor.value as THREE.Color).setRGB(...p.scatterColor);
     (u.uDeepColor.value as THREE.Color).setRGB(...p.deepColor);
     u.uSunRoughness.value = p.sunRoughness;
+    u.uDeformHeightScale.value = p.deformHeightScale;
+    u.uDeformFoamMult.value = p.deformFoamMult;
+  }
+
+  /** Feed this frame's DEFORM_WATER_SURFACE particle layer (rendered by the
+   *  scene environment before the sea) with the camera viewProj that drew
+   *  it; `null` turns the composition off. */
+  setDeformLayer(tex: THREE.Texture | null, viewProj?: THREE.Matrix4): void {
+    const u = this.uniforms;
+    u.uDeformTexture.value = tex;
+    u.uDeformEnabled.value = tex ? 1 : 0;
+    if (tex && viewProj) (u.uDeformViewProj.value as THREE.Matrix4).copy(viewProj);
   }
 
   /** Bind a PMREM (CubeUV) environment for reflections, or `null` for the

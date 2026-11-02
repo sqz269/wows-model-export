@@ -21,6 +21,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 
 import type { ColorGrade } from './env_ibl';
+import { isDeformWaterMaterial, setDeformWriteMode } from './particles/material';
 
 export interface BloomParams {
   /** Overall bloom contribution (UnrealBloomPass.strength). */
@@ -113,6 +114,43 @@ function materialHasSoftParticleUniform(material: THREE.Material): material is T
 function materialIsDistortionParticle(material: THREE.Material): material is THREE.ShaderMaterial {
   const uniforms = (material as THREE.ShaderMaterial).uniforms;
   return !!uniforms?.uDistortion && Number(uniforms.uDistortion.value ?? 0) > 0.5;
+}
+
+/** A distortion particle that still needs the scene-colour copy this frame.
+ *  DEFORM systems in water-layer write mode are composed by the ocean and
+ *  never refract, so they must not keep the (full extra scene render) copy
+ *  alive on their own. */
+function materialConsumesSceneColor(material: THREE.Material): material is THREE.ShaderMaterial {
+  if (!materialIsDistortionParticle(material)) return false;
+  const write = material.uniforms.uDeformWrite;
+  return !write || Number(write.value ?? 0) < 0.5;
+}
+
+/** three.js layer reserved for DEFORM_WATER_SURFACE particle meshes while the
+ *  FFT ocean consumes them: the deform pre-pass renders this layer alone, and
+ *  the main pass (layer 0) no longer sees the quads — in the game they are
+ *  never visible sprites either (VS64/PS66 write a water RT the sea reads). */
+const DEFORM_LAYER = 30;
+
+interface DeformParticleSet {
+  /** Every mesh carrying a DEFORM material, visible or not. */
+  meshes: THREE.Object3D[];
+  materials: THREE.ShaderMaterial[];
+  /** At least one mesh is on screen with live particles. */
+  visible: boolean;
+}
+
+function objectIsShown(object: THREE.Object3D): boolean {
+  for (let o: THREE.Object3D | null = object; o; o = o.parent) {
+    if (!o.visible) return false;
+  }
+  return true;
+}
+
+function instanceCountOf(object: THREE.Object3D): number {
+  const geometry = (object as THREE.Mesh).geometry as THREE.InstancedBufferGeometry | undefined;
+  const count = geometry?.instanceCount;
+  return typeof count === 'number' ? count : 1;
 }
 
 function shouldHideForOpaqueDepth(object: THREE.Object3D): boolean {
@@ -499,6 +537,10 @@ export function createSceneEnvironment(
   let gtPass: ShaderPass | null = null;
   let opaqueDepthTarget: THREE.WebGLRenderTarget | null = null;
   let sceneColorTarget: THREE.WebGLRenderTarget | null = null;
+  let deformTarget: THREE.WebGLRenderTarget | null = null;
+  const deformSize = new THREE.Vector2(1, 1);
+  const deformViewProj = new THREE.Matrix4();
+  const deformClearColor = new THREE.Color();
   const opaqueDepthMaterial = new THREE.MeshDepthMaterial({
     depthPacking: THREE.BasicDepthPacking,
   });
@@ -591,10 +633,112 @@ export function createSceneEnvironment(
     scene.traverse((object) => {
       if (!object.visible) return;
       for (const mat of objectMaterials(object)) {
-        if (materialIsDistortionParticle(mat)) consumers.add(mat);
+        if (materialConsumesSceneColor(mat)) consumers.add(mat);
       }
     });
     return [...consumers];
+  };
+
+  // ── DEFORM_WATER_SURFACE → ocean composition ───────────────────────
+  // Native (particles.fxo VS64/PS66 + sea.fxo, RE notes
+  // ship_wake_foam_investigation_2026_11.md §2.4): the DEFORM particle
+  // quads are drawn into a screen-space water RT — x = Σ ln(1 − foam),
+  // y = Σ (height + foam·k), additive — and the sea shader samples that RT
+  // at each grid point's projection for displacement, normals and foam
+  // coverage 1 − eˣ. The quads themselves never reach the screen. While the
+  // FFT ocean is shown the webview does the same: the DEFORM meshes move to
+  // DEFORM_LAYER, their materials switch to the write path, the pre-pass
+  // below renders that layer alone into `deformTarget`, and the ocean
+  // consumes it. With no ocean (water off, inspector without a water plane)
+  // the meshes stay on layer 0 as the flat lit-card fallback.
+  const collectDeformParticles = (): DeformParticleSet => {
+    const meshes: THREE.Object3D[] = [];
+    const materials = new Set<THREE.ShaderMaterial>();
+    let visible = false;
+    scene.traverse((object) => {
+      let deform = false;
+      for (const mat of objectMaterials(object)) {
+        if (!isDeformWaterMaterial(mat)) continue;
+        deform = true;
+        materials.add(mat);
+      }
+      if (!deform) return;
+      meshes.push(object);
+      if (!visible && instanceCountOf(object) > 0 && objectIsShown(object)) visible = true;
+    });
+    return { meshes, materials: [...materials], visible };
+  };
+
+  // Applied to EVERY deform mesh and material each frame, shown or not, so a
+  // system that becomes visible later never draws one frame in the wrong
+  // mode (ONE/ONE sprites on screen, or cards into the layer).
+  const applyDeformMode = (set: DeformParticleSet, consume: boolean) => {
+    const k = ocean?.shading.deformFoamDisplaceMult;
+    for (const mat of set.materials) {
+      setDeformWriteMode(mat, consume);
+      if (consume && k !== undefined && mat.uniforms.uDeformFoamDisplaceMult) {
+        mat.uniforms.uDeformFoamDisplaceMult.value = k;
+      }
+    }
+    const mask = consume ? 1 << DEFORM_LAYER : 1;
+    for (const mesh of set.meshes) mesh.layers.mask = mask;
+  };
+
+  const ensureDeformTarget = () => {
+    renderer.getDrawingBufferSize(deformSize);
+    const width = Math.max(1, Math.floor(deformSize.x));
+    const height = Math.max(1, Math.floor(deformSize.y));
+    if (deformTarget && deformTarget.width === width && deformTarget.height === height) {
+      return deformTarget;
+    }
+    deformTarget?.dispose();
+    // Half floats: x sums ln(1 − foam) terms down to PS66's −65504 sentinel
+    // (foam = 1), y sums signed heights of order 1. Blending needs a
+    // renderable float format, so RGBA16F (RG alone is not guaranteed
+    // colour-renderable everywhere); zw stay 0. No depth: the quads do not
+    // depth-test against each other or the scene in this layer.
+    deformTarget = new THREE.WebGLRenderTarget(width, height, {
+      type: THREE.HalfFloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      wrapS: THREE.ClampToEdgeWrapping,
+      wrapT: THREE.ClampToEdgeWrapping,
+      generateMipmaps: false,
+      stencilBuffer: false,
+      depthBuffer: false,
+    });
+    deformTarget.texture.name = 'WowsDeformWaterLayer';
+    return deformTarget;
+  };
+
+  const renderDeformLayer = () => {
+    if (!ocean) return;
+    const target = ensureDeformTarget();
+    const previousTarget = renderer.getRenderTarget();
+    const previousBackground = scene.background;
+    const previousLayers = camera.layers.mask;
+    renderer.getClearColor(deformClearColor);
+    const previousClearAlpha = renderer.getClearAlpha();
+    try {
+      // Only the DEFORM layer, over transparent black (ln 1 = 0, height 0):
+      // the sky/colour background must not land in the sum.
+      scene.background = null;
+      camera.layers.set(DEFORM_LAYER);
+      renderer.setRenderTarget(target);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear(true, false, false);
+      renderer.render(scene, camera);
+    } finally {
+      renderer.setRenderTarget(previousTarget);
+      renderer.setClearColor(deformClearColor, previousClearAlpha);
+      camera.layers.mask = previousLayers;
+      scene.background = previousBackground;
+    }
+    // The render above refreshed the camera matrices; the ocean re-projects
+    // its grid points through the same viewProj to find each one's texel.
+    deformViewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    ocean.setDeformLayer(target.texture, deformViewProj);
   };
 
   const ensureOpaqueDepthTarget = () => {
@@ -725,8 +869,16 @@ export function createSceneEnvironment(
       // Ambient surface animation runs on wall clock, independent of the
       // particle transport, so the sea keeps moving while an effect is paused.
       updateOcean();
+      // Pass order: ocean sim → deform mode switch → opaque depth copy →
+      // scene-colour copy (SHIMMER refraction) → DEFORM layer → main pass
+      // (the ocean reads the layer; the DEFORM quads are off layer 0).
+      const deform = collectDeformParticles();
+      const consumeDeform = !!ocean && ocean.mesh.visible && deform.visible;
+      applyDeformMode(deform, consumeDeform);
       renderOpaqueDepthSnapshot(collectSoftDepthConsumers());
       renderDistortionSceneColor(collectDistortionConsumers());
+      if (consumeDeform) renderDeformLayer();
+      else ocean?.setDeformLayer(null);
       if (!postprocessEnabled && !bloomEnabled) {
         renderer.render(scene, camera);
         return;
@@ -864,6 +1016,8 @@ export function createSceneEnvironment(
       opaqueDepthTarget = null;
       sceneColorTarget?.dispose();
       sceneColorTarget = null;
+      deformTarget?.dispose();
+      deformTarget = null;
       composer?.dispose();
       composer = null;
       bloomPass = null;

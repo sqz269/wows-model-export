@@ -68,6 +68,9 @@ export interface ParticleAttachmentHandle {
   record: ParticleRecord;
   intensityValues?: number[];
   active: boolean;
+  /** False after setAttachmentEmitting(handle, false): no new particles, the
+   *  live ones fade out. Absent or true = emitting. */
+  emitting?: boolean;
 }
 
 interface SpawnedParticleEffect {
@@ -371,12 +374,21 @@ export class ParticleScene {
     for (const sys of rec.systems) {
       const r = sys.renderer;
       const anim = sys.animation;
+      // Storage frame per the coordinateStyle law (sampling.ts): modes 0/1/2
+      // keep their particles in the particle root (world) and leave the
+      // anchor behind after spawn; mode 3 keeps them in the attachment group
+      // and rides it. The group itself always carries the anchor's live
+      // transform (position, authored rotation, engine-frame mirror).
       const systemParent = systemUsesDetachedCoordinateFrame(sys) ? this.root : group;
       // Texture source: prefer the direct DDS URL when present (the
       // texture was extracted as its own file); otherwise route through the
       // manifest atlas mapping. Both paths compose with the animation grid.
       const useAtlas = !r?.textureUrl0 && !!r?.textureAtlas0;
       const useLut = !!r?.blendType && PS_RBT_LUT_MODES.has(r.blendType) && !!r?.textureUrl1;
+      // DEFORM_WATER_SURFACE reads textureName1 as PS66's t1, the foamTile
+      // erosion pattern — a different consumer of the same slot than the
+      // gradient ramp above, so it gets its own sampler.
+      const useFoamTile = r?.blendType === 'DEFORM_WATER_SURFACE' && !!r?.textureUrl1;
       const useMv = anim?.animationType === 'motionVectors' && !!anim?.motionVectorsTextureUrl;
       // Sprite rotation has two byte-proven sources (see tick()): a
       // yawRateRamp scaled by spinRateBase, and a standalone spinRateRange
@@ -460,13 +472,13 @@ export class ParticleScene {
         light.ownerSystemIndex = systems.length - 1;
         if (intensityValues) light.setIntensityValues(intensityValues);
         light.setActive(active);
-        if (systemParent !== group) {
-          group.updateWorldMatrix(true, false);
-          systemParent.updateWorldMatrix(true, false);
-          group.localToWorld(light.group.position);
-          systemParent.worldToLocal(light.group.position);
-        }
-        systemParent.add(light.group);
+        // A light component has no particle record to be stored in the world
+        // with: it is a per-frame glow at an authored offset from the node, so
+        // it stays on the attachment group in every coordinateStyle and moves
+        // with the anchor. (Before the 2026-11-01 mapping fix the mode-2
+        // majority already sat here; this keeps the mode-0/1/3 minority there
+        // too instead of leaving their glow behind a moving ship.)
+        group.add(light.group);
         lights.push(light);
       }
       const texPath = r?.textureUrl0 ?? (useAtlas ? r!.textureAtlas0!.page : undefined);
@@ -475,6 +487,9 @@ export class ParticleScene {
       }
       if (useLut && r?.textureUrl1) {
         void this.bindLutTexture(mat, r.textureUrl1);
+      }
+      if (useFoamTile && r?.textureUrl1) {
+        void this.bindFoamTileTexture(mat, r.textureUrl1);
       }
       if (useMv && anim?.motionVectorsTextureUrl) {
         void this.bindMvTexture(mat, anim.motionVectorsTextureUrl);
@@ -737,6 +752,37 @@ export class ParticleScene {
     material.needsUpdate = true;
   }
 
+  /** Bind ``workspaceRelPath`` (textureName1 of a DEFORM_WATER_SURFACE
+   *  system, ``foamTile.dds``) as the foam-erosion sampler: PS66's t1, read
+   *  at corner * tiling and subtracted from the foam by (1 - tint.g). Linear
+   *  and wrapping like the base sheet (the tiling repeats it). Same cache as
+   *  ``bindTexture``; every wake foam system shares the one tile. */
+  private async bindFoamTileTexture(
+    material: THREE.ShaderMaterial,
+    workspaceRelPath: string,
+  ): Promise<void> {
+    const r = this.renderer;
+    if (!r) return;
+    const url = repoUrl(workspaceRelPath);
+    let pending = this.textureCache.get(url);
+    if (!pending) {
+      pending = loadDdsSoftwareRgbaTexture(url, false, r)
+        .catch(() => null)
+        .then((tex) => tex ?? loadDdsMipChain([url], false, r))
+        .catch((err) => {
+          console.warn('[particles] foamTile DDS load failed', workspaceRelPath, err);
+          return null;
+        })
+        .then((tex) => ParticleScene.configureParticleTexture(tex));
+      this.textureCache.set(url, pending);
+    }
+    const tex = await pending;
+    if (!tex) return;
+    material.uniforms.foamTile.value = tex;
+    material.uniforms.useFoamTile.value = 1;
+    material.needsUpdate = true;
+  }
+
   /** Step every emitter forward by `dt`. Call this from the render loop. */
   tick(nowMs?: number, paused = false): void {
     this.updateViewportHeightUniforms();
@@ -901,6 +947,22 @@ export class ParticleScene {
     handle.group.visible = active;
   }
 
+  /** Stop (or resume) spawning on one attachment and its child effects while
+   *  everything already alive simulates to the end of its life. This is how a
+   *  gameplay group stopping (ShipEffects listStop with reattachToRoot=False)
+   *  reads on screen: the wake stops growing and the trail fades behind the
+   *  ship. Whether native lets in-flight particles finish is still open (E8 in
+   *  wows-re-notes topics/particle/ship_wake_foam_investigation_2026_11.md).
+   *  Lights stay as they are; restartAttachment() resumes emission. */
+  setAttachmentEmitting(handle: ParticleAttachmentHandle, on: boolean): void {
+    handle.emitting = on;
+    for (const s of handle.systems) s.setEmitting(on);
+    for (const effect of this.spawnedEffects) {
+      if (effect.parent !== handle) continue;
+      for (const s of effect.systems) s.setEmitting(on);
+    }
+  }
+
   restartAttachment(handle: ParticleAttachmentHandle): void {
     for (let i = this.spawnedEffects.length - 1; i >= 0; i--) {
       const effect = this.spawnedEffects[i];
@@ -909,6 +971,7 @@ export class ParticleScene {
       this.spawnedEffects.splice(i, 1);
     }
     handle.active = true;
+    handle.emitting = true;
     for (const s of handle.systems) s.restart();
     for (const l of handle.lights) l.restart();
     handle.group.visible = true;
@@ -928,9 +991,14 @@ export class ParticleScene {
     }
   }
 
+  /** Pin the inherited parent velocity of one attachment (world metres/s).
+   *  Not needed when the caller moves `handle.group` (or the anchor it is
+   *  copied from): each system derives the node velocity from its group's
+   *  world-matrix motion every tick, which is the native quantity. Pass null
+   *  to go back to the derived motion. */
   setAttachmentParentVelocity(
     handle: ParticleAttachmentHandle,
-    velocityWorld: THREE.Vector3,
+    velocityWorld: THREE.Vector3 | null,
   ): void {
     for (const s of handle.systems) s.setParentVelocityWorld(velocityWorld);
     for (const effect of this.spawnedEffects) {

@@ -179,10 +179,11 @@ function blendConfigForPsRbt(label: string | undefined): {
     case 'DEFORM_WATER_SURFACE':
       // RE doc 63 H3/M1: these are screen-space DISTORTION passes (water-deform
       // / heat-haze refraction) with their own NON-additive engine techniques —
-      // not in the 0x2e8 order-dependent set, not additive. We don't model the
-      // refraction; render alpha-over (NormalBlending) so the sprite occludes
-      // faintly instead of an additive bloom that washes out the whole burst.
-      // (Full fix = a background-RTT UV-warp pass driven by tex0/tex1.)
+      // not in the 0x2e8 order-dependent set, not additive. SHIMMER warps the
+      // scene-colour copy alpha-over. DEFORM_WATER_SURFACE starts alpha-over
+      // too (the flat lit-card fallback for scenes without the FFT ocean);
+      // while the ocean is up, setDeformWriteMode switches it to ONE/ONE so
+      // the quads accumulate PS66's water layer in the deform pre-pass.
       return { blending: THREE.NormalBlending };
     default:
       // Unknown / missing label — keep the historical additive default
@@ -194,6 +195,52 @@ function blendConfigForPsRbt(label: string | undefined): {
 /** PS_RBT labels that should sample textureName1 as a 1D color LUT and
  *  remap textureName0's red channel through it. */
 export const PS_RBT_LUT_MODES = new Set(['GRADIENT_MAP', 'UNDERWATER_GRADIENT_MAP']);
+
+/** PS66's g_waterParams[10].w (cb[62].w): the water layer's .y gains this
+ *  much per unit of foam coverage, so foam patches also lift the surface a
+ *  little. Matches the per-weather ubersettings `deformFoamDisplaceMult`
+ *  (0.009 on the first `00_CO_ocean` weather, 0.007-0.010 across maps); the
+ *  constant-slot binding is inferred from the value range, not byte-proven. */
+export const DEFAULT_DEFORM_FOAM_DISPLACE_MULT = 0.009;
+
+/** Is this a DEFORM_WATER_SURFACE particle material (distortion mode 1)?
+ *  SHIMMER is mode 2 and stays a scene-colour refraction. */
+export function isDeformWaterMaterial(mat: THREE.Material): mat is THREE.ShaderMaterial {
+  const u = (mat as THREE.ShaderMaterial).uniforms;
+  return !!u?.uDistortionMode && Number(u.uDistortionMode.value) === 1;
+}
+
+/**
+ * Switch a DEFORM_WATER_SURFACE material between its two output paths.
+ * `on`: the water-layer write (uDeformWrite = 1) with ONE/ONE blending, so
+ * PS66's ln(1 - foam) terms sum to ln of the product and the heights add;
+ * the scene environment draws these into its deform render target before
+ * the FFT ocean, which then shows them as foam and displacement. `off`: the
+ * flat lit-card fallback, alpha-over, for scenes without the ocean. Blend
+ * state and a uniform only — no program recompile.
+ */
+export function setDeformWriteMode(mat: THREE.ShaderMaterial, on: boolean): void {
+  const u = mat.uniforms.uDeformWrite;
+  if (!u) return;
+  u.value = on ? 1 : 0;
+  if (on) {
+    mat.blending = THREE.CustomBlending;
+    mat.blendEquation = THREE.AddEquation;
+    mat.blendSrc = THREE.OneFactor;
+    mat.blendDst = THREE.OneFactor;
+    mat.blendEquationAlpha = THREE.AddEquation;
+    mat.blendSrcAlpha = THREE.OneFactor;
+    mat.blendDstAlpha = THREE.OneFactor;
+  } else {
+    mat.blending = THREE.NormalBlending;
+    mat.blendEquation = THREE.AddEquation;
+    mat.blendSrc = THREE.SrcAlphaFactor;
+    mat.blendDst = THREE.OneMinusSrcAlphaFactor;
+    mat.blendEquationAlpha = null;
+    mat.blendSrcAlpha = null;
+    mat.blendDstAlpha = null;
+  }
+}
 
 /** PS_RLT labels whose textureName0 is a directional lightmap (RGB = 3
  *  baked light-direction renders, A = opacity), NOT albedo. The fragment
@@ -541,6 +588,22 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uDistortionStrength: { value: distortionStrength },
       uDistortionSceneTexture: { value: null as THREE.Texture | null },
       uDistortionSceneSize: { value: new THREE.Vector2(1, 1) },
+      // foamTile.dds — textureName1 of DEFORM_WATER_SURFACE systems, PS66's
+      // t1 (particleGlowTexture slot): the erosion pattern subtracted from
+      // the foam by (1 - tint.g). Bound by ParticleScene.bindFoamTileTexture,
+      // which flips useFoamTile to 1 once the DDS has loaded. Kept apart from
+      // `lut`, the GRADIENT_MAP ramp that also travels in textureName1.
+      foamTile: { value: null as THREE.Texture | null },
+      useFoamTile: { value: 0 },
+      // 1 while the FFT ocean consumes this system through the deform
+      // pre-pass (three/scene.ts): the fragment then writes PS66's
+      // (ln(1 - foam), height + foam * k) pair for ONE/ONE accumulation
+      // instead of drawing a sprite, and the vertex applies VS64's 0.8 clip
+      // guard band. 0 = the flat lit-card fallback (no ocean to feed).
+      uDeformWrite: { value: 0 },
+      // PS66 cb[62].w, foam -> height lift per unit coverage. The scene
+      // environment pushes the ocean's tunable here each frame.
+      uDeformFoamDisplaceMult: { value: DEFAULT_DEFORM_FOAM_DISPLACE_MULT },
       // Warm "detonation glow" strength for the lightmapping + GRADIENT_MAP
       // path. Native IA TEXCOORD6.x -> PS TEXCOORD9.x is lightingShineness.
       uGlowStrength: { value: Math.max(0, finiteNumber(opts.lightingShineness, 1)) },
@@ -584,6 +647,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uniform float uHideFadeBase;
       uniform float uHideSpeed;
       uniform float uHideIsAxial;
+      uniform float uDeformWrite;
       varying vec4 vColor;
       varying float vAge;
       varying float vFrameSeed;
@@ -756,6 +820,13 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           vec2 viewOffset = vec2(cornerUV.x - 0.5, 0.5 - cornerUV.y) * worldDiam + anchorOff;
           gl_Position = projectionMatrix * vec4(mvPosition.xyz + vec3(viewOffset, 0.0), 1.0);
         }
+        if (uDeformWrite > 0.5) {
+          // Water-layer write: VS64 scales clip xy by 0.8 so the layer keeps
+          // a 10% guard band on every side (displaced sea vertices can
+          // project a little past the viewport); the sea then samples it at
+          // ndc * 0.4 + 0.5 (sea_vs8.txt:1006-1028, sea_ps49.txt:903-925).
+          gl_Position.xy *= 0.8;
+        }
       }
     `,
     fragmentShader: /* glsl */ `
@@ -809,6 +880,10 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uniform float uDistortionStrength;
       uniform sampler2D uDistortionSceneTexture;
       uniform vec2 uDistortionSceneSize;
+      uniform sampler2D foamTile;
+      uniform float useFoamTile;
+      uniform float uDeformWrite;
+      uniform float uDeformFoamDisplaceMult;
       uniform float uGlowStrength;
       uniform float uGlowPosterizeSteps;
       uniform float uOpacityLightingSteps;
@@ -842,6 +917,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       void main() {
         vec4 base;
         vec3 glow = vec3(0.0);   // additive warm glow (gradient+lightmapping)
+        vec2 deformTileUv = vec2(0.0); // DEFORM foamTile lookup, VS64 o5
         if (useMap > 0.5) {
           // Convert the square GL_POINT coordinate to authored sprite UVs.
           // Geometry is measured in sprite-height units: width=scaleX,
@@ -876,7 +952,15 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           vec2 local = vec2(spriteGeom.x / vSpriteAspectX + 0.5, spriteGeom.y + 0.5);
           if (local.x < 0.0 || local.x > 1.0 || local.y < 0.0 || local.y > 1.0) discard;
           local = mix(local, vec2(1.0) - local, uUvFlip);
-          if (abs(uUvTiling.x - 1.0) > 0.0001 || abs(uUvTiling.y - 1.0) > 0.0001) {
+          // DEFORM_WATER_SURFACE never tiles its base sheet: VS64 passes the
+          // frame rect through untouched and applies the tiling only to the
+          // foamTile lookup, o5 = corner * v7.zw (the register flow is
+          // byte-proven; v7.zw = PARTICLE_TILING is the inference). Tiling
+          // the base here repeated a deform16f trough 3x3 over one card for
+          // the stern "deform" system, which authors tilingU/V = 3.
+          deformTileUv = local * uUvTiling;
+          bool deformBase = uDistortionMode > 0.5 && uDistortionMode < 1.5;
+          if (!deformBase && (abs(uUvTiling.x - 1.0) > 0.0001 || abs(uUvTiling.y - 1.0) > 0.0001)) {
             local = fract(local * uUvTiling);
           }
           float fx = framesPerXY.x;
@@ -1230,15 +1314,44 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           //   R * 1.99219 - 0.992188 (signed around R = 0.5), foam = G.
           //   Then height *= tint.r and foam *= tint.b, both times alpha.
           // The tint channels are strengths, not colour: wake foam authors
-          // r = 0 and b = a; the deform sheet r = 0.85 and b = 0. Native also
-          // erodes the foam with a second texture (foamTile, by 1 - tint.g),
-          // which this approximation leaves out. Reading max(r, g, b) here
-          // turned the 0.5 marker into a half-opaque square.
+          // r = 0 and b = a; the deform sheet r = 0.85 and b = 0. Reading
+          // max(r, g, b) here turned the 0.5 marker into a half-opaque square.
+          // PS66 then erodes the foam with the second texture (foamTile.dds,
+          // textureName1), sampled at corner * tiling:
+          //   foam = saturate(foam - tile.g * (1 - tint.g) * tint.b * tint.a)
+          // Wake foam fades tint.g 1 -> 0.1 over its life, so each patch wears
+          // away along the tile's cell borders instead of dimming uniformly.
           bool foamSheet = abs(base.b - 0.5) < 0.25;
-          float deformFade = clamp(outA, 0.0, 1.0);
-          float deformHeight = (foamSheet ? 0.0 : base.r * 1.99219 - 0.992188) * vColor.r;
-          float deformWarp = clamp(abs(deformHeight) * 2.0, 0.0, 1.0) * deformFade;
-          float deformFoam = clamp(base.g * vColor.b, 0.0, 1.0) * deformFade;
+          float deformTintA = clamp(vColor.a * vHideFade, 0.0, 1.0);
+          float deformHeight =
+            (foamSheet ? 0.0 : base.r * 1.99219 - 0.992188) * vColor.r * deformTintA;
+          float deformFoam = base.g * vColor.b * deformTintA;
+          if (useFoamTile > 0.5) {
+            float tile = texture2D(foamTile, deformTileUv).g;
+            deformFoam -= tile * (1.0 - vColor.g) * vColor.b * deformTintA;
+          }
+          deformFoam = clamp(deformFoam, 0.0, 1.0);
+          if (uDeformWrite > 0.5) {
+            // Water-layer write, consumed by the FFT ocean (ocean/surface.ts).
+            // PS66 discards when both channels are ~0, writes
+            // o0.x = foam < 1 ? ln(1 - foam) : -65504 — ONE/ONE blending then
+            // sums ln(1 - f_i), so the sea's 1 - exp(x) is the alpha-over
+            // coverage of every sheet, order-free — and o0.y = foam *
+            // g_waterParams[10].w + height. Nothing else of the sprite path
+            // applies: no lighting, no soft-depth fade, no colour encode.
+            // Until the base texture has loaded there is nothing to write.
+            if (useMap < 0.5) discard;
+            if (max(abs(deformHeight), abs(deformFoam)) < 1e-4) discard;
+            float lnCoverage = deformFoam < 1.0 ? log(1.0 - deformFoam) : -65504.0;
+            gl_FragColor = vec4(
+              lnCoverage,
+              deformFoam * uDeformFoamDisplaceMult + deformHeight,
+              0.0,
+              1.0
+            );
+            return;
+          }
+          float deformWarp = clamp(abs(deformHeight) * 2.0, 0.0, 1.0);
           // Foam lies flat on the sea: light it like the FFT ocean's own foam
           // (ocean/surface.ts, 0.85 albedo, ambient + up-facing sun).
           // uSunColorNorm is sun / (luma + 1), so x2 restores a roughly unit

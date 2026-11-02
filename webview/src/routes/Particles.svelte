@@ -866,10 +866,17 @@
       // the native non-gradient substitution rule.
       if (s.animation?.useEmissionAlphaFromMV) anyMvEmission = true;
     }
-    if (placeholderBlends.size > 0) {
+    if (placeholderBlends.has('DEFORM_WATER_SURFACE')) {
       gaps.push(
-        `blend mode ${[...placeholderBlends].join(' / ')} approximated as ` +
-          'screen-space refraction from a scene-color copy; native water/heat-haze pass not exact',
+        'DEFORM_WATER_SURFACE: with the water plane on, foam and height are drawn into a water layer ' +
+          'the ocean reads (native sea composition, height scale not calibrated); without it, flat ' +
+          'foam cards stand in',
+      );
+    }
+    if (placeholderBlends.has('SHIMMER')) {
+      gaps.push(
+        'blend mode SHIMMER approximated as screen-space refraction from a scene-color copy; ' +
+          'native heat-haze pass not exact',
       );
     }
     if (anyUnresolvedTexture) {

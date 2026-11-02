@@ -151,6 +151,18 @@ export class Ocean {
     this.surface.setEnvironment(tex);
   }
 
+  /** This frame's DEFORM_WATER_SURFACE particle layer for the surface shader
+   *  (foam coverage, displacement, normals); `null` = none this frame. */
+  setDeformLayer(tex: THREE.Texture | null, viewProj?: THREE.Matrix4): void {
+    this.surface.setDeformLayer(tex, viewProj);
+  }
+
+  /** Live shading parameters (not a copy), for per-frame readers such as the
+   *  deform pre-pass that pushes `deformFoamDisplaceMult` into materials. */
+  get shading(): Readonly<OceanShadingParams> {
+    return this.params.shading;
+  }
+
   private ensureSim(): OceanSimulation {
     if (!this.spectrumDirty && this.sim) return this.sim;
     const spectra = buildCascadeSpectra(this.params.spectrum);
