@@ -589,6 +589,7 @@ export class SystemRenderer {
     particleSpeed: 0,
     systemSpeed: 0,
     particleIndex: 0,
+    particleSeed: Number.NaN,
   };
 
   /** Resolved ShaderMaterial. Owned per-instance so each system can bind
@@ -1891,6 +1892,7 @@ export class SystemRenderer {
       clocks.particleSpeed = Math.hypot(vx, vy, vz);
       clocks.systemSpeed = 0;
       clocks.particleIndex = this.pidx[i];
+      clocks.particleSeed = this.spinSeed[i];
       // Force integration (constants ignore the axis; ramps use parameterType).
       // Gated by the force action's delay — inactive until age >= forceDelay.
       if (age >= this.forceDelay) {
@@ -2565,6 +2567,10 @@ export class SystemRenderer {
     sc.particleSpeed = 0;
     sc.systemSpeed = 0;
     sc.particleIndex = this.pidx[slot];
+    // The emitter's spawn generators keep independent fresh draws (which seed
+    // native passes there is not byte-proven); the per-particle seed below
+    // takes over for the scalers, which the tick re-evaluates every frame.
+    sc.particleSeed = Number.NaN;
     const base = sampleGenAxis(this.emitterSizeGen, sc, DEFAULT_SIZE);
     // SIZE = emitter.sizeGenerator × static ONLY (native record 0x20). ageScale/aux
     // are age-clock coefficients, not size factors: ageScale → per-particle age
@@ -2590,6 +2596,11 @@ export class SystemRenderer {
     this.ageRate[slot] = ageRate > 0 ? ageRate : 1; // guard div-by-zero / negative
     // base was this.maxAge (set above); aux>1 and/or AGE_AUX intensity>1 → lives longer
     this.lifetime[slot] *= ageAux * (ageAuxBlock > 0 ? ageAuxBlock : 1);
+    // The per-particle rngSeed (native record+0x10, the same value spinSeed
+    // holds): every LINEAR generator evaluated for this particle from here on
+    // reads it, so the spawn-time scaler values below match what the tick
+    // computes on later frames.
+    sc.particleSeed = this.spinSeed[slot];
     let sizeScale0 = 1;
     for (let s = 0; s < this.scalerGens.length; s++) {
       if (this.scalerDelays[s] > 0) continue; // delayed scalers are inactive at spawn (age 0)

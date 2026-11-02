@@ -190,6 +190,12 @@ export interface ParticleClocks {
   particleSpeed: number;
   systemSpeed: number;
   particleIndex: number;
+  /** The particle's generator seed (0..1, drawn once at spawn), or NaN when
+   *  the evaluation has no particle (system-level). Native fx_Generator_eval
+   *  @0x14071a440 evaluates a LINEAR generator as lerp(from, to, t) with
+   *  t = record+0x10 (the per-particle rngSeed) whenever it runs for a
+   *  particle, and a fresh rand01() only without one. */
+  particleSeed: number;
 }
 
 export function rampHasNonZeroValue(ramp: ParticleRamp | undefined): boolean {
@@ -253,7 +259,12 @@ export function sampleGenAxis(
   if (vg.type === 'linear') {
     const f = vg.from ?? 0;
     const t = vg.to ?? f;
-    return f + particleRandom() * (t - f);
+    // Per-particle evaluations reuse the particle's spawn seed, so a random
+    // range (e.g. a scaler's scaleXGenerator 0.9–1.2) is one fixed value for
+    // the particle's life. Drawing a fresh random every tick re-rolled it 60
+    // times a second, and foam cards flickered in width and stretch.
+    const r = Number.isNaN(c.particleSeed) ? particleRandom() : c.particleSeed;
+    return f + r * (t - f);
   }
   if (vg.type === 'ramp') {
     const pts = vg.ramp?.points;
