@@ -58,10 +58,6 @@ interface ParticleMaterialOptions {
   /** animation.useEmissionAlphaFromMV — when set, the `_MVEA` texture's R
    *  channel drives emission and its A channel drives opacity. */
   useEmissionAlphaFromMV?: boolean;
-  /** DEFORM_WATER_SURFACE per-texel strength encoding: true when the base
-   *  texture is a `particles/deform16f/` float field (signed height around
-   *  R=0.5); false ⇒ RGB foam mask (DXT1 alpha-less). Drives uDeformSigned. */
-  deformSigned?: boolean;
   /** animation.randomFrameOnly — when set, each particle shows ONE fixed
    *  random atlas cell for its whole life (no flipbook). Engine
    *  FUN_14071b7f0 @0x14071c5b6 leaves the spawn-seeded random frame byte
@@ -308,10 +304,13 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
   // (param_2[1] = camera, unanimous in the 5-agent corroboration). ~36% of
   // systems carry a nonzero explicitOrientation (mostly (0,1,0) ground-flat +
   // (1,0,0)/(0,0,1) cards). velocityOriented splits by billboard: WITH
-  // billboard it is the velocity-axial mode below; WITHOUT billboard, native
-  // is a mode-0 card with a spawn-baked in-plane velocity angle — the webview
-  // still approximates that population as camera-facing + FS UV velocity spin
-  // (the frame algebra + shared sign bit are open; see handoff §13).
+  // billboard it is the velocity-axial mode below; WITHOUT billboard it is
+  // still this fixed card, and fx_Particle_initSpinAngle @0x14071a710 replaces
+  // the card's in-plane angle with the spawn velocity projected into the card
+  // plane, atan2(-A.v, B.v) through the eo basis, so texture-right (the
+  // scaleX side) runs along the motion. 275 systems, mostly DEFORM_WATER
+  // wake/splash foam lying flat on the sea (eo = +Y). These used to fall
+  // through to the camera-facing billboard and stood up as squares.
   // Axial (cylindrical) billboard: billboard=true + ANY nonzero eo — eo is
   // the card's LONG/UP AXIS, not its normal (world frame, or the attachment's
   // local frame per explicitOrientationLocal). The card contains the axis and
@@ -345,9 +344,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
   const useAxialBillboard =
     opts.billboard === true && (opts.velocityOriented === true || hasExplicitOrientation) ? 1 : 0;
   const fixedOrientationVec =
-    hasExplicitOrientation && !opts.velocityOriented && !useAxialBillboard
-      ? opts.explicitOrientation
-      : undefined;
+    hasExplicitOrientation && !useAxialBillboard ? opts.explicitOrientation : undefined;
   const useFixedOrientation = fixedOrientationVec ? 1 : 0;
   const orientationVec =
     explicitOrientation ??
@@ -541,9 +538,6 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
         value: distortionMode > 0 ? 1 : 0,
       },
       uDistortionMode: { value: distortionMode },
-      // DEFORM per-texel strength encoding: 1 = deform16f signed field
-      // (R centred 0.5), 0 = RGB foam mask. See the mode-1 shader branch.
-      uDeformSigned: { value: opts.deformSigned ? 1 : 0 },
       uDistortionStrength: { value: distortionStrength },
       uDistortionSceneTexture: { value: null as THREE.Texture | null },
       uDistortionSceneSize: { value: new THREE.Vector2(1, 1) },
@@ -726,10 +720,17 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           // native's post-rotation pos += rightAxis*halfW*kx + upAxis*halfH*ky.
           // rotationPhase carries initialOrientation + spin drift + the
           // camera-azimuth spawn bake (flat local eoY cards). velocityOriented
-          // flat cards stay on the FS per-frame velocity-angle path instead
-          // (native spawn-bakes the card-plane velocity angle; approximation
-          // documented at the FS gate).
-          float thetaFC = (uVelocityOriented > 0.5) ? 0.0 : rotationPhase;
+          // cards add the spawn velocity's angle in the card plane instead of
+          // that bake (fx_Particle_initSpinAngle): the renderer fills the
+          // velocity attribute with the unit spawn direction, and texture-right
+          // (U = B cos - A sin) lands on its projection. A velocity normal to
+          // the card leaves the angle alone, as native does.
+          float thetaFC = rotationPhase;
+          if (uVelocityOriented > 0.5) {
+            float vB = dot(velW, tB);
+            float vA = dot(velW, tA);
+            if (vB * vB + vA * vA > 1e-10) thetaFC += atan(-vA, vB);
+          }
           float sFC = sin(thetaFC);
           float cFC = cos(thetaFC);
           vec3 U = tB * cFC - tA * sFC;
@@ -798,7 +799,6 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uniform float uPremultiply;
       uniform float uDistortion;
       uniform float uDistortionMode;
-      uniform float uDeformSigned;
       uniform float uDistortionStrength;
       uniform sampler2D uDistortionSceneTexture;
       uniform vec2 uDistortionSceneSize;
@@ -847,23 +847,18 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           );
           vec2 spriteGeom = pointGeom;
           // Fixed-orientation cards rotate their AXES in the vertex shader
-          // (native buildQuad mode 0), so the UV footprint must NOT rotate
-          // again here. velocityOriented fixed cards are the exception: their
-          // angle still applies to the sampled UVs below (per-frame view-plane
-          // velocity — an approximation of native's spawn-baked card-plane
-          // velocity angle; see the VS note).
-          bool fsRotates = uUseSpriteRotation > 0.5
-            && !(uUseFixedOrientation > 0.5 && uVelocityOriented < 0.5);
+          // (native buildQuad mode 0), including the velocityOriented card-
+          // plane angle, so the UV footprint must NOT rotate again here.
+          bool fsRotates = uUseSpriteRotation > 0.5 && uUseFixedOrientation < 0.5;
           if (fsRotates) {
             // GL_POINTS cannot rotate the quad geometry. Enlarge the point in
             // the vertex shader, rotate source geometry by the inverse angle,
             // then sample the unrotated sprite UVs.
             vec2 rel = pointGeom - pivotGeom;
-            // velocityOriented UV spin: only for the NON-billboard population
-            // (mode-0 cards) — an approximation of native's spawn-baked
-            // card-plane velocity angle (fx_Particle_initSpinAngle). The
-            // billboard+velocityOriented systems are VELOCITY-AXIAL: their
-            // geometry aligns to velocity in the VS, so the UV term would
+            // velocityOriented UV spin: only the camera-facing (eo = 0,
+            // non-billboard) population reaches here — an approximation of
+            // native's spawn-baked world velocity angle. Velocity-axial and
+            // fixed cards align to velocity in the VS, so the UV term would
             // double-apply.
             float spriteAngle = vRotationPhase
               + ((uVelocityOriented > 0.5 && uVelocityAxial < 0.5) ? vVelocityAngle : 0.0);
@@ -922,7 +917,13 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           if (randomCell) {
             // Fixed per-particle random cell (no time advance, no cross-fade).
             // vFrameSeed was assigned floor(rand()*framesRangeEnd) at spawn.
-            vec2 gridUv = (vec2(mod(vFrameSeed, fx), floor(vFrameSeed / fx)) + local) / vec2(fx, fy);
+            // Round it before mod/floor: the interpolated varying arrives as
+            // 36.9999 in some pixels and 37.0 in others, so the cell flickered
+            // between neighbours row by row. Each jump also blew up the UV
+            // derivatives, dropping that 2x2 block to the 1x1 mip — flat
+            // horizontal bands across random-frame foam cards.
+            float cellIndex = floor(vFrameSeed + 0.5);
+            vec2 gridUv = (vec2(mod(cellIndex, fx), floor(cellIndex / fx)) + local) / vec2(fx, fy);
             vec2 puv = gridUv;
             if (useAtlasRect > 0.5) {
               puv = mix(atlasRect.xy, atlasRect.zw, puv);
@@ -1097,8 +1098,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
             vec3 up = normalize(vLightingUp);
             // UV-only spin must rotate the lighting frame too. Fixed-card
             // geometry already carries its spin, so do not apply it twice.
-            bool lightingFsRotates = uUseSpriteRotation > 0.5
-              && !(uUseFixedOrientation > 0.5 && uVelocityOriented < 0.5);
+            bool lightingFsRotates = uUseSpriteRotation > 0.5 && uUseFixedOrientation < 0.5;
             if (lightingFsRotates) {
               float angle = vRotationPhase
                 + ((uVelocityOriented > 0.5 && uVelocityAxial < 0.5) ? vVelocityAngle : 0.0);
@@ -1212,8 +1212,36 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           if (dot(normalOffset, normalOffset) < 0.0001) {
             normalOffset = (vLocalUV - vec2(0.5)) * 2.0;
           }
+          bool isShimmer = uDistortionMode > 1.5;
+          // DEFORM_WATER_SURFACE decode, as the native technique's pixel
+          // shader (particles.win.dx11.fxo blob 66, _MV twin 65) writes it
+          // into the screen-space water RT that the sea shader then shows as
+          // foam and displacement. These quads are never visible sprites.
+          //   |B - 0.5| < 0.25 (the Foam_*_foam sheets store B = 0.5 as a
+          //   marker): height = 0, foam = G.
+          //   Otherwise (deform16f height fields, B = 0): height =
+          //   R * 1.99219 - 0.992188 (signed around R = 0.5), foam = G.
+          //   Then height *= tint.r and foam *= tint.b, both times alpha.
+          // The tint channels are strengths, not colour: wake foam authors
+          // r = 0 and b = a; the deform sheet r = 0.85 and b = 0. Native also
+          // erodes the foam with a second texture (foamTile, by 1 - tint.g),
+          // which this approximation leaves out. Reading max(r, g, b) here
+          // turned the 0.5 marker into a half-opaque square.
+          bool foamSheet = abs(base.b - 0.5) < 0.25;
+          float deformFade = clamp(outA, 0.0, 1.0);
+          float deformHeight = (foamSheet ? 0.0 : base.r * 1.99219 - 0.992188) * vColor.r;
+          float deformWarp = clamp(abs(deformHeight) * 2.0, 0.0, 1.0) * deformFade;
+          float deformFoam = clamp(base.g * vColor.b, 0.0, 1.0) * deformFade;
+          // Foam lies flat on the sea: light it like the FFT ocean's own foam
+          // (ocean/surface.ts, 0.85 albedo, ambient + up-facing sun).
+          // uSunColorNorm is sun / (luma + 1), so x2 restores a roughly unit
+          // sun.
+          float foamNoL = max(normalize(uSunDirWorld).y, 0.0);
+          vec3 foamLit = vec3(0.85) * (
+            0.6 * uParticleLightingFactors.y
+            + (0.3 + 0.7 * foamNoL) * 2.0 * uSunColorNorm
+          );
           if (uDistortionSceneSize.x > 1.0 && uDistortionSceneSize.y > 1.0) {
-            bool isShimmer = uDistortionMode > 1.5;
             // SHIMMER (heat haze) BOILS: ride the per-particle age + a random
             // per-particle phase (vFrameSeed) so the warp field wobbles and the
             // lens looks alive rather than a frozen glass pane. RE doc 63 (M1):
@@ -1244,25 +1272,24 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
               ) + emissionBody;
               outA *= 0.55;
             } else {
-              // DEFORM_WATER_SURFACE quads natively write the water-sim RT
-              // (signed height + foam accumulation) — they are never visible
-              // billboards, and their fields feather to NEUTRAL at the quad
-              // borders (probed: water_spray_wave_UD border deviation ~0.003
-              // vs centre ~0.13). The flat 0.45-alpha refraction rendered the
-              // whole quad as a glassy square (FX_HELPER foam/deform family) —
-              // scale warp/foam/alpha by the per-texel deviation instead.
-              // deform16f/* = float RG field, R centred 0.5 (signed height),
-              // G≈0; other deform-blend textures are RGB foam MASKS (DXT1,
-              // alpha-less, black = nothing).
-              float deformMag = uDeformSigned > 0.5
-                ? clamp((abs(base.r - 0.5) * 2.0 + abs(base.g)) * 2.0, 0.0, 1.0)
-                : clamp(max(base.r, max(base.g, base.b)), 0.0, 1.0);
-              vec2 warpedUv = clamp(screenUv + warp * deformMag, vec2(0.001), vec2(0.999));
+              // Height bends the scene behind it (a stand-in for the sea
+              // displacement); foam lies over that as a lit white layer.
+              // Both feather to nothing at the quad borders, where the
+              // height field is neutral and the foam mask is empty.
+              vec2 warpedUv = clamp(screenUv + warp * deformWarp, vec2(0.001), vec2(0.999));
               vec3 refracted = texture2D(uDistortionSceneTexture, warpedUv).rgb;
-              float foam = 0.10 * clamp(outA, 0.0, 1.0) * deformMag;
-              outRgb = refracted + vec3(foam) + emissionBody;
-              outA *= 0.45 * deformMag;
+              float refractA = 0.45 * deformWarp;
+              float layerA = deformFoam + refractA * (1.0 - deformFoam);
+              outRgb = (layerA > 0.0001
+                ? (foamLit * deformFoam + refracted * refractA * (1.0 - deformFoam)) / layerA
+                : refracted) + emissionBody;
+              outA = layerA;
             }
+          } else if (!isShimmer) {
+            // No scene-colour copy: show the foam layer, plus a faint hint of
+            // the height field so pure deform sheets stay findable.
+            outRgb = foamLit + emissionBody;
+            outA = deformFoam + 0.15 * deformWarp * (1.0 - deformFoam);
           } else if (useEmissionAlphaFromMV > 0.5) {
             // No scene-colour RTT (the inspector's normal state): keep the
             // emissive flash core visible instead of the faint placeholder.

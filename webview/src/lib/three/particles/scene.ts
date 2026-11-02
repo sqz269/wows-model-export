@@ -406,7 +406,6 @@ export class ParticleScene {
         // SHIMMER emission-body composite (which falls back to the lit _LM
         // when no _MVEA is loaded). All mvMap samples are guarded on useMv.
         useEmissionAlphaFromMV: anim?.useEmissionAlphaFromMV,
-        deformSigned: r?.textureName0?.startsWith('particles/deform16f/'),
         randomFrameOnly: anim?.randomFrameOnly,
         frameRateRamp: anim?.frameRateRamp,
         spriteRotation: useSpriteRotation,

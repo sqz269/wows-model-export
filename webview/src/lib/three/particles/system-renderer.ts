@@ -417,10 +417,12 @@ export class SystemRenderer {
   // orientVec (sim+0x70) from the SPAWN velocity and never tracks the live
   // velocity, so cards keep their spawn axis while forces curve the path
   // (splash crowns under gravity). Zero = degenerate spawn speed -> the VS
-  // falls back to the authored eo axis. Only filled for the velocity-axial
-  // population (billboard + velocityOriented).
+  // falls back to the authored eo axis. Filled for the two velocityOriented
+  // populations whose geometry follows the spawn velocity: velocity-axial
+  // (billboard) and flat explicitOrientation cards, whose in-plane angle
+  // fx_Particle_initSpinAngle bakes from the spawn velocity.
   private spawnAxis: Float32Array;
-  private readonly velocityAxial: boolean;
+  private readonly seedsSpawnAxis: boolean;
   private age: Float32Array; // age in seconds; -1 = empty slot
   private lifetime: Float32Array;
   private colorRGBA: Float32Array;
@@ -940,7 +942,12 @@ export class SystemRenderer {
     this.vel = new Float32Array(this.capacity * 3);
     this.velGpu = new Float32Array(this.capacity * 3);
     this.spawnAxis = new Float32Array(this.capacity * 3);
-    this.velocityAxial = renderer?.billboard === true && renderer?.velocityOriented === true;
+    {
+      const eo = renderer?.explicitOrientation;
+      const hasEo = Array.isArray(eo) && eo.some((c) => Number.isFinite(c) && c !== 0);
+      this.seedsSpawnAxis =
+        renderer?.velocityOriented === true && (renderer?.billboard === true || hasEo);
+    }
     this.age = new Float32Array(this.capacity);
     this.lifetime = new Float32Array(this.capacity);
     this.ageRate = new Float32Array(this.capacity);
@@ -1993,7 +2000,7 @@ export class SystemRenderer {
     t.pos[dst3 + 0] = this.pos[src3 + 0] * this.nativeToWorld;
     t.pos[dst3 + 1] = this.pos[src3 + 1] * this.nativeToWorld;
     t.pos[dst3 + 2] = this.pos[src3 + 2] * this.nativeToWorld;
-    if (this.velocityAxial) {
+    if (this.seedsSpawnAxis) {
       // Spawn-seeded unit axis (native sim+0x70) — the VS only normalizes it,
       // so no NATIVE_TO_METRES scale; a zero axis falls back to eo in the VS.
       t.vel[dst3 + 0] = this.spawnAxis[src3 + 0];
@@ -2345,7 +2352,7 @@ export class SystemRenderer {
     this.vel[slot * 3 + 0] = SystemRenderer.TMP_VEL.x;
     this.vel[slot * 3 + 1] = SystemRenderer.TMP_VEL.y;
     this.vel[slot * 3 + 2] = SystemRenderer.TMP_VEL.z;
-    if (this.velocityAxial) {
+    if (this.seedsSpawnAxis) {
       // Seed the axial axis from the FINAL spawn velocity (post folds, post
       // frame hop — same frame as this.vel). Never re-read live velocity:
       // native seeds sim+0x70 once at spawn (see spawnAxis).
