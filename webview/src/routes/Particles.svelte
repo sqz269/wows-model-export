@@ -22,14 +22,22 @@
   import Play from '@lucide/svelte/icons/play';
   import Pause from '@lucide/svelte/icons/pause';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
+  import Repeat from '@lucide/svelte/icons/repeat';
+  import StepBack from '@lucide/svelte/icons/step-back';
+  import StepForward from '@lucide/svelte/icons/step-forward';
   import XIcon from '@lucide/svelte/icons/x';
   import { Button } from '$lib/components/ui/button';
   import { ApiError, fetchJson } from '$lib/api';
   import { navigate } from '$lib/router';
   import { navState } from '$lib/nav_state.svelte';
   import { hasModifier, isTypingContext } from '$lib/shortcuts';
-  import { ParticleScene, type ParticleAttachmentHandle } from '$lib/three/particles';
+  import {
+    ParticleScene,
+    type ParticleAttachmentHandle,
+    type ParticleAttachmentState,
+  } from '$lib/three/particles';
   import { gunShotIntensity } from '$lib/three/particles/gun-shot-intensity';
+  import { DEFAULT_PARTICLE_LIFETIME } from '$lib/three/particles/constants';
   import { createSceneEnvironment, type SceneEnvironment } from '$lib/three/scene';
   import { observeResize } from '$lib/three/resize';
   import { startRenderLoop } from '$lib/three/render_loop';
@@ -109,8 +117,41 @@
   /** Per-handle stats updated on the render loop. Drives the readouts
    *  in the centre overlay (alive count + elapsed time). */
   let aliveCount = $state(0);
-  let elapsedS = $state(0);
   let playing = $state(true);
+
+  // ── Timeline ────────────────────────────────────────────────────────
+  // The inspector runs the simulation in fixed 1/60 s steps from a seeded
+  // random source, so the effect at a given time is always the same frame.
+  // Scrubbing back restarts the effect and replays to the target; scrubbing
+  // forward just keeps stepping. Effects with camera-distance intensity
+  // channels still read the live camera, so orbiting can change a replay.
+  const SIM_STEP_S = 1 / 60;
+  const SIM_SEED = 0x5eed1234;
+  const PLAYBACK_RATES = [0.1, 0.25, 0.5, 1, 2];
+  /** Fixed steps simulated since the last restart. */
+  let simSteps = 0;
+  /** Real time owed to the simulation that does not yet fill a step. */
+  let pendingRealS = 0;
+  let lastFrameMs = -1;
+  /** Time picked on the scrubber, applied on the next frame. */
+  let pendingSeekS: number | null = null;
+  /** Pointer held on the scrubber: playback waits until release. */
+  let scrubbing = false;
+  /** Saved effect states by step, so seeking back replays at most
+   *  CHECKPOINT_STEPS instead of the whole run. Valid only for the current
+   *  build and intensity; cleared when either changes. */
+  const CHECKPOINT_STEPS = 30;
+  const CHECKPOINT_BUDGET_BYTES = 64 * 1024 * 1024;
+  let checkpoints = new Map<number, ParticleAttachmentState>();
+  let checkpointBytes = 0;
+  /** The clock holds at 0 until the effect's child records have loaded, so
+   *  every run (and every checkpoint) sees the same child spawns. */
+  let simReady = false;
+  let buildToken = 0;
+  let simTime = $state(0);
+  let timelineEnd = $state(10);
+  let loopTimeline = $state(true);
+  let playbackRate = $state(1);
 
   // Per-system bounding-box overlay (inspector diagnostic — wraps each
   // system's live particles in a coloured AABB).
@@ -279,6 +320,8 @@
 
   function applyIntensity(): void {
     if (scene && currentHandle) scene.setAttachmentIntensityValues(currentHandle, intensityValues);
+    // Saved states carry the old intensity; replays from them would mix both.
+    clearCheckpoints();
   }
 
   function setPresetAuthored(): void {
@@ -373,6 +416,26 @@
     scene.setSunLighting(sun.direction, sun.color);
     env.scene.add(scene.root);
 
+    // Console/automation handle, like `__shipViewer__` on the ship page:
+    //   __particleInspector__.seek(1.5); __particleInspector__.handle.systems
+    (globalThis as { __particleInspector__?: unknown }).__particleInspector__ = {
+      get scene() {
+        return scene;
+      },
+      get handle() {
+        return currentHandle;
+      },
+      get time() {
+        return simSteps * SIM_STEP_S;
+      },
+      get checkpoints() {
+        return { count: checkpoints.size, bytes: checkpointBytes };
+      },
+      seek: (seconds: number) => (pendingSeekS = seconds),
+      pause: () => (playing = false),
+      play: () => (playing = true),
+    };
+
     boundsGroup = new THREE.Group();
     boundsGroup.name = 'ParticleSystemBounds';
     env.scene.add(boundsGroup);
@@ -386,24 +449,29 @@
 
     stopLoop = startRenderLoop(() => {
       env!.controls.update();
-      scene!.tick(undefined, !playing);
+      const now = performance.now();
+      const realDt = lastFrameMs < 0 ? 0 : Math.min(0.1, (now - lastFrameMs) * 0.001);
+      lastFrameMs = now;
+      if (!simReady) {
+        scene!.advanceFixed(0, SIM_STEP_S);
+      } else if (pendingSeekS !== null) {
+        seekSimulation(pendingSeekS);
+        pendingSeekS = null;
+      } else if (playing && !scrubbing && currentHandle) {
+        advancePlayback(realDt);
+      } else {
+        // No steps, but keep the draw order fresh while the camera moves.
+        scene!.advanceFixed(0, SIM_STEP_S);
+      }
       syncSystems();
       env!.render();
-      // Mirror the simulator's alive count + elapsed time into reactive
-      // state so the overlay readouts update without a manual ping.
-      if (currentHandle) {
-        let total = 0;
-        let maxElapsed = 0;
-        for (const s of currentHandle.systems) {
-          total += s.aliveCount;
-          if (s.elapsedSeconds > maxElapsed) maxElapsed = s.elapsedSeconds;
-        }
-        aliveCount = total;
-        elapsedS = maxElapsed;
-      } else {
-        aliveCount = 0;
-        elapsedS = 0;
-      }
+      // Mirror the alive count and timeline position into reactive state so
+      // the readouts update without a manual ping.
+      simTime = simSteps * SIM_STEP_S;
+      if (!loopTimeline && simTime > timelineEnd) timelineEnd = simTime;
+      let total = 0;
+      for (const s of currentHandle?.systems ?? []) total += s.aliveCount;
+      aliveCount = total;
     });
   }
 
@@ -505,8 +573,15 @@
   function rebuildSceneFromRecord(rec: ParticleRecord | null) {
     if (!scene) return;
     scene.clear();
+    scene.setRandomSeed(SIM_SEED);
     currentHandle = null;
     hiddenSystems = new Set();
+    simSteps = 0;
+    pendingRealS = 0;
+    pendingSeekS = null;
+    clearCheckpoints();
+    simReady = false;
+    const token = ++buildToken;
     if (!rec || !selectedPath) return;
     const synthetic: ParticleAttachment = {
       group: 'inspector',
@@ -518,12 +593,18 @@
       [synthetic],
       { [selectedPath]: rec },
       () => new THREE.Vector3(0, 0, 0),
+      { prefetchChildEffects: true },
     );
     if (handles.length === 0) return;
     const h = handles[0];
     scene.setAttachmentActive(h, true);
     scene.setAttachmentIntensityValues(h, intensityValues);
     currentHandle = h;
+    // Steps start from the top of the sequence, the same as a seek restart.
+    scene.setRandomSeed(SIM_SEED);
+    void scene.whenChildEffectsReady().then(() => {
+      if (token === buildToken) simReady = true;
+    });
   }
 
   // Rebuild whenever the active record changes. The rebuild also reads
@@ -531,8 +612,108 @@
   // dragging an intensity slider never resets the simulator.
   $effect(() => {
     const rec = activeRecord;
-    untrack(() => rebuildSceneFromRecord(rec));
+    untrack(() => {
+      timelineEnd = defaultTimelineEnd(rec);
+      rebuildSceneFromRecord(rec);
+    });
   });
+
+  /** Scrubber length for a record. A one-shot gets its own loop period
+   *  (emission window plus the longest particle life, the period the scene
+   *  re-bursts on); a continuous effect gets a few particle lifetimes so it
+   *  reaches its steady state. */
+  function defaultTimelineEnd(rec: ParticleRecord | null): number {
+    let longestMaxAge = 0;
+    for (const sys of rec?.systems ?? []) {
+      const age = sys.general?.maxParticleAge ?? DEFAULT_PARTICLE_LIFETIME;
+      longestMaxAge = Math.max(longestMaxAge, Math.max(0.05, age));
+    }
+    const emitting = rec?.maxEmittingDuration ?? 0;
+    const end = emitting > 0 ? emitting + longestMaxAge : Math.max(5, 3 * longestMaxAge);
+    return Math.min(120, Math.ceil(end / SIM_STEP_S - 1e-6) * SIM_STEP_S);
+  }
+
+  /** Restart the effect and the random sequence: time 0 of the replay. */
+  function restartSimulation(): void {
+    if (!scene || !currentHandle) return;
+    scene.restartAttachment(currentHandle);
+    scene.setRandomSeed(SIM_SEED);
+    simSteps = 0;
+  }
+
+  function clearCheckpoints(): void {
+    checkpoints = new Map();
+    checkpointBytes = 0;
+  }
+
+  /** Save the effect's state at the current step, within the memory budget. */
+  function saveCheckpoint(): void {
+    if (!scene || !currentHandle || checkpoints.has(simSteps)) return;
+    const state = scene.captureAttachmentState(currentHandle);
+    if (checkpointBytes + state.bytes > CHECKPOINT_BUDGET_BYTES) return;
+    checkpoints.set(simSteps, state);
+    checkpointBytes += state.bytes;
+  }
+
+  /** Step forward to `target`, saving a checkpoint at each boundary. */
+  function advanceTo(target: number): void {
+    if (!scene) return;
+    if (target <= simSteps) {
+      scene.advanceFixed(0, SIM_STEP_S);
+      return;
+    }
+    while (simSteps < target) {
+      const mark = (Math.floor(simSteps / CHECKPOINT_STEPS) + 1) * CHECKPOINT_STEPS;
+      const stop = Math.min(target, mark);
+      scene.advanceFixed(stop - simSteps, SIM_STEP_S);
+      simSteps = stop;
+      if (stop === mark) saveCheckpoint();
+    }
+  }
+
+  /** Move the simulation to `seconds`, rounded to a step. Going back
+   *  restores the last checkpoint before the target (or restarts) and
+   *  replays the rest; going forward continues from the current state. */
+  function seekSimulation(seconds: number): void {
+    if (!scene || !currentHandle) return;
+    const target = Math.max(0, Math.round(seconds / SIM_STEP_S));
+    if (target < simSteps) {
+      // Strictly before the target, so at least one step runs and redraws.
+      let best = 0;
+      for (const step of checkpoints.keys()) if (step < target && step > best) best = step;
+      const state = best > 0 ? checkpoints.get(best) : undefined;
+      if (state && scene.restoreAttachmentState(currentHandle, state)) simSteps = best;
+      else restartSimulation();
+    }
+    advanceTo(target);
+    pendingRealS = 0;
+  }
+
+  /** Turn elapsed real time into whole simulation steps, wrapping at the
+   *  end of the timeline when looping. */
+  function advancePlayback(realDt: number): void {
+    pendingRealS += realDt * playbackRate;
+    let steps = Math.floor(pendingRealS / SIM_STEP_S + 1e-6);
+    pendingRealS = Math.max(0, pendingRealS - steps * SIM_STEP_S);
+    const endSteps = Math.round(timelineEnd / SIM_STEP_S);
+    if (loopTimeline && endSteps > 0 && simSteps + steps >= endSteps) {
+      steps = (simSteps + steps - endSteps) % endSteps;
+      restartSimulation();
+    }
+    advanceTo(simSteps + steps);
+  }
+
+  /** Pause and move one or more frames (negative = back). */
+  function stepFrames(delta: number): void {
+    playing = false;
+    pendingSeekS = Math.max(0, simSteps + delta) * SIM_STEP_S;
+  }
+
+  function setTimelineEnd(value: number): void {
+    if (!Number.isFinite(value) || value <= 0) return;
+    timelineEnd = Math.min(600, Math.round(value / SIM_STEP_S) * SIM_STEP_S || SIM_STEP_S);
+    if (simSteps * SIM_STEP_S > timelineEnd) pendingSeekS = timelineEnd;
+  }
 
   // ── Lifecycle wiring ────────────────────────────────────────────────
 
@@ -558,6 +739,14 @@
         case 'r':
         case 'R':
           restart();
+          e.preventDefault();
+          return;
+        case ',':
+          stepFrames(-1);
+          e.preventDefault();
+          return;
+        case '.':
+          stepFrames(1);
           e.preventDefault();
           return;
       }
@@ -878,21 +1067,6 @@
             {/each}
           </div>
         {/if}
-        <Button
-          variant="outline"
-          size="sm"
-          onclick={() => (playing = !playing)}
-          title={playing ? 'Pause (space)' : 'Play (space)'}
-        >
-          {#if playing}
-            <Pause class="size-3" />
-          {:else}
-            <Play class="size-3" />
-          {/if}
-        </Button>
-        <Button variant="outline" size="sm" onclick={restart} title="Restart simulation (R)">
-          <RotateCcw class="size-3" />
-        </Button>
       </div>
     </div>
 
@@ -929,7 +1103,7 @@
             alive <span class="text-foreground tabular-nums">{aliveCount}</span>
           </div>
           <div class="text-muted-foreground">
-            t <span class="text-foreground tabular-nums">{elapsedS.toFixed(2)}s</span>
+            t <span class="text-foreground tabular-nums">{simTime.toFixed(2)}s</span>
           </div>
           <div class="text-muted-foreground">
             systems <span class="text-foreground tabular-nums"
@@ -983,6 +1157,108 @@
         </div>
       {/if}
     </div>
+
+    <!-- Timeline: scrub, step and loop the simulation clock. -->
+    {#if selectedPath && activeRecord && !recordError}
+      <div
+        class="border-border bg-card flex flex-none items-center gap-1.5 border-t px-2 py-1 font-mono text-[10px]"
+      >
+        <Button
+          variant="ghost"
+          size="sm"
+          class="h-6 px-1.5"
+          onclick={restart}
+          title="Restart simulation (R)"
+        >
+          <RotateCcw class="size-3" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          class="h-6 px-1.5"
+          onclick={() => stepFrames(-1)}
+          title="Back one frame (,)"
+        >
+          <StepBack class="size-3" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          class="h-6 px-1.5"
+          onclick={() => (playing = !playing)}
+          title={playing ? 'Pause (space)' : 'Play (space)'}
+        >
+          {#if playing}
+            <Pause class="size-3" />
+          {:else}
+            <Play class="size-3" />
+          {/if}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          class="h-6 px-1.5"
+          onclick={() => stepFrames(1)}
+          title="Forward one frame (.)"
+        >
+          <StepForward class="size-3" />
+        </Button>
+        <span class="text-foreground w-[52px] flex-none text-right tabular-nums"
+          >{simTime.toFixed(2)}s</span
+        >
+        <input
+          type="range"
+          class="accent-primary h-1 min-w-0 flex-1 cursor-pointer"
+          min="0"
+          max={timelineEnd}
+          step={SIM_STEP_S}
+          value={simTime}
+          aria-label="Simulation time"
+          title="Drag to scrub the simulation time"
+          oninput={(e) => (pendingSeekS = Number(e.currentTarget.value))}
+          onpointerdown={() => (scrubbing = true)}
+          onpointerup={() => (scrubbing = false)}
+          onpointercancel={() => (scrubbing = false)}
+          onchange={() => (scrubbing = false)}
+        />
+        <label
+          class="text-muted-foreground flex flex-none items-center gap-1"
+          title="Timeline length in seconds"
+        >
+          /
+          <input
+            type="number"
+            min="0.1"
+            step="0.5"
+            value={timelineEnd.toFixed(2)}
+            onchange={(e) => setTimelineEnd(Number(e.currentTarget.value))}
+            class="bg-popover border-border text-foreground w-14 rounded border px-1 py-0.5 tabular-nums"
+          />
+          s
+        </label>
+        <button
+          type="button"
+          onclick={() => (loopTimeline = !loopTimeline)}
+          title={loopTimeline
+            ? 'Looping at the end of the timeline (click to run on past it)'
+            : 'Running past the end of the timeline (click to loop)'}
+          class="flex-none rounded border border-border p-1 {loopTimeline
+            ? 'bg-primary text-primary-foreground'
+            : 'bg-popover text-muted-foreground hover:text-foreground'}"
+        >
+          <Repeat class="size-3" />
+        </button>
+        <select
+          bind:value={playbackRate}
+          title="Playback speed"
+          class="bg-popover border-border text-foreground flex-none rounded border px-1 py-0.5"
+        >
+          {#each PLAYBACK_RATES as rate (rate)}
+            <option value={rate}>{rate}×</option>
+          {/each}
+        </select>
+      </div>
+    {/if}
   </section>
 
   <!-- ── Right: parameter inspector ───────────────────────────────── -->

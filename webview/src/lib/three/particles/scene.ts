@@ -26,10 +26,32 @@ import type { ParticleEffectSpawnCallback, ParticleEffectSpawnRequest } from './
 import { composeMainBucket } from './bucket-compositor';
 import { LightRenderer } from './light-renderer';
 import { PS_RBT_LUT_MODES, buildParticleMaterial } from './material';
+import { SeededParticleRandom, useParticleRandom } from './random';
+import { captureObjectState, objectStateBytes, restoreObjectState } from './state-snapshot';
+import type { ObjectState } from './state-snapshot';
 
 // ---------------------------------------------------------------------------
 // Public API — one ParticleScene per ShipViewer instance
 // ---------------------------------------------------------------------------
+
+export interface ParticleBuildOptions {
+  /** Whether a one-shot effect loops (default true); see `build`. */
+  loopOneShot?: (attachment: ParticleAttachment) => boolean;
+  /** Load the records of every child effect up front, so child spawns
+   *  happen on time from the first play (and replays are repeatable). */
+  prefetchChildEffects?: boolean;
+}
+
+/** Saved simulation state of one effect; see `captureAttachmentState`. */
+export interface ParticleAttachmentState {
+  systems: ObjectState[];
+  lights: ObjectState[];
+  children: SpawnedEffectState[];
+  active: boolean;
+  randomState: number | null;
+  /** Typed-array bytes held by the copy. */
+  bytes: number;
+}
 
 export interface ParticleAttachmentHandle {
   attachment: ParticleAttachment;
@@ -54,6 +76,21 @@ interface SpawnedParticleEffect {
   systems: SystemRenderer[];
   lights: LightRenderer[];
   depth: number;
+  /** What the child was built from, so a saved state can rebuild it. */
+  effectPath: string;
+  record: ParticleRecord;
+}
+
+/** Saved child effect: how to rebuild it, plus its simulation state. */
+interface SpawnedEffectState {
+  effectPath: string;
+  record: ParticleRecord;
+  position: [number, number, number];
+  /** Index of the saved child whose group holds this one; -1 = the effect. */
+  parentIndex: number;
+  depth: number;
+  systems: ObjectState[];
+  lights: ObjectState[];
 }
 
 type ParticleQuality = 'high' | 'low' | 'shared';
@@ -110,6 +147,9 @@ export class ParticleScene {
   readonly root: THREE.Group;
   private attachments = new Map<string, ParticleAttachmentHandle>();
   private lastTickMs = -1;
+  private childEffectsReady: Promise<void> = Promise.resolve();
+  /** Seeded random source for this scene's builds and steps; null = Math.random. */
+  private random: SeededParticleRandom | null = null;
   private sunDirection = DEFAULT_PARTICLE_SUN_DIR.clone();
   private sunColorNorm = DEFAULT_PARTICLE_SUN_COLOR_NORM.clone();
   private lightingFactors: [number, number] = [0.25, 0.8];
@@ -212,7 +252,23 @@ export class ParticleScene {
     attachments: ParticleAttachment[],
     particles: Record<string, ParticleRecord>,
     resolveNodePosition: (attachment: ParticleAttachment) => THREE.Vector3 | null,
-    options: { loopOneShot?: (attachment: ParticleAttachment) => boolean } = {},
+    options: ParticleBuildOptions = {},
+  ): ParticleAttachmentHandle[] {
+    // Systems draw some per-instance values at construction (emitter delay),
+    // so a seeded scene seeds its builds too.
+    const previous = this.random ? useParticleRandom(this.random.next) : null;
+    try {
+      return this.buildHandles(attachments, particles, resolveNodePosition, options);
+    } finally {
+      if (previous) useParticleRandom(previous);
+    }
+  }
+
+  private buildHandles(
+    attachments: ParticleAttachment[],
+    particles: Record<string, ParticleRecord>,
+    resolveNodePosition: (attachment: ParticleAttachment) => THREE.Vector3 | null,
+    options: ParticleBuildOptions,
   ): ParticleAttachmentHandle[] {
     this.clear();
     this.particleRecords.clear();
@@ -223,11 +279,13 @@ export class ParticleScene {
       if (effectRef.quality === 'high') this.particleRecords.set(effectRef.path, record);
     }
     const handles: ParticleAttachmentHandle[] = [];
+    const prefetches: Promise<void>[] = [];
     for (let i = 0; i < attachments.length; i++) {
       const a = attachments[i];
       const particlePath = normalizeParticleEffectPath(a.particle_path);
       const rec = particles[a.particle_path] ?? particles[particlePath];
       if (!rec) continue;
+      if (options.prefetchChildEffects) prefetches.push(this.prefetchChildEffectRecords(rec, 0));
       const grp = new THREE.Group();
       grp.name = `effect:${a.group}:${a.node}`;
       const anchor = resolveNodePosition(a);
@@ -282,6 +340,7 @@ export class ParticleScene {
       .sort((a, b) => b.score - a.score)
       .slice(0, PARTICLE_POINT_LIGHT_BUDGET);
     for (const l of pointLights) l.enablePointLight();
+    this.childEffectsReady = Promise.all(prefetches).then(() => undefined);
     return handles;
   }
 
@@ -425,15 +484,21 @@ export class ParticleScene {
     return { systems, lights };
   }
 
+  private cachedParticleRecord(path: string, quality: ParticleQuality): ParticleRecord | undefined {
+    const normalized = normalizeParticleEffectPath(path);
+    return (
+      this.particleRecords.get(particleRecordCacheKey(normalized, quality)) ??
+      (quality === 'high' ? this.particleRecords.get(normalized) : undefined)
+    );
+  }
+
   private async loadParticleRecord(
     path: string,
     quality: ParticleQuality,
   ): Promise<ParticleRecord | null> {
     const normalized = normalizeParticleEffectPath(path);
     const key = particleRecordCacheKey(normalized, quality);
-    const cached =
-      this.particleRecords.get(key) ??
-      (quality === 'high' ? this.particleRecords.get(normalized) : undefined);
+    const cached = this.cachedParticleRecord(path, quality);
     if (cached) return cached;
     let pending = this.particleRecordFetches.get(key);
     if (!pending) {
@@ -474,20 +539,67 @@ export class ParticleScene {
     }
   }
 
-  private async spawnChildEffect(
+  /** Spawn a child effect. With its record already loaded it is created
+   *  right away, inside the parent's step as the engine does, so replays of
+   *  the parent are repeatable; otherwise it appears once the record loads. */
+  private spawnChildEffect(
     parent: ParticleAttachmentHandle,
     parentGroup: THREE.Group,
     request: ParticleEffectSpawnRequest,
     depth: number,
-  ): Promise<void> {
+  ): void {
     if (!parent.active || depth >= CHILD_EFFECT_DEPTH_LIMIT) return;
     if (this.spawnedEffects.length >= CHILD_EFFECT_BUDGET) return;
     const effectRef = parseParticleEffectRef(request.effectName);
     const effectPath = effectRef.path;
     if (!effectPath.endsWith('.xml')) return;
-    const rec = await this.loadParticleRecord(effectPath, effectRef.quality);
-    if (!rec || !parent.active) return;
+    const cached = this.cachedParticleRecord(effectPath, effectRef.quality);
+    if (cached) {
+      this.instantiateChildEffect(parent, parentGroup, request, depth, effectPath, cached);
+      return;
+    }
+    void this.loadParticleRecord(effectPath, effectRef.quality).then((rec) => {
+      if (!rec || !parent.active || this.spawnedEffects.length >= CHILD_EFFECT_BUDGET) return;
+      this.instantiateChildEffect(parent, parentGroup, request, depth, effectPath, rec);
+    });
+  }
 
+  /** Start loading every child effect a record can spawn (spawner and
+   *  barrier actions, recursively), so spawns during playback find their
+   *  record ready and happen on time. */
+  private prefetchChildEffectRecords(rec: ParticleRecord, depth: number): Promise<void> {
+    if (depth >= CHILD_EFFECT_DEPTH_LIMIT) return Promise.resolve();
+    const loads: Promise<void>[] = [];
+    for (const sys of rec.systems ?? []) {
+      for (const c of sys.components ?? []) {
+        const name = (c.body as { effectName?: unknown } | undefined)?.effectName;
+        if (typeof name !== 'string' || !name) continue;
+        const ref = parseParticleEffectRef(name);
+        if (!ref.path.endsWith('.xml')) continue;
+        loads.push(
+          this.loadParticleRecord(ref.path, ref.quality).then((child) =>
+            child ? this.prefetchChildEffectRecords(child, depth + 1) : undefined,
+          ),
+        );
+      }
+    }
+    return Promise.all(loads).then(() => undefined);
+  }
+
+  /** Resolves once the child records requested by the last `build` with
+   *  `prefetchChildEffects` have loaded (or failed). */
+  whenChildEffectsReady(): Promise<void> {
+    return this.childEffectsReady;
+  }
+
+  private instantiateChildEffect(
+    parent: ParticleAttachmentHandle,
+    parentGroup: THREE.Group,
+    request: ParticleEffectSpawnRequest,
+    depth: number,
+    effectPath: string,
+    rec: ParticleRecord,
+  ): SpawnedParticleEffect {
     const group = new THREE.Group();
     group.name = `spawn:${effectPath}`;
     group.position.set(request.position[0], request.position[1], request.position[2]);
@@ -498,6 +610,8 @@ export class ParticleScene {
       systems: [],
       lights: [],
       depth: depth + 1,
+      effectPath,
+      record: rec,
     };
     const instantiated = this.instantiateRecordSystems(
       rec,
@@ -512,6 +626,7 @@ export class ParticleScene {
     spawned.systems = instantiated.systems;
     spawned.lights = instantiated.lights;
     this.spawnedEffects.push(spawned);
+    return spawned;
   }
 
   private disposeSpawnedEffect(effect: SpawnedParticleEffect): void {
@@ -636,17 +751,124 @@ export class ParticleScene {
     // Pausing retains visible buffers and still re-sorts when the camera moves.
     // Refresh lastTickMs above so resuming never consumes the paused interval.
     if (dt <= 0 && !paused) return;
-    for (const handle of this.attachments.values()) {
-      if (!handle.active) continue;
-      if (!paused) for (const s of handle.systems) s.tick(dt);
-      if (!paused) for (const l of handle.lights) l.tick(dt);
-    }
-    for (const effect of this.spawnedEffects) {
-      if (!effect.parent.active) continue;
-      if (!paused) for (const s of effect.systems) s.tick(dt);
-      if (!paused) for (const l of effect.lights) l.tick(dt);
-    }
+    if (!paused) this.stepActive(dt, true);
     this.pruneFinishedSpawnedEffects();
+    this.composeActive();
+  }
+
+  /** Advance every active effect by `steps` fixed steps of `stepDt` seconds,
+   *  ignoring the wall clock. GPU buffers are written once, after the last
+   *  step; `steps = 0` only refreshes the draw order for the camera. With a
+   *  seed set, restarting an effect and replaying the same steps reproduces
+   *  it exactly, which is how the inspector seeks to an earlier time. */
+  advanceFixed(steps: number, stepDt: number): void {
+    this.updateViewportHeightUniforms();
+    for (let i = 0; i < steps; i++) {
+      this.stepActive(stepDt, i === steps - 1);
+      this.pruneFinishedSpawnedEffects();
+    }
+    this.composeActive();
+  }
+
+  /** Seed this scene's random draws (`null` = Math.random). Setting the
+   *  same seed again rewinds the sequence to its start. */
+  setRandomSeed(seed: number | null): void {
+    this.random = seed === null ? null : new SeededParticleRandom(seed);
+  }
+
+  /** Copy one effect's simulation state, its live child effects and the
+   *  scene's random sequence position, so `restoreAttachmentState` can jump
+   *  back to it. */
+  captureAttachmentState(handle: ParticleAttachmentHandle): ParticleAttachmentState {
+    const systems = handle.systems.map((s) => captureObjectState(s));
+    const lights = handle.lights.map((l) => captureObjectState(l));
+    let bytes = 0;
+    for (const st of systems) bytes += objectStateBytes(st);
+    const live = this.spawnedEffects.filter((e) => e.parent === handle);
+    const children: SpawnedEffectState[] = live.map((e) => {
+      const childSystems = e.systems.map((s) => captureObjectState(s));
+      for (const st of childSystems) bytes += objectStateBytes(st);
+      return {
+        effectPath: e.effectPath,
+        record: e.record,
+        position: [e.group.position.x, e.group.position.y, e.group.position.z],
+        parentIndex: live.findIndex((other) => other.group === e.group.parent),
+        depth: e.depth,
+        systems: childSystems,
+        lights: e.lights.map((l) => captureObjectState(l)),
+      };
+    });
+    return {
+      systems,
+      lights,
+      children,
+      active: handle.active,
+      randomState: this.random?.state ?? null,
+      bytes,
+    };
+  }
+
+  /** Put an effect back to a state from `captureAttachmentState`. Returns
+   *  false if the effect changed shape since then (the caller should
+   *  restart and replay instead). */
+  restoreAttachmentState(
+    handle: ParticleAttachmentHandle,
+    state: ParticleAttachmentState,
+  ): boolean {
+    if (state.systems.length !== handle.systems.length) return false;
+    if (state.lights.length !== handle.lights.length) return false;
+    for (let i = this.spawnedEffects.length - 1; i >= 0; i--) {
+      const effect = this.spawnedEffects[i];
+      if (effect.parent !== handle) continue;
+      this.disposeSpawnedEffect(effect);
+      this.spawnedEffects.splice(i, 1);
+    }
+    handle.systems.forEach((s, i) => restoreObjectState(s, state.systems[i]));
+    handle.lights.forEach((l, i) => restoreObjectState(l, state.lights[i]));
+    // Rebuild the child effects that were alive, in their original order
+    // (step order decides who draws which random numbers), then restore them.
+    // Same record, same systems, so the saved states line up one to one.
+    const groups: THREE.Group[] = [];
+    for (const c of state.children) {
+      const parentGroup = c.parentIndex >= 0 ? groups[c.parentIndex] : handle.group;
+      const request = { effectName: c.effectPath, position: c.position };
+      const child = this.instantiateChildEffect(
+        handle,
+        parentGroup,
+        request,
+        c.depth - 1,
+        c.effectPath,
+        c.record,
+      );
+      groups.push(child.group);
+      child.systems.forEach((s, i) => restoreObjectState(s, c.systems[i]));
+      child.lights.forEach((l, i) => restoreObjectState(l, c.lights[i]));
+    }
+    handle.active = state.active;
+    if (this.random && state.randomState !== null) this.random.state = state.randomState;
+    return true;
+  }
+
+  private stepActive(dt: number, writeBuffers: boolean): void {
+    const previous = this.random ? useParticleRandom(this.random.next) : null;
+    try {
+      for (const handle of this.attachments.values()) {
+        if (!handle.active) continue;
+        for (const s of handle.systems) s.tick(dt, writeBuffers);
+        for (const l of handle.lights) l.tick(dt);
+      }
+      // Copy: children spawned during this step start ticking on the next.
+      for (const effect of this.spawnedEffects.slice()) {
+        if (!effect.parent.active) continue;
+        for (const s of effect.systems) s.tick(dt, writeBuffers);
+        for (const l of effect.lights) l.tick(dt);
+      }
+    } finally {
+      if (previous) useParticleRandom(previous);
+    }
+  }
+
+  private composeActive(): void {
     // Native shared list-0: one back-to-front sort across every main-bucket
     // system of every live effect, then per-technique runs (see
     // bucket-compositor.ts). Runs after prune so disposed systems are gone.

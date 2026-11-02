@@ -58,6 +58,7 @@ import {
   sampleScalarVg,
 } from './sampling';
 import type { ParticleClocks } from './sampling';
+import { particleRandom } from './random';
 import {
   BARRIER_REACTION_ALPHA,
   BARRIER_REACTION_BOUNCE,
@@ -1078,6 +1079,10 @@ export class SystemRenderer {
     this.alive = 0;
     this.emitAccum = 0;
     this.creatorAccum = 0;
+    // A restart is a fresh instance: the particle-index clock that value
+    // generators can sample starts from 0 again.
+    this.spawnCounter = 0;
+    this.spawnSerialCounter = 0;
     for (const action of this.spawnerActions) action.accum = 0;
     for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
     this.instGeom.instanceCount = 0;
@@ -1414,8 +1419,9 @@ export class SystemRenderer {
     this.parentVelocityLocal.applyMatrix3(worldBasis(source, SystemRenderer.TMP_BASIS).transpose());
   }
 
-  /** Step the simulation by `dt` seconds. Updates the GPU buffers. */
-  tick(dt: number): void {
+  /** Step the simulation by `dt` seconds. Updates the GPU buffers unless
+   *  `writeBuffers` is false (fast-forwarding several steps at once). */
+  tick(dt: number, writeBuffers = true): void {
     if (!this.active) {
       // Even when paused, decay existing particles so they don't sit
       // frozen. Optional — for MVP we just fully freeze.
@@ -1438,7 +1444,7 @@ export class SystemRenderer {
     this.advanceBy(dt, true);
     // Main-bucket systems are drawn by the scene-global compositor (native
     // shared list-0); their own mesh stays empty.
-    if (!this.composedMainBucket) this.writeBuffers();
+    if (writeBuffers && !this.composedMainBucket) this.writeBuffers();
   }
 
   /** Advance the sim by `dt`, subdivided into ≤0.25 s substeps like the
@@ -2393,13 +2399,13 @@ export class SystemRenderer {
     // [0, framesRangeEnd). The fragment shader reads it via `frameSeed` only
     // when uRandomFrame is set; harmless to assign unconditionally.
     this.frameSeed[slot] =
-      this.framesRangeEnd > 0 ? Math.floor(Math.random() * this.framesRangeEnd) : 0;
+      this.framesRangeEnd > 0 ? Math.floor(particleRandom() * this.framesRangeEnd) : 0;
     this.framePhase[slot] = 0;
     // Start angle = (rand−0.5)·range + base (native FUN_14071a710 centres
     // the random by −0.5 / DAT_1425565dc). spinSeed feeds the standalone
     // spinRateRange drift term in tick().
     this.rotationPhase[slot] =
-      (Math.random() - 0.5) * this.initialOrientationRange + this.initialOrientationBase;
+      (particleRandom() - 0.5) * this.initialOrientationRange + this.initialOrientationBase;
     // Flat-card camera-azimuth spawn bake (fx_Particle_emitUpdate
     // @0x14071b231): add atan2(−fwd.x, fwd.z) of the camera forward at THIS
     // particle's spawn moment, sign per eo.y. Consumed by the VS fixed-card
@@ -2412,7 +2418,7 @@ export class SystemRenderer {
         this.spawnCameraYawSign *
         Math.atan2(-SystemRenderer.TMP_POS2.x, SystemRenderer.TMP_POS2.z);
     }
-    this.spinSeed[slot] = Math.random();
+    this.spinSeed[slot] = particleRandom();
     const sc = SystemRenderer.TMP_CLOCKS;
     sc.particleAge = 0;
     sc.systemAge = this.elapsed;

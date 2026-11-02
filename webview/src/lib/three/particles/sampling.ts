@@ -11,6 +11,7 @@ import type {
   ParticleVariantVg,
   ParticleVgtPrototype,
 } from '$lib/types/sidecar';
+import { particleRandom } from './random';
 
 export function finiteNumber(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -154,7 +155,7 @@ export function sampleScalarVg(
       // Random pick in [from, to]. Caller can re-sample for randomness.
       const f = vg.from ?? 0;
       const tt = vg.to ?? f;
-      return f + Math.random() * (tt - f);
+      return f + particleRandom() * (tt - f);
     }
     case 'ramp':
       return sampleRamp(vg.ramp, t, fallback);
@@ -237,7 +238,7 @@ export function sampleGenAxis(
   if (vg.type === 'linear') {
     const f = vg.from ?? 0;
     const t = vg.to ?? f;
-    return f + Math.random() * (t - f);
+    return f + particleRandom() * (t - f);
   }
   if (vg.type === 'ramp') {
     const pts = vg.ramp?.points;
@@ -259,7 +260,7 @@ export function samplePosFromVariantVg(
   if (!vg || vg.count === 0 || !vg.prototypes?.length) return;
   // Pick one prototype at random with uniform weight. WG's distribution
   // semantics aren't fully nailed down; uniform is a reasonable approx.
-  const proto = vg.prototypes[Math.floor(Math.random() * vg.prototypes.length)];
+  const proto = vg.prototypes[Math.floor(particleRandom() * vg.prototypes.length)];
   samplePosFromPrototype(proto, out);
 }
 
@@ -279,16 +280,16 @@ function samplePosFromPrototype(proto: ParticleVgtPrototype, out: THREE.Vector3)
       const c = body.corner ?? [0, 0, 0];
       const o = body.opposite ?? c;
       out.set(
-        c[0] + Math.random() * (o[0] - c[0]),
-        c[1] + Math.random() * (o[1] - c[1]),
-        c[2] + Math.random() * (o[2] - c[2]),
+        c[0] + particleRandom() * (o[0] - c[0]),
+        c[1] + particleRandom() * (o[1] - c[1]),
+        c[2] + particleRandom() * (o[2] - c[2]),
       );
       return;
     }
     case 'line': {
       const c = body.corner ?? [0, 0, 0];
       const d = body.difference ?? [0, 0, 0];
-      const u = Math.random();
+      const u = particleRandom();
       out.set(c[0] + u * d[0], c[1] + u * d[1], c[2] + u * d[2]);
       return;
     }
@@ -297,10 +298,10 @@ function samplePosFromPrototype(proto: ParticleVgtPrototype, out: THREE.Vector3)
       const rMin = body.minRadius ?? 0;
       const rMax = body.maxRadius ?? rMin;
       // Pick a random direction; pick a radius uniformly between min and max.
-      const u = Math.random() * 2 - 1;
-      const phi = Math.random() * Math.PI * 2;
+      const u = particleRandom() * 2 - 1;
+      const phi = particleRandom() * Math.PI * 2;
       const sinTheta = Math.sqrt(1 - u * u);
-      const r = rMin + Math.random() * Math.max(0, rMax - rMin);
+      const r = rMin + particleRandom() * Math.max(0, rMax - rMin);
       out.set(
         ctr[0] + r * sinTheta * Math.cos(phi),
         ctr[1] + r * u,
@@ -315,9 +316,9 @@ function samplePosFromPrototype(proto: ParticleVgtPrototype, out: THREE.Vector3)
       const diff = body.difference ?? [0, 1, 0];
       const rMin = body.minRadius ?? 0;
       const rMax = body.maxRadius ?? rMin;
-      const r = rMin + Math.random() * Math.max(0, rMax - rMin);
-      const theta = Math.random() * Math.PI * 2;
-      const tHeight = Math.random();
+      const r = rMin + particleRandom() * Math.max(0, rMax - rMin);
+      const theta = particleRandom() * Math.PI * 2;
+      const tHeight = particleRandom();
       const cu = Math.cos(theta) * r;
       const cv = Math.sin(theta) * r;
       out.set(
