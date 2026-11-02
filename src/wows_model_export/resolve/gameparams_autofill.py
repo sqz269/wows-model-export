@@ -747,6 +747,31 @@ def ship_movement_extras(components: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def ship_hull_size_extras(components: dict[str, Any]) -> list[float] | None:
+    """Return the active hull's ``size`` as ``[length_m, width_m, height_m]``.
+
+    GameParams ``Hull.size`` is the hull's bounding dimensions in metres
+    (Montana: ``[280.77, 36.93, 39.64]``). The game's ``ShipEffects`` component
+    feeds ``size[0]`` / ``size[1]`` through ``clampremap`` into the wake
+    effects' intensity channels 3 and 4 (``effectsIntensityByLength`` /
+    ``effectsIntensityByWidth`` in ``ShipEffects.__init__``), so a consumer
+    that drives ship wakes needs the raw hull dimensions. Emitted verbatim in
+    GameParams units; the clampremap constants stay consumer-side.
+
+    Returns ``None`` when the hull has no usable 3-component size.
+    """
+    hull = components.get("hull")
+    if not isinstance(hull, dict):
+        return None
+    raw = hull.get("size")
+    if not isinstance(raw, (list, tuple)) or len(raw) < 3:
+        return None
+    dims = [_safe_float(v) for v in raw[:3]]
+    if any(v is None for v in dims):
+        return None
+    return [round(float(v), 4) for v in dims if v is not None]
+
+
 def variants_summary(ship: dict[str, Any]) -> dict[str, Any]:
     """Return a JSON-friendly summary of the ship's upgrade tree.
 

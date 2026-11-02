@@ -199,6 +199,11 @@ _SHIP_ORDER: tuple[str, ...] = (
     "peculiarity_flag",
     "paper_ship",
     "displacement_t",
+    # Active hull ``[length, width, height]`` in metres (GameParams
+    # ``Hull.size``). The game remaps length / width into the wake effects'
+    # intensity channels 3 / 4 (``ShipEffects.effectsIntensityByLength`` /
+    # ``...ByWidth``), so wake-driving consumers need the raw dimensions.
+    "hull_size_m",
     "hp_rated",
     "service_date",
 )

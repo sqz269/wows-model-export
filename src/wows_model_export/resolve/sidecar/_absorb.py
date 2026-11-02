@@ -671,6 +671,7 @@ def absorb_gameparams_ship(
     *,
     full_ship_id: str | None = None,
     movement: dict[str, Any] | None = None,
+    hull_size_m: list[float] | None = None,
 ) -> dict[str, Any]:
     """Merge ship-level metadata extras (archetype, peculiarity, paper_ship)
     into ``doc.ship``. Returns a new doc; ``doc`` is not mutated.
@@ -683,6 +684,12 @@ def absorb_gameparams_ship(
     :func:`...gameparams_autofill.ship_movement_extras` (max speed, turning
     radius, rudder time, engine spool times, drag coefs). When non-empty it is
     stamped at ``ship.movement`` (schema v3.x, additive).
+
+    ``hull_size_m`` is the active hull's ``[length, width, height]`` in metres
+    from :func:`...gameparams_autofill.ship_hull_size_extras`. The game's
+    ``ShipEffects`` remaps length / width into the wake effects' intensity
+    channels 3 / 4, so wake-driving consumers read it. Stamped at
+    ``ship.hull_size_m`` (schema v3.x, additive).
     """
     if not isinstance(ship_dict, dict):
         return doc
@@ -702,6 +709,8 @@ def absorb_gameparams_ship(
         update_ship["wg_ship_full_id"] = full_ship_id
     if isinstance(movement, dict) and movement:
         update_ship["movement"] = movement
+    if isinstance(hull_size_m, (list, tuple)) and len(hull_size_m) == 3:
+        update_ship["hull_size_m"] = [float(v) for v in hull_size_m]
     if not update_ship:
         return doc
     return merge_preserving(doc, {"ship": update_ship})

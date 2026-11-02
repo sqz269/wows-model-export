@@ -1577,8 +1577,10 @@ def _absorb_gameparams_passes(
     # gameplay-active hull/engine (before any rendered-hull reassignment below).
     try:
         movement = _gp_autofill.ship_movement_extras(components)
+        hull_size_m = _gp_autofill.ship_hull_size_extras(components)
         doc = sidecar.absorb_gameparams_ship(
             doc, ship_dict, full_ship_id=full_id, movement=movement,
+            hull_size_m=hull_size_m,
         )
     except Exception as e:
         _warn(warnings, f"gameparams ship-extras failed ({e})")
