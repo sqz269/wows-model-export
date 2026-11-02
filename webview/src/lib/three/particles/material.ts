@@ -242,6 +242,59 @@ export function setDeformWriteMode(mat: THREE.ShaderMaterial, on: boolean): void
   }
 }
 
+/** PS_RBT modes drawn by the native water-surface colour technique
+ *  (particles.fxo VS58/61 + PS59/60/62/63) into g_waterSurfaceLayer, the
+ *  colour layer the sea shader composes over the water (sea_ps49.txt
+ *  11143-11173). 1 = BLENDED_WATER_SURFACE, 2 = ADDITIVE_WATER_SURFACE. */
+function waterSurfaceModeFor(blendType: string | undefined): number {
+  if (blendType === 'BLENDED_WATER_SURFACE') return 1;
+  if (blendType === 'ADDITIVE_WATER_SURFACE') return 2;
+  return 0;
+}
+
+/** Is this a BLENDED_/ADDITIVE_WATER_SURFACE particle material? */
+export function isWaterSurfaceColorMaterial(mat: THREE.Material): mat is THREE.ShaderMaterial {
+  const u = (mat as THREE.ShaderMaterial).uniforms;
+  return !!u?.uWaterSurfaceMode && Number(u.uWaterSurfaceMode.value) > 0.5;
+}
+
+/**
+ * Switch a water-surface colour material between its two output paths.
+ * `on`: the surface-layer write (uWaterSurfaceWrite = 1). The layer is
+ * cleared to (0, 0, 0, 1) and the sea composes it as
+ *   water * L.a + L.rgb * (1 - L.a)
+ * so L.a must hold the transmittance: every quad multiplies it by (1 - a),
+ * whatever its colour blend. Colour blends alpha-over for BLENDED and
+ * alpha-weighted add for ADDITIVE, the pairing the two pixel shaders' discard
+ * tests imply (PS60 drops a below 1/1700, PS63 drops a * max(rgb) below
+ * it); the colour blend state itself is not in the DXBC and was not seen in
+ * a capture, so it is inferred. `off`: the flat card fallback with the
+ * system's own blend, for scenes without the FFT ocean.
+ */
+export function setWaterSurfaceWriteMode(mat: THREE.ShaderMaterial, on: boolean): void {
+  const u = mat.uniforms.uWaterSurfaceWrite;
+  if (!u) return;
+  u.value = on ? 1 : 0;
+  const additive = Number(mat.uniforms.uWaterSurfaceMode?.value) > 1.5;
+  if (on) {
+    mat.blending = THREE.CustomBlending;
+    mat.blendEquation = THREE.AddEquation;
+    mat.blendSrc = THREE.SrcAlphaFactor;
+    mat.blendDst = additive ? THREE.OneFactor : THREE.OneMinusSrcAlphaFactor;
+    mat.blendEquationAlpha = THREE.AddEquation;
+    mat.blendSrcAlpha = THREE.ZeroFactor;
+    mat.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
+  } else {
+    mat.blending = additive ? THREE.AdditiveBlending : THREE.NormalBlending;
+    mat.blendEquation = THREE.AddEquation;
+    mat.blendSrc = THREE.SrcAlphaFactor;
+    mat.blendDst = THREE.OneMinusSrcAlphaFactor;
+    mat.blendEquationAlpha = null;
+    mat.blendSrcAlpha = null;
+    mat.blendDstAlpha = null;
+  }
+}
+
 /** PS_RLT labels whose textureName0 is a directional lightmap (RGB = 3
  *  baked light-direction renders, A = opacity), NOT albedo. The fragment
  *  shader reconstructs a single lit luminance against the sun direction
@@ -534,8 +587,13 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       // lightmap reconstructed against uSunDirWorld, not albedo. The sun
       // dir defaults to the scene's key DirectionalLight (scene.ts:121-122,
       // positioned at (50,80,50)) so particle lighting matches the hull.
+      // The water-surface colour technique (PS59-63) has no lightmap
+      // decode, so those systems always read their texture as colour.
       uLightingMode: {
-        value: PS_RLT_LIGHTMAP_MODES.has(opts.lightingType ?? '') ? 1 : 0,
+        value:
+          PS_RLT_LIGHTMAP_MODES.has(opts.lightingType ?? '') && waterSurfaceModeFor(opts.blendType) === 0
+            ? 1
+            : 0,
       },
       // Live key-light direction/color. RE doc 63 H7/M2: particle lightmaps
       // should track the same world sun as the scene, and the native shader
@@ -604,6 +662,16 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       // PS66 cb[62].w, foam -> height lift per unit coverage. The scene
       // environment pushes the ocean's tunable here each frame.
       uDeformFoamDisplaceMult: { value: DEFAULT_DEFORM_FOAM_DISPLACE_MULT },
+      // BLENDED_/ADDITIVE_WATER_SURFACE (see waterSurfaceModeFor). These
+      // systems are lit by the water-surface technique's own term, which
+      // takes all four renderer lighting floats at their authored values:
+      // TEXCOORD6 = (shineness, ambient, diffuse, transmission), the
+      // fx_RenderDescriptor +0x24..+0x30 order. uWaterSurfaceWrite = 1 while
+      // the FFT ocean composes them through the surface-layer pre-pass
+      // (three/scene.ts); 0 = flat card fallback.
+      uWaterSurfaceMode: { value: waterSurfaceModeFor(opts.blendType) },
+      uWaterSurfaceWrite: { value: 0 },
+      uWaterShineness: { value: Math.max(0, finiteNumber(opts.lightingShineness, 0)) },
       // Warm "detonation glow" strength for the lightmapping + GRADIENT_MAP
       // path. Native IA TEXCOORD6.x -> PS TEXCOORD9.x is lightingShineness.
       uGlowStrength: { value: Math.max(0, finiteNumber(opts.lightingShineness, 1)) },
@@ -648,6 +716,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uniform float uHideSpeed;
       uniform float uHideIsAxial;
       uniform float uDeformWrite;
+      uniform float uWaterSurfaceWrite;
       varying vec4 vColor;
       varying float vAge;
       varying float vFrameSeed;
@@ -820,11 +889,12 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           vec2 viewOffset = vec2(cornerUV.x - 0.5, 0.5 - cornerUV.y) * worldDiam + anchorOff;
           gl_Position = projectionMatrix * vec4(mvPosition.xyz + vec3(viewOffset, 0.0), 1.0);
         }
-        if (uDeformWrite > 0.5) {
+        if (uDeformWrite > 0.5 || uWaterSurfaceWrite > 0.5) {
           // Water-layer write: VS64 scales clip xy by 0.8 so the layer keeps
           // a 10% guard band on every side (displaced sea vertices can
           // project a little past the viewport); the sea then samples it at
           // ndc * 0.4 + 0.5 (sea_vs8.txt:1006-1028, sea_ps49.txt:903-925).
+          // The water-surface colour VS (VS58/61) applies the same 0.8.
           gl_Position.xy *= 0.8;
         }
       }
@@ -884,6 +954,9 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uniform float useFoamTile;
       uniform float uDeformWrite;
       uniform float uDeformFoamDisplaceMult;
+      uniform float uWaterSurfaceMode;
+      uniform float uWaterSurfaceWrite;
+      uniform float uWaterShineness;
       uniform float uGlowStrength;
       uniform float uGlowPosterizeSteps;
       uniform float uOpacityLightingSteps;
@@ -1267,7 +1340,12 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
               base = vec4(texture2D(lut, vec2(base.r, 0.5)).rgb, base.a);
             }
           }
-          if (uLightingMode <= 0.5 && uDistortion <= 0.5 && uOpacityLightingSteps > 0.5) {
+          if (
+            uLightingMode <= 0.5 &&
+            uDistortion <= 0.5 &&
+            uWaterSurfaceMode < 0.5 &&
+            uOpacityLightingSteps > 0.5
+          ) {
             // Native extracts Renderer.opacityMultiplier as an 8-bit step
             // count and quantizes lighting factors before composing the body
             // with the additive glow. The webview has a collapsed lighting
@@ -1288,6 +1366,42 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
         }
         float outA = vColor.a * base.a * vHideFade;
         vec3 outRgb = vColor.rgb * base.rgb + glow;
+        if (uWaterSurfaceMode > 0.5) {
+          // Water-surface colour technique (PS60/63, MV twins PS59/62). The
+          // discard test reads the unlit colour: alpha for BLENDED, alpha *
+          // max(rgb) for ADDITIVE, against 1/1700.
+          float waterKeep = uWaterSurfaceMode > 1.5
+            ? outA * max(max(outRgb.r, outRgb.g), outRgb.b)
+            : outA;
+          // Lighting, only where a > 0:
+          //   rgb *= diffuse * (1 - pow(a, transmission) * (0.5 + 0.5 * dir.y)) * sun
+          //          + shineness + skyAmbient
+          // dir is g_sunLight.direction, the light's travel direction, so
+          // dir.y = -uSunDirWorld.y; skyAmbient is VS61's SH ambient times
+          // the renderer's lightingAmbient. The webview stands in
+          // 2 * uSunColorNorm for the raw sun colour and
+          // uParticleLightingFactors.y for the SH term, as its foam does.
+          // All-zero lighting floats give black: the "dark" oil slick of
+          // FTBOTO_CustomDeath_Submarin is authored that way.
+          if (outA > 0.0) {
+            float sunFacing = 0.5 - 0.5 * normalize(uSunDirWorld).y;
+            float direct = uLightingDiffuse
+              * (1.0 - pow(max(outA, 0.00001), uLightingTransmission) * sunFacing);
+            outRgb *= direct * 2.0 * uSunColorNorm
+              + vec3(uWaterShineness)
+              + vec3(uLightingAmbient * uParticleLightingFactors.y);
+          }
+          if (uWaterSurfaceWrite > 0.5) {
+            // Surface-layer write, composed by the FFT ocean
+            // (ocean/surface.ts). Straight colour and alpha; the blend state
+            // (setWaterSurfaceWriteMode) folds alpha into the layer's
+            // transmittance. The native PS reads no depth, so no soft fade.
+            if (useMap < 0.5) discard;
+            if (waterKeep < 0.000588235) discard;
+            gl_FragColor = vec4(outRgb, clamp(outA, 0.0, 1.0));
+            return;
+          }
+        }
         if (uDistortion > 0.5) {
           // SHIMMER systems that author useEmissionAlphaFromMV compose an
           // EMISSIVE body with the refraction (the &8 MVEA control bit

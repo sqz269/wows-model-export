@@ -160,6 +160,24 @@ vec2 sampleDeformLayer(vec2 worldXZ) {
 }
 `;
 
+// The BLENDED_/ADDITIVE_WATER_SURFACE particle layer, the webview's stand-in
+// for the native g_waterSurfaceLayer: linear colour in rgb and the product
+// of (1 - alpha) over every quad in a, cleared to (0, 0, 0, 1). Sampled at
+// the same undisplaced grid-point projection as the deform layer (the native
+// reuses that UV, sea_ps49.txt:1816 and 11143).
+const SURFACE_LAYER_GLSL = /* glsl */ `
+uniform sampler2D uSurfaceTexture;
+uniform float uSurfaceEnabled;
+uniform mat4 uSurfaceViewProj;
+
+vec4 sampleSurfaceLayer(vec2 worldXZ) {
+  vec4 clip = uSurfaceViewProj * vec4(worldXZ.x, 0.0, worldXZ.y, 1.0);
+  if (clip.w <= 1e-4) return vec4(0.0, 0.0, 0.0, 1.0);
+  vec2 uv = clamp(clip.xy / clip.w * 0.4 + 0.5, 0.0, 1.0);
+  return textureLod(uSurfaceTexture, uv, 0.0);
+}
+`;
+
 const VERT = /* glsl */ `
 uniform sampler2D uDisp0;
 uniform sampler2D uDisp1;
@@ -252,6 +270,7 @@ uniform float uFogNear;
 uniform float uFogFar;
 uniform float uDeformFoamMult;
 ${DEFORM_GLSL}
+${SURFACE_LAYER_GLSL}
 
 varying vec3 vWorld;
 varying vec2 vOffset;
@@ -406,6 +425,15 @@ void main() {
   vec3 foamLit = vec3(0.85) * (ambient * 0.6 + uSunColor * (0.3 + 0.7 * NoL));
   color = mix(color, foamLit, foam);
 
+  if (uSurfaceEnabled > 0.5) {
+    // Water-surface particle colour (oil slicks, stains), sea_ps49.txt
+    // 11143-11173, ahead of the fog: water * L.a + k * L.rgb * (1 - L.a),
+    // where L.a is the layer's transmittance and k = 0.25 + 0.375 * the two
+    // sea-shadow taps (1 in full sun). No sea shadows here, so k = 1.
+    vec4 surfaceLayer = sampleSurfaceLayer((uCenter + vOffset) * uUnitScale);
+    color = color * surfaceLayer.a + surfaceLayer.rgb * (1.0 - surfaceLayer.a);
+  }
+
   // Scene fog when the scene has one (same law as three's Fog/FogExp2, so the
   // sea matches the terrain); otherwise a distance haze into the background
   // that reaches ~1 at the far plane so the far clip never shows a seam.
@@ -481,6 +509,11 @@ export class OceanSurface {
       uDeformViewProj: { value: new THREE.Matrix4() },
       uDeformHeightScale: { value: DEFAULT_SHADING_PARAMS.deformHeightScale },
       uDeformFoamMult: { value: DEFAULT_SHADING_PARAMS.deformFoamMult },
+      // Water-surface colour layer (see SURFACE_LAYER_GLSL); fed per frame
+      // by setSurfaceLayer.
+      uSurfaceTexture: { value: null },
+      uSurfaceEnabled: { value: 0 },
+      uSurfaceViewProj: { value: new THREE.Matrix4() },
     };
     this.material = new THREE.ShaderMaterial({
       uniforms: this.uniforms,
@@ -525,6 +558,16 @@ export class OceanSurface {
     u.uDeformTexture.value = tex;
     u.uDeformEnabled.value = tex ? 1 : 0;
     if (tex && viewProj) (u.uDeformViewProj.value as THREE.Matrix4).copy(viewProj);
+  }
+
+  /** Feed this frame's BLENDED_/ADDITIVE_WATER_SURFACE colour layer (rendered
+   *  by the scene environment before the sea) with the camera viewProj that
+   *  drew it; `null` turns the composition off. */
+  setSurfaceLayer(tex: THREE.Texture | null, viewProj?: THREE.Matrix4): void {
+    const u = this.uniforms;
+    u.uSurfaceTexture.value = tex;
+    u.uSurfaceEnabled.value = tex ? 1 : 0;
+    if (tex && viewProj) (u.uSurfaceViewProj.value as THREE.Matrix4).copy(viewProj);
   }
 
   /** Bind a PMREM (CubeUV) environment for reflections, or `null` for the

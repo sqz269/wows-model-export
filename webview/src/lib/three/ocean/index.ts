@@ -157,6 +157,12 @@ export class Ocean {
     this.surface.setDeformLayer(tex, viewProj);
   }
 
+  /** This frame's BLENDED_/ADDITIVE_WATER_SURFACE colour layer (oil slicks,
+   *  stains), composed over the water; `null` = none this frame. */
+  setSurfaceLayer(tex: THREE.Texture | null, viewProj?: THREE.Matrix4): void {
+    this.surface.setSurfaceLayer(tex, viewProj);
+  }
+
   /** Live shading parameters (not a copy), for per-frame readers such as the
    *  deform pre-pass that pushes `deformFoamDisplaceMult` into materials. */
   get shading(): Readonly<OceanShadingParams> {

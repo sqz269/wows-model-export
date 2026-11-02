@@ -853,11 +853,15 @@
     let anyUnresolvedTexture = false;
     let anyLightmap = false;
     let anyMvEmission = false;
+    let anyWaterSurfaceColor = false;
     for (const s of rec.systems ?? []) {
       const r = s.renderer;
       if (!r) continue;
       if (r.blendType && PLACEHOLDER_BLEND_MODES.has(r.blendType)) {
         placeholderBlends.add(r.blendType);
+      }
+      if (r.blendType === 'BLENDED_WATER_SURFACE' || r.blendType === 'ADDITIVE_WATER_SURFACE') {
+        anyWaterSurfaceColor = true;
       }
       // textureName0 referenced, but it resolved to neither a direct DDS
       // extract nor an atlas region -> the renderer draws a procedural disc.
@@ -877,6 +881,13 @@
         'DEFORM_WATER_SURFACE: with the water plane on, foam and height are drawn into a water layer ' +
           'the ocean reads (native sea composition, height scale not calibrated); without it, flat ' +
           'foam cards stand in',
+      );
+    }
+    if (anyWaterSurfaceColor) {
+      gaps.push(
+        'BLENDED_/ADDITIVE_WATER_SURFACE: with the water plane on, drawn into a colour layer the ' +
+          'ocean lays over the waves (native composition; layer blend state inferred, no sea ' +
+          'shadows); without it, flat cards stand in',
       );
     }
     if (placeholderBlends.has('SHIMMER')) {

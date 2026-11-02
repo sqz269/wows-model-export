@@ -21,7 +21,12 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 
 import type { ColorGrade } from './env_ibl';
-import { isDeformWaterMaterial, setDeformWriteMode } from './particles/material';
+import {
+  isDeformWaterMaterial,
+  isWaterSurfaceColorMaterial,
+  setDeformWriteMode,
+  setWaterSurfaceWriteMode,
+} from './particles/material';
 
 export interface BloomParams {
   /** Overall bloom contribution (UnrealBloomPass.strength). */
@@ -132,8 +137,13 @@ function materialConsumesSceneColor(material: THREE.Material): material is THREE
  *  never visible sprites either (VS64/PS66 write a water RT the sea reads). */
 const DEFORM_LAYER = 30;
 
+/** three.js layer for BLENDED_/ADDITIVE_WATER_SURFACE particle meshes while
+ *  the FFT ocean composes them: like the DEFORM quads, the native draws them
+ *  only into a water layer (g_waterSurfaceLayer) the sea shader reads. */
+const SURFACE_LAYER = 29;
+
 interface DeformParticleSet {
-  /** Every mesh carrying a DEFORM material, visible or not. */
+  /** Every mesh carrying a matching water material, visible or not. */
   meshes: THREE.Object3D[];
   materials: THREE.ShaderMaterial[];
   /** At least one mesh is on screen with live particles. */
@@ -538,8 +548,10 @@ export function createSceneEnvironment(
   let opaqueDepthTarget: THREE.WebGLRenderTarget | null = null;
   let sceneColorTarget: THREE.WebGLRenderTarget | null = null;
   let deformTarget: THREE.WebGLRenderTarget | null = null;
+  let surfaceTarget: THREE.WebGLRenderTarget | null = null;
   const deformSize = new THREE.Vector2(1, 1);
   const deformViewProj = new THREE.Matrix4();
+  const surfaceViewProj = new THREE.Matrix4();
   const deformClearColor = new THREE.Color();
   const opaqueDepthMaterial = new THREE.MeshDepthMaterial({
     depthPacking: THREE.BasicDepthPacking,
@@ -651,23 +663,26 @@ export function createSceneEnvironment(
   // below renders that layer alone into `deformTarget`, and the ocean
   // consumes it. With no ocean (water off, inspector without a water plane)
   // the meshes stay on layer 0 as the flat lit-card fallback.
-  const collectDeformParticles = (): DeformParticleSet => {
+  const collectWaterParticles = (
+    matches: (mat: THREE.Material) => mat is THREE.ShaderMaterial,
+  ): DeformParticleSet => {
     const meshes: THREE.Object3D[] = [];
     const materials = new Set<THREE.ShaderMaterial>();
     let visible = false;
     scene.traverse((object) => {
-      let deform = false;
+      let found = false;
       for (const mat of objectMaterials(object)) {
-        if (!isDeformWaterMaterial(mat)) continue;
-        deform = true;
+        if (!matches(mat)) continue;
+        found = true;
         materials.add(mat);
       }
-      if (!deform) return;
+      if (!found) return;
       meshes.push(object);
       if (!visible && instanceCountOf(object) > 0 && objectIsShown(object)) visible = true;
     });
     return { meshes, materials: [...materials], visible };
   };
+  const collectDeformParticles = () => collectWaterParticles(isDeformWaterMaterial);
 
   // Applied to EVERY deform mesh and material each frame, shown or not, so a
   // system that becomes visible later never draws one frame in the wrong
@@ -739,6 +754,74 @@ export function createSceneEnvironment(
     // its grid points through the same viewProj to find each one's texel.
     deformViewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     ocean.setDeformLayer(target.texture, deformViewProj);
+  };
+
+  // ── BLENDED_/ADDITIVE_WATER_SURFACE → ocean composition ────────────
+  // Native (particles.fxo VS58/61 + PS59/60/62/63, sea_ps49.txt:11143-11173):
+  // these quads are drawn, with VS64's 0.8 guard band, into
+  // g_waterSurfaceLayer, a colour RT cleared to (0, 0, 0, 1) every frame
+  // (seen in all 41 GK captures). The sea samples it at the undisplaced
+  // grid point and composes water * L.a + k * L.rgb * (1 - L.a) before its
+  // fog, so oil slicks and stains lie on the waves instead of being cut by
+  // them. k = 0.25 + 0.375 * the sea-shadow taps (1 when lit); the webview
+  // has no sea shadows, so k = 1. With no ocean the systems stay flat cards.
+  const collectSurfaceParticles = () => collectWaterParticles(isWaterSurfaceColorMaterial);
+
+  const applySurfaceMode = (set: DeformParticleSet, consume: boolean) => {
+    for (const mat of set.materials) setWaterSurfaceWriteMode(mat, consume);
+    const mask = consume ? 1 << SURFACE_LAYER : 1;
+    for (const mesh of set.meshes) mesh.layers.mask = mask;
+  };
+
+  const ensureSurfaceTarget = () => {
+    renderer.getDrawingBufferSize(deformSize);
+    const width = Math.max(1, Math.floor(deformSize.x));
+    const height = Math.max(1, Math.floor(deformSize.y));
+    if (surfaceTarget && surfaceTarget.width === width && surfaceTarget.height === height) {
+      return surfaceTarget;
+    }
+    surfaceTarget?.dispose();
+    // Linear colour + transmittance. The native layer is 8-bit (B8G8R8A8,
+    // half width); half floats keep dark linear colours from banding.
+    surfaceTarget = new THREE.WebGLRenderTarget(width, height, {
+      type: THREE.HalfFloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      wrapS: THREE.ClampToEdgeWrapping,
+      wrapT: THREE.ClampToEdgeWrapping,
+      generateMipmaps: false,
+      stencilBuffer: false,
+      depthBuffer: false,
+    });
+    surfaceTarget.texture.name = 'WowsWaterSurfaceLayer';
+    return surfaceTarget;
+  };
+
+  const renderSurfaceLayer = () => {
+    if (!ocean) return;
+    const target = ensureSurfaceTarget();
+    const previousTarget = renderer.getRenderTarget();
+    const previousBackground = scene.background;
+    const previousLayers = camera.layers.mask;
+    renderer.getClearColor(deformClearColor);
+    const previousClearAlpha = renderer.getClearAlpha();
+    try {
+      // Black with full transmittance: an empty texel leaves the water as is.
+      scene.background = null;
+      camera.layers.set(SURFACE_LAYER);
+      renderer.setRenderTarget(target);
+      renderer.setClearColor(0x000000, 1);
+      renderer.clear(true, false, false);
+      renderer.render(scene, camera);
+    } finally {
+      renderer.setRenderTarget(previousTarget);
+      renderer.setClearColor(deformClearColor, previousClearAlpha);
+      camera.layers.mask = previousLayers;
+      scene.background = previousBackground;
+    }
+    surfaceViewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    ocean.setSurfaceLayer(target.texture, surfaceViewProj);
   };
 
   const ensureOpaqueDepthTarget = () => {
@@ -869,16 +952,22 @@ export function createSceneEnvironment(
       // Ambient surface animation runs on wall clock, independent of the
       // particle transport, so the sea keeps moving while an effect is paused.
       updateOcean();
-      // Pass order: ocean sim → deform mode switch → opaque depth copy →
-      // scene-colour copy (SHIMMER refraction) → DEFORM layer → main pass
-      // (the ocean reads the layer; the DEFORM quads are off layer 0).
+      // Pass order: ocean sim → water-layer mode switches → opaque depth
+      // copy → scene-colour copy (SHIMMER refraction) → DEFORM and surface
+      // colour layers → main pass (the ocean reads both layers; their quads
+      // are off layer 0).
       const deform = collectDeformParticles();
       const consumeDeform = !!ocean && ocean.mesh.visible && deform.visible;
       applyDeformMode(deform, consumeDeform);
+      const surface = collectSurfaceParticles();
+      const consumeSurface = !!ocean && ocean.mesh.visible && surface.visible;
+      applySurfaceMode(surface, consumeSurface);
       renderOpaqueDepthSnapshot(collectSoftDepthConsumers());
       renderDistortionSceneColor(collectDistortionConsumers());
       if (consumeDeform) renderDeformLayer();
       else ocean?.setDeformLayer(null);
+      if (consumeSurface) renderSurfaceLayer();
+      else ocean?.setSurfaceLayer(null);
       if (!postprocessEnabled && !bloomEnabled) {
         renderer.render(scene, camera);
         return;
@@ -1018,6 +1107,8 @@ export function createSceneEnvironment(
       sceneColorTarget = null;
       deformTarget?.dispose();
       deformTarget = null;
+      surfaceTarget?.dispose();
+      surfaceTarget = null;
       composer?.dispose();
       composer = null;
       bloomPass = null;
