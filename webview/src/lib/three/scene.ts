@@ -37,6 +37,33 @@ export const DEFAULT_BLOOM_PARAMS: BloomParams = {
   threshold: 0.75,
 };
 
+/** Width of each bloom blur pass, as a fraction of its tap radius. */
+const BLOOM_SIGMA_PER_RADIUS = 1 / 3;
+
+/**
+ * Re-weight UnrealBloomPass's blur passes as Gaussians that fade out before
+ * their last tap. Three builds each pass with sigma equal to its tap radius
+ * and stops at radius - 1, so the outermost tap still weighs 0.66-0.80 of the
+ * centre. Each pass is close to a box filter, and a horizontal box followed by
+ * a vertical one spreads a point into a square. Ordinary highlights hide this.
+ * A source tens of times brighter than white fills the whole square past
+ * white, though: GRADIENT_MAP particles reach about 150 (authored
+ * lightingShineness 100 times the fire ramp), so GK_Shot's dust bloomed into
+ * glowing squares. With sigma at a third of the radius the last tap weighs
+ * 0.02-0.14 of the centre, and the blur stays round at any brightness. The
+ * pass divides by its own weight sum, so the weights need no normalising.
+ */
+function makeBloomKernelsRound(pass: UnrealBloomPass): void {
+  for (const material of pass.separableBlurMaterials) {
+    const radius = Number(material.defines?.KERNEL_RADIUS);
+    if (!Number.isFinite(radius) || radius < 2) continue;
+    const sigma = radius * BLOOM_SIGMA_PER_RADIUS;
+    material.uniforms.gaussianCoefficients.value = Array.from({ length: radius }, (_, i) =>
+      Math.exp((-0.5 * i * i) / (sigma * sigma)),
+    );
+  }
+}
+
 /** GT (Uchimura "Gran Turismo") tonemap curve parameters. Seeded from WG's
  *  `14_Atlantic` / Default `space.ubersettings` (HDR/Tonemapping). `exposure`
  *  is the keyed-exposure multiplier (WG: `middleGray / avgLum * 2^offset`;
@@ -533,6 +560,7 @@ export function createSceneEnvironment(
       bloomParams.radius,
       bloomParams.threshold,
     );
+    makeBloomKernelsRound(bloomPass);
     bloomPass.enabled = bloomEnabled;
     composer.addPass(bloomPass);
     // GT (Uchimura) tonemap + sRGB OETF — final, screen-bound pass. The

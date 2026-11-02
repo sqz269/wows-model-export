@@ -422,6 +422,9 @@
       get scene() {
         return scene;
       },
+      get env() {
+        return env;
+      },
       get handle() {
         return currentHandle;
       },
