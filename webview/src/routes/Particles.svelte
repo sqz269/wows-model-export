@@ -695,9 +695,15 @@
   /** Turn elapsed real time into whole simulation steps, wrapping at the
    *  end of the timeline when looping. */
   function advancePlayback(realDt: number): void {
+    // Round to the nearest step and carry the signed remainder. Frame times
+    // wobble around 16.7 ms, so flooring gave an irregular 1,2,0,1… step
+    // pattern at 60 Hz: a frozen frame next to a double step every few
+    // frames, which made slow sheets (wake and splash foam) visibly stutter.
+    // Rounding locks to one step per display frame while the remainder keeps
+    // the long-run rate exact.
     pendingRealS += realDt * playbackRate;
-    let steps = Math.floor(pendingRealS / SIM_STEP_S + 1e-6);
-    pendingRealS = Math.max(0, pendingRealS - steps * SIM_STEP_S);
+    let steps = Math.max(0, Math.round(pendingRealS / SIM_STEP_S));
+    pendingRealS -= steps * SIM_STEP_S;
     const endSteps = Math.round(timelineEnd / SIM_STEP_S);
     if (loopTimeline && endSteps > 0 && simSteps + steps >= endSteps) {
       steps = (simSteps + steps - endSteps) % endSteps;
