@@ -52,8 +52,23 @@ export function systemUsesDetachedCoordinateFrame(system: ParticleSystem): boole
   return coordinateStyleUsesDetachedFrame(coord);
 }
 
+/** Native `general.coordinateStyle` frame law (build 12506899, byte-proven
+ *  2026-11-01; wows-re-notes topics/particle/ship_wake_foam_investigation_2026_11.md
+ *  §2.2):
+ *  - 2 = WORLD space after spawn. fx_ParticleSystem_updatePoolMatrices
+ *    @0x1406c92c0 puts the live node matrix in the spawn slot (pool+0x00), so
+ *    buildSpawnRecord @0x14071a990 generates through the node once, and
+ *    cookDrawRecords @0x14071c820 copies the position verbatim (cfg+0x180 != 3).
+ *    The particle never follows the node again; wake foam trails a moving ship.
+ *  - 3 = node-local. The spawn slot is the identity and every draw multiplies
+ *    by the CURRENT node matrix (pool+0x40). Fire cores and flood lights ride.
+ *  - 0 (camera-projected point) and 1 (identity rotation + source position)
+ *    are special cases that also leave the node after spawn.
+ *  "Detached" here means the sim stores positions in the particle root's
+ *  frame (world) instead of the attachment group's. Until 2026-11-01 this
+ *  returned `coord < 2 || coord === 3`, i.e. modes 2 and 3 swapped. */
 export function coordinateStyleUsesDetachedFrame(coord: number): boolean {
-  return coord < 2 || coord === 3;
+  return coord !== 3;
 }
 
 /** Sample a 1D ``Ramp`` curve at parameter ``t ∈ [0, 1]``. */

@@ -15,10 +15,11 @@
 // recent laptop. Heavier scenes (idle wakes + 4 fires) should switch to
 // a GPU-driven backend; that's a future iteration.
 //
-// Coordinates: most systems (coordinateStyle=2) simulate in the attachment
-// group's local frame. WG's detached coordinate styles (0/1/3) sample their
-// spawn data in the source attachment frame, then run in the particle-root
-// frame so older particles do not keep inheriting future parent motion.
+// Coordinates: most systems (coordinateStyle=2) spawn through the attachment
+// frame and then live in the particle-root (world) frame, so a moving ship
+// leaves them behind. Mode 3 stays in the attachment group's local frame and
+// rides it, with no inherited velocity. Modes 0/1 are world after spawn too.
+// See sampling.ts coordinateStyleUsesDetachedFrame for the native evidence.
 //
 // Package layout (split 2026-07-02 from the former single-file particles.ts;
 // bodies moved verbatim — see git history of particles.ts for older blame):

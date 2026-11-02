@@ -313,6 +313,7 @@ export class SystemRenderer {
   private forceZ: ParticleValueGenerator | undefined;
   private forceDelay = 0;
   private streamActions: StreamAction[] = [];
+  private hasSwitchStreams = false;
   private jitterActions: JitterAction[] = [];
   private orbitorActions: OrbitorAction[] = [];
   private magnetActions: MagnetAction[] = [];
@@ -516,6 +517,11 @@ export class SystemRenderer {
    *  inert, factor 1). */
   private alphaDepthRow: Float32Array | null = null;
   private active = true;
+  /** False stops new particles (emitter, creator, spawner children) while the
+   *  ones already alive keep simulating and fade out on their own lifetimes.
+   *  The ship viewer uses it when a gameplay effect group stops (ShipEffects
+   *  switching wake sets, smoke on engine stop); restart() turns it back on. */
+  private emissionEnabled = true;
   private finished = false;
   private readonly spawnEffect?: ParticleEffectSpawnCallback;
   private readonly loopOneShot: boolean;
@@ -532,7 +538,32 @@ export class SystemRenderer {
   private barrierInsideNow = false;
   private barrierInsideNext = false;
   private barrierDistanceRatio = 1;
-  private parentVelocityLocal = new THREE.Vector3();
+  /** Source-node velocity for this tick, in the SIM frame and native units/s.
+   *  Native derives it from the node's world matrix: the source frame at
+   *  0x1406c8e10 keeps the translation and its velocity is Δtranslation/dt
+   *  (1406c90d8–9124). buildSpawnRecord adds inheritVelocityFactor × this to
+   *  each new particle (14071ad89–adc4); emitUpdate zeroes it for mode 3
+   *  (14071b1be–b207). Refreshed by updateSourceMotion at the top of tick(). */
+  private parentVelocitySim = new THREE.Vector3();
+  /** Source-node world translation at the previous tick (metres), and whether
+   *  it is valid. A restart or re-activation invalidates it so the first tick
+   *  back never turns a stale offset into a velocity spike. */
+  private sourceWorldPrev = new THREE.Vector3();
+  private sourceMotionValid = false;
+  /** Optional caller-supplied world velocity (metres/s) that replaces the
+   *  derived node motion while set. Null = derive from the anchor's own
+   *  world-matrix motion (the default; see setParentVelocityWorld). */
+  private parentVelocityOverrideWorld: THREE.Vector3 | null = null;
+  /** Per-tick spawn frame cache (refreshed in updateSourceMotion): the source
+   *  node's world matrix and the sim parent's world inverse, so the spawn hop
+   *  does not walk the scene graph or invert a matrix per particle. */
+  private spawnSourceWorld = new THREE.Matrix4();
+  private spawnSimWorldInverse = new THREE.Matrix4();
+  /** Direction basis source → sim (mirror-preserving, see worldBasis). */
+  private spawnDirectionToSim = new THREE.Matrix3();
+  /** Direction basis for switchCoordinateStyle streams: alternate frame → sim. */
+  private streamSwitchToSim = new THREE.Matrix3();
+  private spawnFrameIdentity = true;
 
   // Tmp scratch — avoids per-frame Vector3 allocations.
   private static readonly TMP_POS = new THREE.Vector3();
@@ -547,6 +578,7 @@ export class SystemRenderer {
   private static readonly TMP_BOUNDS_VEC = new THREE.Vector3();
   private static readonly TMP_VIEW_SORT = new THREE.Matrix4();
   private static readonly TMP_BASIS = new THREE.Matrix3();
+  private static readonly TMP_BASIS2 = new THREE.Matrix3();
   private static readonly TMP_COL = new Float32Array(4);
   // Reused per-particle clock scratch (mutated in tick/spawn; the per-particle
   // update loop and the emit/spawn phase run sequentially, never concurrently).
@@ -710,10 +742,12 @@ export class SystemRenderer {
             vector: new THREE.Vector3(v[0], v[1], v[2]),
             halfLife: typeof body.halfLife === 'number' ? body.halfLife : -1,
             delay: typeof body.delay === 'number' ? body.delay : 0,
-            // Native switchCoordinateStyle uses the alternate frame from the
-            // system coordinateStyle audit; convert before applying velocity.
+            // switchCoordinateStyle: the vector is authored in the alternate
+            // frame of the node/world pair and is rebased into the sim frame
+            // each tick (updateSourceMotion → streamVectorForSimulationFrame).
             switchCoordinateStyle: !!body.switchCoordinateStyle,
           });
+          if (body.switchCoordinateStyle) this.hasSwitchStreams = true;
         }
       } else if (c.action === 'jitter') {
         this.jitterActions.push({
@@ -861,7 +895,12 @@ export class SystemRenderer {
     // separate source clock preserves creation/delay/retirement ordering.
     this.emitterDelay = Math.max(0, sampleScalarVg(system.emitter?.delayGenerator, 0, 0));
     this.emitterSleepPeriod = sampleScalarVg(system.emitter?.sleepPeriodGenerator, 0, Number.NaN);
-    this.inheritVelocityFactor = system.emitter?.inheritVelocityFactor ?? 0;
+    // Mode 3 (node-local) never inherits: fx_Particle_emitUpdate @0x14071b120
+    // zeroes the inherited vector before the spawn record is built
+    // (14071b1be–b207). The 75 corpus mode-3 systems that author a non-zero
+    // factor get the native 0. Every other mode keeps the authored factor.
+    this.inheritVelocityFactor =
+      this.coordinateStyle === 3 ? 0 : (system.emitter?.inheritVelocityFactor ?? 0);
     this.snapToSeaLevel = !!system.emitter?.snapToSeaLevel;
     // SIZE base (RE 2026-06-04): the emitter's sizeGenerator is the per-particle
     // BASE size in METRES; ageScaleGenerator is a per-particle life multiplier.
@@ -1058,6 +1097,7 @@ export class SystemRenderer {
   }
 
   setActive(active: boolean): void {
+    if (active && !this.active) this.sourceMotionValid = false;
     this.active = active;
     this.points.visible = active;
     if (!active) {
@@ -1071,8 +1111,14 @@ export class SystemRenderer {
     if (active && this.loopOneShot) this.finished = false;
   }
 
+  /** Stop or resume spawning without touching the live particles. */
+  setEmitting(on: boolean): void {
+    this.emissionEnabled = on;
+  }
+
   restart(): void {
     this.active = true;
+    this.emissionEnabled = true;
     this.finished = false;
     this.points.visible = true;
     this.elapsed = 0;
@@ -1088,6 +1134,9 @@ export class SystemRenderer {
     for (const action of this.spawnerActions) action.accum = 0;
     for (let i = 0; i < this.capacity; i++) this.age[i] = -1;
     this.instGeom.instanceCount = 0;
+    // The anchor may have been moved while the effect was down; the first
+    // tick back samples a fresh previous position instead of a velocity.
+    this.sourceMotionValid = false;
   }
 
   setSortCamera(camera: THREE.Camera | null): void {
@@ -1403,22 +1452,97 @@ export class SystemRenderer {
     }
   }
 
-  /** Parent velocity is sampled in world space by ShipViewer and converted
-   *  into this system's local frame. It is applied only to newly spawned
-   *  particles through emitter.inheritVelocityFactor. */
-  setParentVelocityWorld(velocity: THREE.Vector3): void {
+  /** Override the parent (source-node) velocity, in world metres/s. By default
+   *  the sim derives it from the attachment group's own world-matrix motion
+   *  each tick (updateSourceMotion), which is the native quantity; a caller
+   *  that moves the anchor needs nothing else. Passing a vector pins the
+   *  inherited velocity to it until `null` restores the derived motion. It is
+   *  only applied to newly spawned particles through
+   *  emitter.inheritVelocityFactor (0 for mode 3). */
+  setParentVelocityWorld(velocity: THREE.Vector3 | null): void {
+    if (!velocity) {
+      this.parentVelocityOverrideWorld = null;
+      return;
+    }
+    (this.parentVelocityOverrideWorld ??= new THREE.Vector3()).copy(velocity);
+  }
+
+  /** Refresh the spawn-frame cache and the inherited parent velocity for this
+   *  tick. Native 0x1406c8e10 builds the source frame from the node's world
+   *  matrix (basis normalized per axis, translation kept) and sets the source
+   *  velocity to Δtranslation/dt (1406c90d8–9124); the webview reads the same
+   *  thing off the attachment group's matrixWorld, so whatever moves the anchor
+   *  (a ship-motion driver, a traversing turret) feeds inheritance without a
+   *  side channel. The caller must have the anchor's transform for THIS frame
+   *  in place before the particle tick; updateWorldMatrix(true) here only
+   *  recomposes matrices from position/quaternion/scale (or an assigned
+   *  matrix), it cannot see a move that has not been applied yet. */
+  private updateSourceMotion(dt: number): void {
+    const source = this.sourceFrame();
+    const sim = this.points.parent;
+    if (!source || !sim) {
+      this.parentVelocitySim.set(0, 0, 0);
+      this.spawnFrameIdentity = true;
+      return;
+    }
+    source.updateWorldMatrix(true, false);
+    if (sim !== source) sim.updateWorldMatrix(true, false);
+    const e = source.matrixWorld.elements;
+    const x = e[12];
+    const y = e[13];
+    const z = e[14];
+    const v = this.parentVelocitySim;
+    if (this.parentVelocityOverrideWorld) {
+      v.copy(this.parentVelocityOverrideWorld);
+    } else if (this.sourceMotionValid && dt > 0) {
+      v.set(x - this.sourceWorldPrev.x, y - this.sourceWorldPrev.y, z - this.sourceWorldPrev.z);
+      v.multiplyScalar(1 / dt);
+    } else {
+      v.set(0, 0, 0);
+    }
+    this.sourceWorldPrev.set(x, y, z);
+    this.sourceMotionValid = true;
+
+    // Spawn hop cache. The sim frame is the particle root for detached modes
+    // (0/1/2) and the attachment group itself for mode 3, in which case the
+    // hop is the identity and is skipped.
+    this.spawnFrameIdentity = sim === source || !this.detachedCoordinateFrame;
+    if (!this.spawnFrameIdentity) {
+      this.spawnSourceWorld.copy(source.matrixWorld);
+      this.spawnSimWorldInverse.copy(sim.matrixWorld).invert();
+      // Directions: source basis then the sim basis transposed. Both keep the
+      // engine-frame Z mirror (EFFECT_FRAME_FROM_GLB) that a world quaternion
+      // would drop, so a port-side spray stays on the port side.
+      const simBasisT = worldBasis(sim, SystemRenderer.TMP_BASIS).transpose();
+      this.spawnDirectionToSim
+        .copy(simBasisT)
+        .multiply(worldBasis(source, SystemRenderer.TMP_BASIS2));
+    }
+    if (this.hasSwitchStreams) {
+      // switchCoordinateStyle = the authored vector lives in the OTHER frame
+      // of the pair (node ↔ world): node for a world-stored system (mode 2),
+      // world for a node-local one (mode 3). See streamVectorForSimulationFrame.
+      const alt = this.detachedCoordinateFrame ? source : (this.rootGroup ?? sim);
+      if (alt !== sim) {
+        if (alt !== source) alt.updateWorldMatrix(true, false);
+        const simBasisT = worldBasis(sim, SystemRenderer.TMP_BASIS).transpose();
+        this.streamSwitchToSim.copy(simBasisT).multiply(worldBasis(alt, SystemRenderer.TMP_BASIS2));
+      } else {
+        this.streamSwitchToSim.identity();
+      }
+    }
+
     if (this.inheritVelocityFactor === 0) {
-      this.parentVelocityLocal.set(0, 0, 0);
+      v.set(0, 0, 0);
       return;
     }
     // World velocity is metres/s (×15); divide back into the record-unit sim
     // frame so it composes with the raw spawn velocity (re-scaled ×15 at the
-    // draw boundary). See NATIVE_TO_METRES.
-    this.parentVelocityLocal.copy(velocity).multiplyScalar(1 / this.nativeToWorld);
-    const source = this.sourceFrame();
-    if (!source) return;
-    source.updateWorldMatrix(true, false);
-    this.parentVelocityLocal.applyMatrix3(worldBasis(source, SystemRenderer.TMP_BASIS).transpose());
+    // draw boundary, see NATIVE_TO_METRES), then rotate it into the sim frame
+    // the particle is stored in. For a detached system that is the particle
+    // root, i.e. the world basis (identity in the ship viewer and on maps).
+    v.multiplyScalar(1 / this.nativeToWorld);
+    v.applyMatrix3(worldBasis(sim, SystemRenderer.TMP_BASIS).transpose());
   }
 
   /** Step the simulation by `dt` seconds. Updates the GPU buffers unless
@@ -1438,6 +1562,9 @@ export class SystemRenderer {
     // H1's "one-shot never catches up" applied only to prewarm-authored
     // systems — warming the rest pre-aged the pool past the tint ramp's
     // ignition window (grey instead of orange) and popped in at full density.
+    // Source-node motion and the spawn-frame cache come first so prewarm and
+    // every spawn in this tick see the anchor where it is THIS frame.
+    this.updateSourceMotion(dt);
     if (!this.prewarmed) {
       if (this.authoredPrewarm) this.runPrewarm();
       this.prewarmed = true;
@@ -1700,7 +1827,7 @@ export class SystemRenderer {
       // re-warms on re-activation).
       this.prewarmed = false;
     }
-    const emitting = !oneShot || this.elapsed <= this.oneShotEmitEnd();
+    const emitting = this.emissionEnabled && (!oneShot || this.elapsed <= this.oneShotEmitEnd());
     if (emitting && allowChildSpawns) this.applySpawnerActions(dt);
 
     // Per-particle update. WG's authoring convention: ramp + color
@@ -2332,15 +2459,25 @@ export class SystemRenderer {
     samplePosFromVariantVg(posVg, SystemRenderer.TMP_POS);
     this.applySeaLevelBaseOffset(SystemRenderer.TMP_POS);
     samplePosFromVariantVg(velVg, SystemRenderer.TMP_VEL);
-    if (this.inheritVelocityFactor !== 0) {
-      SystemRenderer.TMP_VEL.addScaledVector(this.parentVelocityLocal, this.inheritVelocityFactor);
-    }
-    this.convertSpawnToSimulationFrame(SystemRenderer.TMP_POS, SystemRenderer.TMP_VEL);
+    // Native spawn order (fx_Particle_buildSpawnRecord @0x14071a990):
+    //  1. the PS_IC VEL_X/Y/Z intensity and distance folds multiply the
+    //     GENERATED velocity per axis, in the record (node) frame
+    //     (14071ac66–acd0);
+    //  2. position and velocity go through the spawn matrix, the live node
+    //     matrix for mode 2 (pool+0x00; 14071aba8–ac13), the identity for 3;
+    //  3. inheritVelocityFactor × the node's own velocity is added UNSCALED
+    //     (14071ad89–adc4), already in the sim frame (0 for mode 3).
+    // Folding after the hop, or folding the inherited term, was the latent
+    // W10 divergence: a VEL_Z ramp would have scaled the ship's motion.
     SystemRenderer.TMP_VEL.set(
       SystemRenderer.TMP_VEL.x * this.intensityVelXMultiplier * this.distanceVelXMultiplier,
       SystemRenderer.TMP_VEL.y * this.intensityVelYMultiplier * this.distanceVelYMultiplier,
       SystemRenderer.TMP_VEL.z * this.intensityVelZMultiplier * this.distanceVelZMultiplier,
     );
+    this.convertSpawnToSimulationFrame(SystemRenderer.TMP_POS, SystemRenderer.TMP_VEL);
+    if (this.inheritVelocityFactor !== 0) {
+      SystemRenderer.TMP_VEL.addScaledVector(this.parentVelocitySim, this.inheritVelocityFactor);
+    }
     this.pos[slot * 3 + 0] = SystemRenderer.TMP_POS.x;
     this.pos[slot * 3 + 1] = SystemRenderer.TMP_POS.y;
     this.pos[slot * 3 + 2] = SystemRenderer.TMP_POS.z;
@@ -2487,12 +2624,12 @@ export class SystemRenderer {
     if (!source) return;
     // Native `snapToSeaLevel` snaps the emitter base, not every particle's
     // authored local height. Preserve local Y offsets and velocity by applying
-    // only the parent-translation delta at spawn.
-    source.updateWorldMatrix(true, false);
-    source.getWorldPosition(SystemRenderer.TMP_WORLD);
+    // only the parent-translation delta at spawn. matrixWorld was refreshed
+    // for this tick by updateSourceMotion.
+    const sourceWorldY = source.matrixWorld.elements[13];
     // The world Y is in metres (×15); the sim runs in raw record units, so the
     // snap delta is divided back by NATIVE_TO_METRES before entering it.
-    const dy = (SEA_LEVEL_Y - SystemRenderer.TMP_WORLD.y) / this.nativeToWorld;
+    const dy = (SEA_LEVEL_Y - sourceWorldY) / this.nativeToWorld;
     if (Math.abs(dy) <= 1e-6) return;
     const offset = SystemRenderer.TMP_POS2.set(0, dy, 0);
     offset.applyMatrix3(worldBasis(source, SystemRenderer.TMP_BASIS).transpose());
@@ -2503,27 +2640,28 @@ export class SystemRenderer {
     return this.sourceGroup ?? this.points.parent;
   }
 
+  /** Spawn hop for world-stored systems (modes 0/1/2): the generated position
+   *  goes through the attachment group's FULL world matrix, as native mode 2
+   *  goes through the live node matrix in pool+0x00 (buildSpawnRecord
+   *  14071aba8–ac13), then into the particle root's frame where the sim keeps
+   *  it. The full matrix carries the authored anchor rotation and the
+   *  engine-frame Z mirror, so a side-specific effect lands on its side.
+   *  Directions use the mirror-preserving bases cached by updateSourceMotion.
+   *  Mode 3 stores node-local and skips this (spawnFrameIdentity). */
   private convertSpawnToSimulationFrame(pos: THREE.Vector3, vel: THREE.Vector3): void {
-    if (!this.detachedCoordinateFrame) return;
-    const source = this.sourceFrame();
-    const target = this.points.parent;
-    if (!source || !target || source === target) return;
-    source.updateWorldMatrix(true, false);
-    target.updateWorldMatrix(true, false);
-    // localToWorld/worldToLocal operate in THREE world units (METRES), but the
-    // sim — and `this.pos` — are native BW units (writeDrawSlot scales the
-    // OUTPUT ×NATIVE_TO_METRES). The source→target hop injects the source
-    // group's world translation, a world-frame INPUT, so it must be divided
-    // back into native units just like sea-level snap / parent velocity (see
-    // writeDrawSlot). Without this, a detached hull effect (e.g. floodLight,
-    // coordinateStyle=3) keeps the group's metre offset as if it were native
-    // units, then gets ×15 again at draw → ~15× too far from the ship.
+    if (this.spawnFrameIdentity) return;
+    // The matrices are in THREE world units (METRES), but the sim — and
+    // `this.pos` — are native BW units (writeDrawSlot scales the OUTPUT
+    // ×NATIVE_TO_METRES). The hop injects the group's world translation, a
+    // world-frame INPUT, so it must be divided back into native units just like
+    // sea-level snap / parent velocity. Without this a hull effect keeps the
+    // group's metre offset as if it were native units, then gets ×15 again at
+    // draw → ~15× too far from the ship (the 2026-07 floodLight bug).
     pos.multiplyScalar(this.nativeToWorld);
-    source.localToWorld(pos);
-    target.worldToLocal(pos);
+    pos.applyMatrix4(this.spawnSourceWorld);
+    pos.applyMatrix4(this.spawnSimWorldInverse);
     pos.multiplyScalar(1 / this.nativeToWorld);
-    vel.applyMatrix3(worldBasis(source, SystemRenderer.TMP_BASIS));
-    vel.applyMatrix3(worldBasis(target, SystemRenderer.TMP_BASIS).transpose());
+    vel.applyMatrix3(this.spawnDirectionToSim);
   }
 
   private convertSimulationPositionToSourceFrame(pos: THREE.Vector3): void {
@@ -2553,19 +2691,16 @@ export class SystemRenderer {
         ),
       );
     if (!action.switchCoordinateStyle) return out;
-    const source = this.streamSwitchSourceFrame();
-    const target = this.points.parent;
-    if (!source || !target || source === target) return out;
-    source.updateWorldMatrix(true, false);
-    target.updateWorldMatrix(true, false);
-    out.applyMatrix3(worldBasis(source, SystemRenderer.TMP_BASIS));
-    out.applyMatrix3(worldBasis(target, SystemRenderer.TMP_BASIS).transpose());
-    return out;
-  }
-
-  private streamSwitchSourceFrame(): THREE.Object3D | null {
-    if (this.coordinateStyle === 2) return this.rootGroup ?? this.points.parent;
-    return this.sourceFrame();
+    // switchCoordinateStyle rebases the authored vector from the alternate
+    // frame of the node/world pair: a world-stored system (mode 2) reads a
+    // NODE-frame vector and rotates it by the current node basis; a
+    // node-local one (mode 3) reads a WORLD vector and applies the inverse.
+    // The frame choice follows the coordinateStyle law (sampling.ts); the
+    // stream body itself (fx_Action_stream @0x1407428b0, body+0x14) has not
+    // been re-decompiled under the corrected law, so the "alternate frame"
+    // reading is inferred from the flag name and the old audit — open
+    // question E6 in the 2026-11 wake investigation. Basis cached per tick.
+    return out.applyMatrix3(this.streamSwitchToSim);
   }
 
   private applyStreamActions(slot: number, age: number, dt: number): void {
@@ -2941,23 +3076,33 @@ export class SystemRenderer {
         const sim = this.points.parent;
         if (action.useWorldSpace && sim) {
           // useWorldSpace (fx_Action_barrierPlane_system @0x140743530, RE
-          // 2026-07-02): the authored plane is in WORLD space — native
-          // converts it into the sim frame per frame via the pool
-          // inverse-node matrix; we equivalently evaluate the particle in the
-          // world frame. localToWorld runs in metres while the sim is native
-          // BW units, so ×15 in / ÷15 out (same bridge as
-          // convertSimulationPositionToSourceFrame); SEA_LEVEL_Y re-bases the
-          // scene's sea level onto the native world y=0 that the 78
-          // waterline-splash barriers author against. normalOut goes back to
-          // the sim frame so bounce/force reactions stay sim-space (unused in
-          // corpus — all 92 plane barriers are reaction-3 spawns).
-          sim.updateWorldMatrix(true, false);
+          // 2026-07-02): the authored plane is in WORLD space. Native converts
+          // it into the particle's storage frame per frame with the pool's
+          // inverse-node matrix; the equivalent here is to test the particle
+          // in the world frame. Under the coordinateStyle law (sampling.ts)
+          // that is: mode 2 (world-stored) → the sim frame is the particle
+          // root, so this is only the root's own matrix (identity in the ship
+          // viewer and on maps), no node conversion; mode 3 (node-local) →
+          // the attachment group's live matrix, i.e. the inverse-node
+          // conversion of the plane. The 2026-07 decompile read the pool slot
+          // as "inverse node" with the labels inverted (E13); with the sim
+          // frame chosen by the law the test is consistent for both modes.
+          // useWorldSpace=false keeps the plane in the sim frame verbatim,
+          // which for mode 2 is also world. matrixWorld is refreshed by
+          // updateSourceMotion at the top of the tick. The matrices are
+          // metres while the sim is native BW units, so ×15 in / ÷15 out (same
+          // bridge as convertSimulationPositionToSourceFrame); SEA_LEVEL_Y
+          // re-bases the scene's sea level onto the native world y=0 that the
+          // 78 waterline-splash barriers author against. normalOut goes back
+          // to the sim frame so bounce/force reactions stay sim-space (unused
+          // in corpus — all 92 plane barriers are reaction-3 spawns).
+          const m = sim.matrixWorld;
           cur = SystemRenderer.TMP_REL.copy(current).multiplyScalar(this.nativeToWorld);
-          sim.localToWorld(cur);
+          cur.applyMatrix4(m);
           cur.y -= SEA_LEVEL_Y;
           cur.multiplyScalar(1 / this.nativeToWorld);
           next = SystemRenderer.TMP_REL2.copy(predicted).multiplyScalar(this.nativeToWorld);
-          sim.localToWorld(next);
+          next.applyMatrix4(m);
           next.y -= SEA_LEVEL_Y;
           next.multiplyScalar(1 / this.nativeToWorld);
           normalOut.applyMatrix3(worldBasis(sim, SystemRenderer.TMP_BASIS).transpose());
