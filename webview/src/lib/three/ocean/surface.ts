@@ -175,7 +175,8 @@ vec4 sampleSurfaceLayer(vec2 worldXZ) {
   vec4 clip = uSurfaceViewProj * vec4(worldXZ.x, 0.0, worldXZ.y, 1.0);
   if (clip.w <= 1e-4) return vec4(0.0, 0.0, 0.0, 1.0);
   vec2 uv = clamp(clip.xy / clip.w * 0.4 + 0.5, 0.0, 1.0);
-  return textureLod(uSurfaceTexture, uv, 0.0);
+  // The native layer is UNORM, so stored sums saturate at 1.
+  return clamp(textureLod(uSurfaceTexture, uv, 0.0), 0.0, 1.0);
 }
 `;
 

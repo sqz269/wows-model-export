@@ -1412,7 +1412,11 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
             // transmittance. The native PS reads no depth, so no soft fade.
             if (useMap < 0.5) discard;
             if (waterKeep < 0.000588235) discard;
-            gl_FragColor = vec4(outRgb, clamp(outA, 0.0, 1.0));
+            // The native layer is B8G8R8A8_UNORM, which clamps the shader
+            // output to [0, 1] before blending (and the stored sum, which the
+            // ocean clamps on read). Aurora's shineness-10 additive glows
+            // would otherwise come out far brighter than in game.
+            gl_FragColor = vec4(clamp(outRgb, 0.0, 1.0), clamp(outA, 0.0, 1.0));
             return;
           }
         }
