@@ -2558,16 +2558,27 @@ export class SystemRenderer {
     // the node's forward projected into the card, so local flat eoY cards
     // turn with their node.
     if (this.spawnNodeYawSign !== 0) {
-      // The node's forward axis (+Z column of its world matrix, engine
-      // Z mirror included) in the world frame the fixed-card VS builds its
-      // basis in. Identity node (inspector) → +Z → no extra angle.
+      // Native: up = B cos(theta_i + s*yaw) - A sin(theta_i + s*yaw) in the
+      // engine world, i.e. the node-LOCAL card up B cos(theta_i) - A sin(theta_i)
+      // carried by the node's rotation. Do exactly that: build the local up
+      // vector from initialOrientation, push it through the node's world
+      // basis (the engine-frame Z mirror on ship effects included, which
+      // reverses angle sense, so adding a world-frame yaw angle to a
+      // record-frame theta_i would put the sheet on the wrong side), then turn
+      // it back into the angle the fixed-card VS expects:
+      // V = tB cos(theta) - tA sin(theta), tA = (s,0,0), tB = (0,0,1).
+      // Identity node (inspector) gives theta = theta_i unchanged.
       const source = this.sourceFrame();
       if (source) {
         const e = source.matrixWorld.elements;
-        const fx = e[8];
-        const fz = e[10];
-        if (fx * fx + fz * fz > 1e-12) {
-          this.rotationPhase[slot] += this.spawnNodeYawSign * Math.atan2(-fx, fz);
+        const s = this.spawnNodeYawSign;
+        const ti = this.rotationPhase[slot];
+        const lx = -s * Math.sin(ti);
+        const lz = Math.cos(ti);
+        const wx = e[0] * lx + e[8] * lz;
+        const wz = e[2] * lx + e[10] * lz;
+        if (wx * wx + wz * wz > 1e-12) {
+          this.rotationPhase[slot] = Math.atan2(-s * wx, wz);
         }
       }
     }
