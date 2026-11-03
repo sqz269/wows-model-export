@@ -859,7 +859,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           // rotationCenter anchor lever arm below turns with it, exactly like
           // native's post-rotation pos += rightAxis*halfW*kx + upAxis*halfH*ky.
           // rotationPhase carries initialOrientation + spin drift + the
-          // camera-azimuth spawn bake (flat local eoY cards). velocityOriented
+          // node-yaw spawn bake (flat local eoY cards). velocityOriented
           // cards add the spawn velocity's angle in the card plane instead of
           // that bake (fx_Particle_initSpinAngle, theta = atan2(-A.v, B.v)).
           //
@@ -875,8 +875,8 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           // straight aft, and deform_long (scaleX 0.275) runs along the hull.
           // The old mapping assumed (cos, sin), which turned every fixed card
           // 90 degrees and pushed anchored wake sheets sideways off the
-          // centreline. The camera bake likewise points texture-up away
-          // from the camera. Right = up x N gives the native handedness in
+          // centreline. The node-yaw bake likewise points texture-up along
+          // the emitter node's forward. Right = up x N gives the native handedness in
           // the webview's world (records carry the engine-frame Z mirror):
           // Montana ahead puts texture-right on the starboard side.
           float thetaFC = rotationPhase;

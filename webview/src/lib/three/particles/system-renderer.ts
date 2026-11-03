@@ -326,11 +326,11 @@ export class SystemRenderer {
   private spinRateRange = 0;
   private initialOrientationBase = 0;
   private initialOrientationRange = 0;
-  /** ±sign(eo.y) when the native flat-card camera-azimuth spawn bake applies
+  /** ±sign(eo.y) when the native flat-card node-yaw spawn bake applies
    *  (mode-2 + explicitOrientationLocal + !billboard + eo=(0,±y,0), not
    *  velocityOriented); 0 = off. See the constructor note
    *  (fx_Particle_emitUpdate @0x14071b231). */
-  private spawnCameraYawSign = 0;
+  private spawnNodeYawSign = 0;
   private readonly depthSortParticles: boolean;
   /** Main-bucket member (BLEND_BUCKET_RENDER_ORDER tier 0): the draw is owned
    *  by the scene-global compositor (bucket-compositor.ts), which mirrors the
@@ -939,24 +939,28 @@ export class SystemRenderer {
     this.spinRateRange = finiteNumber(renderer?.spinRateRange, 0);
     this.initialOrientationBase = finiteNumber(renderer?.initialOrientationBase, 0);
     this.initialOrientationRange = finiteNumber(renderer?.initialOrientationRange, 0);
-    // Camera-azimuth spawn bake (fx_Particle_emitUpdate @0x14071b231, flag
-    // map corrected 2026-07-02 §9): a mode-2 system with
+    // Node-yaw spawn bake (fx_Particle_emitUpdate @0x14071b231, flag map
+    // corrected 2026-07-02 §9): a mode-2 system with
     // explicitOrientationLocal=true, billboard=FALSE and eo=(0,±y,0) bakes
-    // atan2f(−camFwd.x, camFwd.z) (negated for eo.y<0) into each particle's
-    // spawn angle — record+0x5c, ADDITIVE with initialOrientation
-    // (fx_Particle_initSpinAngle @0x14071a710). Flat LOCAL water cards
-    // (shell-splash foam/deform sheets, 661 systems) keep their texture-up +
-    // rotationCenter anchor lever arm facing the viewer's azimuth at spawn.
+    // atan2f(−F.x, F.z) (negated for eo.y<0) into each particle's spawn angle
+    // — record+0x5c, ADDITIVE with initialOrientation
+    // (fx_Particle_initSpinAngle @0x14071a710). CORRECTED 2026-11-02: F is
+    // row 2 of the matrix at param_1+0x40. That is the EMITTER NODE matrix,
+    // the same pointer the next branch uses to rotate a local non-Y eo basis
+    // into world. It was misread as the camera. Rotating a ±Y eo by a yawed
+    // node leaves the normal unchanged, so the node's yaw is carried as this
+    // in-plane angle instead: local flat cards (shell-splash sheets, ship bow
+    // waves such as Montana's deform_long at initOri ±2.46 rad) turn with
+    // their node, not with the camera.
     // billboard=true systems never get it (they are the AXIAL population,
     // handled per-draw in the VS via uUseAxialBillboard). velocityOriented is
     // NOT in the native gate, but initSpinAngle then OVERRIDES the angle with
     // the velocity direction projected into the card plane (unless the
-    // projection is degenerate); the webview approximates that override with
-    // the per-frame FS velocity angle, so velocityOriented systems skip the
-    // bake here rather than double-count the facing.
+    // projection is degenerate). The VS adds that spawn-velocity heading, so
+    // velocityOriented systems skip the bake here rather than double-count.
     {
       const eo = renderer?.explicitOrientation;
-      this.spawnCameraYawSign =
+      this.spawnNodeYawSign =
         this.coordinateStyle === 2 &&
         renderer?.explicitOrientationLocal === true &&
         renderer?.billboard !== true &&
@@ -2547,17 +2551,25 @@ export class SystemRenderer {
     // spinRateRange drift term in tick().
     this.rotationPhase[slot] =
       (particleRandom() - 0.5) * this.initialOrientationRange + this.initialOrientationBase;
-    // Flat-card camera-azimuth spawn bake (fx_Particle_emitUpdate
-    // @0x14071b231): add atan2(−fwd.x, fwd.z) of the camera forward at THIS
+    // Flat-card NODE-yaw spawn bake (fx_Particle_emitUpdate @0x14071b231):
+    // add atan2(−F.x, F.z) of the emitter node's forward axis at THIS
     // particle's spawn moment, sign per eo.y. Consumed by the VS fixed-card
-    // axis rotation (not the FS UV spin). Absolute sign vs native is still
-    // unverified (needs a live-game A/B or a corner-stream capture — handoff
-    // §7); the term's PRESENCE is byte-proven.
-    if (this.spawnCameraYawSign !== 0 && this.sortCamera) {
-      this.sortCamera.getWorldDirection(SystemRenderer.TMP_POS2);
-      this.rotationPhase[slot] +=
-        this.spawnCameraYawSign *
-        Math.atan2(-SystemRenderer.TMP_POS2.x, SystemRenderer.TMP_POS2.z);
+    // axis rotation (texture-up = B cos − A sin), which puts texture-up along
+    // the node's forward projected into the card, so local flat eoY cards
+    // turn with their node.
+    if (this.spawnNodeYawSign !== 0) {
+      // The node's forward axis (+Z column of its world matrix, engine
+      // Z mirror included) in the world frame the fixed-card VS builds its
+      // basis in. Identity node (inspector) → +Z → no extra angle.
+      const source = this.sourceFrame();
+      if (source) {
+        const e = source.matrixWorld.elements;
+        const fx = e[8];
+        const fz = e[10];
+        if (fx * fx + fz * fz > 1e-12) {
+          this.rotationPhase[slot] += this.spawnNodeYawSign * Math.atan2(-fx, fz);
+        }
+      }
     }
     this.spinSeed[slot] = particleRandom();
     const sc = SystemRenderer.TMP_CLOCKS;
