@@ -861,10 +861,24 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           // rotationPhase carries initialOrientation + spin drift + the
           // camera-azimuth spawn bake (flat local eoY cards). velocityOriented
           // cards add the spawn velocity's angle in the card plane instead of
-          // that bake (fx_Particle_initSpinAngle): the renderer fills the
-          // velocity attribute with the unit spawn direction, and texture-right
-          // (U = B cos - A sin) lands on its projection. A velocity normal to
-          // the card leaves the angle alone, as native does.
+          // that bake (fx_Particle_initSpinAngle, theta = atan2(-A.v, B.v)).
+          //
+          // CORRECTED 2026-11-02: the buildQuad sincos helper returns
+          // (sin, cos) in (low, high). This is byte-proven from the current
+          // exe (VA 0x141586fd0): the small-angle path returns (x, 1 - 0.5x^2),
+          // and the large-angle path takes cos as sin(|x| + pi/2). So the
+          // native axes are
+          //   right = A cos + B sin,   up = B cos - A sin   (A, B = eo basis)
+          // and the heading puts texture-UP along the spawn velocity: the
+          // anchor's y moves a sheet fore and aft, and scaleX narrows it
+          // across the motion. Montana's transom foam (anchor y -0.8) trails
+          // straight aft, and deform_long (scaleX 0.275) runs along the hull.
+          // The old mapping assumed (cos, sin), which turned every fixed card
+          // 90 degrees and pushed anchored wake sheets sideways off the
+          // centreline. The camera bake likewise points texture-up away
+          // from the camera. Right = up x N gives the native handedness in
+          // the webview's world (records carry the engine-frame Z mirror):
+          // Montana ahead puts texture-right on the starboard side.
           float thetaFC = rotationPhase;
           if (uVelocityOriented > 0.5) {
             float vB = dot(velW, tB);
@@ -873,8 +887,8 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           }
           float sFC = sin(thetaFC);
           float cFC = cos(thetaFC);
-          vec3 U = tB * cFC - tA * sFC;
-          vec3 V = tB * sFC + tA * cFC;
+          vec3 V = tB * cFC - tA * sFC;
+          vec3 U = cross(V, N);
           vLightingRight = U;
           vLightingUp = V;
           vec3 centerW = (modelMatrix * vec4(iPosition, 1.0)).xyz;

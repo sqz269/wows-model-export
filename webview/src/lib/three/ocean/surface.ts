@@ -33,13 +33,14 @@ export interface OceanShadingParams {
   /** Minimum GGX roughness of the sun glint (caps its peak brightness). */
   sunRoughness: number;
   /** Metres of surface displacement per unit of the DEFORM particle layer's
-   *  .y (height sheets + foam lift). Stands in for the native sea VS scale
-   *  g_waterParams[14].x, which is not yet read out. The sea VS works in BW
-   *  units (it folds the FFT metres by 1/15 first, sea_vs8.txt:717,844) and
-   *  adds .y * [14].x straight in, so [14].x = 1 would make one layer unit
-   *  one BW unit = 15 m; the authored amplitudes only read at that order
-   *  (a 420 mm shell ring peaks at 0.27 * 0.2 = 0.054 units, the stern sheet
-   *  at 0.48 * 0.07-0.25) and so does the 0.009 foam lift. Default 15. */
+   *  .y (height sheets + foam lift). The sea works in BW units (it folds
+   *  the FFT metres by 1/15 first, sea_vs8.txt:717,844) and adds
+   *  .y * g_waterParams.deformationsScale (`mad r4.y, r0.y,
+   *  g_waterParams.deformationsScale.x, r3.z` in the live sea domain
+   *  shader). deformationsScale reads 0.5 in all four GK frame captures
+   *  checked (it is not in the map ubersettings), so one layer unit is
+   *  0.5 BW = 7.5 m. The earlier 15 m default assumed a scale of 1 and
+   *  made bow waves twice too tall. Default 7.5. */
   deformHeightScale: number;
   /** Native g_deformFoamMult: the floor of the particle foam's whiteness at
    *  full coverage, before the sea's own foam pattern adds to it. 0.6 on the
@@ -58,7 +59,7 @@ export const DEFAULT_SHADING_PARAMS: OceanShadingParams = {
   scatterColor: [0.003, 0.016, 0.024],
   deepColor: [0.001, 0.006, 0.012],
   sunRoughness: 0.08,
-  deformHeightScale: 15,
+  deformHeightScale: 7.5,
   deformFoamMult: 0.6,
   deformFoamDisplaceMult: 0.009,
 };
