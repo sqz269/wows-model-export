@@ -1432,7 +1432,10 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           // max(r, g, b) here turned the 0.5 marker into a half-opaque square.
           // PS66 then erodes the foam with the second texture (foamTile.dds,
           // textureName1), sampled at corner * tiling:
-          //   foam = saturate(foam - tile.g * (1 - tint.g) * tint.b * tint.a)
+          //   foam = saturate(foam - tile.r * (1 - tint.g) * tint.b * tint.a)
+          // The tile is RED: sample r0.z, v5.xy, t1.yzxw puts swizzle[2] = x
+          // into .z (the resource swizzle is positional). foamTile.dds has
+          // G = 0 everywhere, so reading .g eroded nothing.
           // Wake foam fades tint.g 1 -> 0.1 over its life, so each patch wears
           // away along the tile's cell borders instead of dimming uniformly.
           bool foamSheet = abs(base.b - 0.5) < 0.25;
@@ -1441,7 +1444,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
             (foamSheet ? 0.0 : base.r * 1.99219 - 0.992188) * vColor.r * deformTintA;
           float deformFoam = base.g * vColor.b * deformTintA;
           if (useFoamTile > 0.5) {
-            float tile = texture2D(foamTile, deformTileUv).g;
+            float tile = texture2D(foamTile, deformTileUv).r;
             deformFoam -= tile * (1.0 - vColor.g) * vColor.b * deformTintA;
           }
           deformFoam = clamp(deformFoam, 0.0, 1.0);
