@@ -61,10 +61,10 @@ pink). This command software-decodes those to a TRUE-HDR ``<name>.exr`` sibling
 when ``imagecodecs`` is absent (the webview software-decodes BC6H for the same
 reason).
 
-A few uncompressed textures ship with a truncated mip chain (e.g.
+A few textures ship with a truncated mip chain (e.g.
 ``particles/deform16f/water_spray_lens_noise.dds``, 6 of 11 levels), which some
-loaders reject outright (Unity's IHV importer produces no texture). The missing
-levels are box-filtered from the last authored one; the authored levels are kept.
+loaders reject outright (Unity's IHV importer produces no texture);
+``compose.dds_mips.complete_partial_mip_chain`` fills in the missing levels.
 
 NOTE: this extracts RAW WG DDS (no UV-normalize pass). For an additive
 camera-facing tracer strip that's fine (V-orientation is invisible across the
@@ -82,6 +82,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from ..compose.dds_mips import complete_partial_mip_chain
 from ..errors import ConfigError, ToolkitError
 from ..toolkit import vfs as _vfs
 from ._args import (
@@ -203,88 +204,6 @@ def _modernize_legacy_dds(path: Path) -> bool:
     # DDS_HEADER_DXT10: R8G8B8A8_UNORM(28), TEXTURE2D(3), miscFlag, arraySize=1, miscFlags2
     dx10 = struct.pack("<IIIII", 28, 3, 0, 1, 0)
     path.write_bytes(bytes(hdr) + dx10 + bytes(pixels))
-    return True
-
-
-# Uncompressed formats whose mip levels can be box-filtered: legacy D3DFMT
-# FourCC codes (stored as a number in the FourCC field) and DXGI formats, both
-# mapped to (channels, numpy dtype name).
-_D3DFMT_UNCOMPRESSED = {
-    111: (1, "float16"),  # R16F
-    112: (2, "float16"),  # G16R16F (particles/deform16f/*)
-    113: (4, "float16"),  # A16B16G16R16F
-    114: (1, "float32"),  # R32F
-    115: (2, "float32"),  # G32R32F
-    116: (4, "float32"),  # A32B32G32R32F
-}
-_DXGI_UNCOMPRESSED = {
-    2: (4, "float32"),   # R32G32B32A32_FLOAT
-    10: (4, "float16"),  # R16G16B16A16_FLOAT
-    28: (4, "uint8"),    # R8G8B8A8_UNORM
-    34: (2, "float16"),  # R16G16_FLOAT
-}
-
-
-def _complete_partial_mip_chain(path: Path) -> bool:
-    """Extend an uncompressed DDS whose mip chain stops early down to 1x1.
-
-    A few WG textures carry a truncated chain (``deform16f/water_spray_lens_noise``
-    is 512x1024 with 6 of 11 levels). Direct3D samples such a texture fine, but
-    some loaders reject it outright (Unity's IHV importer yields no texture), so
-    every effect using it renders without it. The authored levels are kept
-    byte-for-byte and the missing ones are 2x2 box-filtered from the last level.
-    Compressed formats are left alone. Idempotent; returns ``True`` when the file
-    was rewritten.
-    """
-    import math  # noqa: PLC0415
-
-    data = path.read_bytes()
-    if len(data) < 128 or data[:4] != b"DDS ":
-        return False
-    height, width = struct.unpack_from("<II", data, 12)
-    mips = struct.unpack_from("<I", data, 28)[0]
-    full = int(math.floor(math.log2(max(width, height, 1)))) + 1
-    if mips <= 1 or mips >= full:
-        return False
-
-    fourcc = data[_PF_FOURCC:_PF_FOURCC + 4]
-    if fourcc == b"DX10":
-        fmt = _DXGI_UNCOMPRESSED.get(struct.unpack_from("<I", data, _DX10_DXGI)[0])
-        offset = 148
-    else:
-        fmt = _D3DFMT_UNCOMPRESSED.get(struct.unpack_from("<I", data, _PF_FOURCC)[0])
-        offset = 128
-    if fmt is None:
-        return False
-
-    import numpy as np  # noqa: PLC0415
-
-    channels, dtype_name = fmt
-    dtype = np.dtype(dtype_name)
-    levels = []
-    w, h = width, height
-    for _ in range(mips):
-        count = w * h * channels
-        levels.append(np.frombuffer(data, dtype=dtype, count=count, offset=offset)
-                      .reshape(h, w, channels))
-        offset += count * dtype.itemsize
-        w, h = max(1, w // 2), max(1, h // 2)
-    if offset != len(data):
-        return False  # size doesn't match the header: not the layout we assumed
-
-    cur = levels[-1].astype(np.float32)
-    while len(levels) < full:
-        if cur.shape[0] % 2:
-            cur = np.concatenate([cur, cur[-1:]], axis=0)
-        if cur.shape[1] % 2:
-            cur = np.concatenate([cur, cur[:, -1:]], axis=1)
-        cur = 0.25 * (cur[0::2, 0::2] + cur[1::2, 0::2] + cur[0::2, 1::2] + cur[1::2, 1::2])
-        level = np.rint(cur) if dtype.kind == "u" else cur
-        levels.append(level.astype(dtype))
-
-    header = bytearray(data[:148 if fourcc == b"DX10" else 128])
-    struct.pack_into("<I", header, 28, full)
-    path.write_bytes(bytes(header) + b"".join(level.tobytes() for level in levels))
     return True
 
 
@@ -462,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
                 converted += 1
             if _transcode_bc6h_ramp(dds):
                 bc6h += 1
-            if _complete_partial_mip_chain(dds):
+            if complete_partial_mip_chain(dds):
                 mips_completed += 1
 
         # vfs.extract returns only the out_dir (the glob match size isn't known
