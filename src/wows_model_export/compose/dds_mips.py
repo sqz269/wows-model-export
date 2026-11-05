@@ -26,6 +26,9 @@ derived from the last authored one:
   and avoids re-encoding.
 
 Formats it doesn't know are left alone. Idempotent.
+
+:func:`rewrap_legacy_rgba8` gives the few legacy masked 32-bit RGBA files
+a DX10 header, for loaders that only know FourCC / DX10 formats.
 """
 from __future__ import annotations
 
@@ -173,3 +176,52 @@ def _complete_blocks(data, offset, width, height, mips, full, block_bytes):
         levels.append(bytes(out))
         grids.append((bw, bh))
     return levels
+
+
+# Legacy (pre-DX10) uncompressed 32-bit RGBA: pixel-format masks -> DXGI format.
+_DDPF_RGB = 0x40
+_DDPF_FOURCC = 0x4
+_LEGACY_RGBA8_DXGI = {
+    (0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000): 28,  # R8G8B8A8_UNORM
+    (0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000): 87,  # B8G8R8A8_UNORM
+}
+
+
+def rewrap_legacy_rgba8(path: Path) -> bool:
+    """Give a legacy masked 32-bit RGBA DDS a DX10 header (same pixels).
+
+    WG ships a few small uncompressed textures in the pre-DX10 layout that
+    describes the format with RGBA bit masks and no FourCC, e.g.
+    ``content/gameplay/common/projectile/artillery/textures/
+    incandescenceMap.dds`` (32x1, masks R=0xff ... A=0xff000000). Direct3D
+    reads them fine, but some loaders only know FourCC / DX10 formats and
+    reject these as an unknown format, producing no texture at all. The
+    rewrite swaps the pixel format for ``DX10`` + the matching DXGI format
+    (R8G8B8A8_UNORM / B8G8R8A8_UNORM) and keeps the payload byte for byte.
+    2D and cube textures only. Idempotent; returns ``True`` when rewritten.
+    """
+    path = Path(path)
+    data = path.read_bytes()
+    if len(data) < 128 or data[:4] != b"DDS ":
+        return False
+    pf_flags = struct.unpack_from("<I", data, 80)[0]
+    if data[_FOURCC:_FOURCC + 4] != b"\0\0\0\0" or not pf_flags & _DDPF_RGB:
+        return False
+    if struct.unpack_from("<I", data, 88)[0] != 32:
+        return False
+    dxgi = _LEGACY_RGBA8_DXGI.get(struct.unpack_from("<IIII", data, 92))
+    if dxgi is None:
+        return False
+    caps2 = struct.unpack_from("<I", data, 112)[0]
+    if caps2 & 0x200000:  # volume texture
+        return False
+    is_cube = bool(caps2 & 0x200)
+    header = bytearray(data[:128])
+    struct.pack_into("<I", header, 80, _DDPF_FOURCC)
+    header[_FOURCC:_FOURCC + 4] = b"DX10"
+    struct.pack_into("<IIIII", header, 88, 0, 0, 0, 0, 0)
+    # dxgiFormat, resourceDimension (3 = TEXTURE2D), miscFlag (4 = cube),
+    # arraySize, miscFlags2
+    dx10 = struct.pack("<IIIII", dxgi, 3, 0x4 if is_cube else 0, 1, 0)
+    path.write_bytes(bytes(header) + dx10 + data[128:])
+    return True

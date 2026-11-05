@@ -72,7 +72,7 @@ from ..config import PipelineConfig
 from ..read import sidecar as read_sidecar
 from ..types import OnEvent, PublishCounts, PublishResult
 from ._step_runner import StepRunner
-from .dds_mips import complete_partial_mip_chain
+from .dds_mips import complete_partial_mip_chain, rewrap_legacy_rgba8
 
 # Extensions we consider "publishable" under textures_dds/ and the
 # library DDS roots. Matches the I:-side `DDS_EXTENSIONS` tuple.
@@ -115,10 +115,13 @@ def _copy_if_changed(src: Path, dst: Path, force: bool) -> bool:
             return False
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
-    if dst.suffix.lower() == ".dds" and complete_partial_mip_chain(dst):
-        # Some loaders reject a chain that stops before 1x1 (see dds_mips).
-        # The completed copy is larger than its source, so the size compare
-        # above re-copies these few files on every publish; that's harmless.
+    if dst.suffix.lower() == ".dds" and (
+        complete_partial_mip_chain(dst) | rewrap_legacy_rgba8(dst)
+    ):
+        # Some loaders reject a chain that stops before 1x1 or a legacy masked
+        # RGBA pixel format (see dds_mips). The rewritten copy differs in size
+        # from its source, so the size compare above re-copies these few
+        # files on every publish; that's harmless.
         os.utime(dst, (src.stat().st_atime, src.stat().st_mtime))
     return True
 
