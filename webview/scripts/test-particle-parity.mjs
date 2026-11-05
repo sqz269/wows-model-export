@@ -149,6 +149,11 @@ try {
                   assert.equal(material.uniforms.uSoftParticleEnabled.value, 1);
                   assert.ok(material.vertexShader.includes('1.0 / (0.3 * softDepthExtent)'));
                   assert.ok(material.fragmentShader.includes('(sceneLinear - particleLinear) * vSoftDepthSlope'));
+                  // Native near-plane fade (capture 39398 PS 69-73): same slope against the
+                  // camera near plane, applied to the lit alpha and the output alpha.
+                  assert.ok(material.fragmentShader.includes('(1.0 / gl_FragCoord.w - vCameraNear) * vSoftDepthSlope'));
+                  assert.ok(material.fragmentShader.includes('vColor.a * base.a * vHideFade * nearFade'));
+                  assert.ok(material.vertexShader.includes('projectionMatrix[3][2] / (projectionMatrix[2][2] - 1.0)'));
                 } finally { sim.dispose(); }
                 softChecked++;
               }

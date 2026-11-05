@@ -729,6 +729,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       varying float vPointExtent;
       varying vec2 vLocalUV;
       varying float vSoftDepthSlope;
+      varying float vCameraNear;
       varying vec3 vLightingRight;
       varying vec3 vLightingUp;
       varying vec3 vLightingToCamera;
@@ -737,6 +738,10 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
         // Native VS: reciprocal(0.3 * v5.z), with v5.z = B * authoredSoft.
         // CPU converted the extent to metres; width/height intensity is absent.
         vSoftDepthSlope = softDepthExtent > 0.0 ? 1.0 / (0.3 * softDepthExtent) : 0.0;
+        // Camera near plane for the native near-plane fade (fragment shader). A
+        // perspective projection carries it: near = P[3][2] / (P[2][2] - 1).
+        vCameraNear = projectionMatrix[2][3] != 0.0
+          ? projectionMatrix[3][2] / (projectionMatrix[2][2] - 1.0) : 0.0;
         vColor = color;
         vGlowStrength = glowStrength;
         vAge = age;
@@ -986,6 +991,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       varying float vPointExtent;
       varying vec2 vLocalUV;
       varying float vSoftDepthSlope;
+      varying float vCameraNear;
 
       float perspectiveDepthToViewZ(const in float invClipZ, const in float near, const in float far) {
         return (near * far) / ((far - near) * invClipZ - far);
@@ -1004,6 +1010,14 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       void main() {
         vec4 base;
         vec3 glow = vec3(0.0);   // additive warm glow (gradient+lightmapping)
+        // Native near-plane fade: every world-particle PS of particles.win.dx11.fxo
+        // (blobs 4, 6, 24, 40, 46, 47, 55; capture 39398 PS 69-73) multiplies alpha by
+        // saturate((viewDepth - nearPlane) * slope) with the soft-depth slope, before the
+        // lighting reads alpha. The water-layer writers have no such term; S <= 0 never fades.
+        float nearFade = 1.0;
+        if (vSoftDepthSlope > 0.0 && vCameraNear > 0.0 && uDeformWrite < 0.5 && uWaterSurfaceWrite < 0.5) {
+          nearFade = clamp((1.0 / gl_FragCoord.w - vCameraNear) * vSoftDepthSlope, 0.0, 1.0);
+        }
         vec2 deformTileUv = vec2(0.0); // DEFORM foamTile lookup, VS64 o5
         if (useMap > 0.5) {
           // Convert the square GL_POINT coordinate to authored sprite UVs.
@@ -1299,7 +1313,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
             float avg4 = (base.r + base.g + base.b + base.a) * 0.25;
             float frontTerm = min(pow(max(avg4, 0.0), 0.625), 1.0);
             float opacity = (useMvAlpha && mvAlphaSample >= 0.0) ? mvAlphaSample : base.a;
-            float particleAlpha = opacity * vColor.a * vHideFade;
+            float particleAlpha = opacity * vColor.a * vHideFade * nearFade;
             float backTerm = 1.0 + uLightWrapAmount
               - pow(max(particleAlpha, 0.00001), uLightingTransmission);
             float ch3 = d3 > 0.0 ? frontTerm : backTerm;
@@ -1378,7 +1392,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
           float a = (1.0 - r * r);
           base = vec4(1.0, 1.0, 1.0, a);
         }
-        float outA = vColor.a * base.a * vHideFade;
+        float outA = vColor.a * base.a * vHideFade * nearFade;
         vec3 outRgb = vColor.rgb * base.rgb + glow;
         if (uWaterSurfaceMode > 0.5) {
           // Water-surface colour technique (PS60/63, MV twins PS59/62). The
