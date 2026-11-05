@@ -1348,11 +1348,114 @@ def shell_visual_extras(ammo_id: str, *, refresh: bool = False) -> dict[str, Any
     No species filter — fields-only extraction. Pair with
     :func:`torpedo_visual_extras` to cover both render families;
     output blocks have disjoint keys so the caller can merge.
+
+    The ``trail`` sub-dict (see :func:`_shell_trail_block`) is the
+    authoritative in-flight shell description: native GameParams names
+    snake-cased, native units (BW), nothing reinterpreted. The older keys
+    are kept for existing readers but their names mislead and they are
+    deprecated: ``model_length_m`` is ``shellLength`` (the streak length
+    in BW, not a model length), ``model_scale`` is ``shellModelScale``
+    (only the spin divisor; the model is scaled by the firing gun's
+    barrel diameter), ``tracer.length_m`` is ``tracerLength`` (the SMOKE
+    length in BW) and ``tracer.thickness_m`` is ``tracerThickness`` (a
+    half-width in BW).
     """
     proj = get_projectile(ammo_id, refresh=refresh)
     if proj is None:
         return {}
     return _shell_visual_extras_from_proj(proj)
+
+
+# The engine's ``SHELL_SETTINGS.defaultShellModels``: the model an ammo
+# draws when its own ``model`` is '' (every vanilla shell).
+DEFAULT_SHELL_MODEL = (
+    "content/gameplay/common/projectile/artillery/CPA001_Shell_Main/"
+    "CPA001_Shell_Main.model"
+)
+DEFAULT_SHELL_MODELS: dict[str, str] = {
+    "AP": DEFAULT_SHELL_MODEL,
+    "HE": DEFAULT_SHELL_MODEL,
+    "CS": DEFAULT_SHELL_MODEL,
+}
+
+# GameParams scalar → trail key, in the order the native trail record
+# parses them (fx_ArtilleryTrail_parseParams), then the per-shell extras.
+_TRAIL_SCALARS: tuple[tuple[str, str], ...] = (
+    ("shellLength", "shell_length"),
+    ("shellGlow", "shell_glow"),
+    ("tracerThickness", "tracer_thickness"),
+    ("smokeOpacity", "smoke_opacity"),
+    ("tracerLength", "tracer_length"),
+    ("smokeAlphaFalloff", "smoke_alpha_falloff"),
+    ("smokeTileLength", "smoke_tile_length"),
+    ("smokeThickness", "smoke_thickness"),
+    ("uvSpeed", "uv_speed"),
+    ("distTile", "dist_tile"),
+    ("bulletSpeed", "bullet_speed"),
+    ("shellModelScale", "shell_model_scale"),
+    ("rotationCoeff", "rotation_coeff"),
+    ("tracerOpacity", "tracer_opacity"),
+)
+_TRAIL_TEXTURES: tuple[tuple[str, str], ...] = (
+    ("tracerTexture", "tracer"),
+    ("ownTracerTexture", "tracer_own"),
+    ("hatTracerTexture", "hat"),
+    ("ownHatTracerTexture", "hat_own"),
+    ("smokeTexture", "smoke"),
+    ("smokeDistortTexture", "smoke_distort"),
+    ("shellDistortTexture", "shell_distort"),
+)
+
+
+def _shell_trail_block(proj: dict[str, Any]) -> dict[str, Any]:
+    """The artillery in-flight trail parameters, verbatim.
+
+    One key per GameParams attribute the client's artillery trail reads
+    (smoke ribbon, tracer streak, head-on hat, shell model spin), snake-
+    cased, in native units: lengths and widths are BW (1 BW = 15 m of
+    model geometry), ``uv_speed`` is texture u per second, tints are
+    linear RGB. ``tracer_thickness`` / ``smoke_thickness`` are
+    HALF-widths. ``smoke_opacity`` is carried for completeness; the
+    artillery trail does not read it. ``model`` is the ammo's own model,
+    or the engine default for its ammo type when the ammo leaves it
+    empty. GameParams ``gunCaliber`` (0.1 for every shell) is left out:
+    the client overwrites it with the firing gun's ``barrelDiameter``,
+    which the ship sidecar carries per gun as ``caliber_mm``.
+
+    Returns ``{}`` when the entity has no streak (``shellLength``) or no
+    width (``tracerThickness``).
+    """
+    if _safe_float(proj.get("shellLength")) is None or _safe_float(
+        proj.get("tracerThickness")
+    ) is None:
+        return {}
+    out: dict[str, Any] = {"units": "bw"}
+    for src, dst in _TRAIL_SCALARS:
+        x = _safe_float(proj.get(src))
+        if x is not None:
+            out[dst] = x
+    for src, dst in (("shellTint", "shell_tint"), ("smokeTint", "smoke_tint")):
+        c = _color3(proj.get(src))
+        if c is not None:
+            out[dst] = c
+    dp = proj.get("distParams")
+    if isinstance(dp, list) and len(dp) >= 4:
+        vals = [_safe_float(x) for x in dp[:4]]
+        if all(v is not None for v in vals):
+            out["dist_params"] = vals
+    textures: dict[str, str] = {}
+    for src, dst in _TRAIL_TEXTURES:
+        s = _str_or_none(proj.get(src))
+        if s is not None:
+            textures[dst] = s
+    if textures:
+        out["textures"] = textures
+    model = _str_or_none(proj.get("model"))
+    if model is None:
+        model = DEFAULT_SHELL_MODELS.get(str(proj.get("ammoType") or ""))
+    if model is not None:
+        out["model"] = model
+    return out
 
 
 def _shell_visual_extras_from_proj(proj: dict[str, Any]) -> dict[str, Any]:
@@ -1464,6 +1567,10 @@ def _shell_visual_extras_from_proj(proj: dict[str, Any]) -> dict[str, Any]:
     v = _safe_float(proj.get("waterEffectMaxIntensity"))
     if v is not None:
         out["water_effect_max_intensity"] = v
+
+    trail = _shell_trail_block(proj)
+    if trail:
+        out["trail"] = trail
 
     return out
 

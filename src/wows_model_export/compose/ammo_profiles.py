@@ -11,6 +11,7 @@ Output schema (``<library_root>/ammo_profiles.json``)::
     {
       "version": "YYYY-MM-DD",
       "profile_count": 3000,
+      "shell_trail_constants": { ... },     # client-wide trail constants
       "profiles": {
         "PAPA014_Shell_406mm_AP_AP_Mk_8": {
           "ammo_type": "AP",
@@ -24,7 +25,13 @@ Output schema (``<library_root>/ammo_profiles.json``)::
     }
 
 Per-projectile blocks come from the shell/torpedo visual + effects
-helpers in :mod:`wows_model_export.resolve.gameparams_autofill`.
+helpers in :mod:`wows_model_export.resolve.gameparams_autofill`. An
+artillery shell's ``visual.trail`` block carries its in-flight trail
+parameters verbatim (native names, BW units); ``shell_trail_constants``
+(:data:`SHELL_TRAIL_CONSTANTS`) carries the client-wide constants the
+trail is drawn with, so a consumer hard-codes nothing. The build also
+extracts the shell model's shared heat ramp (``incandescenceMap.dds``)
+next to the file (:data:`TRAIL_TEXTURES`).
 Shell-render and torpedo-render helpers extract disjoint key sets, so
 the merged block carries every relevant field for the species (bombs
 end up with shell-style sizing/tracer + airdrop parachute fields,
@@ -46,11 +53,14 @@ The composer emits the following canonical :class:`StepEvent` names:
 
     "load_gameparams"   "resolve_asset_ids"
     "collect_extras"    "write_profiles"
+    "extract_trail_textures"
 """
 
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -61,11 +71,106 @@ from ..errors import StepError
 from ..read import gameparams as _gp_read
 from ..resolve import gameparams_autofill as _gp_autofill
 from ..toolkit.gameparams import ensure_dump as _ensure_gameparams_dump
+from ..toolkit.vfs import extract as _vfs_extract
 from ..types import AmmoProfilesResult, OnEvent
 from ._step_runner import StepRunner
 
 # Engine convention: every artillery shell renders the same shared mesh.
 _ARTILLERY_ASSET_ID = "CPA001_Shell_Main"
+
+# Shared textures the in-flight shell needs that no per-asset export
+# carries: VFS path -> path under the projectile library root. The heat
+# ramp (32x1) is bound by the shell model's body and friction materials
+# as ``incandescenceMap``.
+TRAIL_TEXTURES: dict[str, str] = {
+    "content/gameplay/common/projectile/artillery/textures/incandescenceMap.dds":
+        "common/artillery/textures/incandescenceMap.dds",
+}
+
+# Client-wide constants of the artillery in-flight visuals (tracer
+# streak, smoke ribbon, head-on hat, shell model). Python layer build
+# 13533378 (ConstantsShip, SHELL_SETTINGS, ShotTracerSettings,
+# TerminalFakeShotParameters), native trail code build 12506899, shader
+# values from a June-2026 frame capture. Lengths are BW (1 BW = 15 m of
+# model geometry), angles radians, times seconds, rates per second.
+SHELL_TRAIL_CONSTANTS: dict[str, Any] = {
+    "units": "bw",
+    # Shot.start runs this long after the shot arrives; nothing (shell or
+    # trail) is drawn before it.
+    "client_shot_tracer_delay_s": 0.25,
+    # The trail alpha rises 0 -> tracerOpacity over this.
+    "trail_fade_in_s": 0.5,
+    # A new ring point when the shell moved more than max_points_dist_bw
+    # since the last one, or more than min_points_dist_bw with a pitch
+    # change above max_dogleg_rad (pitch = -atan2(dy, |dxz|)).
+    "min_points_dist_bw": 1.0,
+    "max_points_dist_bw": 5.0,
+    "max_dogleg_rad": 0.008726646,
+    # Ring of 64 slots, at most 63 points kept when a point is added;
+    # segment lengths are stored as max(len, min_segment_bw) and the
+    # cumulative length (texture u source) as tex_per_bw * len.
+    "ring_points": 64,
+    "min_segment_bw": 0.02,
+    "tex_per_bw": 0.1,
+    # Fadeout after impact: alpha = clamp(1 - rate * t, 0, 1); the trail
+    # is dead once both alphas are below dead_alpha.
+    "fadeout_smoke_per_s": 0.85,
+    "fadeout_tracer_per_s": 10.0,
+    "dead_alpha": 0.0004,
+    # Hat: s2 = sin^2 of the angle between the streak and the camera's
+    # forward axis, f = clamp(s2 * hat_gain - hat_bias, 0, 1); no hat at
+    # f >= 1 (above 5.38 deg), full below 1.98 deg.
+    "hat_gain": 131.579,
+    "hat_bias": 0.15789,
+    # Near-camera fade in the pixel shader (both techniques):
+    # saturate((dist - start / z) / (width / z)), z = max(zoom^2, min_zoom_sq).
+    "near_fade_start_bw": 0.3,
+    "near_fade_width_bw": 0.25,
+    "near_fade_min_zoom_sq": 0.04,
+    # Streak and hat vertex shader: fade = saturate((dist^2 * zoom -
+    # modelHideDistance^2) * shell_hide_fade_per_bw2); vertex alpha unused.
+    "shell_hide_fade_per_bw2": 0.001,
+    # Smoke vertex shader: k = 1 + gain * saturate(dot(V.xz, -sunDir.xz))^power
+    # scales the base colour, the SH ambient (floored at ambient_floor per
+    # channel) and the sun term sunColour / (1 + luminance(sunColour)).
+    "forward_scatter": {"gain": 4.0, "power": 16.0},
+    "ambient_floor": 0.001,
+    "sun_luminance_weights": [0.2125, 0.7154, 0.0721],
+    # SHELL_SETTINGS (Lesta.shellModelGlobalSettings).
+    "shell_settings": {
+        "rollingSpeedCoef": 0.005,
+        "speedCoefAfterCollision": 4.0,
+        "modelShowDistance": 4.5,
+        "modelHideDistance": 20.0,
+        "modelTransitionDistance": 4.0,
+        "defaultShellModels": dict(_gp_autofill.DEFAULT_SHELL_MODELS),
+    },
+    # Shell model spin: omega = k / shellModelScale * rotationCoeff *
+    # bulletSpeed * rollingSpeedCoef * 2pi rad/s, times
+    # max(decay_gain * (1 - decay_per_bw * fromMuzzle)^3, decay_floor).
+    "spin": {"k": 0.025, "decay_gain": 11.9, "decay_per_bw": 0.001,
+             "decay_floor": 0.1},
+    # Shell model heat: heat = max(exp(-per_bw * max(fromMuzzle -
+    # start_bw, 0)), floor_body); the friction glow floors at floor_friction.
+    "heat": {"start_bw": 50.0, "per_bw": 0.01, "floor_body": 0.01,
+             "floor_friction": 0.05},
+    # Shell model material parameters as captured (emissivePower, blPos).
+    "shell_model_materials": {
+        "body": {"emissive_power": 10.0},
+        "friction": {"emissive_power": 5.0, "bl_pos": 1.0},
+        "friction_head": {"emissive_power": 2.5, "bl_pos": 1.0},
+    },
+    # The model's uniform scale is the firing gun's barrelDiameter (m); a
+    # shell created without a gun (the fake continuation shells) keeps this.
+    "model_scale_without_gun": 0.5,
+    # TerminalFakeShotParameters: the ricochet / over-penetration
+    # continuation shells multiply these trail parameters.
+    "fake_shot": {"tracer_opacity": 0.5, "shell_length": 0.15,
+                  "shell_glow": 0.15},
+    "textures": {
+        "incandescence_map": next(iter(TRAIL_TEXTURES)),
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +299,7 @@ def write_profiles_file(
     doc = {
         "version": time.strftime("%Y-%m-%d", time.gmtime()),
         "profile_count": len(profiles),
+        "shell_trail_constants": SHELL_TRAIL_CONSTANTS,
         "profiles": profiles,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -203,6 +309,34 @@ def write_profiles_file(
         text = json.dumps(doc, ensure_ascii=False, separators=(",", ":")) + "\n"
     out_path.write_text(text, encoding="utf-8")
     return out_path
+
+
+def extract_trail_textures(
+    library_root: Path,
+    *,
+    config: PipelineConfig | None = None,
+) -> list[Path]:
+    """Extract :data:`TRAIL_TEXTURES` from the VFS into ``library_root``.
+
+    One extract call; a file is only rewritten when its bytes changed, so
+    a re-run leaves an unchanged file's mtime alone (publish copies on
+    mtime). Returns the paths now present under ``library_root``.
+    """
+    written: list[Path] = []
+    with tempfile.TemporaryDirectory(prefix="wms-trail-tex-") as td:
+        staging = Path(td)
+        _vfs_extract([f"**/{vfs}" for vfs in TRAIL_TEXTURES],
+                     out_dir=staging, config=config)
+        for vfs, rel in TRAIL_TEXTURES.items():
+            src = staging / vfs
+            if not src.is_file():
+                continue
+            dst = library_root / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if not dst.is_file() or dst.read_bytes() != src.read_bytes():
+                shutil.copyfile(src, dst)
+            written.append(dst)
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +518,24 @@ def build_ammo_profiles(
             step="write_profiles", underlying=e, detail=str(e),
         ) from e
 
+    # ── Step: extract_trail_textures ──────────────────────────────────
+    try:
+        with runner.step("extract_trail_textures") as st:
+            got = extract_trail_textures(out_path.parent, config=cfg)
+            missing = len(TRAIL_TEXTURES) - len(got)
+            if missing:
+                warnings.append(
+                    f"{missing} trail texture(s) not found in the VFS"
+                )
+            st.annotate(
+                f"{len(got)} trail texture(s) under {out_path.parent.name}/",
+                data={"written": [str(p) for p in got]},
+            )
+    except StepError:
+        raise
+    except Exception as e:
+        warnings.append(f"extract_trail_textures failed: {e}")
+
     return AmmoProfilesResult(
         output_path=out_path,
         profiles_count=len(profiles),
@@ -393,7 +545,10 @@ def build_ammo_profiles(
 
 
 __all__ = [
+    "SHELL_TRAIL_CONSTANTS",
+    "TRAIL_TEXTURES",
     "build_ammo_profiles",
     "build_profiles",
+    "extract_trail_textures",
     "write_profiles_file",
 ]
