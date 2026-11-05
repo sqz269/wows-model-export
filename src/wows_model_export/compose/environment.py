@@ -56,7 +56,10 @@ MANIFEST_FILE = LIBRARY_ROOT / "manifest.json"
 # v3 (2026-06-25): per-weather "color_grading" block (UE4-style per-lum-range
 # Saturation/Contrast/Gain/Offset) — the PostFX grade applied pre-tonemap; a
 # consumer that skips it renders darker/less-warm than the game.
-SCHEMA_VERSION = 3
+# v4 (2026-11-05): per-weather "tracer" block (tracerAmbientMultiplier,
+# tracerSunMultiplier, tracerSmokeTint, AAtracerSmokeTint) — the shell-trail
+# smoke lighting knobs.
+SCHEMA_VERSION = 4
 
 # The one shared split-sum BRDF LUT (packed only — not in res_unpack).
 ENV_BRDF_LUT_VFS = "system/maps/env_brdf_lut.dds"
@@ -472,6 +475,7 @@ def build(
                 "pbs_extras": w.get("pbs_extras") or {},
                 "sun": w.get("sun"),
                 "wetness": w.get("wetness"),
+                "tracer": w.get("tracer"),
             }
         spaces_out[name] = {
             "weather_order": env.get("weather_order") or list(weathers_out),

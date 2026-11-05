@@ -278,6 +278,49 @@ def _parse_wetness(
     }
 
 
+# Per-weather shell-trail lighting knobs in ``<Weather><settings>`` (read by
+# the client's projectile system, ``readSpaceTracerSettings``).
+TRACER_KEYS: tuple[str, ...] = (
+    "tracerAmbientMultiplier",
+    "tracerSunMultiplier",
+    "tracerSmokeTint",
+    "AAtracerSmokeTint",
+)
+
+
+def _parse_tracer(weather: ET.Element) -> dict[str, Any] | None:
+    """Pull the per-weather shell-trail lighting knobs.
+
+    ``tracerAmbientMultiplier`` / ``tracerSunMultiplier`` scale the smoke
+    ribbon's SH-ambient and sun terms; ``tracerSmokeTint`` (RGBA) is the
+    smoke base colour (rgb) and a global smoke alpha factor (a);
+    ``AAtracerSmokeTint`` is the same for AA tracers. They sit in the
+    weather's top-level ``<settings>`` next to the wetness knobs. A scalar
+    tint is broadcast to RGBA with alpha 1.
+
+    Returns ``None`` when the weather authors none of them; otherwise
+    only the keys present.
+    """
+    settings_elem = weather.find("settings")
+    if settings_elem is None:
+        return None
+    s = _settings_dict(settings_elem)
+    out: dict[str, Any] = {}
+    for key in TRACER_KEYS:
+        v = s.get(key)
+        if isinstance(v, bool) or v is None:
+            continue
+        if key.endswith("Tint"):
+            if isinstance(v, (int, float)):
+                out[key] = [float(v)] * 3 + [1.0]
+            elif isinstance(v, list) and len(v) >= 3:
+                rgba = [float(c) for c in v[:4]]
+                out[key] = rgba + [1.0] * (4 - len(rgba))
+        elif isinstance(v, (int, float)):
+            out[key] = float(v)
+    return out or None
+
+
 def parse_ubersettings_text(xml_text: str) -> dict[str, Any]:
     """Parse ubersettings XML text into a per-weather environment dict.
 
@@ -300,6 +343,9 @@ def parse_ubersettings_text(xml_text: str) -> dict[str, Any]:
               "sun": {yaw, pitch, color} | None,
               "wetness": {puddlesIntensity, ripplesIntensity, falloutIntensity,
                           overallWetness, wetnessColor} | None,
+              "tracer": {tracerAmbientMultiplier, tracerSunMultiplier,
+                         tracerSmokeTint: [r, g, b, a],
+                         AAtracerSmokeTint: [r, g, b, a]} | None,
             },
             "Storm": {...}, ...
           },
@@ -336,6 +382,7 @@ def parse_ubersettings_text(xml_text: str) -> dict[str, Any]:
             "pbs_extras": pbs["pbs_extras"],
             "sun": _parse_sun(weather),
             "wetness": _parse_wetness(weather, pbs["pbs_extras"]),
+            "tracer": _parse_tracer(weather),
         }
         order.append(name)
 
@@ -441,6 +488,7 @@ def color_grade(weather: dict[str, Any]) -> dict[str, Any] | None:
 
 __all__ = [
     "GT_PARAM_KEYS",
+    "TRACER_KEYS",
     "COLOR_GRADE_RANGES",
     "SH_COEFF_COUNT",
     "decode_harmonics",
