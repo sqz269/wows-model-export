@@ -1930,6 +1930,11 @@ _MUNITION_LIST_SLOTS: tuple[str, ...] = (
     "underwaterDeathEffects",
     "deathUnderWaterBubblesEffects",
 )
+# Weapon components whose mounts list ammo (``HP_*`` -> ``ammoList``) for the
+# munition scan.
+_MUNITION_COMPONENT_GROUPS: tuple[str, ...] = (
+    "artillery", "atba", "airDefense", "torpedoes", "depthCharges",
+)
 
 
 def _emit_particle(
@@ -2079,8 +2084,9 @@ def collect_munition_effects(
     """Per-Munition particle attachments (shell impact + projectile-destroyed
     + tracer XML refs).
 
-    Iterates every ammo ID carried by the active hull's gun mounts (or
-    ``ammo_ids`` directly when caller pre-resolved them), loads each
+    Iterates every ammo ID carried by the active hull's gun, torpedo and
+    depth-charge mounts (or ``ammo_ids`` directly when caller pre-resolved
+    them), loads each
     Projectile entity via GameParams, and emits one row per non-empty
     effect slot. Impact effects spawn at hit location (no anchor on the
     ship); ``node`` is left empty so the consumer stages them.
@@ -2093,12 +2099,20 @@ def collect_munition_effects(
     if ammo_ids is None:
         if components is None:
             components = resolve_components(ship, hull_choice="upgraded")
-        # Collect ammo IDs from every gun mount across artillery / atba /
-        # airDefense. AA mounts technically don't carry ammoList (they
-        # damage by aura), but check anyway in case a future schema does.
+        # Collect ammo IDs from every weapon mount: guns (artillery / atba /
+        # airDefense), torpedo launchers and depth-charge throwers. AA mounts
+        # technically don't carry ammoList (they damage by aura), but check
+        # anyway in case a future schema does. Torpedo ammo carries the
+        # torpedo hit keys (blowUpEffect underwater, torpedoProjDestroyedEffect
+        # at the surface, ground / dropToTheGroundEffect, water = the launch
+        # drop) and the running tracers (tracerEffect / ownTracerEffect above
+        # the surface, underwaterTracerEffect always); depth-charge ammo
+        # carries waterHitEffect / enemyHitSurfaceEffect /
+        # enemyHitUnderwaterEffect. Same components as the placement autofill,
+        # so the rows key on the ammo the mounts list.
         seen: set[str] = set()
         ordered: list[str] = []
-        for grp_key in ("artillery", "atba", "airDefense"):
+        for grp_key in _MUNITION_COMPONENT_GROUPS:
             group = components.get(grp_key)
             if not isinstance(group, dict):
                 continue

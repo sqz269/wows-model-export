@@ -13,9 +13,15 @@ from typing import Any
 from .gameparams_autofill import resolve_hull_effect_positions
 
 _SHOOTER_GROUPS = {"shotEffect", "lensEffect", "purgingEffect", "reloadBoostEffect"}
+# Ammo attributes the client passes through Peculiarities.getEffect: every
+# createEffect pick (impacts, incl. the depth-charge waterHitEffect) and the
+# shell tracer. Known divergence: the torpedo client (ClientTorpedoes.Torpedo,
+# build 13533378) plays tracerEffect / ownTracerEffect / underwaterTracerEffect
+# without substitution, but the rows carry no species to tell torpedo tracers
+# from shell tracers.
 _MUNITION_GROUPS = {
     "tracerEffect", "ownTracerEffect", "dropToTheGroundEffect", "hitEffect",
-    "enemyHitSurfaceEffect", "enemyHitUnderwaterEffect", "blowUpEffect",
+    "enemyHitSurfaceEffect", "enemyHitUnderwaterEffect", "waterHitEffect", "blowUpEffect",
     "water", "ground", "groundHorizontal", "groundVertical",
     "projDestroyedEffect", "projDestroyedEffectHorizontal", "projDestroyedEffectVertical",
     "torpedoProjDestroyedEffect",
