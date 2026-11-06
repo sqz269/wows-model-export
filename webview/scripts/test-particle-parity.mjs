@@ -18,7 +18,7 @@ try {
       contents: `
         import assert from 'node:assert/strict';
         import * as THREE from 'three';
-        import { SystemRenderer } from './src/lib/three/particles/system-renderer';
+        import { SystemRenderer, alphaSetterZoomFactor } from './src/lib/three/particles/system-renderer';
         import { buildParticleMaterial } from './src/lib/three/particles/material';
         import { composeMainBucket } from './src/lib/three/particles/bucket-compositor';
         import { gunShotIntensity } from './src/lib/three/particles/gun-shot-intensity';
@@ -154,6 +154,12 @@ try {
                   assert.ok(material.fragmentShader.includes('(1.0 / gl_FragCoord.w - vCameraNear) * vSoftDepthSlope'));
                   assert.ok(material.fragmentShader.includes('vColor.a * base.a * vHideFade * nearFade'));
                   assert.ok(material.vertexShader.includes('projectionMatrix[3][2] / (projectionMatrix[2][2] - 1.0)'));
+                  // alphaSetter depth x BigWorld's LOD zoom factor tan(vfov/2)/tan(30 deg) (native
+                  // PerView g_zoomFactor: 0.5795 at 37 deg, 0.0673 at the x12 scope's 4.45 deg).
+                  close(alphaSetterZoomFactor(new THREE.PerspectiveCamera(60)), 1, 'zoom factor at 60 deg');
+                  assert.ok(Math.abs(alphaSetterZoomFactor(new THREE.PerspectiveCamera(37)) - .5795) < 5e-4, 'zoom factor at 37 deg');
+                  assert.ok(Math.abs(alphaSetterZoomFactor(new THREE.PerspectiveCamera(4.4507)) - .0673) < 5e-4, 'zoom factor at the x12 scope');
+                  assert.equal(alphaSetterZoomFactor(new THREE.OrthographicCamera()), 1);
                 } finally { sim.dispose(); }
                 softChecked++;
               }

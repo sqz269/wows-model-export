@@ -187,6 +187,19 @@ interface SystemRendererOptions {
  * One Three.Points emitter wrapping a single System inside a particle's
  * Effect record. Updates a ring buffer of particles each frame.
  */
+/**
+ * BigWorld's LOD zoom factor, tan(vfov / 2) / tan(30°) — the native PerView
+ * g_zoomFactor (0.5795 at the 37° battle view, 0.0673 in the x12 scope). The
+ * alphaSetter ramp is sampled at view depth (BW) × this factor. 1 for a
+ * non-perspective camera.
+ */
+export function alphaSetterZoomFactor(camera: THREE.Camera): number {
+  const cam = camera as THREE.PerspectiveCamera;
+  if (!cam.isPerspectiveCamera) return 1;
+  const vfov = THREE.MathUtils.degToRad(cam.getEffectiveFOV());
+  return Math.tan(vfov / 2) / Math.tan(Math.PI / 6);
+}
+
 export class SystemRenderer {
   readonly points: THREE.Mesh;
   /** Per-system author name (System+0x198), `''` for pre-`name` records. */
@@ -1778,6 +1791,10 @@ export class SystemRenderer {
     // points.matrixWorld × (simPos × NATIVE_TO_METRES); the ramp axis is
     // NATIVE (BW) units, so ÷NATIVE_TO_METRES — the two 15s cancel on the
     // linear part. Three's view looks down −Z, so negate for +forward depth.
+    // The depth is scaled by the camera's zoom factor tan(vfov/2)/tan(30°)
+    // (BigWorld LOD zoom, native PerView g_zoomFactor): native GK captures in
+    // the x12 scope draw fire sparks whose ramp ends at 60 BW at 294 BW, which
+    // only depth × zoom (0.081) allows. 1 at a 60° camera.
     if (this.alphaRamp && this.sortCamera) {
       this.sortCamera.updateMatrixWorld(true);
       this.points.updateWorldMatrix(true, false);
@@ -1785,11 +1802,12 @@ export class SystemRenderer {
         this.sortCamera.matrixWorldInverse,
         this.points.matrixWorld,
       ).elements;
+      const zoom = alphaSetterZoomFactor(this.sortCamera);
       const row = (this.alphaDepthRow ??= new Float32Array(4));
-      row[0] = -e[2];
-      row[1] = -e[6];
-      row[2] = -e[10];
-      row[3] = -e[14] / this.nativeToWorld;
+      row[0] = -e[2] * zoom;
+      row[1] = -e[6] * zoom;
+      row[2] = -e[10] * zoom;
+      row[3] = (-e[14] / this.nativeToWorld) * zoom;
     } else {
       this.alphaDepthRow = null;
     }
