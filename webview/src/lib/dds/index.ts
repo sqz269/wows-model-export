@@ -163,9 +163,10 @@ function makeRgtcDataTexture(
  * GRADIENT_MAP color ramps and any other non-BC particle texture.
  */
 function makeRgba8DataTexture(
-  mip: { data: Uint8Array | Float32Array; width: number; height: number },
+  mips: { data: Uint8Array | Float32Array; width: number; height: number }[],
   renderer: THREE.WebGLRenderer,
 ): THREE.DataTexture {
+  const mip = mips[0];
   const tex = new THREE.DataTexture(
     mip.data as unknown as Uint8Array<ArrayBuffer>,
     mip.width,
@@ -173,9 +174,22 @@ function makeRgba8DataTexture(
     THREE.RGBAFormat,
     THREE.UnsignedByteType,
   );
+  // Strip LUTs (particle ramps, N x 1..8) stay single-level. A real 2D image
+  // that carries its own mip chain (the 2048² ship detail atlas) keeps it, so
+  // minified samples filter instead of aliasing. Wrapping stays clamped: the
+  // atlas shader insets and wraps its cells itself.
+  const chained = mips.length > 1 && mip.width >= 64 && mip.height >= 64;
+  if (chained) {
+    tex.mipmaps = mips.map((m) => ({
+      data: m.data as unknown as Uint8Array<ArrayBuffer>,
+      width: m.width,
+      height: m.height,
+    })) as unknown as THREE.DataTexture['mipmaps'];
+    tex.generateMipmaps = false;
+  }
   tex.wrapS = THREE.ClampToEdgeWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
-  tex.minFilter = THREE.LinearFilter;
+  tex.minFilter = chained ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
   tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
   tex.flipY = false;
@@ -300,7 +314,7 @@ export async function loadDdsMipChain(
   // pump straight into a DataTexture.
   const firstRgba8 = parses.find((p): p is ParseSuccess => !!p && p.kind === 'rgba8');
   if (firstRgba8) {
-    return makeRgba8DataTexture(firstRgba8.mipmaps[0], renderer);
+    return makeRgba8DataTexture(firstRgba8.mipmaps, renderer);
   }
 
   // BC6H HDR fast-path: worker software-decoded to a Float32 RGBA buffer.

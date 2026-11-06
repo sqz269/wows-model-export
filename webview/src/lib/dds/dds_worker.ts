@@ -421,6 +421,10 @@ function parseDx10Classic(buf: ArrayBuffer, dxgi: number): ParseSuccess | null {
 // path keys these as 1D LUTs via the fragment shader. Pixel-format
 // signature: DDPF_RGB | DDPF_ALPHAPIXELS, 32 bpp, channel masks for
 // either RGBA or BGRA byte order.
+//
+// 24 bpp (no alpha) is read too and expanded to RGBA with A = 255. The
+// ship detail atlas ``ship_atlas_detail.dds`` (2048², 12 mips, BGR masks)
+// is this format; without it every material lost its detail layer.
 function parseUncompressedRgba8(buf: ArrayBuffer): ParseSuccess | null {
   const view = new DataView(buf);
   if (buf.byteLength < 128) return null;
@@ -430,7 +434,8 @@ function parseUncompressedRgba8(buf: ArrayBuffer): ParseSuccess | null {
   const fourCC = view.getUint32(84, true);
   if (fourCC !== 0 && (pfFlags & DDPF_FOURCC) !== 0) return null;
   const rgbBits = view.getUint32(88, true);
-  if (rgbBits !== 32) return null; // 24bpp + 16bpp paths not needed yet.
+  if (rgbBits !== 32 && rgbBits !== 24) return null; // 16bpp not needed yet.
+  const srcBpp = rgbBits / 8;
 
   const maskR = view.getUint32(92, true);
   const maskG = view.getUint32(96, true);
@@ -447,7 +452,7 @@ function parseUncompressedRgba8(buf: ArrayBuffer): ParseSuccess | null {
   } else {
     return null; // unsupported mask layout
   }
-  const hasAlpha = (pfFlags & DDPF_ALPHAPIXELS) !== 0 && maskA !== 0;
+  const hasAlpha = srcBpp === 4 && (pfFlags & DDPF_ALPHAPIXELS) !== 0 && maskA !== 0;
 
   let height = view.getUint32(12, true);
   let width = view.getUint32(16, true);
@@ -461,9 +466,20 @@ function parseUncompressedRgba8(buf: ArrayBuffer): ParseSuccess | null {
   for (let i = 0; i < mipCount; i++) {
     const pixelCount = width * height;
     const byteSize = pixelCount * 4;
-    if (offset + byteSize > buf.byteLength) break;
+    const srcSize = pixelCount * srcBpp;
+    if (offset + srcSize > buf.byteLength) break;
     const out = new Uint8Array(byteSize);
-    if (swizzle === 'rgba') {
+    if (srcBpp === 3) {
+      // RGB / BGR on disk -> RGBA output, A = 255.
+      const r = swizzle === 'rgba' ? 0 : 2;
+      const b = swizzle === 'rgba' ? 2 : 0;
+      for (let p = 0, q = offset; p < byteSize; p += 4, q += 3) {
+        out[p] = src[q + r];
+        out[p + 1] = src[q + 1];
+        out[p + 2] = src[q + b];
+        out[p + 3] = 0xff;
+      }
+    } else if (swizzle === 'rgba') {
       out.set(src.subarray(offset, offset + byteSize));
       if (!hasAlpha) {
         // Force alpha=255 when the file doesn't carry an alpha channel.
@@ -479,7 +495,7 @@ function parseUncompressedRgba8(buf: ArrayBuffer): ParseSuccess | null {
       }
     }
     mipmaps.push({ data: out, width, height });
-    offset += byteSize;
+    offset += srcSize;
     if (width === 1 && height === 1) break;
     width = Math.max(1, width >> 1);
     height = Math.max(1, height >> 1);
