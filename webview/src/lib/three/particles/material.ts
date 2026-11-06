@@ -320,6 +320,8 @@ function rotationPivotForCenter(
 // = buildQuad's cfg+0x70/+0x74, once mislabeled "scaleX/scaleY"), and
 // fx_Sprite_buildQuad offsets the INSTANCE POSITION by it:
 //   pos = wpos + right·halfW·kx + up·halfH·ky
+// with right/up the quad axes after the spin AND the flipTexcoordU/V
+// negations (2026-11-05), so the anchored texel stays on the particle.
 // PS_RRC: 0=bottom→(0,1) (bottom edge at the particle — e.g. the
 // Laser_Charge_Shot_H2020 beam extends one way from the muzzle),
 // 1=corner→(1,1), 2=center→(0,0) (customCenterOffset IGNORED for center),
@@ -712,6 +714,7 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
       uniform float uUseFixedOrientation;
       uniform float uVelocityAxial;
       uniform vec2 uAnchorShift;
+      uniform vec2 uUvFlip;
       uniform float uHideFadeBase;
       uniform float uHideSpeed;
       uniform float uHideIsAxial;
@@ -809,8 +812,31 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
         // up*halfH*ky; halfW folds the aspect like native drawRec+0x04, halfH
         // = the base half-height). bottom=(0,1) puts the bottom edge at the
         // particle (muzzle-anchored beams); center=(0,0) is a no-op.
+        //
+        // right/up are the quad axes AFTER the spin sincos AND the flip
+        // negations (buildQuad 0x1406d2fbb-0x1406d3198: the XORPS flip
+        // registers XMM4/6/5 and XMM8/11/9 are packed as the VS axes and then
+        // scaled by halfW/halfH and kx/ky into the instance position). So the
+        // anchored texel ((1-kx)/2, (1+ky)/2) always sits ON the particle: a
+        // spinning sprite turns about the particle, not about its own centre,
+        // and a flipped sprite mirrors about the particle. Here the FS turns
+        // and flips the texture about the quad centre, so the lever arm takes
+        // the flip signs and the same FS angle (fixed cards turn their axes
+        // below instead and get angle 0). PROJ_Explo_2 stretched_v04 (2 pi
+        // random angle) drew its burst origin off the hit point; flipV
+        // smoke_trails led their debris instead of trailing it.
         float anchorHalfH = size * 0.5;
-        vec2 anchorOff = uAnchorShift * vec2(anchorHalfH * spriteAspectX, anchorHalfH);
+        vec2 anchorOff = uAnchorShift * (vec2(1.0) - 2.0 * uUvFlip)
+          * vec2(anchorHalfH * spriteAspectX, anchorHalfH);
+        if (uUseSpriteRotation > 0.5 && uUseFixedOrientation < 0.5) {
+          // Same angle and sense as the FS: texture-right = R cos - U sin,
+          // texture-up = R sin + U cos in the branch's (right, up) frame.
+          float aAng = rotationPhase
+            + ((uVelocityOriented > 0.5 && uVelocityAxial < 0.5) ? vVelocityAngle : 0.0);
+          float aS = sin(aAng);
+          float aC = cos(aAng);
+          anchorOff = vec2(anchorOff.x * aC + anchorOff.y * aS, -anchorOff.x * aS + anchorOff.y * aC);
+        }
         if (uUseAxialBillboard > 0.5) {
           // AXIAL (cylindrical) billboard — billboard=true + nonzero eo: the
           // card's long/up axis = eo (world, or the attachment frame when
