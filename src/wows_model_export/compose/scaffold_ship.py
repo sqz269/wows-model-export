@@ -1772,6 +1772,20 @@ def _absorb_gameparams_passes(
     except Exception as e:
         _warn(warnings, f"gameparams effects failed ({e})")
 
+    # Pass 8: death presentation (the death sequence's particles, the sinking effects and
+    # their depth windows, the sink rows). Best-effort.
+    try:
+        from ..resolve import death_presentation as _death
+        cfg = config or PipelineConfig.load()
+        block = _death.collect_death_block(
+            components.get("hull") or {},
+            cache_root=_death.sequence_cache_root(cfg),
+            config=cfg,
+        )
+        doc = sidecar.absorb_death_presentation(doc, block)
+    except Exception as e:
+        _warn(warnings, f"gameparams death presentation failed ({e})")
+
     return doc
 
 

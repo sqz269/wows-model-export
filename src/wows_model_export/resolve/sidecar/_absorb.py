@@ -1234,6 +1234,25 @@ def absorb_gameparams_effects(
     return new_doc
 
 
+def absorb_death_presentation(
+    doc: dict[str, Any],
+    block: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Stamp the hull's death presentation into ``doc.death``.
+
+    ``block`` comes from :func:`wows_model_export.resolve.death_presentation.collect_death_block`:
+    the death sequence's particle tracks, the sinking effects (foam, bubbles, fountains,
+    fuming, ...), their per-class depth windows (BW units), and the sink rows.
+
+    Replace-by-section, like the effects block: re-running drops stale entries.
+    """
+    if not block:
+        return doc
+    new_doc = _deepcopy_jsonish(doc)
+    new_doc["death"] = {"source": {"generated_at": _now_iso()}, **block}
+    return new_doc
+
+
 def absorb_ballistics_json(
     doc: dict[str, Any],
     ballistics: str | Path | dict[str, Any],
