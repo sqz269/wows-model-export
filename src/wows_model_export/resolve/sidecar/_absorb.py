@@ -820,9 +820,14 @@ def _extract_hull_stats(ship_dict: dict[str, Any], hull_name: str) -> dict[str, 
 
     Hit-zone HPs come from the per-zone subdicts (``Hull`` / ``Bow`` /
     ``Ammo_1`` / ``SS`` / ``SG`` / ``St`` / ``SSC`` / ``Engine`` / etc.) —
-    each carries ``maxHP``. Burn-node timing comes from ``burnNodes[i][0]``
-    (all four entries share the same float in the cases we've inspected, so
-    we record just the first).
+    each carries ``maxHP``.
+
+    The fire numbers come from ``burnNodes``: one row per fire zone (four),
+    each ``[fire resistance coefficient, % of max HP burned per second, burn
+    time in seconds]`` (Montana ``[0.5005, 0.3, 60.0]``, Fletcher B hull
+    ``[0.5671, 0.3, 30.0]``, the large cruiser Aegir ``[0.5671, 0.3, 60.0]``).
+    The four rows are equal on every hull inspected, so the first one is
+    recorded, as ``fire_resistance``, ``fire_dps_pct`` and ``fire_duration_s``.
     """
     hull = ship_dict.get(hull_name)
     if not isinstance(hull, dict):
@@ -831,15 +836,16 @@ def _extract_hull_stats(ship_dict: dict[str, Any], hull_name: str) -> dict[str, 
     health = hull.get("health")
     rudder = hull.get("rudderTime")
 
+    fire_row: list[float | None] = [None, None, None]
     burn_nodes = hull.get("burnNodes")
-    burn_first = None
     if isinstance(burn_nodes, list) and burn_nodes:
         first = burn_nodes[0]
-        if isinstance(first, list) and first:
-            try:
-                burn_first = float(first[0])
-            except (TypeError, ValueError):
-                burn_first = None
+        if isinstance(first, list):
+            for i in range(min(len(first), 3)):
+                try:
+                    fire_row[i] = float(first[i])
+                except (TypeError, ValueError):
+                    fire_row[i] = None
 
     zone_hp: dict[str, float] = {}
     for zone_name, zone in hull.items():
@@ -856,7 +862,9 @@ def _extract_hull_stats(ship_dict: dict[str, Any], hull_name: str) -> dict[str, 
     return make_hull_stats(
         health=float(health) if health is not None else None,
         rudder_time_s=float(rudder) if rudder is not None else None,
-        burn_node_time_s=burn_first,
+        fire_resistance=fire_row[0],
+        fire_dps_pct=fire_row[1],
+        fire_duration_s=fire_row[2],
         zone_hp=zone_hp or None,
     )
 

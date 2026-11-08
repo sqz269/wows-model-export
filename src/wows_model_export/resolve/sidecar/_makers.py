@@ -181,17 +181,30 @@ def make_hull_stats(
     *,
     health: float | None = None,
     rudder_time_s: float | None = None,
-    burn_node_time_s: float | None = None,
+    fire_resistance: float | None = None,
+    fire_dps_pct: float | None = None,
+    fire_duration_s: float | None = None,
     zone_hp: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Build the ``stats`` sub-block of a hull entry. All fields nullable."""
+    """Build the ``stats`` sub-block of a hull entry. All fields nullable.
+
+    The fire fields are one ``burnNodes`` row of the hull: the fire
+    resistance coefficient (multiplies every shell's fire chance), the
+    percentage of max HP one fire burns per second, and one fire's burn time
+    in seconds. Sidecars made before these fields carried only the
+    coefficient, under the name ``burn_node_time_s``.
+    """
     out: dict[str, Any] = {}
     if health is not None:
         out["health"] = float(health)
     if rudder_time_s is not None:
         out["rudder_time_s"] = float(rudder_time_s)
-    if burn_node_time_s is not None:
-        out["burn_node_time_s"] = float(burn_node_time_s)
+    if fire_resistance is not None:
+        out["fire_resistance"] = float(fire_resistance)
+    if fire_dps_pct is not None:
+        out["fire_dps_pct"] = float(fire_dps_pct)
+    if fire_duration_s is not None:
+        out["fire_duration_s"] = float(fire_duration_s)
     if zone_hp:
         out["zone_hp"] = {k: float(v) for k, v in zone_hp.items()}
     return out

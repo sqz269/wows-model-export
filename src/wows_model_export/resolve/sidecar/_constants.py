@@ -471,10 +471,16 @@ _HULL_ENTRY_ORDER: tuple[str, ...] = (
 #: ``Ammo_1`` / ``Ammo_2`` / ``SG`` / ``St`` / ``SSC`` / ``Engine`` /
 #: …) — keys are passed through verbatim because the inventory varies
 #: by class and we don't want to drop fields we don't recognise yet.
+#: ``fire_resistance`` / ``fire_dps_pct`` / ``fire_duration_s`` are the
+#: hull's first ``burnNodes`` row (coefficient, % max HP per second, burn
+#: time in s); older sidecars carry only the coefficient, as
+#: ``burn_node_time_s``.
 _HULL_STATS_ORDER: tuple[str, ...] = (
     "health",
     "rudder_time_s",
-    "burn_node_time_s",
+    "fire_resistance",
+    "fire_dps_pct",
+    "fire_duration_s",
     "zone_hp",
 )
 
