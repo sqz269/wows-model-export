@@ -1,7 +1,11 @@
 // Armor thickness heat-map. The hull GLB's `Armor` group carries one mesh
 // per armor zone (`Armor_Citadel`, `Armor_Bow`, …); every vertex carries a
 // `_MATERIAL_ID` (GLTFLoader lowercases custom attributes → `_material_id`)
-// that joins to the sidecar's `armor.materials_table[id].thickness_mm`.
+// packing `(layer << 8) | material_id`. A multi-layer material has one
+// thickness per layer and each layer covers a different part of the hull, so
+// a plate's thickness is `materials_table[material_id].layer_thickness_mm
+// [layer]` (see `decodeArmorMaterialId`). Exports predating the packing carry
+// layer 0 and fall back to the material's summed `thickness_mm`.
 //
 // We build a per-vertex `color` buffer from thickness → ramp colour and swap
 // each armor mesh onto a shared semi-transparent X-ray material with
@@ -139,8 +143,47 @@ export interface ArmorMeshEntry {
   ownedGeometry?: THREE.BufferGeometry;
 }
 
-/** Resolves a per-vertex `_MATERIAL_ID` to an effective thickness (mm). */
-export type ArmorThicknessFn = (matId: number) => number;
+/** Resolves a raw per-vertex `_MATERIAL_ID` to the plate thickness (mm). */
+export type ArmorThicknessFn = (rawId: number) => number;
+
+/** A `_MATERIAL_ID` split into its collision material and 1-based layer.
+ *  `layer` is 0 for exports that predate the layer packing. */
+export interface ArmorPlateId {
+  materialId: number;
+  layer: number;
+}
+
+/** Decode a raw `_MATERIAL_ID`: `(layer << 8) | material_id`. */
+export function decodeArmorMaterialId(rawId: number): ArmorPlateId {
+  return { materialId: rawId & 0xff, layer: rawId >> 8 };
+}
+
+/**
+ * Thickness of one hull plate from the sidecar `materials_table`. With a
+ * layer (current exports) this is that layer's own value — 0 when the
+ * material has no such layer or the layer is 0 mm. Without one (old GLB), or
+ * when the sidecar predates `layer_thickness_mm`, it falls back to the
+ * material's `thickness_mm` (the sum over layers — wrong for multi-layer
+ * materials, but the only value old data carries).
+ */
+export function hullPlateThickness(
+  materialsTable: Record<string, SidecarArmorMaterial>,
+  plate: ArmorPlateId,
+): number {
+  const m = materialsTable[String(plate.materialId)];
+  if (!m) return 0;
+  if (plate.layer > 0 && m.layer_thickness_mm) {
+    return m.layer_thickness_mm[String(plate.layer)] ?? 0;
+  }
+  return m.thickness_mm ?? 0;
+}
+
+/** Thickness function for hull armor meshes (see `hullPlateThickness`). */
+export function hullArmorThicknessOf(
+  materialsTable: Record<string, SidecarArmorMaterial>,
+): ArmorThicknessFn {
+  return (rawId) => hullPlateThickness(materialsTable, decodeArmorMaterialId(rawId));
+}
 
 export interface ArmorPrep {
   entries: ArmorMeshEntry[];
@@ -256,7 +299,7 @@ export function buildArmorEntries(
 
 /**
  * Walk the hull `Armor` group and build swap entries + the shared X-ray
- * material. Thickness from the sidecar `materials_table` (summed layers).
+ * material. Per-plate thickness from the sidecar `materials_table`.
  */
 export function prepareArmorMeshes(
   armorGroup: THREE.Object3D,
@@ -266,30 +309,40 @@ export function prepareArmorMeshes(
   armorGroup.traverse((o) => {
     if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh);
   });
-  const thicknessOf: ArmorThicknessFn = (id) => materialsTable[String(id)]?.thickness_mm ?? 0;
-  return { entries: buildArmorEntries(meshes, thicknessOf), material: createArmorXrayMaterial() };
+  return {
+    entries: buildArmorEntries(meshes, hullArmorThicknessOf(materialsTable)),
+    material: createArmorXrayMaterial(),
+  };
 }
 
 /**
  * Build a thickness function for a turret/secondary mount from the sidecar's
- * `mount_armor[hp]` map. Its keys are `(layer << 16) | material_id`; we mask
- * to the material id and SUM the layers, matching how `materials_table`
- * collapses multi-layer plates into one `thickness_mm`. Falls back to the
- * hull `materials_table` when the mount carries no armor table.
+ * `mount_armor[hp]` map, keyed by the GameParams armor key
+ * `(layer << 16) | material_id`. A packed `_MATERIAL_ID` names that key
+ * directly, so each plate gets its own layer's value; a plate the mount table
+ * lacks falls back to the hull `materials_table` (the toolkit's own lookup
+ * order). Old accessory GLBs carry layer 0: those fall back to the SUM over
+ * the mount's layers for the material, as before.
  */
 export function mountArmorThicknessOf(
   mountArmor: Record<string, number> | undefined,
   materialsTable: Record<string, SidecarArmorMaterial>,
 ): ArmorThicknessFn {
-  if (mountArmor && Object.keys(mountArmor).length > 0) {
-    const byMat = new Map<number, number>();
-    for (const [k, mm] of Object.entries(mountArmor)) {
-      const mat = Number(k) & 0xffff;
-      byMat.set(mat, (byMat.get(mat) ?? 0) + mm);
-    }
-    return (id) => byMat.get(id) ?? 0;
+  const hull = hullArmorThicknessOf(materialsTable);
+  if (!mountArmor || Object.keys(mountArmor).length === 0) return hull;
+  const byKey = new Map<number, number>();
+  const sumByMat = new Map<number, number>();
+  for (const [k, mm] of Object.entries(mountArmor)) {
+    const key = Number(k);
+    byKey.set(key, mm);
+    const mat = key & 0xffff;
+    sumByMat.set(mat, (sumByMat.get(mat) ?? 0) + mm);
   }
-  return (id) => materialsTable[String(id)]?.thickness_mm ?? 0;
+  return (rawId) => {
+    const { materialId, layer } = decodeArmorMaterialId(rawId);
+    if (layer === 0) return sumByMat.get(materialId) ?? hull(rawId);
+    return byKey.get((layer << 16) | materialId) ?? hull(rawId);
+  };
 }
 
 /** Swap armor meshes onto (on) / off (off) the thickness material. */

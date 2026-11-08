@@ -246,12 +246,17 @@ def make_armor(
 
     ``materials_table`` is keyed by the integer-as-string ``material_id``
     the toolkit emits per armor triangle; values carry
-    ``{thickness_mm, layers, zones[, hidden]}``. The downstream consumer
-    resolves ``RaycastHit.triangleIndex`` → per-vertex ``_MATERIAL_ID`` →
-    this table at runtime.
+    ``{thickness_mm, layers, layer_thickness_mm, zones[, hidden]}``. The
+    armor mesh's per-vertex ``_MATERIAL_ID`` packs ``(layer << 8) |
+    material_id``; a plate's thickness is
+    ``materials_table[id & 0xFF].layer_thickness_mm[id >> 8]``.
+    ``thickness_mm`` is the sum over layers, not any one plate (layers cover
+    different parts of the hull). Passed through verbatim.
 
     ``mount_armor`` is keyed by hardpoint name (``HP_AGM_1``); values are
-    ``{material_id_str: thickness_mm}`` from GameParams ``A_*.HP_*.armor``.
+    ``{gameparams_key: thickness_mm}`` from GameParams ``A_*.HP_*.armor``,
+    keyed ``(layer << 16) | material_id`` — an accessory armor mesh's
+    ``_MATERIAL_ID`` maps to key ``((id >> 8) << 16) | (id & 0xFF)``.
     ``barbettes`` is ``{HP_AGM_*: [material_id_str, …]}`` from
     ``A_Hull.barbettes`` — pairs with ``hitbox.boxes.CM_SB_gk_*.owner_hp``
     for shell-into-barbette damage attribution.

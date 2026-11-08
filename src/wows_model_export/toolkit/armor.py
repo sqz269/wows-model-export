@@ -6,10 +6,13 @@ sections (see `docs/contracts/sidecar-schema.md` §5 once that lift lands;
 historical reference: `tools/contracts/METADATA_SPEC.md` §5).
 
 Per-material payload:
-    { thickness_mm, layers, zones }
+    { thickness_mm, layers, layer_thickness_mm, zones }
 
-Keys are stringified u32 material IDs that match the per-vertex
-`_MATERIAL_ID` attribute baked into the hull GLB by `export_ship`.
+Keys are stringified u32 material IDs. The hull GLB's per-vertex
+`_MATERIAL_ID` packs `(layer << 8) | material_id`: the material is
+`id & 0xFF` (this table's key) and the plate's thickness is
+`layer_thickness_mm[str(id >> 8)]`. `thickness_mm` is the sum over layers
+(older toolkits emit only that and `layers`, with layer-less ids).
 """
 
 from __future__ import annotations

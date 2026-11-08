@@ -79,7 +79,10 @@ import {
   applyArmorView,
   buildArmorEntries,
   createArmorXrayMaterial,
+  decodeArmorMaterialId,
   disposeArmorView,
+  hullArmorThicknessOf,
+  hullPlateThickness,
   materialIdAtIntersection,
   mountArmorThicknessOf,
   type ArmorMeshEntry,
@@ -130,16 +133,20 @@ export interface PickResult {
  * per-vertex `_MATERIAL_ID` at the raycast hit → the sidecar thickness table.
  */
 export interface ArmorPickResult {
-  /** Effective plate thickness at the hit point (summed layers), in mm. */
+  /** Thickness of the plate under the hit point (its own layer), in mm. */
   thicknessMm: number;
-  /** The raw `_MATERIAL_ID` the thickness was resolved from. */
+  /** Collision material id (`_MATERIAL_ID & 0xff`). */
   materialId: number;
+  /** 1-based armor layer of the plate (`_MATERIAL_ID >> 8`); null for
+   *  exports that predate the layer packing. */
+  layer: number | null;
   /** Hull belt/deck plating vs. a turret/secondary mount's own armor. */
   source: 'hull' | 'mount';
   /** Short zone label derived from the armor mesh name (`Armor_Citadel`
    *  → `Citadel`), or null when the mesh is unnamed. */
   zoneLabel: string | null;
-  /** Outer→inner layer thicknesses (hull armor only; null for mounts). */
+  /** All of the material's per-layer thicknesses, ascending layer order
+   *  (hull armor only; null for mounts). */
   layers: number[] | null;
   /** Armor zones this material spans (hull armor only). */
   zones: string[] | null;
@@ -1650,12 +1657,9 @@ export class ShipViewer {
         group.node.traverse((o) => {
           if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh);
         });
-        // `mountArmorThicknessOf(undefined, table)` is just the materials_table
-        // lookup — hull armor has unique geometry, so no clone.
-        this.armorEntries = buildArmorEntries(
-          meshes,
-          mountArmorThicknessOf(undefined, materialsTable),
-        );
+        // Per-plate materials_table lookup — hull armor has unique geometry,
+        // so no clone.
+        this.armorEntries = buildArmorEntries(meshes, hullArmorThicknessOf(materialsTable));
       }
       if (this.armorEntries && this.armorMaterial) {
         applyArmorView(this.armorEntries, this.armorMaterial, on);
@@ -2330,8 +2334,10 @@ export class ShipViewer {
     const hits = pickRaycaster.intersectObjects(meshes, false);
     for (const hit of hits) {
       if (!isVisibleChain(hit.object)) continue;
-      const matId = materialIdAtIntersection(hit);
-      if (matId == null) continue;
+      const rawId = materialIdAtIntersection(hit);
+      if (rawId == null) continue;
+      const plate = decodeArmorMaterialId(rawId);
+      const layer = plate.layer > 0 ? plate.layer : null;
       const mesh = hit.object as THREE.Mesh;
       const rec = this.mountArmorRecords.find((r) => r.meshes.includes(mesh));
       if (rec) {
@@ -2339,8 +2345,9 @@ export class ShipViewer {
           rec.thicknessOf ??
           mountArmorThicknessOf(this.sidecar?.armor?.mount_armor?.[rec.hp ?? ''], materialsTable);
         return {
-          thicknessMm: thicknessOf(matId),
-          materialId: matId,
+          thicknessMm: thicknessOf(rawId),
+          materialId: plate.materialId,
+          layer,
           source: 'mount',
           zoneLabel: armorZoneLabel(mesh.name),
           layers: null,
@@ -2351,10 +2358,11 @@ export class ShipViewer {
           point: hit.point.clone(),
         };
       }
-      const m = materialsTable[String(matId)];
+      const m = materialsTable[String(plate.materialId)];
       return {
-        thicknessMm: m?.thickness_mm ?? 0,
-        materialId: matId,
+        thicknessMm: hullPlateThickness(materialsTable, plate),
+        materialId: plate.materialId,
+        layer,
         source: 'hull',
         zoneLabel: armorZoneLabel(mesh.name),
         layers: m?.layers ?? null,

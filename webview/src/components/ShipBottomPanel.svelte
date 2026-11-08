@@ -406,11 +406,18 @@
       .map(([zone, z]) => ({ zone, ...z }))
       .sort((a, b) => b.max_thickness_mm - a.max_thickness_mm),
   );
-  // Materials sorted by thickness desc; 0mm (no-armor) sentinels trail.
+  // Materials sorted by thickest plate desc; 0mm (no-armor) sentinels trail.
+  // A multi-layer material's layers are separate plates (different parts of
+  // the hull), so the row shows its thickest plate, not the layer sum. Old
+  // sidecars without `layer_thickness_mm` keep showing the sum.
   const armorMaterialRows = $derived.by(() =>
     Object.entries(armorSection?.materials_table ?? {})
-      .map(([id, m]) => ({ id, ...m }))
-      .sort((a, b) => b.thickness_mm - a.thickness_mm || Number(a.id) - Number(b.id)),
+      .map(([id, m]) => {
+        const perLayer = m.layer_thickness_mm ? Object.values(m.layer_thickness_mm) : null;
+        const plateMm = perLayer ? Math.max(0, ...perLayer) : m.thickness_mm;
+        return { id, ...m, plateMm, perLayer: perLayer !== null };
+      })
+      .sort((a, b) => b.plateMm - a.plateMm || Number(a.id) - Number(b.id)),
   );
   const hitLocationRows = $derived.by(() =>
     Object.entries(hitboxSection?.hit_locations ?? {})
@@ -989,10 +996,12 @@
                         <td class="text-right">
                           <span
                             class="mr-1 inline-block size-2 rounded-[2px] align-middle"
-                            style="background:{thicknessToColorHex(m.thickness_mm)}"
-                          ></span>{m.thickness_mm}
+                            style="background:{thicknessToColorHex(m.plateMm)}"
+                          ></span>{m.plateMm}
                         </td>
-                        <td class="text-muted-foreground">{m.layers.join(' + ') || '—'}</td>
+                        <td class="text-muted-foreground">
+                          {m.layers.join(m.perLayer ? ' / ' : ' + ') || '—'}
+                        </td>
                         <td class="text-muted-foreground">{m.zones.join(', ') || '—'}</td>
                       </tr>
                     {/each}
@@ -1000,7 +1009,8 @@
                 </table>
               </div>
               <div class="text-muted-foreground/70 mt-1 text-[9px]">
-                dimmed rows = hidden (internal decks / bulkheads); layers = outer→inner mm
+                dimmed rows = hidden (internal decks / bulkheads); layers = each layer's plate mm
+                (layers cover different areas); mm = thickest plate
               </div>
             </div>
           {/if}

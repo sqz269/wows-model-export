@@ -185,8 +185,10 @@
         {/if}
       </div>
       {#if armorTip.layers && armorTip.layers.length > 1}
+        <!-- Each layer is a different plate of this material, not a stack. -->
         <div class="text-muted-foreground text-[10px] tabular-nums">
-          layers: {armorTip.layers.join(' + ')} mm
+          {armorTip.layer != null ? 'material layers' : 'layers (summed)'}:
+          {armorTip.layers.join(' / ')} mm
         </div>
       {/if}
       {#if armorTip.source === 'mount'}
@@ -203,7 +205,9 @@
           zones: {armorTip.zones.join(', ')}
         </div>
       {/if}
-      <div class="text-muted-foreground/70 text-[9px] tabular-nums">mat #{armorTip.materialId}</div>
+      <div class="text-muted-foreground/70 text-[9px] tabular-nums">
+        mat #{armorTip.materialId}{armorTip.layer != null ? ` · layer ${armorTip.layer}` : ''}
+      </div>
     </div>
   {/if}
 </div>

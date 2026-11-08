@@ -168,8 +168,9 @@ export interface SidecarMount {
 }
 
 // ─── Armor (§6) ──────────────────────────────────────────────────────────
-// Per-vertex `_MATERIAL_ID` on the hull GLB's `Armor` group joins to
-// `materials_table[id]` for thickness. `zones` is the human-readable
+// Per-vertex `_MATERIAL_ID` on the hull GLB's `Armor` group packs
+// `(layer << 8) | material_id`; the plate thickness is
+// `materials_table[material_id].layer_thickness_mm[layer]`. `zones` is the human-readable
 // per-zone summary. See reference/schemas/METADATA_SPEC.md §6.
 
 export interface SidecarArmorZone {
@@ -179,10 +180,16 @@ export interface SidecarArmorZone {
 }
 
 export interface SidecarArmorMaterial {
-  /** Effective total thickness (sum of `layers`). */
+  /** Sum of `layers`. NOT the thickness of any one plate when the material
+   *  has several layers — use `layer_thickness_mm`. */
   thickness_mm: number;
-  /** Ordered outer→inner layer thicknesses, e.g. [19, 19] = 2×19mm spaced. */
+  /** Per-layer thicknesses in ascending layer order. Each layer covers a
+   *  different part of the hull; they are not stacked. */
   layers: number[];
+  /** Per-plate thickness keyed by the 1-based layer that `_MATERIAL_ID`
+   *  packs as `(layer << 8) | material_id`. Zero-mm layers are present.
+   *  Absent on exports that predate the layer packing. */
+  layer_thickness_mm?: Record<string, number>;
   /** Armor zones that use this material (a material may span several). */
   zones: string[];
   /** Toolkit `zone_hidden` flag — internal decks / bulkheads. */
@@ -195,9 +202,10 @@ export interface SidecarArmor {
   plate_count?: number;
   triangles?: number;
   zones?: Record<string, SidecarArmorZone>;
-  /** Keyed by integer-as-string `material_id` (matches GLB `_MATERIAL_ID`). */
+  /** Keyed by integer-as-string `material_id` (`_MATERIAL_ID & 0xff`). */
   materials_table?: Record<string, SidecarArmorMaterial>;
-  /** Per-mount armor `{HP_AGM_1: {material_id_str: thickness_mm}}` (v3+). */
+  /** Per-mount armor `{HP_AGM_1: {gameparams_key: thickness_mm}}` (v3+), keyed
+   *  by the GameParams armor key `(layer << 16) | material_id`. */
   mount_armor?: Record<string, Record<string, number>>;
   /** Per-turret barbette material-id lists (v3+). */
   barbettes?: Record<string, string[]>;
