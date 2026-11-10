@@ -39,6 +39,19 @@ What it copies (per domain):
                     workspace-relative URLs resolve against the published root.
                     Built with ``wows-build-environment-library``; absent ->
                     no-op.
+* ``shared_textures`` — the content-addressed store of textures shared
+                    byte-for-byte across folders
+                    (``libraries/textures_shared/<sha1-8>/<file>``, today
+                    the ship detail atlas) copied to
+                    ``textures_shared/<sha1-8>/<file>``. Sidecar and
+                    library-index texture paths that start with
+                    ``libraries/`` name these files (workspace-relative;
+                    the ``libraries/`` prefix maps to the target root like
+                    every other library). Published automatically whenever
+                    ``ships``, ``library`` or ``projectiles`` is, since
+                    their texture paths point into it. Flat files at the
+                    store root (hardlink canonicals of
+                    ``wows-dedup-textures --hardlink``) are not published.
 * ``maps``        — cached map/space exports ``maps/<Map>/``: the map GLB +
                     the sidecar manifests (``export.json`` + ``*_manifest``
                     JSONs) + the non-GLB sidecars the map contract carries —
@@ -52,7 +65,7 @@ Canonical :class:`StepEvent` step names emitted to ``on_event``:
 
     "discover_domain_files"  "copy_ships"  "copy_library"
     "copy_projectiles"       "copy_decals"  "copy_environment"
-    "copy_maps"
+    "copy_maps"              "copy_shared_textures"
 
 Each step emits ``started`` -> ``completed`` (or ``skipped``).
 
@@ -68,6 +81,7 @@ import shutil
 import threading
 from pathlib import Path
 
+from .. import shared_textures
 from ..config import PipelineConfig
 from ..read import sidecar as read_sidecar
 from ..types import OnEvent, PublishCounts, PublishResult
@@ -87,7 +101,12 @@ _DOMAIN_STEPS: dict[str, str] = {
     "decals":      "copy_decals",
     "environment": "copy_environment",
     "maps":        "copy_maps",
+    "shared_textures": "copy_shared_textures",
 }
+
+# Domains whose texture paths reference the shared texture store; asking
+# for any of them publishes the store too.
+_STORE_USING_DOMAINS: frozenset[str] = frozenset({"ships", "library", "projectiles"})
 
 # Non-GLB/JSON/DDS sidecar extensions the maps domain carries: shoreline
 # SDF + minimap-style PNGs, per-weather sky HDR environment maps, raw
@@ -330,6 +349,39 @@ def _publish_flat_dds(
     return PublishCounts(copied=copied, skipped=skipped)
 
 
+def _publish_shared_store(
+    src_root: Path,
+    dst_root: Path,
+    *,
+    force: bool,
+) -> PublishCounts:
+    """Mirror the shared texture store's ``<hash>/<file>`` entries.
+
+    Only the content-addressed subdirectories are copied; flat files at
+    the store root (legacy hardlink canonicals) are skipped.
+    """
+    if not src_root.is_dir():
+        return PublishCounts()
+    copied = 0
+    skipped = 0
+    for sub in sorted(src_root.iterdir()):
+        if not sub.is_dir():
+            continue
+        name = sub.name.lower()
+        if len(name) != shared_textures.HASH_PREFIX_LEN or any(
+            c not in "0123456789abcdef" for c in name
+        ):
+            continue
+        for src in sorted(sub.iterdir()):
+            if not src.is_file() or src.suffix.lower() not in _DDS_EXTENSIONS:
+                continue
+            if _copy_if_changed(src, dst_root / sub.name / src.name, force):
+                copied += 1
+            else:
+                skipped += 1
+    return PublishCounts(copied=copied, skipped=skipped)
+
+
 def _combine_counts(*counts: PublishCounts) -> PublishCounts:
     """Sum field-wise across multiple ``PublishCounts`` instances."""
     return PublishCounts(
@@ -378,7 +430,9 @@ def publish(
         domains      Which domains to publish. The default fans out
                      across every domain EXCEPT ``maps`` (map exports
                      run hundreds of MB each — request ``("maps",)``
-                     deliberately). Unknown names raise ``ValueError``.
+                     deliberately). ``shared_textures`` rides along with
+                     ``ships`` / ``library`` / ``projectiles``. Unknown
+                     names raise ``ValueError``.
         force        Skip the mtime+size compare and copy every file.
         on_event     Optional :class:`StepEvent` callback. Steps:
                      ``discover_domain_files``, ``copy_ships``,
@@ -475,8 +529,13 @@ def publish(
                 allow_dds=True,
                 # Drop the toolkit-emitted skel_ext candidate JSONs
                 # (~10 MB per heavy mount; transient input to
-                # asset_attachments_resolve, never consumed downstream).
-                skip_suffix=(".skel_ext_candidates.json",),
+                # asset_attachments_resolve, never consumed downstream)
+                # and the shared-texture redirect files (pipeline-internal;
+                # the index already names the store paths).
+                skip_suffix=(
+                    ".skel_ext_candidates.json",
+                    shared_textures.REDIRECT_FILENAME,
+                ),
             )
             ctx.annotate(
                 f"copied={library_counts.copied} skipped={library_counts.skipped}",
@@ -499,6 +558,7 @@ def publish(
                 allow_json=True,
                 allow_glb=True,
                 allow_dds=True,
+                skip_suffix=(shared_textures.REDIRECT_FILENAME,),
             )
             ctx.annotate(
                 f"copied={projectiles_counts.copied} "
@@ -510,6 +570,27 @@ def publish(
             )
     else:
         runner.emit("copy_projectiles", "skipped", detail="domain not requested")
+
+    # ── Step: copy_shared_textures ────────────────────────────────────
+    # Ship / library / projectile texture paths that start with
+    # `libraries/` name the shared store, so it publishes with them.
+    shared_counts = PublishCounts()
+    if "shared_textures" in domain_set or domain_set & _STORE_USING_DOMAINS:
+        with runner.step("copy_shared_textures") as ctx:
+            shared_counts = _publish_shared_store(
+                shared_textures.store_root(workspace),
+                target_dir / shared_textures.STORE_REL.split("/", 1)[1],
+                force=force,
+            )
+            ctx.annotate(
+                f"copied={shared_counts.copied} skipped={shared_counts.skipped}",
+                data={
+                    "copied":  shared_counts.copied,
+                    "skipped": shared_counts.skipped,
+                },
+            )
+    else:
+        runner.emit("copy_shared_textures", "skipped", detail="domain not requested")
 
     # ── Step: copy_decals ─────────────────────────────────────────────
     decals_counts = PublishCounts()
@@ -665,6 +746,7 @@ def publish(
         decals=decals_counts,
         environment=environment_counts,
         maps=maps_counts,
+        shared_textures=shared_counts,
         warnings=tuple(warnings),
     )
 

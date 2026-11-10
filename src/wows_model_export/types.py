@@ -285,6 +285,7 @@ class PublishResult:
     decals:       PublishCounts = PublishCounts()
     environment:  PublishCounts = PublishCounts()
     maps:         PublishCounts = PublishCounts()
+    shared_textures: PublishCounts = PublishCounts()
     warnings:     tuple[str, ...] = ()
 
 
