@@ -47,7 +47,9 @@ export interface SidecarMaterial {
    * populated (the sidecar emits them as a unit; the consumer does not
    * need `??` fallbacks). Pairs with the shared
    * `ship_atlas_detail.dds` atlas bound under the `detail` slot of
-   * `texture_sets["main"]`.
+   * `texture_sets["main"]`, whose path names the workspace's shared
+   * store (`libraries/textures_shared/<sha1-8>/ship_atlas_detail.dds`,
+   * workspace-relative); older exports name a `textures_dds/` copy.
    *
    * Engine recipe (PBS_ship_metallic.win.dx11 / Path A `ship_camo_material.fx`):
    * sample detail at `vMapUv × (scale_u, scale_v)`, decode RG as signed

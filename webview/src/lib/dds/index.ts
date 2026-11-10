@@ -23,11 +23,34 @@
 import * as THREE from 'three';
 import { Buffer } from 'buffer';
 import { decodeImage, parseDDSHeader } from 'dds-ktx-parser';
+import { repoUrl } from '$lib/api/client';
 import type { ParseSuccess } from './dds_worker';
 import { getSharedPool } from './worker_pool';
 
 /** Mip chain entry — a single `.dd0` / `.dd1` / `.dd2` / `.dds` path. */
 export type DdsMipPaths = string[];
+
+/**
+ * Texture paths starting with this prefix are workspace-relative: the
+ * shared libraries (camo masks / atlases, and the content-addressed store
+ * `libraries/textures_shared/<sha1-8>/<file>` that holds textures shared
+ * byte-for-byte across folders, e.g. the ship detail atlas). Every other
+ * texture path is relative to the owning model's directory (`base`).
+ */
+const WORKSPACE_PATH_PREFIX = 'libraries/';
+
+/** Resolve one texture path from a sidecar / library entry to a URL. */
+export function resolveTextureUrl(rel: string, base: string): string {
+  const norm = rel.replace(/\\/g, '/');
+  try {
+    if (norm.startsWith(WORKSPACE_PATH_PREFIX)) {
+      return new URL(repoUrl(norm), base).toString();
+    }
+    return new URL(rel, base).toString();
+  } catch {
+    return rel;
+  }
+}
 
 /**
  * Pick the full mip chain (`.dds`) when present, otherwise the first entry.
@@ -38,11 +61,7 @@ export function pickDdsUrl(urls: DdsMipPaths | undefined, base: string): string 
   const full = urls.find((u) => u.toLowerCase().endsWith('.dds'));
   const rel = full ?? urls[0];
   if (!rel) return null;
-  try {
-    return new URL(rel, base).toString();
-  } catch {
-    return rel;
-  }
+  return resolveTextureUrl(rel, base);
 }
 
 /**
@@ -72,15 +91,7 @@ export function resolveDdsMipUrls(urls: DdsMipPaths | undefined, base: string): 
     return 99;
   };
   const sorted = [...urls].sort((a, b) => order(a) - order(b));
-  const resolved: string[] = [];
-  for (const u of sorted) {
-    try {
-      resolved.push(new URL(u, base).toString());
-    } catch {
-      resolved.push(u);
-    }
-  }
-  return resolved;
+  return sorted.map((u) => resolveTextureUrl(u, base));
 }
 
 const PLACEHOLDER_DDS_NAMES = new Set<string>([
