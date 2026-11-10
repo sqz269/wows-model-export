@@ -18,10 +18,14 @@ composer moves a workspace to the layout new exports produce (see
 4. **rewrite** — repoint every texture path in the ship sidecars,
    building sidecars and the accessory / projectile library indexes that
    names a copy. Each path is resolved against the directory it is
-   relative to and matched by content hash; the file is rewritten by
-   exact string substitution, so its formatting is unchanged.
+   relative to and matched by content hash (or by the folder's redirect
+   record); a path that matches neither is left alone. The file is
+   rewritten by exact string substitution, so its formatting is unchanged.
 5. **remove** — delete each copy whose content hash equals its verified
-   store copy. Copies without one are kept and reported.
+   store copy. Copies without one are kept and reported, and so is every
+   copy under an export root (ship / building directory, library) whose
+   document failed to rewrite or is a ``*.meta.json`` this composer does
+   not know.
 6. **legacy** — delete the flat hardlink canonicals
    ``<stem>.<sha256-8>.s<N><ext>`` that ``wows-dedup-textures
    --hardlink`` left at the store root, once nothing else links them and
@@ -144,22 +148,41 @@ def _stored_contents(ws: Path, names_lower: frozenset[str]) -> dict[str, set[str
     return out
 
 
-def _documents(ws: Path) -> list[tuple[Path, str]]:
-    """``(document, kind)`` for every JSON that names raw-DDS textures."""
+def _documents(ws: Path) -> tuple[list[tuple[Path, str]], list[Path]]:
+    """``(document, kind)`` for every JSON that names raw-DDS textures,
+    plus the sidecar-like files (``*.meta.json`` next to a sidecar under
+    another name) this migration does not know how to rewrite."""
     out: list[tuple[Path, str]] = []
+    unvisited: list[Path] = []
     for top in ("ships", "buildings"):
         root = ws / top
         if not root.is_dir():
             continue
         for d in sorted(root.iterdir()):
-            sc = d / f"{d.name}.meta.json"
-            if sc.is_file():
-                out.append((sc, "sidecar"))
+            if not d.is_dir():
+                continue
+            expected = f"{d.name}.meta.json"
+            for sc in sorted(d.glob("*.meta.json")):
+                if not sc.is_file():
+                    continue
+                if sc.name == expected:
+                    out.append((sc, "sidecar"))
+                else:
+                    unvisited.append(sc)
     for lib in _LIBRARY_INDEXES:
         idx = ws / "libraries" / lib / "index.json"
         if idx.is_file():
             out.append((idx, "library_index"))
-    return out
+    return out, unvisited
+
+
+def _under(path: Path, roots: dict[str, str]) -> str | None:
+    """Reason recorded for the first of ``roots`` that contains ``path``."""
+    p = _norm(path)
+    for root, reason in roots.items():
+        if p.startswith(root + os.sep):
+            return reason
+    return None
 
 
 class _Rewriter:
@@ -191,14 +214,8 @@ class _Rewriter:
         rec = store.read_redirect_records(target.parent).get(name)
         if rec is not None:
             return rec["ref"]
-        shas = self.stored.get(name.lower()) or set()
-        if sha is None and len(shas) == 1:
-            only = next(iter(shas))
-            self.warnings.append(
-                f"{self.doc_path}: {value!r} (under {base}) names no file; "
-                f"bound to the only stored content {only[:8]}"
-            )
-            return store.store_ref(canon, only)
+        # Anything else (a VFS / provenance string, a path to a file that
+        # is gone) is not a reference to a scanned copy: never guess.
         self.warnings.append(f"{self.doc_path}: {value!r} (under {base}) left as is")
         return None
 
@@ -386,15 +403,27 @@ def migrate_shared_textures(
         st.annotate(f"{n_redirects} folder(s)")
 
     # ── 4. rewrite references ─────────────────────────────────────────
+    # Export roots (a ship / building directory, a library) whose
+    # references may still name a local copy: their copies are kept.
+    blocked: dict[str, str] = {}
     n_docs = n_refs = 0
     with runner.step("rewrite") as st:
-        for doc_path, kind in _documents(ws):
+        documents, unvisited = _documents(ws)
+        for doc_path in unvisited:
+            reason = f"{doc_path.name} is not a document this migration rewrites"
+            blocked.setdefault(_norm(doc_path.parent), reason)
+            warnings.append(f"{doc_path}: not rewritten; copies under {doc_path.parent} kept")
+        for doc_path, kind in documents:
             try:
                 n = _rewrite_document(
                     doc_path, kind, sha_by_path, stored, warnings, dry_run=dry_run,
                 )
             except Exception as e:  # noqa: BLE001
-                warnings.append(f"rewrite failed for {doc_path}: {e}")
+                warnings.append(
+                    f"rewrite failed for {doc_path}: {e}; copies under "
+                    f"{doc_path.parent} kept"
+                )
+                blocked[_norm(doc_path.parent)] = f"{doc_path.name} failed to rewrite: {e}"
                 continue
             if n:
                 n_docs += 1
@@ -412,6 +441,11 @@ def migrate_shared_textures(
     bytes_removed = bytes_freed = 0
     with runner.step("remove") as st:
         for c in copies:
+            reason = _under(c.path, blocked)
+            if reason is not None:
+                kept += 1
+                log["kept"].append({"path": str(c.path), "sha1": c.sha1, "reason": reason})
+                continue
             ref = store_ok.get((c.path.name.lower(), c.sha1))
             verified = ref is not None and (
                 dry_run or store.cached_sha1(store.resolve_ref(ws, ref)) == c.sha1

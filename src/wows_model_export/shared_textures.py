@@ -87,6 +87,10 @@ class SharedTextureConflict(RuntimeError):
     """A store path already holds different content (hash-prefix clash)."""
 
 
+class SharedTextureIncomplete(RuntimeError):
+    """A source file is not a complete texture (e.g. an interrupted write)."""
+
+
 # ---------------------------------------------------------------------------
 # Names, paths, hashes
 # ---------------------------------------------------------------------------
@@ -110,6 +114,86 @@ def canonical_name(name: str) -> str:
 def is_workspace_path(path: str) -> bool:
     """Whether a texture path is workspace-relative (``libraries/...``)."""
     return path.replace("\\", "/").startswith(WORKSPACE_PATH_PREFIX)
+
+
+# DDS payload sizes, for spotting a truncated file before it is stored.
+# Block-compressed formats: bytes per 4x4 block.
+_DDS_FOURCC_BLOCK = {
+    b"DXT1": 8, b"DXT2": 16, b"DXT3": 16, b"DXT4": 16, b"DXT5": 16,
+    b"ATI1": 8, b"BC4U": 8, b"BC4S": 8,
+    b"ATI2": 16, b"BC5U": 16, b"BC5S": 16,
+}
+_DXGI_BLOCK = {
+    **{f: 8 for f in (70, 71, 72, 79, 80, 81)},                       # BC1, BC4
+    **{f: 16 for f in (73, 74, 75, 76, 77, 78, 82, 83, 84,             # BC2, BC3, BC5
+                       94, 95, 96, 97, 98, 99)},                       # BC6H, BC7
+}
+# Uncompressed formats: bytes per pixel.
+_D3DFMT_BPP = {111: 2, 112: 4, 113: 8, 114: 4, 115: 8, 116: 16}
+_DXGI_BPP = {
+    **{f: 16 for f in (1, 2, 3, 4)},                                   # R32G32B32A32
+    **{f: 8 for f in (9, 10, 11, 12, 13, 14, 15, 16, 17, 18)},         # R16G16B16A16, R32G32
+    **{f: 4 for f in (23, 24, 25, 26, 27, 28, 29, 30, 31, 32,          # R10G10B10A2, R11G11B10, RGBA8
+                      33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43,      # R16G16, R32
+                      87, 88, 90, 91, 92, 93)},                        # BGRA8 / BGRX8
+    **{f: 2 for f in (48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59)}, # R8G8, R16
+    **{f: 1 for f in (60, 61, 62, 63, 64, 65)},                        # R8, A8
+}
+
+
+def dds_is_complete(path: Path) -> bool:
+    """Whether ``path`` is a DDS file whose payload is all there.
+
+    Checks the header and, for the 2D / cube formats whose layout is
+    known, that the file holds every mip level of every face. A file of an
+    unknown format (or a volume texture) passes on a valid header alone.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(148)
+        size = os.path.getsize(path)
+    except OSError:
+        return False
+    if len(head) < 128 or head[:4] != b"DDS " or int.from_bytes(head[4:8], "little") != 124:
+        return False
+
+    def u32(off: int) -> int:
+        return int.from_bytes(head[off:off + 4], "little")
+
+    height, width, mips = u32(12), u32(16), u32(28) or 1
+    pf_flags, fourcc, rgb_bits, caps2 = u32(80), head[84:88], u32(88), u32(112)
+    header_len, faces = 128, 1
+    block = bpp = None
+    if fourcc == b"DX10":
+        if len(head) < 148:
+            return False
+        header_len = 148
+        dxgi, dim, misc, array = u32(128), u32(132), u32(136), u32(140) or 1
+        if dim == 4:  # volume
+            return True
+        faces = array * (6 if misc & 0x4 else 1)
+        block, bpp = _DXGI_BLOCK.get(dxgi), _DXGI_BPP.get(dxgi)
+    else:
+        if caps2 & 0x200000:  # volume
+            return True
+        if caps2 & 0x200:  # cube: one bit per face present
+            faces = bin(caps2 & 0xFC00).count("1") or 6
+        if pf_flags & 0x4:  # DDPF_FOURCC
+            block = _DDS_FOURCC_BLOCK.get(bytes(fourcc))
+            bpp = _D3DFMT_BPP.get(u32(84))
+        elif rgb_bits and rgb_bits % 8 == 0:
+            bpp = rgb_bits // 8
+    if block is None and bpp is None:
+        return True
+    payload = 0
+    w, h = max(width, 1), max(height, 1)
+    for _ in range(mips):
+        if block is not None:
+            payload += max(1, (w + 3) // 4) * max(1, (h + 3) // 4) * block
+        else:
+            payload += w * h * bpp
+        w, h = max(1, w // 2), max(1, h // 2)
+    return size >= header_len + payload * faces
 
 
 def file_sha1(path: Path, _buf: int = 1 << 20) -> str:
@@ -181,10 +265,14 @@ def put(
     The store copy is written once (temp file + atomic rename, a fresh
     file rather than a link to ``src``). A store file that already exists
     is verified by full SHA-1; different content under the same 8-hex
-    prefix raises :class:`SharedTextureConflict`.
+    prefix raises :class:`SharedTextureConflict`. A ``.dds`` source that
+    is cut short (:func:`dds_is_complete`) raises
+    :class:`SharedTextureIncomplete` and is not stored.
     """
     src = Path(src)
     name = name or src.name
+    if src.suffix.lower() == ".dds" and not dds_is_complete(src):
+        raise SharedTextureIncomplete(f"{src} is not a complete DDS file; not stored")
     sha = sha1 or file_sha1(src)
     dst = store_path(workspace, name, sha)
     existing = cached_sha1(dst) if dst.exists() else None
@@ -288,7 +376,10 @@ def adopt_dir(dds_dir: Path, *, workspace: Path) -> dict[str, str]:
     For each file named in :data:`SHARED_TEXTURE_NAMES`: hash it, make sure
     the store holds the content (:func:`put`), record ``name -> store
     path`` in the directory's redirect file, then delete the local copy.
-    Idempotent; returns ``{name: store path}`` for the files moved.
+    A file the store refuses as incomplete (an export interrupted while
+    writing it) stays where it is, unreferenced by any redirect; the next
+    export overwrites it. Idempotent; returns ``{name: store path}`` for
+    the files moved.
     """
     dds_dir = Path(dds_dir)
     if not dds_dir.is_dir():
@@ -300,7 +391,11 @@ def adopt_dir(dds_dir: Path, *, workspace: Path) -> dict[str, str]:
             continue
         size = f.stat().st_size
         sha = file_sha1(f)
-        ref = put(workspace, f, sha1=sha, name=canonical_name(f.name))
+        try:
+            ref = put(workspace, f, sha1=sha, name=canonical_name(f.name))
+        except SharedTextureIncomplete as e:
+            print(f"[shared_textures] {e}; kept in place", file=sys.stderr)
+            continue
         records[f.name] = redirect_record(ref, sha, size)
         moved[f.name] = ref
     if records:
@@ -386,11 +481,13 @@ __all__ = [
     "STORE_REL",
     "WORKSPACE_PATH_PREFIX",
     "SharedTextureConflict",
+    "SharedTextureIncomplete",
     "adopt_dir",
     "adopt_dirs",
     "cached_sha1",
     "canonical_name",
     "dds_dir_entries",
+    "dds_is_complete",
     "file_sha1",
     "is_inside",
     "is_shared_name",

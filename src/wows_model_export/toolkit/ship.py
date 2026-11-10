@@ -504,7 +504,9 @@ def _adopt_shared_textures(
 ) -> None:
     """Move engine-global textures out of freshly dumped raw-DDS dirs into
     the workspace's shared store. Never raises (an export must not fail
-    over this; a directory it can't handle keeps its local copy)."""
+    over this; a directory it can't handle keeps its local copy). Runs
+    after failed toolkit runs too, so a batch keeps the items it finished;
+    the store refuses a file the failed run left cut short."""
     if not any(raw_dds_dirs):
         return
     try:
