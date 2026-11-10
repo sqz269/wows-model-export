@@ -38,7 +38,11 @@ Two suffix vocabularies coexist on disk:
                  every PBS material that has ``g_detailNormalInfluence``
                  > 0 in its MFM, sampled at ``vMapUv × (g_detailScaleU,
                  g_detailScaleV)``. Per-material blend weights live on
-                 the sidecar ``materials[].detail_params`` field.
+                 the sidecar ``materials[].detail_params`` field. The
+                 file lives once in the workspace's shared texture
+                 store; the slot path is workspace-relative
+                 (``libraries/textures_shared/<sha1-8>/...``, see
+                 :mod:`wows_model_export.shared_textures`).
 
 * **WG-original channels** that loose mods ship before the swizzle pass
   has run (skin_pack invokes ``wowsunpack swizzle-dir`` to produce the

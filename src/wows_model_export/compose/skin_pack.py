@@ -74,6 +74,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .. import build_deps as _build_deps
+from .. import shared_textures
 from .. import toolkit
 from ..config import PipelineConfig
 from ..errors import StepError
@@ -1000,13 +1001,26 @@ def _apply_plan(
     ship_dir: Path,
     sidecar_path: Path,
     verdicts: dict[str, dict],
+    workspace: Path | None = None,
 ) -> dict:
     """Materialise the plan: copy DDS files into the skin directory and
     patch the sidecar via the canonical writer. Returns a summary dict.
+
+    Engine-global textures (``shared_textures.SHARED_TEXTURE_NAMES``) are
+    never copied into the skin directory: with a ``workspace`` they go to
+    the shared store and the sidecar names the store path.
     """
     skin_dir = ship_dir / read_sidecar.MODELS_SUBDIR / "skins" / plan.skin_id
     skin_dir.mkdir(parents=True, exist_ok=True)
     accessories_subdir = skin_dir / "accessories"
+
+    def _shared_ref(src: Path) -> str | None:
+        """Store path for an engine-global texture, else ``None``."""
+        if workspace is None or not shared_textures.is_shared_name(src.name):
+            return None
+        return shared_textures.put(
+            workspace, src, name=shared_textures.canonical_name(src.name),
+        )
 
     # Sidecar update: build the new texture_sets entries + Skin entry.
     sc = json.loads(sidecar_path.read_text(encoding="utf-8"))
@@ -1020,16 +1034,20 @@ def _apply_plan(
     for (stem, slot), prio_buckets in grouped_ship.items():
         best_prio = min(prio_buckets)
         for tx in prio_buckets[best_prio]:
-            dst = skin_dir / tx.src_path.name
-            if not dst.exists() or dst.stat().st_size != tx.src_path.stat().st_size:
-                shutil.copy2(tx.src_path, dst)
-            rel = f"skins/{plan.skin_id}/{tx.src_path.name}"
+            rel = _shared_ref(tx.src_path)
+            if rel is None:
+                dst = skin_dir / tx.src_path.name
+                if not dst.exists() or dst.stat().st_size != tx.src_path.stat().st_size:
+                    shutil.copy2(tx.src_path, dst)
+                rel = f"skins/{plan.skin_id}/{tx.src_path.name}"
             by_stem_textures.setdefault(stem, {}).setdefault(slot, []).append(rel)
         # Lower-priority files still copied to disk (offline workflows).
         for prio, txs in prio_buckets.items():
             if prio == best_prio:
                 continue
             for tx in txs:
+                if shared_textures.is_shared_name(tx.src_path.name):
+                    continue
                 dst = skin_dir / tx.src_path.name
                 if not dst.exists() or dst.stat().st_size != tx.src_path.stat().st_size:
                     shutil.copy2(tx.src_path, dst)
@@ -1085,6 +1103,10 @@ def _apply_plan(
                 best_prio = min(prio_buckets)
                 kept_paths: list[str] = []
                 for tx in prio_buckets[best_prio]:
+                    ref = _shared_ref(tx.src_path)
+                    if ref is not None:
+                        kept_paths.append(ref)
+                        continue
                     dst = asset_dir / tx.src_path.name
                     if not dst.exists() or dst.stat().st_size != tx.src_path.stat().st_size:
                         shutil.copy2(tx.src_path, dst)
@@ -1095,6 +1117,8 @@ def _apply_plan(
                     if prio == best_prio:
                         continue
                     for tx in txs:
+                        if shared_textures.is_shared_name(tx.src_path.name):
+                            continue
                         dst = asset_dir / tx.src_path.name
                         if not dst.exists() or dst.stat().st_size != tx.src_path.stat().st_size:
                             shutil.copy2(tx.src_path, dst)
@@ -1471,6 +1495,7 @@ def ingest_skin_pack(
     try:
         summary = _apply_plan(
             plan, ship_dir=ship_dir, sidecar_path=sidecar_path, verdicts=verdicts,
+            workspace=workspace,
         )
     except Exception as e:
         timer.emit("merge_sidecar", "failed")

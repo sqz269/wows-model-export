@@ -26,6 +26,7 @@ from ._constants import (
     _MFM_STRIP_SUFFIXES,
     DDS_MIP_SUFFIXES,
 )
+from ...shared_textures import dds_dir_entries
 from ._dds_channels import CHANNEL_SLOTS, LEGACY_RAW_SUFFIXES
 from ._makers import make_default_skin, make_skin
 
@@ -265,11 +266,10 @@ def texture_sets_from_dir(
         return {}
 
     # Gather all DDS files, grouped by "stem" (filename minus the mip suffix).
+    # Shared textures moved to the workspace store come back with their
+    # store path (see `wows_model_export.shared_textures`).
     per_stem: dict[str, list[str]] = {}
-    for f in sorted(d.iterdir()):
-        if not f.is_file():
-            continue
-        name = f.name
+    for name, uri in dds_dir_entries(d, dds_uri_prefix=dds_uri_prefix):
         stem: str | None = None
         for sfx in DDS_MIP_SUFFIXES:
             if name.endswith(sfx):
@@ -277,7 +277,7 @@ def texture_sets_from_dir(
                 break
         if stem is None:
             continue
-        per_stem.setdefault(stem, []).append(f"{dds_uri_prefix}{name}")
+        per_stem.setdefault(stem, []).append(uri)
 
     # Sort each stem's mips by DDS_MIP_SUFFIXES order (so the `.dd0` top mip
     # is always first). The paths already end in a suffix from the known set.
@@ -759,7 +759,9 @@ _MFM_PROP_TO_PBR_SLOTS: dict[str, tuple[str, ...]] = {
     # mr/cavity stem the artist used).
     #
     # `detailMap` is intentionally NOT in this table. The shared
-    # atlas (``ship_atlas_detail.dds``) is bound separately, gated on
+    # atlas (``ship_atlas_detail.dds``, kept once in the workspace's
+    # shared texture store, so its slot path is the workspace-relative
+    # store path) is bound separately, gated on
     # the per-material ``g_detail*Influence`` triplet — binding it
     # unconditionally would attach the atlas to materials that
     # multiply it by zero, wasting texture-unit + cache bandwidth at
@@ -859,10 +861,7 @@ def _apply_material_mappings_json(
     # is the canonical PBR slot name. Raw WG ``_n`` / ``_mg`` files are
     # pre-filtered (modern extracts always carry the conformant sibling).
     dds_index: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
-    for f in sorted(textures_dds_dir.iterdir()):
-        if not f.is_file():
-            continue
-        name = f.name
+    for name, uri in dds_dir_entries(textures_dds_dir, dds_uri_prefix=dds_uri_prefix):
         mip_sfx = next((s for s in DDS_MIP_SUFFIXES if name.endswith(s)), None)
         if mip_sfx is None:
             continue
@@ -884,7 +883,7 @@ def _apply_material_mappings_json(
         stem, scheme, slot = _classify_dds_filename(stem_and_channel)
         if scheme != "main":
             continue
-        dds_index[stem][slot].append(f"{dds_uri_prefix}{name}")
+        dds_index[stem][slot].append(uri)
 
     def _mip_rank(path: str) -> int:
         for i, sfx in enumerate(DDS_MIP_SUFFIXES):
@@ -1142,11 +1141,7 @@ def _bind_dds_textures_by_name(
         lambda: defaultdict(lambda: defaultdict(list))
     )
 
-    for f in sorted(textures_dds_dir.iterdir()):
-        if not f.is_file():
-            continue
-        name = f.name
-
+    for name, uri in dds_dir_entries(textures_dds_dir, dds_uri_prefix=dds_uri_prefix):
         # Strip mip suffix (.dd0/.dd1/.dd2/.dds).
         mip_sfx = next((s for s in DDS_MIP_SUFFIXES if name.endswith(s)), None)
         if mip_sfx is None:
@@ -1164,7 +1159,7 @@ def _bind_dds_textures_by_name(
             continue
 
         stem, scheme, slot = _classify_dds_filename(stem_and_channel)
-        stem_index[stem][scheme][slot].append(f"{dds_uri_prefix}{name}")
+        stem_index[stem][scheme][slot].append(uri)
 
     def _mip_rank(p: str) -> int:
         for i, sfx in enumerate(DDS_MIP_SUFFIXES):

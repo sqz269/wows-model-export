@@ -16,6 +16,12 @@ Three callables:
 with inverted triangle order, and downstream raycasters expect the
 WG/glTF convention. The flip is local to ship exports; `export_model`
 does not run it (single-asset GLBs don't carry armor / hitbox meshes).
+
+Every wrapper that passes ``--raw-dds-dir`` also moves the engine-global
+textures the toolkit dumps into each directory (``ship_atlas_detail.dds``)
+into the workspace's shared texture store afterwards, leaving a redirect
+file behind (see :mod:`wows_model_export.shared_textures`). Directories
+outside the workspace keep their local copy.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ import tempfile
 from pathlib import Path
 from typing import Literal
 
+from .. import shared_textures
 from .._glb import flip_winding, parse_glb, write_glb
 from ..config import PipelineConfig
 from ..errors import ToolkitError
@@ -135,7 +142,10 @@ def export_ship(
         argv += ["--material-mappings-json", str(mat_map_out)]
         expected.append(mat_map_out)
 
-    result = run_toolkit(argv, config=cfg, expect_outputs=tuple(expected))
+    try:
+        result = run_toolkit(argv, config=cfg, expect_outputs=tuple(expected))
+    finally:
+        _adopt_shared_textures([raw_dds_dir], cfg)
 
     # Post-export: flip winding on armor + hitbox cube meshes (see
     # module docstring for rationale). Re-pack timing into the returned
@@ -266,7 +276,10 @@ def ingest_ship_bundle(
     if ammo_hull is not None:
         argv += ["--ammo-hull", ammo_hull]
 
-    result = run_toolkit(argv, config=cfg, expect_outputs=tuple(expected))
+    try:
+        result = run_toolkit(argv, config=cfg, expect_outputs=tuple(expected))
+    finally:
+        _adopt_shared_textures([raw_dds_dir], cfg)
 
     # Same post-export armor/hitbox winding flip export_ship applies — the
     # combined GLB is produced by the identical toolkit code path.
@@ -381,7 +394,10 @@ def export_model(
         # don't (the file is per-host, not per-asset). So we don't add
         # it to expect_outputs — a missing file isn't a failure here.
 
-    return run_toolkit(argv, config=cfg, expect_outputs=tuple(expected))
+    try:
+        return run_toolkit(argv, config=cfg, expect_outputs=tuple(expected))
+    finally:
+        _adopt_shared_textures([raw_dds_dir], cfg)
 
 
 def batch_export_model(
@@ -477,6 +493,27 @@ def batch_export_model(
             os.unlink(manifest_path)
         except OSError:
             pass
+        _adopt_shared_textures(
+            [it.get("raw_dds_dir") for it in normalized_items], cfg,
+        )
+
+
+def _adopt_shared_textures(
+    raw_dds_dirs: list[Path | str | os.PathLike | None],
+    cfg: PipelineConfig,
+) -> None:
+    """Move engine-global textures out of freshly dumped raw-DDS dirs into
+    the workspace's shared store. Never raises (an export must not fail
+    over this; a directory it can't handle keeps its local copy)."""
+    if not any(raw_dds_dirs):
+        return
+    try:
+        workspace = cfg.workspace
+    except Exception:  # noqa: BLE001 - no workspace configured
+        return
+    if workspace is None:
+        return
+    shared_textures.adopt_dirs(raw_dds_dirs, workspace=Path(workspace))
 
 
 # ── post-export winding flip ──────────────────────────────────────────
