@@ -2746,10 +2746,10 @@ def class_from_caliber(
     species: str | None,
     components: dict[str, Any] | None = None,
 ) -> str | None:
-    """Derive a 2-letter ship-class code from species + primary caliber.
+    """Derive a ship-class code from species + primary caliber.
 
     Returns one of ``DD`` / ``CL`` / ``CA`` / ``CB`` / ``BB`` / ``CV`` /
-    ``SS``, or ``None`` when the species is unrecognised. The ``CL`` /
+    ``SS`` / ``AUX``, or ``None`` when the species is unrecognised. The ``CL`` /
     ``CA`` / ``CB`` distinction is the only one that needs ``components``;
     the other species map deterministically.
 
@@ -2780,6 +2780,8 @@ def class_from_caliber(
         return "CV"
     if species_low == "submarine":
         return "SS"
+    if species_low == "auxiliary":
+        return "AUX"
     if species_low != "cruiser":
         # Unknown species — let the caller fall back to its default mapping.
         return None
@@ -2807,6 +2809,11 @@ def derive_class_from_placements(
     the species-only mapping. Best-effort — exceptions during the
     GameParams load propagate so the caller can decide whether to log
     or swallow.
+
+    The placements ``ship.species`` is blank for every species outside
+    Destroyer / Cruiser / Battleship / AirCarrier / Submarine (the
+    toolkit writes ``""`` for ``Auxiliary``). A blank species is read
+    from the GameParams Ship's ``typeinfo.species`` instead.
     """
     if isinstance(placements, (str, Path)):
         with open(placements, encoding="utf-8") as f:
@@ -2816,8 +2823,6 @@ def derive_class_from_placements(
     ship_section = placements.get("ship") or {}
     species = (ship_section.get("species") or "").strip() or None
     param_index = (ship_section.get("param_index") or "").strip()
-    if not species:
-        return None
     if not param_index:
         return class_from_caliber(species, None)
     # get_ship -> get_entity already handles prefix-form lookup
@@ -2826,6 +2831,11 @@ def derive_class_from_placements(
     ship = get_ship(param_index, refresh=refresh)
     if ship is None:
         return class_from_caliber(species, None)
+    if not species:
+        typeinfo = ship.get("typeinfo") or {}
+        species = (typeinfo.get("species") or "").strip() or None
+        if not species:
+            return None
     components = resolve_components(ship)
     return class_from_caliber(species, components)
 

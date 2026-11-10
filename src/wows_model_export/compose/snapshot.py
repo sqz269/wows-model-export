@@ -83,13 +83,14 @@ from ._step_runner import StepRunner
 _VFS_META_FILENAME = "vfs_meta.json"
 _GAMEPARAMS_FILENAME = "gameparams.json"
 
-# Species → 2-char class code. Mirrors the sidecar's species map.
+# Species → class code. Mirrors the sidecar's species map.
 _SPECIES_TO_CLASS = {
     "Destroyer":  "DD",
     "Cruiser":    "CA",
     "Battleship": "BB",
     "AirCarrier": "CV",
     "Submarine":  "SS",
+    "Auxiliary":  "AUX",
 }
 
 # Vehicle top-level component-key tail → canonical armament tag.
@@ -198,7 +199,8 @@ def _vehicle_armaments(v: dict[str, Any]) -> list[str]:
 
 
 def _classify_species(species: str | None) -> str | None:
-    """Map ``typeinfo.species`` to a 2-char class code."""
+    """Map ``typeinfo.species`` to a class code (``AUX`` for auxiliaries,
+    two letters for every other known species)."""
     if not species:
         return None
     mapped = _SPECIES_TO_CLASS.get(species)

@@ -117,16 +117,16 @@ def build_ship_key(
 
 
 # Mapping from toolkit `Species` strings (from `placements.ship.species`) to
-# our 2-letter class codes used in `ship.class` and `build_ship_key`.
-# If the toolkit emits a species we don't recognize, fall through to the
-# capitalized species string (so "Submarine" → "SS", anything novel shows up
-# uppercased for manual triage).
+# the class codes used in `ship.class` and `build_ship_key` (every code is
+# in `VALID_SHIP_CLASSES`). A species not listed here falls through to its
+# first two letters uppercased, so anything novel shows up for manual triage.
 _SPECIES_TO_CLASS = {
     "Destroyer":   "DD",
     "Cruiser":     "CA",
     "Battleship":  "BB",
     "AirCarrier":  "CV",
     "Submarine":   "SS",
+    "Auxiliary":   "AUX",
 }
 
 
@@ -142,7 +142,7 @@ def ship_from_placements(
     Resolves the toolkit-emitted ``ship`` fields (``model_dir``,
     ``display_name``, ``param_index``, ``nation``, ``species``, ``tier``)
     into the sidecar's canonical shape — lowercased nation + asset_id,
-    2-letter class code, ship_key built from the three. Returns a dict
+    class code, ship_key built from the three. Returns a dict
     suitable for passing into :func:`new_document` as ``ship=…``.
 
     ``placements`` — path to the JSON file or the parsed dict.
