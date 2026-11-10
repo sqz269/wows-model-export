@@ -68,6 +68,7 @@ from .ingest_ship import (
 from .projectile_library import build_projectile_library
 from .publish import publish
 from .scaffold_ship import scaffold_ship
+from .shared_texture_migration import migrate_shared_textures
 from .skel_ext_resolve import resolve_decorative_placements
 from .skin_pack import ingest_skin_pack
 from .snapshot import snapshot
@@ -103,6 +104,7 @@ __all__ = [
     "build_decal_library",
     "build_ammo_profiles",
     "dedup_textures",
+    "migrate_shared_textures",
     # Cross-cutting
     "publish",
     "snapshot",

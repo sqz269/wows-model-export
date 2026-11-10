@@ -1,17 +1,23 @@
 """Reclaim disk by hardlinking byte-identical duplicate textures.
 
-Some engine-global textures — notably ``ship_atlas_detail.dds``, a 16.8 MB
-detail atlas — are dumped verbatim into every accessory + ship
-``textures_dds/`` dir by the toolkit's raw-DDS dumper (it dedups only by
-filename WITHIN one export session, and each accessory gets its own
-session). On a full workspace that's ~1223 byte-identical copies ≈ 20.5 GB.
+Superseded for ``ship_atlas_detail.dds``: new exports keep one copy of it
+in the content-addressed store ``libraries/textures_shared/<sha1-8>/``
+and sidecars name that copy (:mod:`wows_model_export.shared_textures`);
+``wows-dedup-textures`` without ``--hardlink`` converts older exports
+(:mod:`.shared_texture_migration`). This module remains for other
+byte-identical textures that still sit at per-folder paths.
+
+The toolkit's raw-DDS dumper dedups only by filename WITHIN one export
+session, and each accessory gets its own session, so an engine-global
+texture lands in every folder it is bound in.
 
 This composer replaces those duplicates with hardlinks to shared canonical
-copies under ``<workspace>/libraries/textures_shared/``, reclaiming the
-space with **zero consumer impact**: each file stays at its original path
-with identical bytes; only the physical on-disk allocation is shared
-(webview / Unity / Blender read the same path + bytes as before — no
-sidecar URI change needed).
+copies at the root of ``<workspace>/libraries/textures_shared/`` (flat
+``<stem>.<sha256-8>.s<N><ext>`` files, next to the store's ``<sha1-8>/``
+subdirectories), reclaiming the space with **zero consumer impact**: each
+file stays at its original path with identical bytes; only the physical
+on-disk allocation is shared (no sidecar URI change needed). Downstream
+copies of those paths are still separate files.
 
 Safety model:
 
