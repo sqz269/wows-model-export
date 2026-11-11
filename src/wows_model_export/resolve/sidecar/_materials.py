@@ -330,9 +330,17 @@ def materials_from_glb(
     legacy_name_fallback: bool = True,
     png_uri_prefix: str = "textures/",
     dds_uri_prefix: str = "textures_dds/",
+    dead_stems: bool = False,
 ) -> list[dict[str, Any]]:
     """Extract an authoritative per-material texture manifest from a GLB +
     its sibling texture directories.
+
+    ``dead_stems=True`` lets the material-mappings pass bind the
+    ``<stem>_dead_<channel>`` textures a destroyed-model GLB's own
+    materials name (see :func:`_apply_material_mappings_json`); they land
+    in that material's ``texture_sets["main"]``, since the destroyed GLB
+    is a model of its own. Off by default: callers that fold a destroyed
+    mesh into a live asset's schemes keep their current output.
 
     The glTF file is read only for material names + PBR slot → image URI
     mappings + scalar factors + alpha/cull state. Each slot's manifest
@@ -479,6 +487,7 @@ def materials_from_glb(
         _apply_material_mappings_json(
             out, material_mappings_json, dds_dir,
             dds_uri_prefix=dds_uri_prefix,
+            dead_stems=dead_stems,
         )
 
     if dds_dir is not None and legacy_name_fallback and needs_legacy_before_mapping:
@@ -791,9 +800,17 @@ def _apply_material_mappings_json(
     textures_dds_dir: Path,
     *,
     dds_uri_prefix: str = "textures_dds/",
+    dead_stems: bool = False,
 ) -> int:
     """Pre-fill ``materials[*].texture_sets["main"]`` from the toolkit's
     deterministic material → texture-stem mapping JSON.
+
+    ``dead_stems``: also index the destroyed-variant files
+    (``<stem>_dead_<channel>``, scheme ``dead`` in
+    :func:`_classify_dds_filename`) under the key ``<stem>_dead``, so a
+    mapping slot whose stem is ``<stem>_dead`` (the materials of a
+    destroyed-model GLB, e.g. ``LYB023_dead``) binds them. Slots naming a
+    live stem keep resolving to the live files.
 
     The JSON's ``materials[*].textures`` dict carries one entry per MFM
     property (``diffuseMap`` / ``normalMap`` / ``metallicGlossMap`` /
@@ -888,6 +905,9 @@ def _apply_material_mappings_json(
         # scheme=dead but end in `_mr` not `_dead`. Trust the classifier
         # output instead of the suffix shape.
         stem, scheme, slot = _classify_dds_filename(stem_and_channel)
+        if scheme == "dead" and dead_stems:
+            dds_index[f"{stem}_dead"][slot].append(uri)
+            continue
         if scheme != "main":
             continue
         dds_index[stem][slot].append(uri)

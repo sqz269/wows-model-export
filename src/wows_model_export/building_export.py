@@ -9,7 +9,7 @@ ships inside the model ``.geometry`` as the ``hit_locations`` collision model
 synthesizes ship-convention ``Armor`` / ``Hitboxes`` GLB groups from it, and
 ``--emit-hardpoints`` keeps the static ``HP_*`` mount nodes in the node tree.
 
-Output mirrors the ship layout so Unity-side consumers reuse the ship bakers:
+Output mirrors the ship layout so consumers reuse their ship bakers:
 
     <workspace>/buildings/<index>/
       <index>.meta.json            <- building sidecar (ship-shaped sections)
@@ -19,22 +19,44 @@ Output mirrors the ship layout so Unity-side consumers reuse the ship bakers:
       models/<index>_material_mappings.json
       models/textures_dds/         <- raw DDS for the hull
     <workspace>/buildings/_shared/guns/<stem>/
-      <stem>.glb  (+ <stem>_dead.glb, material mappings, textures_dds/)
-                                   <- gun mounts, shared across buildings
+      <stem>.glb  (+ material mappings, textures_dds/)
+                                   <- gun mounts (live and dead models are
+                                      separate stems), shared across buildings
+    <workspace>/buildings/_shared/guns/index.json
+                                   <- gun library index: per stem its GLB and
+                                      its materials (texture paths)
 
-The sidecar's ``turrets`` / ``hitbox`` / ``armor`` / ``ballistics`` sections
-use the same shapes as ship ``.meta.json`` files (see
+The sidecar's ``turrets`` / ``hitbox`` / ``armor`` / ``ballistics`` /
+``materials`` sections use the same shapes as ship ``.meta.json`` files (see
 ``resolve/sidecar/_makers.py``), with building-specific identity under
 ``building``. Armor thickness comes from GameParams ``hull.armor`` — keys are
 ``(layer << 16) | material_id``; the GLB's per-vertex ``_MATERIAL_ID`` is the
 low 16 bits, so the ``materials_table`` here is keyed by the same fold.
+
+Textures. ``materials`` (hull GLB) and ``dead_materials`` (dead hull GLB)
+carry each material's texture slots as ``dds_mips`` path lists, bound from
+the toolkit's material mappings; the gun index carries the same per gun
+GLB. Paths follow the workspace rule: one that starts with ``libraries/``
+is relative to the workspace root (the shared texture store), any other is
+relative to the directory of the GLB that owns it (``models/`` for a hull,
+``_shared/guns/<stem>/`` for a gun). Never find a texture by listing a
+``textures_dds/`` folder: a set moves to the store whenever another export
+holds the same bytes.
+
+Mount transforms. ``turrets[].transform`` is the ship-placement rule the
+toolkit applies to ship mounts: the hull's ``HP_*`` node world matrix
+times the inverse rotation of the gun model's ``Rotate_Y_BlendBone``,
+made a proper rotation (a Z-mirror bone gives ``HP x Ry(180)``). The gun
+GLB rendered at that matrix faces the way WG's engine renders it.
+``dead_transform`` applies the same rule with the dead model's own bone
+(dead gun models carry none, so it is the raw node), and ``hp_transform``
+is the raw node. A consumer that parents a gun under the ``HP_*`` node
+uses ``inverse(hp_transform) x transform`` as the local matrix.
 """
 
 from __future__ import annotations
 
 import json
-import math
-import struct
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
@@ -43,15 +65,24 @@ from . import shared_textures
 from ._glb import flip_winding, parse_glb, write_glb
 from .config import PipelineConfig
 from .read import gameparams
+from .resolve import sidecar as resolve_sidecar
 from .resolve.gameparams_autofill import _hit_location_meta
 from .toolkit.ship import batch_export_model
 
 MODELS_SUBDIR = "models"
 SHARED_GUNS_SUBDIR = "_shared/guns"
+GUN_INDEX_NAME = "index.json"
+GUN_INDEX_SCHEMA_VERSION = 1
 
 # Sidecar schema version for building meta.json files. Independent of the
 # ship sidecar's schema_version — consumers key off ``pipeline.kind``.
+# Additions since the first version (materials, dead_materials,
+# turrets[].hp_transform / dead_transform) are additive; ``transform`` now
+# follows the ship-placement rule (see the module docstring).
 BUILDING_SCHEMA_VERSION = 1
+
+# The gun bone whose rest rotation the ship-placement rule inverts.
+ROTATE_Y_BLEND_BONE = "Rotate_Y_BlendBone"
 
 _HULL_FLIP_PREFIXES = ("Armor_", "CM_SB_")
 
@@ -122,6 +153,10 @@ def sidecar_path_for(config: PipelineConfig, index: str) -> Path:
 
 def shared_gun_dir(config: PipelineConfig, stem: str) -> Path:
     return buildings_root(config) / SHARED_GUNS_SUBDIR / stem
+
+
+def gun_index_path(config: PipelineConfig) -> Path:
+    return buildings_root(config) / SHARED_GUNS_SUBDIR / GUN_INDEX_NAME
 
 
 # ── GameParams access ─────────────────────────────────────────────────
@@ -311,6 +346,134 @@ def _read_glb_json(path: Path) -> dict[str, Any]:
     return gltf
 
 
+# ── mount placement (the toolkit's ship-mount rule) ───────────────────
+
+
+def _rotate_y_bone(gltf: dict[str, Any]) -> list[float] | None:
+    """Local matrix of the GLB's ``Rotate_Y_BlendBone`` node, or None."""
+    for node in gltf.get("nodes") or []:
+        if node.get("name") == ROTATE_Y_BLEND_BONE:
+            return _node_local_matrix(node)
+    return None
+
+
+def _rotation_inverse(m: list[float]) -> list[float]:
+    """Inverse of the 3×3 rotation (its transpose), no translation — the
+    toolkit's ``mat4_rotation_inverse``."""
+    return [
+        m[0], m[4], m[8], 0.0,
+        m[1], m[5], m[9], 0.0,
+        m[2], m[6], m[10], 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ]
+
+
+def _det3(m: list[float]) -> float:
+    return (
+        m[0] * (m[5] * m[10] - m[6] * m[9])
+        - m[4] * (m[1] * m[10] - m[2] * m[9])
+        + m[8] * (m[1] * m[6] - m[2] * m[5])
+    )
+
+
+def _mount_matrix(hp_world: list[float], bone_local: list[float] | None) -> list[float]:
+    """World matrix to render a mount GLB at: ``hp_world x inverse(bone)``,
+    made proper by negating column 0 when the result mirrors (a Z-mirror
+    bone yields ``hp_world x Ry(180)``). The toolkit's ship-mount rule
+    (``visual_transform = hp_transform * inverse(Rotate_Y_BlendBone)``
+    then ``ensure_proper_rotation``), written in glTF space: the BW->glTF
+    Z flip conjugates both factors, so the product converts the same way.
+    A GLB without the bone renders at the raw node."""
+    if bone_local is None:
+        return [float(v) for v in hp_world]
+    m = _mat_mul(hp_world, _rotation_inverse(bone_local))
+    if _det3(m) < 0.0:
+        m[0], m[1], m[2] = -m[0], -m[1], -m[2]
+    return m
+
+
+def _transform_entry(m: list[float]) -> dict[str, Any]:
+    return {"matrix": m, "position": [m[12], m[13], m[14]]}
+
+
+# ── textures ──────────────────────────────────────────────────────────
+
+
+def _model_materials(
+    glb_path: Path,
+    mappings_json: Path,
+    warn: Callable[[str], None],
+    label: str,
+) -> list[dict[str, Any]]:
+    """Material manifest of one exported model GLB (ship ``materials[]``
+    shape): texture slots bound from the toolkit's material mappings,
+    paths relative to the GLB's directory or to the workspace root
+    (``libraries/...`` store paths). ``dead_stems`` lets the materials of
+    a dead model bind its ``<stem>_dead_*`` textures; live mappings never
+    name a ``_dead`` stem, so it changes nothing for them."""
+    dds_dir = glb_path.parent / "textures_dds"
+    mats = resolve_sidecar.materials_from_glb(
+        glb_path,
+        textures_dds_dir=dds_dir if dds_dir.is_dir() else None,
+        material_mappings_json=mappings_json if mappings_json.is_file() else None,
+        legacy_name_fallback=False,
+        dead_stems=True,
+    )
+    for m in mats:
+        if m.get("shader_intent") in ("opaque_pbr", "cutout"):
+            main = (m.get("texture_sets") or {}).get("main") or {}
+            if "baseColor" not in main:
+                warn(f"{label}: material {m.get('material_id')} has no baseColor texture")
+    return mats
+
+
+def _write_json_atomic(path: Path, doc: Any, *, indent: int = 1) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=indent, sort_keys=True)
+    tmp.replace(path)
+
+
+def _write_gun_index(cfg: PipelineConfig, warnings: list[str]) -> Path | None:
+    """(Re)build ``_shared/guns/index.json`` from every gun GLB on disk.
+
+    One entry per stem: ``glb`` and ``material_mappings`` relative to the
+    index, ``materials`` with texture paths relative to the GLB's own
+    directory (``libraries/...`` paths: workspace root). The shared
+    texture store rewrites the entries when it moves a set out of a gun
+    folder, as it does for the accessory library index.
+    """
+    root = buildings_root(cfg) / SHARED_GUNS_SUBDIR
+    if not root.is_dir():
+        return None
+    assets: dict[str, Any] = {}
+    for d in sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name):
+        stem = d.name
+        glb = d / f"{stem}.glb"
+        if not glb.is_file():
+            continue
+        mm = d / f"{stem}_material_mappings.json"
+        entry = {
+            "glb": f"{stem}/{glb.name}",
+            "material_mappings": f"{stem}/{mm.name}" if mm.is_file() else None,
+            "materials": _model_materials(glb, mm, warnings.append, f"gun {stem}"),
+        }
+        shared_textures.repair_refs(entry, d)
+        assets[stem] = entry
+    out = gun_index_path(cfg)
+    _write_json_atomic(
+        out,
+        {
+            "schema_version": GUN_INDEX_SCHEMA_VERSION,
+            "generator": "wows-export-building",
+            "asset_count": len(assets),
+            "assets": assets,
+        },
+    )
+    return out
+
+
 def _flip_hull_winding(glb_path: Path) -> None:
     """Same fixup the ship pipeline applies to hull GLBs: the toolkit emits
     ``Armor_*`` / ``CM_SB_*`` meshes with inverted winding. Fresh exports
@@ -417,6 +580,16 @@ def _compose_sidecar(
         "hit_locations": {"Hull": hull_hit_location},
     }
 
+    # Gun model bones for the mount rule, read once per stem from the
+    # exported gun GLBs. A stem whose GLB is missing maps to False.
+    bones: dict[str, list[float] | None | bool] = {}
+
+    def gun_bone(stem: str) -> list[float] | None | bool:
+        if stem not in bones:
+            glb = shared_gun_dir(cfg, stem) / f"{stem}.glb"
+            bones[stem] = _rotate_y_bone(_read_glb_json(glb)) if glb.is_file() else False
+        return bones[stem]
+
     # turrets — ship-turret-shaped entries for every gun mount.
     artillery = entry.get("artillery") if isinstance(entry.get("artillery"), dict) else {}
     max_dist = artillery.get("maxDist") if isinstance(artillery, dict) else None
@@ -425,6 +598,7 @@ def _compose_sidecar(
     for i, (comp_name, species, hp_name, gun) in enumerate(_gun_mounts(entry)):
         stem = _stem(gun["model"])
         dead_mesh = gun.get("deadMesh") or ""
+        dead_stem = _stem(dead_mesh) if dead_mesh.endswith(".model") else None
         dispersion: dict[str, Any] = {}
         comp = entry.get(comp_name) or {}
         for k in _DISPERSION_COMPONENT_KEYS:
@@ -442,10 +616,21 @@ def _compose_sidecar(
             if isinstance(proj, dict) and proj.get("ammoType"):
                 ammo_types.append(proj["ammoType"])
 
-        transform = None
+        transform = dead_transform = hp_transform = None
         if hp_name in world:
-            m = world[hp_name]
-            transform = {"matrix": m, "position": [m[12], m[13], m[14]]}
+            hp_m = world[hp_name]
+            hp_transform = _transform_entry(hp_m)
+            bone = gun_bone(stem)
+            if bone is False:
+                warn(f"{index}: gun GLB {stem} missing — {hp_name} transform left at the raw node")
+                bone = None
+            transform = _transform_entry(_mount_matrix(hp_m, bone))
+            if dead_stem:
+                dead_bone = gun_bone(dead_stem)
+                if dead_bone is False:
+                    warn(f"{index}: dead gun GLB {dead_stem} missing — {hp_name} dead transform left at the raw node")
+                    dead_bone = None
+                dead_transform = _transform_entry(_mount_matrix(hp_m, dead_bone))
         else:
             warn(f"{index}: hardpoint {hp_name} not found in hull GLB node tree")
 
@@ -453,7 +638,7 @@ def _compose_sidecar(
         turret: dict[str, Any] = {
             "instance_id": f"{index}_{stem}_{i:02d}",
             "asset_id": stem,
-            "dead_asset_id": _stem(dead_mesh) if dead_mesh.endswith(".model") else None,
+            "dead_asset_id": dead_stem,
             "hp_name": hp_name,
             "parent_section": "Hull",
             "scope": _scope_of(gun["model"]),
@@ -461,7 +646,11 @@ def _compose_sidecar(
             "subcategory": species,
             "species": species,
             "component": comp_name,
+            # Live GLB placement (ship-mount rule), the dead GLB's own
+            # placement, and the raw HP node (module docstring).
             "transform": transform,
+            "dead_transform": dead_transform,
+            "hp_transform": hp_transform,
             "display_name": stem.replace("_", " "),
             "caliber_mm": (float(gun["barrelDiameter"]) * 1000.0) if gun.get("barrelDiameter") else None,
             # WG stores numBarrels as a float (4.0); Unity Placement.barrel_count is int.
@@ -510,11 +699,24 @@ def _compose_sidecar(
 
     dead = hull.get("deadModel") or ""
     has_distinct_dead = bool(dead) and dead != hull["model"]
-    if has_distinct_dead:
-        dead_glb = building_dir(cfg, index) / MODELS_SUBDIR / f"{index}_hull_dead.glb"
-        if not dead_glb.is_file():
-            warn(f"{index}: dead model {_stem(dead)} GLB missing — dead swap disabled")
-            has_distinct_dead = False
+    models = building_dir(cfg, index) / MODELS_SUBDIR
+    dead_glb = models / f"{index}_hull_dead.glb"
+    if has_distinct_dead and not dead_glb.is_file():
+        warn(f"{index}: dead model {_stem(dead)} GLB missing — dead swap disabled")
+        has_distinct_dead = False
+
+    # materials — texture paths relative to models/ (or the workspace
+    # root for store paths), as in ship sidecars.
+    materials = _model_materials(
+        hull_glb, models / f"{index}_material_mappings.json", warn, f"{index} hull"
+    )
+    dead_materials = (
+        _model_materials(
+            dead_glb, models / f"{index}_dead_material_mappings.json", warn, f"{index} dead hull"
+        )
+        if has_distinct_dead
+        else None
+    )
 
     return {
         "schema_version": BUILDING_SCHEMA_VERSION,
@@ -541,6 +743,8 @@ def _compose_sidecar(
         "hitbox": hitbox,
         "turrets": turrets,
         "ballistics": ballistics,
+        "materials": materials,
+        "dead_materials": dead_materials,
         "provenance": {
             "generator": "wows-export-building",
             "exported_at_unix": int(time.time()),
@@ -673,23 +877,35 @@ def run_export(
             continue
         warnings: list[str] = []
         sidecar = _compose_sidecar(index, entry, cfg, gp, warnings)
+        # Safety net: repoint any texture path whose folder copy moved to
+        # the shared store after the materials were resolved.
+        shared_textures.repair_refs(sidecar, building_dir(cfg, index) / MODELS_SUBDIR)
         out = sidecar_path_for(cfg, index)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with out.open("w", encoding="utf-8") as f:
-            json.dump(sidecar, f, indent=1, sort_keys=True)
+        _write_json_atomic(out, sidecar)
+        n_mats = len(sidecar["materials"]) + len(sidecar["dead_materials"] or [])
         report["buildings"][index] = {
             "sidecar": str(out),
             "turrets": len(sidecar["turrets"]),
             "boxes": len(sidecar["hitbox"]["boxes"]),
             "shells": len(sidecar["ballistics"]["shells"]),
+            "materials": n_mats,
             "warnings": warnings,
         }
         report["warnings"] += [f"{index}: {w}" if not w.startswith(index) else w for w in warnings]
         on_event(
             f"  {index}: sidecar ok — {len(sidecar['turrets'])} mounts, "
-            f"{len(sidecar['hitbox']['boxes'])} hit boxes, {len(sidecar['ballistics']['shells'])} shells"
+            f"{len(sidecar['hitbox']['boxes'])} hit boxes, {len(sidecar['ballistics']['shells'])} shells, "
+            f"{n_mats} materials"
             + (f", {len(warnings)} warning(s)" if warnings else "")
         )
+
+    # Phase 3 — the gun library index, rebuilt from every gun GLB on disk.
+    gun_warnings: list[str] = []
+    gun_index = _write_gun_index(cfg, gun_warnings)
+    report["warnings"] += gun_warnings
+    if gun_index is not None:
+        report["gun_index"] = str(gun_index)
+        on_event(f"gun index: {gun_index}" + (f" ({len(gun_warnings)} warning(s))" if gun_warnings else ""))
 
     report_path = buildings_root(cfg) / "export.json"
     with report_path.open("w", encoding="utf-8") as f:

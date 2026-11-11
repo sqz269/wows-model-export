@@ -40,8 +40,9 @@ texture-set model and the consumer path rule. Steps:
    ``name -> store path`` for its members; stale records of sets that are
    local again are dropped.
 5. **rewrite** — every texture path in the ship sidecars, building
-   sidecars and the accessory / projectile library indexes that names a
-   moved copy is repointed at the store path. Each path is resolved
+   sidecars, the accessory / projectile library indexes and the building
+   gun index (``buildings/_shared/guns/index.json``) that names a moved
+   copy is repointed at the store path. Each path is resolved
    against the directory it is relative to and matched against the moved
    copies (or the folder's redirect record when the file is gone); a path
    that matches neither is left alone. The file is rewritten by exact
@@ -87,6 +88,12 @@ from ._step_runner import StepRunner
 # Library indexes whose per-asset texture paths are relative to the
 # asset's GLB directory.
 _LIBRARY_INDEXES: tuple[str, ...] = ("accessories", "projectiles")
+
+# The building gun library (``buildings/_shared/guns/<stem>/``) and its
+# index, which has the library-index shape. ``_shared`` is the export root
+# its texture folders belong to (see :func:`_export_root`).
+_BUILDING_SHARED = "_shared"
+_BUILDING_GUN_INDEX: tuple[str, ...] = ("guns", "index.json")
 
 _LEGACY_SHARD_RE = re.compile(
     r"^(?P<stem>.+)\.(?P<hash>[0-9a-f]{8})\.s(?P<shard>\d+)(?P<ext>\.[^.]+)$",
@@ -384,6 +391,13 @@ def _documents(ws: Path, roots: Iterable[Path] | None) -> tuple[list[tuple[Path,
         if d.parent.name == "libraries":
             idx = d / "index.json"
             if d.name in _LIBRARY_INDEXES and idx.is_file():
+                out.append((idx, "library_index"))
+            continue
+        if d.parent.name == "buildings" and d.name == _BUILDING_SHARED:
+            # The building gun library: one index, library-index shaped
+            # (each asset's texture paths relative to its GLB directory).
+            idx = d.joinpath(*_BUILDING_GUN_INDEX)
+            if idx.is_file():
                 out.append((idx, "library_index"))
             continue
         if not d.is_dir():
