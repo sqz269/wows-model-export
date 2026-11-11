@@ -13,6 +13,7 @@ submodule remains reachable via full-path `from .. import ...` imports).
         autorig_asset, resolve_decorative_placements,
         find_ship_variants, publish, snapshot, teardown_ship,
         build_projectile_library, build_decal_library, build_ammo_profiles,
+        build_aircraft_library,
     )
     result = ingest_ship("Montana", config=cfg, on_event=printer)
     lib    = build_accessory_library(config=cfg, on_event=printer)
@@ -48,6 +49,7 @@ from . import (
 # (importable as `from wows_model_export.compose.scaffold_ship import …`)
 # but get shadowed in the package binding by the function.
 from .accessory_library import build_accessory_library
+from .aircraft_library import build_aircraft_library
 from .ammo_profiles import build_ammo_profiles
 from .clean_workspace import (
     ShipReplayPlan,
@@ -101,6 +103,7 @@ __all__ = [
     "SkinReplayPlan",
     # Fleet-wide composers
     "build_projectile_library",
+    "build_aircraft_library",
     "build_decal_library",
     "build_ammo_profiles",
     "dedup_textures",

@@ -109,6 +109,15 @@ export class AccessoryViewer {
   private texturesOn = true;
   private helpersVisible = true;
 
+  // Optional mesh allow-list (by mesh name). When set, only listed meshes
+  // draw (on top of the LOD filter and the per-mesh toggles). Used by
+  // pages whose index carries an authored LOD table and part groups (the
+  // Aircraft page), where the name-guessed LOD is not reliable.
+  private meshAllow: Set<string> | null = null;
+
+  // Axis markers parented to named nodes (hardpoints). Rebuilt per call.
+  private nodeMarkers: THREE.Object3D[] = [];
+
   // Rig pivot overlay. Lives in the scene from construction; visibility
   // and contents are mutated via setRigPivots / setRigPivotsVisible.
   // Living in the scene (rather than per-load) means the flip-180°
@@ -316,7 +325,46 @@ export class AccessoryViewer {
     const t = this.tracked[index];
     if (!t) return;
     t.info.visible = visible;
-    t.mesh.visible = visible && this.passesLod(t.info.lod);
+    t.mesh.visible = visible && this.passesLod(t.info.lod) && this.passesAllow(t.info.name);
+  }
+
+  /** Draw only the meshes named in `names` (null: no restriction). */
+  setMeshAllowList(names: Iterable<string> | null): void {
+    this.meshAllow = names ? new Set(names) : null;
+    this.applyLodFilter();
+  }
+
+  /**
+   * Put a small axis marker (X red, Y green, Z blue) on each named node,
+   * parented to it so it shows the node's own frame. Drawn on top of the
+   * model. Pass null or an empty list to clear.
+   */
+  setNodeMarkers(names: string[] | null): void {
+    for (const m of this.nodeMarkers) {
+      m.parent?.remove(m);
+      (m as THREE.AxesHelper).dispose?.();
+    }
+    this.nodeMarkers = [];
+    if (!names || names.length === 0 || !this.root) return;
+    const size = new THREE.Vector3();
+    this.bounds.getSize(size);
+    const len = Math.max(size.x, size.y, size.z, 1) * 0.05;
+    for (const name of names) {
+      const node = this.boneNodes.get(name);
+      if (!node) continue;
+      const axes = new THREE.AxesHelper(len);
+      const mat = axes.material as THREE.LineBasicMaterial;
+      mat.depthTest = false;
+      mat.transparent = true;
+      axes.renderOrder = 999;
+      // Undo the node's world scale so every marker has the same size.
+      const s = new THREE.Vector3();
+      node.updateWorldMatrix(true, false);
+      node.matrixWorld.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
+      axes.scale.set(1 / (s.x || 1), 1 / (s.y || 1), 1 / (s.z || 1));
+      node.add(axes);
+      this.nodeMarkers.push(axes);
+    }
   }
 
   // ── Rig pivots overlay ───────────────────────────────────────────────
@@ -521,12 +569,14 @@ export class AccessoryViewer {
       category: lib.asset.category,
       subcategory: lib.asset.subcategory,
     } as unknown as ShipPlacement;
-    for (const t of this.tracked) {
-      this.textures.registerAccessoryMesh(t.mesh, synth);
-    }
-    // No sidecar → no skin overrides → asset-level `main` scheme wins.
-    // Empty `hullBaseUrl` is unused on this path (texture paths inside
-    // libEntry resolve against the libEntry.glb location).
+    // Bind BEFORE registering, as the ship viewer does: registerAccessoryMesh
+    // picks the per-material key only when that key already has schemes, so
+    // registering first would put every mesh on the asset-level flat set
+    // (wrong texture and no `shader_intent` on multi-material assets, e.g. a
+    // plane's alpha-blended propeller disc).
+    // No sidecar → no skin overrides. Empty `hullBaseUrl` is unused on this
+    // path (texture paths inside libEntry resolve against the libEntry.glb
+    // location).
     this.textures.bindLibraryAsset(
       lib.assetId,
       lib.asset,
@@ -534,6 +584,9 @@ export class AccessoryViewer {
       '',
       lib.libraryRoot ?? 'accessories',
     );
+    for (const t of this.tracked) {
+      this.textures.registerAccessoryMesh(t.mesh, synth);
+    }
     this.textures.setActiveSchemeKey(lib.variant ?? 'main');
     // Flip textures on only when the user wants them — registration
     // above survives across toggles so a later setShowTextures(true)
@@ -568,6 +621,7 @@ export class AccessoryViewer {
     });
     this.root = null;
     this.tracked = [];
+    this.nodeMarkers = [];
     this.boneNodes.clear();
     this.boneInfo = [];
     this.boneRestQuats.clear();
@@ -616,12 +670,17 @@ export class AccessoryViewer {
 
   private applyLodFilter(): void {
     for (const t of this.tracked) {
-      t.mesh.visible = t.info.visible && this.passesLod(t.info.lod);
+      t.mesh.visible =
+        t.info.visible && this.passesLod(t.info.lod) && this.passesAllow(t.info.name);
     }
   }
 
   private passesLod(lod: number): boolean {
     return this.state.lodFilter === null || this.state.lodFilter === lod;
+  }
+
+  private passesAllow(name: string): boolean {
+    return this.meshAllow === null || this.meshAllow.has(name);
   }
 }
 

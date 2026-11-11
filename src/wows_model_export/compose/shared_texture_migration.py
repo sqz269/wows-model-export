@@ -87,7 +87,7 @@ from ._step_runner import StepRunner
 
 # Library indexes whose per-asset texture paths are relative to the
 # asset's GLB directory.
-_LIBRARY_INDEXES: tuple[str, ...] = ("accessories", "projectiles")
+_LIBRARY_INDEXES: tuple[str, ...] = ("accessories", "projectiles", "aircraft")
 
 # The building gun library (``buildings/_shared/guns/<stem>/``) and its
 # index, which has the library-index shape. ``_shared`` is the export root

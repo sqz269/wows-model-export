@@ -25,6 +25,7 @@ Available entry points (also listed in ``pyproject.toml``):
   * ``wows-publish``               -> :mod:`.publish`
   * ``wows-snapshot``              -> :mod:`.snapshot`
   * ``wows-build-projectile-library`` -> :mod:`.build_projectile_library`
+  * ``wows-build-aircraft-library`` -> :mod:`.build_aircraft_library`
   * ``wows-build-decal-library``   -> :mod:`.build_decal_library`
   * ``wows-build-ammo-profiles``   -> :mod:`.build_ammo_profiles`
   * ``wows-rig-normalize-bones``   -> :mod:`.rig_normalize_bones`

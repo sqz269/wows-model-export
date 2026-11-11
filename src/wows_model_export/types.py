@@ -282,6 +282,7 @@ class PublishResult:
     ships:        PublishCounts = PublishCounts()
     library:      PublishCounts = PublishCounts()
     projectiles:  PublishCounts = PublishCounts()
+    aircraft:     PublishCounts = PublishCounts()
     decals:       PublishCounts = PublishCounts()
     environment:  PublishCounts = PublishCounts()
     maps:         PublishCounts = PublishCounts()
@@ -319,6 +320,24 @@ class ProjectileLibraryResult:
     library_root:        Path
     projectiles_built:   int
     projectiles_audited: int
+    warnings:            tuple[str, ...] = ()
+    step_timings_ms:     dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AircraftLibraryResult:
+    """Outcome of `compose.build_aircraft_library`.
+
+    ``aircraft_built`` counts the airframes exported this run;
+    ``aircraft_indexed`` the entries of the written index (this run's and
+    earlier ones on disk); ``aircraft_available`` the aircraft model
+    folders with a geometry in the VFS.
+    """
+
+    library_root:        Path
+    aircraft_built:      int
+    aircraft_indexed:    int
+    aircraft_available:  int
     warnings:            tuple[str, ...] = ()
     step_timings_ms:     dict[str, float] = field(default_factory=dict)
 
@@ -377,6 +396,7 @@ __all__ = [
     "PublishResult",
     "SnapshotResult",
     "ProjectileLibraryResult",
+    "AircraftLibraryResult",
     "DecalLibraryResult",
     "AmmoProfilesResult",
     # Config (re-exported from .config)

@@ -63,6 +63,14 @@ export type ProjectilesRoute = {
   projectileId: string | null;
 };
 
+export type AircraftRoute = {
+  page: 'aircraft';
+  path: string;
+  /** Selected airframe (model folder name) from `#/aircraft/<id>`. Null on
+   *  bare `#/aircraft`. */
+  aircraftId: string | null;
+};
+
 export type ParticlesRoute = {
   page: 'particles';
   path: string;
@@ -94,6 +102,7 @@ export type RouteState =
   | GameParamsRoute
   | ConsumersRoute
   | ProjectilesRoute
+  | AircraftRoute
   | ParticlesRoute
   | MapsRoute
   | UpdatesRoute;
@@ -125,6 +134,9 @@ function parseHash(hash: string): RouteState {
   }
   if (head === 'projectiles' || head === 'projectile') {
     return { page: 'projectiles', path, projectileId: rest ?? null };
+  }
+  if (head === 'aircraft') {
+    return { page: 'aircraft', path, aircraftId: rest ? decodeURIComponent(rest) : null };
   }
   if (head === 'maps' || head === 'map') {
     return { page: 'maps', path, spaceName: rest ?? null };

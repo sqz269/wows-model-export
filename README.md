@@ -115,6 +115,10 @@ toolchain required to use it.
     ├── accessories/
     │   ├── index.json             ← fleet-wide accessory index
     │   └── <asset_id>/            ← GLB + DDS per shared accessory
+    ├── aircraft/
+    │   ├── index.json             ← airframe index (LODs, parts, racks,
+    │   │                            hardpoints, GameParams entries)
+    │   └── <nation>/<category>/<ID>/  ← GLB + visual JSON + DDS per airframe
     └── textures_shared/
         └── <key-8>/<file>         ← one copy of each texture set shared
                                      byte-for-byte across export folders
@@ -149,6 +153,7 @@ also available if you'd rather script extractions.
 | `wows-webview-serve` | Launch the local UI on `127.0.0.1:5180`. |
 | `wows-ingest-ship <vehicle>` | Extract one ship from the game install. |
 | `wows-build-accessory-library` | Rebuild the fleet-wide accessory index. |
+| `wows-build-aircraft-library [MODEL_OR_KEY ...]` | Export airframes (aircraft model folders, or GameParams aircraft keys) into `libraries/aircraft/`; `--all` for every one, `--validate` to check the index (`reference/schemas/AIRCRAFT_LIBRARY.md`). |
 | `wows-snapshot` | Dump GameParams + Vehicles/Permoflages cache. |
 | `wows-find-ship-variants` | Enumerate ship variants from GameParams. |
 | `wows-dedup-textures` | Move every texture set shared by two or more export folders into `libraries/textures_shared/` and repoint sidecars + library indexes (older exports). |

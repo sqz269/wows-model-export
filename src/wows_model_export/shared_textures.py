@@ -115,6 +115,7 @@ SCOPE_ROOTS: tuple[str, ...] = (
     "ships",
     "libraries/accessories",
     "libraries/projectiles",
+    "libraries/aircraft",
     "buildings",
 )
 

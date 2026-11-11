@@ -10,6 +10,7 @@ export * from './gameparams';
 export * from './consumers';
 export * from './queue';
 export * from './projectiles';
+export * from './aircraft';
 export * from './maps';
 export * from './particles';
 export * from './builds';

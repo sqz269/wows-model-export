@@ -439,8 +439,13 @@ def batch_export_model(
           "textures_dir":             "<disk path or null>",
           "raw_dds_dir":              "<disk path or null>",
           "material_mappings_json":   "<disk path or null>",
-          "skel_ext_candidates_json": "<disk path or null>"
+          "skel_ext_candidates_json": "<disk path or null>",
+          "visual_json":              "<disk path or null>"
         }
+
+    ``visual_json`` (toolkit feature ``export_model.visual_json``) writes
+    the model's ``.visual`` structure: node hierarchy, render sets and the
+    authored LOD table (``wowsunpack.visual/v1``).
 
     ``shared`` is an optional dict of flags applied to every item:
         {
@@ -485,6 +490,10 @@ def batch_export_model(
         if it.get("skel_ext_candidates_json"):
             entry["skel_ext_candidates_json"] = str(it["skel_ext_candidates_json"])
             Path(entry["skel_ext_candidates_json"]).parent.mkdir(parents=True, exist_ok=True)
+        if it.get("visual_json"):
+            # Needs the toolkit feature `export_model.visual_json`.
+            entry["visual_json"] = str(it["visual_json"])
+            Path(entry["visual_json"]).parent.mkdir(parents=True, exist_ok=True)
         normalized_items.append(entry)
 
     manifest = {

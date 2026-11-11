@@ -55,8 +55,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default="ships,library,projectiles,decals",
         help="Comma-separated list of domains to publish (default: "
              "ships,library,projectiles,decals; also available: "
-             "environment, maps, shared_textures). The shared texture "
-             "store publishes with ships, library or projectiles.",
+             "aircraft, environment, maps, shared_textures). The shared "
+             "texture store publishes with ships, library, projectiles or "
+             "aircraft.",
     )
     ap.add_argument(
         "--maps",
@@ -78,8 +79,8 @@ def _build_parser() -> argparse.ArgumentParser:
 def _summarize(result: PublishResult) -> str:
     bits = [f"published -> {result.target_dir}"]
     for name in (
-        "ships", "library", "projectiles", "decals", "environment", "maps",
-        "shared_textures",
+        "ships", "library", "projectiles", "aircraft", "decals", "environment",
+        "maps", "shared_textures",
     ):
         counts = getattr(result, name)
         bits.append(

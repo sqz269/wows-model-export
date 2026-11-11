@@ -23,6 +23,7 @@ from fastapi import FastAPI
 from ..config import PipelineConfig
 from . import queue as _queue
 from .routes import (
+    aircraft,
     bootstrap,
     builds,
     cleanup,
@@ -82,6 +83,7 @@ def create_app(config: PipelineConfig) -> FastAPI:
     # /api/* routers
     app.include_router(library.make_router(config), prefix="/api")
     app.include_router(projectiles.make_router(config), prefix="/api")
+    app.include_router(aircraft.make_router(config), prefix="/api")
     app.include_router(ships.make_router(config), prefix="/api")
     app.include_router(gameparams.make_router(config), prefix="/api")
     app.include_router(extract.make_router(config), prefix="/api")

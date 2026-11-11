@@ -20,6 +20,10 @@ What it copies (per domain):
                     skipping the large ``.skel_ext_candidates.json``
                     inputs (~10 MB per asset).
 * ``projectiles`` — ``libraries/projectiles/`` GLBs + JSON + DDS.
+* ``aircraft``    — ``libraries/aircraft/`` GLBs + JSON (index, visual
+                    JSON, material mappings) + DDS, copied to
+                    ``aircraft/``. OPT-IN only (not in the default domain
+                    fan-out): request ``domains=("aircraft", ...)``.
 * ``decals``      — the dynamic-decal library ``libraries/decals/``
                     (WG ``dyndecals/`` mirror: ``*_{d,p,e}.{dds,dd?}``
                     textures + the ``manifest.json`` prototype table)
@@ -65,7 +69,7 @@ What it copies (per domain):
 Canonical :class:`StepEvent` step names emitted to ``on_event``:
 
     "discover_domain_files"  "copy_ships"  "copy_library"
-    "copy_projectiles"       "copy_decals"  "copy_environment"
+    "copy_projectiles"       "copy_aircraft"  "copy_decals"  "copy_environment"
     "copy_maps"              "copy_shared_textures"
 
 Each step emits ``started`` -> ``completed`` (or ``skipped``).
@@ -99,6 +103,7 @@ _DOMAIN_STEPS: dict[str, str] = {
     "ships":       "copy_ships",
     "library":     "copy_library",
     "projectiles": "copy_projectiles",
+    "aircraft":    "copy_aircraft",
     "decals":      "copy_decals",
     "environment": "copy_environment",
     "maps":        "copy_maps",
@@ -107,7 +112,7 @@ _DOMAIN_STEPS: dict[str, str] = {
 
 # Domains whose texture paths reference the shared texture store; asking
 # for any of them publishes the store too.
-_STORE_USING_DOMAINS: frozenset[str] = frozenset({"ships", "library", "projectiles"})
+_STORE_USING_DOMAINS: frozenset[str] = frozenset({"ships", "library", "projectiles", "aircraft"})
 
 # Non-GLB/JSON/DDS sidecar extensions the maps domain carries: shoreline
 # SDF + minimap-style PNGs, per-weather sky HDR environment maps, raw
@@ -572,6 +577,29 @@ def publish(
     else:
         runner.emit("copy_projectiles", "skipped", detail="domain not requested")
 
+    # ── Step: copy_aircraft ───────────────────────────────────────────
+    aircraft_counts = PublishCounts()
+    if "aircraft" in domain_set:
+        with runner.step("copy_aircraft") as ctx:
+            aircraft_counts = _publish_tree(
+                workspace / "libraries" / "aircraft",
+                target_dir / "aircraft",
+                force=force,
+                allow_json=True,
+                allow_glb=True,
+                allow_dds=True,
+                skip_suffix=(shared_textures.REDIRECT_FILENAME,),
+            )
+            ctx.annotate(
+                f"copied={aircraft_counts.copied} skipped={aircraft_counts.skipped}",
+                data={
+                    "copied":  aircraft_counts.copied,
+                    "skipped": aircraft_counts.skipped,
+                },
+            )
+    else:
+        runner.emit("copy_aircraft", "skipped", detail="domain not requested")
+
     # ── Step: copy_shared_textures ────────────────────────────────────
     # Ship / library / projectile texture paths that start with
     # `libraries/` name the shared store, so it publishes with them.
@@ -744,6 +772,7 @@ def publish(
         ships=ships_counts,
         library=library_counts,
         projectiles=projectiles_counts,
+        aircraft=aircraft_counts,
         decals=decals_counts,
         environment=environment_counts,
         maps=maps_counts,

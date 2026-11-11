@@ -9,6 +9,7 @@
     extractHref,
     gameParamsHref,
     libraryHref,
+    aircraftHref,
     projectilesHref,
     particlesHref,
     mapsHref,
@@ -25,6 +26,7 @@
   import GameParams from '$routes/GameParams.svelte';
   import Consumers from '$routes/Consumers.svelte';
   import Projectiles from '$routes/Projectiles.svelte';
+  import Aircraft from '$routes/Aircraft.svelte';
   import Maps from '$routes/Maps.svelte';
   import Updates from '$routes/Updates.svelte';
   import HelpDialog from '$components/HelpDialog.svelte';
@@ -117,6 +119,7 @@
     { page: 'ships', href: shipsHref(), label: 'Ships', keyHint: '2' },
     { page: 'library', href: libraryHref(), label: 'Library', keyHint: '3' },
     { page: 'projectiles', href: projectilesHref(), label: 'Projectiles', keyHint: '4' },
+    { page: 'aircraft', href: aircraftHref(), label: 'Aircraft', keyHint: '' },
     { page: 'particles', href: particlesHref(), label: 'Particles', keyHint: '5' },
     { page: 'maps', href: mapsHref(), label: 'Maps', keyHint: '6' },
     { page: 'gameparams', href: gameParamsHref(), label: 'GameParams', keyHint: '7' },
@@ -144,7 +147,7 @@
       <a
         href={item.href}
         onclick={(e) => go(e, item.href)}
-        title={`Switch to ${item.label} (${item.keyHint})`}
+        title={item.keyHint ? `Switch to ${item.label} (${item.keyHint})` : `Switch to ${item.label}`}
         class="rounded px-3 py-1 text-xs text-muted-foreground hover:bg-popover hover:text-foreground hover:no-underline {route.page ===
         item.page
           ? 'bg-accent text-foreground'
@@ -224,6 +227,12 @@
     <Projectiles
       selectedId={route.page === 'projectiles' ? route.projectileId : null}
       active={route.page === 'projectiles'}
+    />
+  </div>
+  <div class={route.page === 'aircraft' ? 'flex flex-1 min-w-0' : 'hidden'}>
+    <Aircraft
+      aircraftId={route.page === 'aircraft' ? route.aircraftId : null}
+      active={route.page === 'aircraft'}
     />
   </div>
   <div class={route.page === 'maps' ? 'flex flex-1 min-w-0' : 'hidden'}>

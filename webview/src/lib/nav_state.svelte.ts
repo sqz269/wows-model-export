@@ -25,6 +25,7 @@ class NavState {
   lastVehicleId = $state<string | null>(null);
   lastGameParamId = $state<string | null>(null);
   lastProjectileId = $state<string | null>(null);
+  lastAircraftId = $state<string | null>(null);
   lastParticlePath = $state<string | null>(null);
   lastSpaceName = $state<string | null>(null);
 }
@@ -84,6 +85,14 @@ export function projectilesHref(): string {
   return navState.lastProjectileId
     ? `#/projectile/${encodeURIComponent(navState.lastProjectileId)}`
     : '#/projectiles';
+}
+
+/** Topnav href for the Aircraft tab. Falls back to bare `#/aircraft`
+ *  when no airframe has been opened this session. */
+export function aircraftHref(): string {
+  return navState.lastAircraftId
+    ? `#/aircraft/${encodeURIComponent(navState.lastAircraftId)}`
+    : '#/aircraft';
 }
 
 /** Topnav href for the Updates tab (game-build diffs, stale exports). */
