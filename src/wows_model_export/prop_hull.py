@@ -31,8 +31,9 @@ Sources (one per prop):
   materials with no ``texture_sets`` and ``prop_hull.textures`` is
   ``"glb"``, which tells a consumer to keep the GLB's own materials.
 
-Models in the merged ``.visual`` container (no loose ``.geometry``) are
-refused with a clear error until the toolkit reads that container.
+Models whose ``.geometry`` the client does not ship (only their assets.bin
+prototypes exist) are refused with a clear error; no reader can export them
+(``reference/toolkit/UNSHIPPED_MODELS.md``).
 
 Options per prop: ``drop_nodes`` (regex: nodes whose name matches are
 left out with their subtree), ``drop_materials`` (regex: primitives whose
@@ -246,8 +247,8 @@ def _resolve_source(e: dict[str, Any], cfg: PipelineConfig, vfs: Callable[[], se
     geometry = model[: -len(".model")] + ".geometry"
     if geometry not in paths:
         raise PropHullError(
-            f"{pid}: {model} has no loose .geometry (merged .visual format); "
-            "the toolkit cannot read it yet"
+            f"{pid}: {model} has no .geometry in the VFS; the client does not ship "
+            "this model's geometry, so it cannot be exported"
         )
     return {"kind": "model", "model": model, "geometry": geometry, "prop": src.get("prop")}
 

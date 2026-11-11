@@ -938,7 +938,7 @@ def run_export(
     # Guard hull-less entries UP FRONT: `--all` sweeps every typeinfo.type ==
     # "Building" and some (logic/aggregate entries) carry no usable hull dict.
     # A KeyError in Phase-1 job assembly would abort the whole run before any
-    # export; skip-with-report instead, like the new-format .visual skip.
+    # export; skip-with-report instead, like the unshipped-geometry skip.
     viable: list[tuple[str, dict[str, Any]]] = []
     for index, entry in selected:
         hull = entry.get("hull")
@@ -957,11 +957,13 @@ def run_export(
     #   guns:  --emit-hardpoints only (skinned guns already carry their rig;
     #          collision groups would mislabel gun hit models as hull armor)
     #
-    # Per-item batch failures don't abort (keep_going): ~half the building
-    # corpus ships in the NEW merged .visual container (no loose .geometry
-    # in the VFS — count + 5 tail relptrs, neither models.bin nor .geometry
-    # layout) which export-model can't read yet. Those buildings are skipped
-    # with a report entry; toolkit support is a tracked follow-up.
+    # Per-item batch failures don't abort (keep_going): 43 of the 99
+    # Building entries have a hull model whose .geometry (and textures) the
+    # client does not ship; only their assets.bin prototypes exist. This is
+    # not a second format a reader could add (the .visual bytes that looked
+    # like one are the ordinary VisualPrototype record):
+    # reference/toolkit/UNSHIPPED_MODELS.md. Those buildings are skipped
+    # with a report entry.
     if not skip_glb:
         hull_jobs: list[dict[str, Any]] = []
         gun_jobs: list[dict[str, Any]] = []
@@ -997,7 +999,7 @@ def run_export(
                 out = Path(job["output"])
                 if not out.is_file():
                     report["warnings"].append(
-                        f"gun GLB missing after batch export (new-format model?): {out.name}"
+                        f"gun GLB missing after batch export (.geometry not shipped?): {out.name}"
                     )
         report["gun_models"] = sorted(seen_guns)
 
@@ -1005,7 +1007,7 @@ def run_export(
     for index, entry in selected:
         hull_glb = building_dir(cfg, index) / MODELS_SUBDIR / f"{index}_hull.glb"
         if not hull_glb.is_file():
-            reason = "hull GLB missing — likely new-format merged .visual (no loose .geometry in VFS)"
+            reason = "hull GLB missing — likely its .geometry is not shipped in this client (not in the VFS)"
             report["skipped"][index] = reason
             on_event(f"  {index}: SKIPPED — {reason}")
             continue

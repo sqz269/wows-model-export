@@ -1,7 +1,7 @@
 """Composed buildings: an old-format base model plus GameParams gun mounts.
 
-Some shore structures exist in GameParams but their model ships in the
-merged ``.visual`` container the toolkit cannot read yet, and some
+Some shore structures exist in GameParams but the client does not ship
+their model's geometry (``reference/toolkit/UNSHIPPED_MODELS.md``), and some
 structures a consumer needs have no Building entry at all. A *composite*
 stands in for them: a base model the toolkit can export (any old-format
 ``.model``: a building, a map prop, a sandbag ring) with one or more gun
