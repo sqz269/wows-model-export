@@ -526,13 +526,18 @@ def refresh_fingerprints(build: int, *, config: PipelineConfig | None = None) ->
 
 def _export_dirs(config: PipelineConfig) -> Iterator[tuple[str, str, Path, Path | None]]:
     """(kind, name, dir, metadata file) for every export in the workspace."""
+    from ..prop_hull import PIPELINE_KIND as PROP_HULL_KIND
+    from ..prop_hull import is_prop_hull_dir
+
     ws = config.workspace
     ships = ws / "ships"
     if ships.is_dir():
         for d in sorted(ships.iterdir()):
             meta = d / f"{d.name}.meta.json"
             if meta.is_file():
-                yield "ship", d.name, d, meta
+                # A prop hull lives in ships/ but is rebuilt by its own
+                # builder, not by a ship ingest.
+                yield (PROP_HULL_KIND if is_prop_hull_dir(d) else "ship"), d.name, d, meta
     maps = ws / "maps"
     if maps.is_dir():
         for d in sorted(maps.iterdir()):
@@ -548,7 +553,7 @@ def _exported_at(kind: str, meta: Path | None) -> str | None:
         doc = json.loads(meta.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if kind == "ship":
+    if kind in ("ship", "prop_hull"):
         return (doc.get("provenance") or {}).get("extracted_at") or (doc.get("pipeline") or {}).get("exported_at")
     return doc.get("generated_at")
 
@@ -560,6 +565,16 @@ def _ship_reexport_from_meta(meta: Path) -> dict[str, Any]:
         return {}
     args = (doc.get("provenance") or {}).get("extract_args") or {}
     return {"kind": "ship", **args} if args else {}
+
+
+def _prop_hull_reexport_from_meta(meta: Path) -> dict[str, Any]:
+    """The spec entry a prop hull was built from (``provenance.spec_entry``)."""
+    try:
+        doc = json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    entry = (doc.get("provenance") or {}).get("spec_entry")
+    return {"kind": "prop_hull", "entry": entry} if entry else {}
 
 
 def _map_reexport_from_meta(meta: Path) -> dict[str, Any]:
@@ -594,7 +609,22 @@ def _removed_from_build(
         entity = ship.get("wg_ship_full_id")
         if isinstance(entity, str) and entity and entity not in manifest.gameparams:
             return f"GameParams entity {entity!r}"
+    if kind == "prop_hull" and meta is not None and manifest.files:
+        try:
+            source = (json.loads(meta.read_text(encoding="utf-8")).get("prop_hull") or {}).get("source") or {}
+        except (OSError, ValueError):
+            return None
+        model = source.get("model")
+        # The .model is an assets.bin record; its loose .geometry is the file.
+        if isinstance(model, str) and model.endswith(".model"):
+            geometry = model[: -len(".model")] + ".geometry"
+            if _norm_vfs(geometry) not in manifest.files:
+                return f"model geometry {geometry!r}"
     return None
+
+
+def _norm_vfs(path: str) -> str:
+    return "/" + path.replace("\\", "/").lstrip("/")
 
 
 def export_status(
@@ -608,6 +638,7 @@ def export_status(
     fallback_reexport = (
         _ship_reexport_from_meta(meta) if kind == "ship" and meta
         else _map_reexport_from_meta(meta) if kind == "map" and meta
+        else _prop_hull_reexport_from_meta(meta) if kind == "prop_hull" and meta
         else {}
     )
     gone = _removed_from_build(kind, name, meta, fallback_reexport, manifest)
@@ -746,6 +777,10 @@ def reexport_plan(status: ExportStatus, config: PipelineConfig | None = None) ->
             "skin_packs": [s.skin_id for s in skins],
         }
     rx = status.reexport or {}
+    if status.kind == "prop_hull":
+        if not rx.get("entry"):
+            raise ValueError(f"{status.name}: no prop hull spec entry recorded to rebuild from")
+        return {"kind": "prop_hull", "name": status.name, "build_prop_hull": rx["entry"]}
     return {
         "kind": "map", "name": status.name,
         "run_export": {
@@ -824,8 +859,9 @@ def reexport_exports(
     """Re-run the exports behind ``statuses`` on the current build.
 
     Ships go through ``compose.ingest_ship`` (then their skin packs), maps
-    through ``maps_export.run_export``; both write a fresh
-    ``build_deps.json``. Ships that asked for the accessory library get it
+    through ``maps_export.run_export``, prop hulls through
+    ``prop_hull.build_prop_hull`` with the spec entry they were built from;
+    each writes a fresh ``build_deps.json``. Ships that asked for the accessory library get it
     built once at the end, as the extract queue does. Per-export failures
     are collected, not raised. ``on_progress(index, total, status)`` is
     called as each export starts.
@@ -940,6 +976,13 @@ def reexport_exports(
                     collision_manifest=plan["collision_manifest"],
                 )
                 record("reexported", {"kind": "map", "name": st.name})
+            elif st.kind == "prop_hull":
+                from ..prop_hull import build_prop_hull
+
+                entry = reexport_plan(st, cfg)["build_prop_hull"]
+                # Its progress lines are plain strings, not step events.
+                build_prop_hull(entry, config=cfg, on_event=lambda _line: None)
+                record("reexported", {"kind": "prop_hull", "name": st.name})
             else:
                 raise ValueError(f"unknown export kind {st.kind!r}")
         except CancelledError:

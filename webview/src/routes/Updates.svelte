@@ -38,7 +38,7 @@
   let jobRunning = $state<string | null>(null);
 
   let stateFilter = $state<'attention' | ExportState | 'all'>('attention');
-  let kindFilter = $state<'all' | 'ship' | 'map'>('all');
+  let kindFilter = $state<'all' | 'ship' | 'map' | 'prop_hull'>('all');
   let selected = $state<Record<string, boolean>>({});
   let expanded = $state<Record<string, boolean>>({});
   let includeUntracked = $state(false);
@@ -485,9 +485,10 @@
             <option value="all">All</option>
           </select>
           <select class={selectCls} bind:value={kindFilter} aria-label="Kind filter">
-            <option value="all">Ships + maps</option>
+            <option value="all">All kinds</option>
             <option value="ship">Ships</option>
             <option value="map">Maps</option>
+            <option value="prop_hull">Prop hulls</option>
           </select>
         </div>
 

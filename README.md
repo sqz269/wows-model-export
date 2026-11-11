@@ -105,7 +105,7 @@ toolchain required to use it.
 │   ├── gameparams.json            ← ~2.8 GB; the toolkit's GameParams dump
 │   └── snapshot.json              ← Vehicles + Permoflages summary
 ├── ships/
-│   └── <Ship>/
+│   └── <Ship>/                    ← also prop hulls (`pipeline.kind: "prop_hull"`)
 │       ├── <Ship>.meta.json       ← sidecar (typed schema)
 │       └── models/
 │           ├── <Ship>_hull.glb
@@ -162,6 +162,7 @@ also available if you'd rather script extractions.
 | `wows-dedup-textures` | Move every texture set shared by two or more export folders into `libraries/textures_shared/` and repoint sidecars + library indexes (older exports). |
 | `wows-export-building` | Export GameParams Building entries (shore structures) into `buildings/`. |
 | `wows-compose-building` | Compose buildings from an old-format base model and GameParams gun mounts, from a spec you supply (`reference/schemas/BUILDING_SIDECAR.md`). |
+| `wows-build-prop-hull` | Wrap a static prop (a WoWS map / port prop by id or model path, or any static `.glb` / `.gltf`) in a minimal ship sidecar under `ships/<id>/`: hull, one armour-less hit box, no mounts, buoyancy dimensions. `--spec` builds several, `--validate` checks them (`reference/schemas/METADATA_SPEC.md` §17). |
 
 Each accepts `--help` for the full argument list. Run `wows-` then Tab
 in a modern shell to discover the rest.

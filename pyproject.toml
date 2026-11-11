@@ -83,6 +83,7 @@ wows-rig-normalize-bones     = "wows_model_export.cli.rig_normalize_bones:main"
 wows-export-map              = "wows_model_export.cli.export_map:main"
 wows-export-building         = "wows_model_export.cli.export_building:main"
 wows-compose-building        = "wows_model_export.cli.compose_building:main"
+wows-build-prop-hull         = "wows_model_export.cli.build_prop_hull:main"
 wows-webview-serve           = "wows_model_export.cli.webview_serve:main"
 wows-builds                  = "wows_model_export.cli.builds:main"
 

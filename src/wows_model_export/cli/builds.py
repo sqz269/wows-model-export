@@ -5,8 +5,8 @@
     wows-builds status                     builds on disk, manifests, cache stamps, export states
     wows-builds snapshot [--build N] [--refresh]
     wows-builds diff [--from N] [--to N] [--json] [--limit N]
-    wows-builds stale [--kind ship|map] [--all] [--json]
-    wows-builds reexport [NAME ...] [--kind ship|map] [--include-untracked]
+    wows-builds stale [--kind ship|map|prop_hull] [--all] [--json]
+    wows-builds reexport [NAME ...] [--kind ship|map|prop_hull] [--include-untracked]
                          [--dry-run] [--no-skins] [--no-library]
 
 ``snapshot`` saves the current build's manifest (fingerprint of every game
@@ -435,7 +435,7 @@ def _build_parser() -> argparse.ArgumentParser:
     add_common_args(p)
 
     p = sub.add_parser("stale", help="Exports whose game inputs changed since they were made.")
-    p.add_argument("--kind", choices=("ship", "map"), default=None)
+    p.add_argument("--kind", choices=("ship", "map", "prop_hull"), default=None)
     p.add_argument("--all", action="store_true", help="Also list current exports.")
     p.add_argument("--json", action="store_true")
     p.add_argument("--limit", type=int, default=8, help="Max changed inputs shown per section.")
@@ -443,7 +443,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("reexport", help="Re-run stale exports with their original arguments.")
     p.add_argument("names", nargs="*", help="Only these exports (ship label / map name).")
-    p.add_argument("--kind", choices=("ship", "map"), default=None)
+    p.add_argument("--kind", choices=("ship", "map", "prop_hull"), default=None)
     p.add_argument("--include-untracked", action="store_true",
                    help="Also re-run exports made before build tracking.")
     p.add_argument("--dry-run", action="store_true", help="Print the plan only.")
