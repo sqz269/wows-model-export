@@ -2958,6 +2958,24 @@ def scaffold_ship(
                 for sec in sidecar.PLACEMENT_SECTIONS:
                     existing.pop(sec, None)
 
+            if skip_geometry_hitbox:
+                # The geometry_hitbox step did not run, so doc still holds
+                # new_document's stubs: an all-zero geometry block and a
+                # hitbox with source_glb None / region_count 0. Merged last,
+                # those values would overwrite the measured ones the existing
+                # sidecar carries (every sidecar refresh used to zero them).
+                # Drop them so the existing values survive; the hitbox's
+                # dict parts (regions / boxes / hit_locations) merge as before.
+                doc = dict(doc)
+                if isinstance(existing.get("geometry"), dict):
+                    doc.pop("geometry", None)
+                ex_hitbox = existing.get("hitbox")
+                if isinstance(ex_hitbox, dict) and isinstance(doc.get("hitbox"), dict):
+                    doc["hitbox"] = {
+                        k: v for k, v in doc["hitbox"].items()
+                        if k not in ("source_glb", "region_count") or k not in ex_hitbox
+                    }
+
             doc = sidecar.merge_preserving(existing, doc)
         except sidecar.SidecarSchemaError as e:
             warnings.append(f"existing sidecar not reusable ({e}); overwriting")
