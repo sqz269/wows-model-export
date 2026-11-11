@@ -523,7 +523,157 @@ _COMPONENT_KEYS: tuple[str, ...] = (
     "engine",
     "depthCharges",
     "pinger",
+    # Event-ship weapon families (Star Trek / Bermuda branch ships): laser
+    # turrets ride the main-battery hardpoints, missile launchers their own.
+    "phaserLasers",
+    "missiles",
 )
+
+#: ucTypes of the per-branch weapon modules on event ships with selectable
+#: branches (``PXSC999_Siegfried_1510``, ``PXSB101_Amagi_H2020``, …). Their
+#: guns live in these modules instead of the ``_Hull`` module's components;
+#: a hull rides with the module of the same branch at the same chain depth
+#: (:func:`_branch_linked_module`).
+_BRANCH_WEAPON_UCTYPES: tuple[str, ...] = ("_PrimaryWeapons", "_SecondaryWeapons")
+
+#: Component keys whose mounts may use the node-list encoding
+#: (:func:`expand_node_list_mounts`), mapped to the weapon-control-system
+#: bucket that holds their per-node records.
+_WCS_NODE_BUCKETS: dict[str, str] = {
+    "artillery":    "ArtilleryNodes",
+    "phaserLasers": "ArtilleryNodes",
+    "atba":         "ATBANodes",
+    "torpedoes":    "TorpedoNodes",
+    "missiles":     "MissileNodes",
+}
+
+
+def _is_node_list_mount(key: Any, mount: Any) -> bool:
+    """True for a node-list mount: a non-``HP_`` key (``Gun_1``) whose
+    ``nodes`` list names the hardpoints the same gun sits on."""
+    if not isinstance(key, str) or key.startswith("HP_"):
+        return False
+    if not isinstance(mount, dict):
+        return False
+    nodes = mount.get("nodes")
+    return isinstance(nodes, list) and any(isinstance(n, str) and n for n in nodes)
+
+
+def _wcs_node_record(
+    wcs: dict[str, Any] | None,
+    node: str,
+    component_key: str | None,
+) -> dict[str, Any] | None:
+    """The per-node record of ``node`` in a weapon-control-system component
+    (``ABC_WeaponControlSystem.ArtilleryNodes.HP_GGM_1`` …): the component's
+    own bucket first, then any bucket that lists the node."""
+    if not isinstance(wcs, dict):
+        return None
+    preferred = _WCS_NODE_BUCKETS.get(component_key or "")
+    buckets = [preferred] if preferred else []
+    buckets += sorted(k for k in wcs if isinstance(k, str) and k != preferred)
+    for bucket_key in buckets:
+        bucket = wcs.get(bucket_key)
+        if isinstance(bucket, dict):
+            rec = bucket.get(node)
+            if isinstance(rec, dict):
+                return rec
+    return None
+
+
+def expand_node_list_mounts(
+    component: Any,
+    wcs: dict[str, Any] | None = None,
+    *,
+    component_key: str | None = None,
+) -> Any:
+    """Return ``component`` with every node-list mount expanded into one
+    mount per listed hardpoint, keyed by that hardpoint.
+
+    Normal ships key each mount by its hull hardpoint
+    (``A_Artillery.HP_GGM_1``). Some event ships instead hold ONE mount
+    (``A_Artillery.Gun_1``) with ``nodes: ["HP_GGM_1", "HP_GGM_2",
+    "HP_GGM_3"]`` — the same gun at each listed hardpoint. Each expanded
+    mount is a copy of the gun's own params (model, miscFilter, ammoList,
+    sectors, HitLocation*, …) without ``nodes``, overlaid with the node's
+    record from the hull's weapon-control-system component (``wcs``), whose
+    ``NodeData`` schema carries the per-node ``horizSector`` /
+    ``vertSector`` / ``deadZone`` / ``pitchDeadZones`` / ``position`` and
+    ``HitLocation*`` (per-turret splash boxes). The expanded mounts take the
+    node-list key's place in key order; an ``HP_`` key already present wins
+    over an expanded node of the same name.
+
+    A component without node-list mounts is returned as the SAME object,
+    so ships that only use ``HP_`` keys are untouched.
+    """
+    if not isinstance(component, dict):
+        return component
+    if not any(_is_node_list_mount(k, v) for k, v in component.items()):
+        return component
+    hp_keys = {k for k in component if isinstance(k, str) and k.startswith("HP_")}
+    out: dict[str, Any] = {}
+    for key, mount in component.items():
+        if not _is_node_list_mount(key, mount):
+            out[key] = mount
+            continue
+        for node in mount["nodes"]:
+            if not isinstance(node, str) or not node or node in hp_keys or node in out:
+                continue
+            expanded = {k: v for k, v in mount.items() if k != "nodes"}
+            rec = _wcs_node_record(wcs, node, component_key)
+            if rec:
+                expanded.update(rec)
+            out[node] = expanded
+    return out
+
+
+def _upgrade_chain_positions(sui: dict[str, Any]) -> dict[str, tuple[str, int, int]]:
+    """``{module_id: (ucType, branch, depth)}`` for every upgrade module.
+
+    ``branch`` is the ``branchId`` of the module's chain root (child
+    modules carry a placeholder ``0``); ``depth`` is the number of ``prev``
+    hops to that root (root = 0).
+    """
+    out: dict[str, tuple[str, int, int]] = {}
+    for mid, mod in sui.items():
+        if not isinstance(mod, dict) or not isinstance(mod.get("ucType"), str):
+            continue
+        root, depth, seen = mid, 0, set()
+        while root not in seen:
+            seen.add(root)
+            prev = (sui.get(root) or {}).get("prev") or ""
+            if not prev or not isinstance(sui.get(prev), dict):
+                break
+            root, depth = prev, depth + 1
+        branch = (sui.get(root) or {}).get("branchId")
+        out[mid] = (
+            mod["ucType"],
+            branch if isinstance(branch, int) and not isinstance(branch, bool) else 0,
+            depth,
+        )
+    return out
+
+
+def _branch_linked_module(
+    positions: dict[str, tuple[str, int, int]],
+    uc_type: str,
+    hull_module: str | None,
+) -> str | None:
+    """The ``uc_type`` module that rides with ``hull_module``: the same
+    branch's module at the same chain depth, or that branch's deepest module
+    when its chain is shorter. Ties resolve to the lowest module id."""
+    pos = positions.get(hull_module or "")
+    if pos is None:
+        return None
+    _, branch, depth = pos
+    best: tuple[int, str] | None = None
+    for mid in sorted(positions):
+        uct, b, d = positions[mid]
+        if uct != uc_type or b != branch or d > depth:
+            continue
+        if best is None or d > best[0]:
+            best = (d, mid)
+    return best[1] if best else None
 
 # (ucType, slot) pairs where the override is the *intended* design: _Hull
 # carries stock defaults for these slots and the dedicated ucType chain is
@@ -651,6 +801,35 @@ def resolve_components(
                 components_src[k] = v
                 components_origin[k] = uc_type
 
+    # Branch-linked weapon modules (event ships, see _BRANCH_WEAPON_UCTYPES):
+    # fill the component slots the picked _Hull module leaves unset from the
+    # weapon module of the same branch + chain depth. Ships without these
+    # ucTypes skip this entirely.
+    hull_module = pick_chain("_Hull")
+    if any(
+        isinstance(m, dict) and m.get("ucType") in _BRANCH_WEAPON_UCTYPES
+        for m in sui.values()
+    ):
+        positions = _upgrade_chain_positions(sui)
+        for uc_type in _BRANCH_WEAPON_UCTYPES:
+            linked = _branch_linked_module(positions, uc_type, hull_module)
+            comps = (sui.get(linked) or {}).get("components") if linked else None
+            if not isinstance(comps, dict):
+                continue
+            for k, v in comps.items():
+                if v and k not in components_src:
+                    components_src[k] = v
+                    components_origin[k] = uc_type
+
+    # The hull's weapon-control-system component holds the per-node records
+    # of node-list mounts (expand_node_list_mounts).
+    wcs_ids = components_src.get("wcs") or []
+    wcs = (
+        ship.get(wcs_ids[0])
+        if isinstance(wcs_ids, list) and wcs_ids and isinstance(wcs_ids[0], str)
+        else None
+    )
+
     out: dict[str, Any] = {}
     active_hull_component_id: str | None = None
     stock_hull_component_id: str | None = None
@@ -671,7 +850,13 @@ def resolve_components(
             stock_hull_component_id = (
                 stock_hull_ids[0] if stock_hull_ids else None
             )
-        out[key] = ship.get(component_id) if isinstance(component_id, str) else None
+        component = ship.get(component_id) if isinstance(component_id, str) else None
+        if key in _WCS_NODE_BUCKETS:
+            component = expand_node_list_mounts(
+                component, wcs if isinstance(wcs, dict) else None,
+                component_key=key,
+            )
+        out[key] = component
 
     out["__active_hull_id__"] = active_hull_component_id
     out["__stock_hull_id__"] = stock_hull_component_id
@@ -808,6 +993,7 @@ def variants_summary(ship: dict[str, Any]) -> dict[str, Any]:
     modules: dict[str, list[str]] = {}
     for uc_type in (
         "_Hull", "_Artillery", "_Engine", "_Suo", "_Torpedoes",
+        *_BRANCH_WEAPON_UCTYPES,
     ):
         chain = _walk_ucType_chain(sui, uc_type)
         if chain:
@@ -941,6 +1127,7 @@ def autofill_for_hp(
     for group_key in (
         "artillery", "atba", "airDefense", "torpedoes",
         "directors", "finders", "radars", "airArmament",
+        "phaserLasers", "missiles",
     ):
         group = components.get(group_key)
         if not isinstance(group, dict):
@@ -976,13 +1163,16 @@ def autofill_for_hp(
         if isinstance(mf, list):
             out["misc_filter"] = [str(s) for s in mf]
 
-        if group_key in ("artillery", "atba"):
+        if group_key in ("artillery", "atba", "phaserLasers"):
+            # Laser turrets are ArtilleryGun subclasses (same arc / reload /
+            # barrel fields on the main-battery hardpoints).
             _fill_gun_fields(mount, group, out)
         elif group_key == "airDefense":
             _fill_aa_fields(mount, out)
         elif group_key == "torpedoes":
             _fill_torpedo_fields(mount, out)
-        # directors / finders / radars / airArmament: display_name + miscFilter only.
+        # directors / finders / radars / airArmament / missiles:
+        # display_name + miscFilter only.
 
         # Per-mount damage state — HP / destructibility / crit / repair from the
         # mount's nested HitLocation* block (sibling to the arc/deadMesh fields
@@ -2041,6 +2231,7 @@ _MUNITION_LIST_SLOTS: tuple[str, ...] = (
 # munition scan.
 _MUNITION_COMPONENT_GROUPS: tuple[str, ...] = (
     "artillery", "atba", "airDefense", "torpedoes", "depthCharges",
+    "phaserLasers", "missiles",
 )
 
 
@@ -2099,7 +2290,8 @@ def collect_gun_effects(
     """Per-gun particle attachments (muzzle blast + gun-damage / purge /
     reload / lens).
 
-    Walks ``artillery`` / ``atba`` / ``airDefense`` HP_* mounts. The
+    Walks ``artillery`` / ``atba`` / ``airDefense`` HP_* mounts (node-list
+    mounts arrive expanded per hardpoint by :func:`resolve_components`). The
     ``node`` is the gun's hardpoint (``HP_AGM_1`` etc.) so the consumer
     can resolve the world position via the existing placement table. WG
     fires the muzzle blast at each barrel's ``HP_gunFire<N>`` inside the
@@ -2474,6 +2666,7 @@ def classify_splash_boxes(
     for group_key in (
         "artillery", "atba", "airDefense", "torpedoes",
         "directors", "finders", "radars", "airArmament",
+        "phaserLasers", "missiles",
     ):
         group = components.get(group_key) if components else None
         if not isinstance(group, dict):
@@ -2621,7 +2814,9 @@ def collect_mount_armor(
     to match the existing ``materials_table`` convention.
     """
     out: dict[str, dict[str, float]] = {}
-    for group_key in ("artillery", "atba", "airDefense", "torpedoes"):
+    for group_key in (
+        "artillery", "atba", "airDefense", "torpedoes", "phaserLasers", "missiles",
+    ):
         group = components.get(group_key) if components else None
         if not isinstance(group, dict):
             continue
