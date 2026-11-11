@@ -830,8 +830,13 @@ def reexport_exports(
 
     ``jobs`` > 1 runs that many exports at once. Each export writes only
     its own folder; the shared caches are brought current first and the
-    shared libraries they extract into are locked. A ship's skin packs run
-    in the same worker, after the ship."""
+    shared libraries they extract into are locked. The one cross-folder
+    writer is the shared texture store's adoption, and it leaves the
+    folders of the exports still running alone: each ingest and skin pack
+    claims its ship root through ``shared_textures.export_session``, and
+    the copies another export's adoption left there move once that
+    session ends. A ship's skin packs run in the same worker, after the
+    ship."""
     import threading
     from concurrent.futures import ThreadPoolExecutor
 

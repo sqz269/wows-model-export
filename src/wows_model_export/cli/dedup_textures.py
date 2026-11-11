@@ -102,6 +102,7 @@ def _summarize_store(r: SharedTextureMigrationResult) -> str:
         f"documents_rewritten={r.documents_rewritten} "
         f"references_rewritten={r.references_rewritten}",
         f"copies_removed={r.copies_removed} copies_kept={r.copies_kept} "
+        f"copies_deferred={r.copies_deferred} "
         f"legacy_canonicals_removed={r.legacy_canonicals_removed}",
         f"removed={r.bytes_removed / 1e9:.2f} GB (logical)  "
         f"freed={r.bytes_freed / 1e6:.1f} MB (on disk)",

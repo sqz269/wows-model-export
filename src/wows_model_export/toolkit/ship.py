@@ -23,7 +23,8 @@ texture store afterwards: each set that another export folder or the store
 already holds byte-for-byte (and the engine-global
 ``ship_atlas_detail.dds``) is moved to the store and replaced by a
 redirect record, and the documents of the other folders holding it are
-repointed (see :mod:`wows_model_export.shared_textures`). Directories
+repointed (folders an export session still claims keep their copy until
+that session ends; see :mod:`wows_model_export.shared_textures`). Directories
 outside the workspace's export trees keep their files. A caller that still
 writes into the directory afterwards (emissive synthesis, diffuse
 recovery) passes ``adopt_shared=False`` and calls

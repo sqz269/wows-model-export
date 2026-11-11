@@ -39,6 +39,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
+from . import shared_textures
 from ._glb import flip_winding, parse_glb, write_glb
 from .config import PipelineConfig
 from .read import gameparams
@@ -550,6 +551,19 @@ def _compose_sidecar(
 # ── public entry point ────────────────────────────────────────────────
 
 
+def _buildings_session_roots(
+    *_args: object,
+    config: PipelineConfig | None = None,
+    **_kwargs: object,
+) -> tuple[Path, list[Path]]:
+    """Export session of a building export: it claims ``buildings/``, so no
+    other export's texture adoption moves a copy the sidecars being composed
+    still name (see :func:`shared_textures.export_session`)."""
+    cfg = config or PipelineConfig.load()
+    return cfg.workspace, [buildings_root(cfg)]
+
+
+@shared_textures.with_export_session(_buildings_session_roots)
 def run_export(
     *,
     indices: Iterable[str] | None = None,

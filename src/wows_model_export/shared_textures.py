@@ -51,6 +51,17 @@ How the producer gets there:
   copies and records ``name -> store path`` in each folder's redirect
   file :data:`REDIRECT_FILENAME` (see
   :mod:`wows_model_export.compose.shared_texture_migration`).
+* :func:`export_session` brackets every export that computes documents
+  in memory and writes them later (ship ingest and scaffold, skin packs,
+  the accessory / projectile libraries, buildings). While it runs, its
+  export roots are *claimed*: adoption by anyone else leaves the copies
+  in a claimed root where they are (recorded in :data:`PENDING_REL`), so
+  a document that export is still computing never names a file that is
+  gone. When the session ends the pending copies move. The claims are
+  visible to other processes through :data:`SESSIONS_REL`.
+* :func:`repair_refs` repoints, in a document about to be written, the
+  paths whose folder copy has moved to the store (a safety net for the
+  writers that compute documents before their own last adoption).
 * :func:`dds_dir_entries` lists a raw-DDS directory for the sidecar and
   library resolvers. Redirected names come back with their store path, so
   every texture slot that would have pointed at the local copy points at
@@ -62,19 +73,23 @@ How the producer gets there:
 * ``wows-dedup-textures`` converts an existing workspace
   (:func:`wows_model_export.compose.shared_texture_migration.migrate_shared_textures`).
 
-The redirect files and the hash cache (:data:`HASH_CACHE_REL`) are
-pipeline-internal and never published.
+The redirect files, the hash cache (:data:`HASH_CACHE_REL`), the session
+files and the pending list are pipeline-internal and never published.
 """
 from __future__ import annotations
 
+import contextlib
+import functools
 import hashlib
+import itertools
 import json
 import os
 import re
 import sys
 import tempfile
 import threading
-from collections.abc import Iterable, Mapping
+import time
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +129,19 @@ REDIRECT_SCHEMA_VERSION = 1
 HASH_CACHE_REL = ".cache/shared_textures/hashes.json"
 
 HASH_CACHE_SCHEMA_VERSION = 1
+
+#: Directory of the per-process export-session files (one ``<pid>.json``
+#: per process with open sessions, listing the export roots it claims).
+#: Pipeline-internal.
+SESSIONS_REL = ".cache/shared_textures/sessions"
+
+#: Folders whose copies of shared sets were left in place because their
+#: export root was claimed; moved when no session claims them any more.
+#: Written by the engine under its run lock. Pipeline-internal.
+PENDING_REL = ".cache/shared_textures/pending.json"
+
+#: A session file older than this is ignored (guards against a reused pid).
+SESSION_STALE_S = 48 * 3600.0
 
 #: Length of the hex hash prefix that names a store subdirectory.
 HASH_PREFIX_LEN = 8
@@ -560,6 +588,275 @@ def redirect_record(ref: str, sha1: str, size: int) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Export sessions: the export roots whose documents are being written
+# ---------------------------------------------------------------------------
+#
+# An export reads its folders, computes documents in memory (a ship
+# sidecar, the library index) and writes them later. Adoption by another
+# export (another thread or process) in between would move a copy those
+# documents still name. A session claims the export's roots for that
+# time; the engine leaves the copies in claimed folders alone (except the
+# folders it was asked to adopt) and lists them in PENDING_REL, and they
+# move once no session claims them.
+
+
+class _Session:
+    __slots__ = ("ws", "ws_key", "claims", "raw")
+
+    def __init__(self, ws: Path, ws_key: str) -> None:
+        self.ws = ws
+        self.ws_key = ws_key
+        self.claims: list[str] = []   # normcased resolved paths
+        self.raw: list[str] = []      # resolved paths as written
+
+
+_sessions: dict[int, _Session] = {}
+_sessions_lock = threading.Lock()
+_session_ids = itertools.count(1)
+_tls = threading.local()
+
+
+def _path_key(p: Path | str) -> str:
+    return os.path.normcase(str(Path(p).resolve()))
+
+
+def _sessions_dir(ws: Path) -> Path:
+    return Path(ws).joinpath(*SESSIONS_REL.split("/"))
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether a process with this pid is running (best effort)."""
+    if pid == os.getpid():
+        return True
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        handle = k32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied: it exists
+        try:
+            code = wintypes.DWORD()
+            if not k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _sync_session_file(ws: Path, ws_key: str) -> None:
+    """Rewrite this process's session file for ``ws`` (caller holds
+    ``_sessions_lock``)."""
+    claims = sorted({c for s in _sessions.values() if s.ws_key == ws_key for c in s.raw})
+    path = _sessions_dir(ws) / f"{os.getpid()}.json"
+    if not claims:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"pid": os.getpid(), "claims": claims,
+                       "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, f, indent=2)
+        os.replace(tmp, path)
+    except OSError as e:
+        print(f"[shared_textures] could not write session file {path}: {e}", file=sys.stderr)
+
+
+def _wait_for_engine(ws: Path) -> None:
+    """Let an engine run that may have read the claims before ours were
+    registered finish before the export goes on."""
+    try:
+        from .compose.shared_texture_migration import wait_for_engine
+        wait_for_engine(ws)
+    except Exception as e:  # noqa: BLE001 - never fail an export over this
+        print(f"[shared_textures] could not wait for a running adoption: {e}", file=sys.stderr)
+
+
+def active_claims(workspace: Path) -> list[str]:
+    """Export roots claimed by open sessions on ``workspace``, in this
+    process and in every other live process (normcased resolved paths).
+    Session files of processes that are gone are removed."""
+    ws = Path(workspace).resolve()
+    ws_key = os.path.normcase(str(ws))
+    with _sessions_lock:
+        out = [c for s in _sessions.values() if s.ws_key == ws_key for c in s.claims]
+    d = _sessions_dir(ws)
+    try:
+        files = list(d.glob("*.json"))
+    except OSError:
+        files = []
+    me = os.getpid()
+    for f in files:
+        try:
+            pid = int(f.stem)
+        except ValueError:
+            continue
+        if pid == me:
+            continue
+        try:
+            age = time.time() - f.stat().st_mtime
+            doc = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if age > SESSION_STALE_S or not _pid_alive(pid):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+            continue
+        for c in (doc or {}).get("claims") or []:
+            if isinstance(c, str):
+                out.append(os.path.normcase(os.path.normpath(c)))
+    return out
+
+
+def is_claimed(folder: Path | str, claims: Iterable[str]) -> bool:
+    """Whether ``folder`` lies in (or is) one of ``claims``
+    (as returned by :func:`active_claims`)."""
+    k = os.path.normcase(os.path.normpath(str(folder)))
+    return any(k == c or k.startswith(c.rstrip("\\/") + os.sep) for c in claims)
+
+
+def _open_session(ws: Path, claims: Iterable[Path | str | None]) -> int:
+    ws = Path(ws).resolve()
+    s = _Session(ws, os.path.normcase(str(ws)))
+    for c in claims:
+        if c:
+            r = str(Path(c).resolve())
+            k = os.path.normcase(r)
+            if k not in s.claims:
+                s.claims.append(k)
+                s.raw.append(r)
+    with _sessions_lock:
+        sid = next(_session_ids)
+        _sessions[sid] = s
+        if s.claims:
+            _sync_session_file(s.ws, s.ws_key)
+    if s.claims:
+        _wait_for_engine(s.ws)
+    return sid
+
+
+def _close_session(sid: int) -> Path | None:
+    with _sessions_lock:
+        s = _sessions.pop(sid, None)
+        if s is None:
+            return None
+        if s.claims:
+            _sync_session_file(s.ws, s.ws_key)
+    return s.ws
+
+
+@contextlib.contextmanager
+def export_session(
+    workspace: Path | str | os.PathLike | None,
+    claims: Iterable[Path | str | None] = (),
+) -> Iterator[None]:
+    """Claim export roots while an export computes and writes documents.
+
+    ``claims`` are directories (an export root such as ``ships/<S>``,
+    ``libraries/accessories`` or ``buildings``); :func:`claim` adds more
+    from inside the session. While the session is open, adoption leaves
+    the copies in claimed folders in place unless it was asked to adopt
+    that very folder, and records them as pending. When the session
+    closes, the pending copies whose roots nobody claims any more move to
+    the store (:func:`flush_pending`). Sessions nest; a ``None``
+    workspace makes this a no-op. Never raises on its own account.
+    """
+    if workspace is None:
+        yield
+        return
+    try:
+        sid = _open_session(Path(workspace), claims)
+    except Exception as e:  # noqa: BLE001
+        print(f"[shared_textures] export session not opened: {e}", file=sys.stderr)
+        yield
+        return
+    stack: list[int] = getattr(_tls, "stack", None) or []
+    _tls.stack = stack
+    stack.append(sid)
+    try:
+        yield
+    finally:
+        try:
+            stack.remove(sid)
+        except ValueError:
+            pass
+        ws = _close_session(sid)
+        if ws is not None:
+            flush_pending(ws)
+
+
+def claim(path: Path | str) -> bool:
+    """Add ``path`` to the innermost export session open in this thread.
+    Returns False (and claims nothing) when no session is open."""
+    stack = getattr(_tls, "stack", None)
+    if not stack:
+        return False
+    with _sessions_lock:
+        s = _sessions.get(stack[-1])
+        if s is None:
+            return False
+        r = str(Path(path).resolve())
+        k = os.path.normcase(r)
+        if k in s.claims:
+            return True
+        s.claims.append(k)
+        s.raw.append(r)
+        _sync_session_file(s.ws, s.ws_key)
+    _wait_for_engine(s.ws)
+    return True
+
+
+def with_export_session(
+    roots: Callable[..., tuple[Path | str | None, Iterable[Path | str | None]]],
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Decorator: run the function inside :func:`export_session`.
+
+    ``roots(*args, **kwargs)`` returns ``(workspace, claims)`` for a call;
+    when it raises, the call runs without a session.
+    """
+    def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                ws, claims = roots(*args, **kwargs)
+            except Exception:  # noqa: BLE001
+                ws, claims = None, ()
+            with export_session(ws, claims):
+                return fn(*args, **kwargs)
+        return wrapper
+    return deco
+
+
+def flush_pending(workspace: Path | str | os.PathLike) -> None:
+    """Move the pending copies whose export roots no session claims any
+    more (see :data:`PENDING_REL`). Never raises."""
+    try:
+        from .compose.shared_texture_migration import flush_pending as _flush
+        _flush(Path(workspace))
+    except Exception as e:  # noqa: BLE001
+        print(f"[shared_textures] pending flush failed: {e}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # Producer hook: route shared sets out of freshly written raw-DDS folders
 # ---------------------------------------------------------------------------
 
@@ -579,7 +876,14 @@ def adopt_dirs(
     the documents naming any of those copies are rewritten to the store
     path and the copies are removed (see
     :func:`wows_model_export.compose.shared_texture_migration.converge_dirs`).
-    Folders outside :data:`SCOPE_ROOTS` are left alone. Idempotent.
+    Exception: a copy in a folder whose export root an open
+    :func:`export_session` claims stays where it is (unless that folder
+    is in ``dirs``) and moves when the session ends. Folders outside
+    :data:`SCOPE_ROOTS` are left alone. Idempotent.
+
+    A caller that computed a document from ``dirs`` BEFORE this call must
+    re-resolve it (or pass it through :func:`repair_refs`) before writing
+    it: the call can move copies out of ``dirs`` that the document names.
 
     Never raises: a failure is reported on stderr and the folders keep
     their copies, which still resolve through the owning-directory rule.
@@ -713,30 +1017,103 @@ def dir_names(dds_dir: Path) -> list[str]:
     return [name for name, _uri in dds_dir_entries(Path(dds_dir))]
 
 
+def repair_refs(node: Any, base: Path) -> int:
+    """Repoint, in place, the texture paths in ``node`` whose folder copy
+    has moved to the store.
+
+    ``node`` is a document or a part of one (dicts and lists, mutated in
+    place): a ship / building sidecar with ``base`` = its ``models/``
+    directory, or one library-index entry with ``base`` = the directory of
+    its GLB. A string is repointed only when it names a texture-set member
+    by a folder-relative path, that file is missing from its folder, and
+    the folder's redirect file records it; everything else stays as it is.
+    For writers that computed a document before an adoption that may have
+    moved copies it names. Returns the number of paths repointed.
+    """
+    base = Path(base)
+    folders: dict[str, tuple[set[str], dict[str, str]]] = {}
+
+    def lookup(value: str) -> str | None:
+        target = base.joinpath(*value.replace("\\", "/").split("/"))
+        folder = target.parent
+        k = os.path.normcase(str(folder))
+        hit = folders.get(k)
+        if hit is None:
+            try:
+                names = {n.lower() for n in os.listdir(folder)}
+            except OSError:
+                names = set()
+            redirects: dict[str, str] = {}
+            if REDIRECT_FILENAME.lower() in names:
+                redirects = {n.lower(): r for n, r in read_redirects(folder).items()}
+            hit = (names, redirects)
+            folders[k] = hit
+        names, redirects = hit
+        low = target.name.lower()
+        if low in names:
+            return None
+        return redirects.get(low)
+
+    count = 0
+
+    def fix(value: Any) -> Any:
+        nonlocal count
+        if isinstance(value, str) and is_set_member(value) and not is_workspace_path(value):
+            ref = lookup(value)
+            if ref is not None and ref != value:
+                count += 1
+                return ref
+            return value
+        walk(value)
+        return value
+
+    def walk(n: Any) -> None:
+        if isinstance(n, dict):
+            for k, v in list(n.items()):
+                nv = fix(v)
+                if nv is not v:
+                    n[k] = nv
+        elif isinstance(n, list):
+            for i, v in enumerate(n):
+                nv = fix(v)
+                if nv is not v:
+                    n[i] = nv
+
+    walk(node)
+    return count
+
+
 __all__ = [
     "HASH_CACHE_REL",
     "HASH_PREFIX_LEN",
+    "PENDING_REL",
     "REDIRECT_FILENAME",
     "SCOPE_ROOTS",
+    "SESSIONS_REL",
     "SHARED_TEXTURE_NAMES",
     "STORE_REL",
     "WORKSPACE_PATH_PREFIX",
     "HashCache",
     "SharedTextureConflict",
     "SharedTextureIncomplete",
+    "active_claims",
     "adopt_dir",
     "adopt_dirs",
     "cached_sha1",
     "canonical_name",
+    "claim",
     "dds_dir_entries",
     "dds_is_complete",
     "dir_file",
     "dir_files",
     "dir_names",
     "drop_redirects",
+    "export_session",
     "file_sha1",
     "find_workspace",
+    "flush_pending",
     "in_scope",
+    "is_claimed",
     "is_inside",
     "is_set_member",
     "is_shared_name",
@@ -745,11 +1122,13 @@ __all__ = [
     "read_redirect_records",
     "read_redirects",
     "redirect_record",
+    "repair_refs",
     "resolve_ref",
     "set_key",
     "set_stem",
     "store_path",
     "store_ref",
     "store_root",
+    "with_export_session",
     "write_redirects",
 ]

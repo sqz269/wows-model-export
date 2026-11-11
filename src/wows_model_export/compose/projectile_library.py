@@ -743,6 +743,12 @@ def write_index(
             entry["materials"] = rec.materials
         if rec.texture_sets:
             entry["texture_sets"] = rec.texture_sets
+        # A record resolved before a shared-texture adoption may still
+        # name a folder copy that moved to the store (no-op otherwise).
+        shared_textures.repair_refs(
+            entry,
+            library_root.joinpath(*rec.glb_rel_path.replace("\\", "/").split("/")[:-1]),
+        )
         assets[rec.key.asset_id] = entry
 
     doc = {
@@ -767,6 +773,21 @@ def write_index(
 # ---------------------------------------------------------------------------
 
 
+def _library_session_roots(
+    *_args: object,
+    workspace: Path | None = None,
+    config: PipelineConfig | None = None,
+    library_root: Path | None = None,
+    **_kwargs: object,
+) -> tuple[Path, list[Path]]:
+    """Export session of a library build: it claims the library root, so
+    no other export's texture adoption moves a copy the index records of
+    this build still name (see :func:`shared_textures.export_session`)."""
+    ws = Path(workspace or (config or PipelineConfig.load()).workspace)
+    return ws, [Path(library_root) if library_root else ws / "libraries" / "projectiles"]
+
+
+@shared_textures.with_export_session(_library_session_roots)
 def build_projectile_library(
     *,
     workspace: Path | None = None,

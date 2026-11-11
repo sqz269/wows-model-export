@@ -1207,7 +1207,22 @@ def _record_build_deps(fn):
     return wrapper
 
 
+def _skin_session_roots(
+    *_args: object,
+    ship_id: str,
+    workspace: Path | None = None,
+    config: PipelineConfig | None = None,
+    **_kwargs: object,
+) -> tuple[Path, list[Path]]:
+    """Export session of a skin pack: it claims ``ships/<ship_id>``, so no
+    other export's texture adoption moves a copy the ship sidecar being
+    patched still names (see :func:`shared_textures.export_session`)."""
+    ws = Path(workspace or (config or PipelineConfig.load()).workspace)
+    return ws, [ws / "ships" / ship_id]
+
+
 @_record_build_deps
+@shared_textures.with_export_session(_skin_session_roots)
 def ingest_skin_pack(
     skin_source: Path | str,
     *,

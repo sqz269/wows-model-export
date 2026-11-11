@@ -131,8 +131,9 @@ more export folders would hold byte-for-byte lives once in
 `libraries/textures_shared/`, for any slot. Each export moves its shared
 sets there right after writing them, leaving a `shared_textures.json`
 redirect behind, and repoints the documents of the other folders that
-held them. `wows-dedup-textures` converts a workspace exported before this
-layout.
+held them (a folder whose own export is still running keeps its copy
+until that export ends). `wows-dedup-textures` converts a workspace
+exported before this layout.
 
 Re-build the accessory library (`Build → Accessory library index` on
 the Settings page) after extracting new ships so they surface in the

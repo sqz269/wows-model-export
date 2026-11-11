@@ -11,6 +11,17 @@ One engine, two entry points:
   restricted to the sets of freshly written folders and every other
   folder's copy of those sets.
 
+Claimed folders. A copy in a folder whose export root an open
+:func:`wows_model_export.shared_textures.export_session` claims (an
+export that is still computing the documents of that root, in this or
+another process) is left in place, unless the run was asked to adopt
+that folder; the folder is added to the pending list
+(:data:`~wows_model_export.shared_textures.PENDING_REL`). Each run also
+takes up the pending folders nobody claims any more, and
+:func:`flush_pending` runs when a session ends. So no export ever has a
+copy it named moved away by somebody else, and no copy stays behind once
+the exports are done.
+
 See :mod:`wows_model_export.shared_textures` for the store layout, the
 texture-set model and the consumer path rule. Steps:
 
@@ -118,6 +129,8 @@ class SharedTextureMigrationResult:
     set_copies_moved: int = 0
     store_entries: int = 0
     files_hashed: int = 0
+    # Files left in claimed folders (moved when their session ends).
+    copies_deferred: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +612,53 @@ class _RunLock:
             _RUN_LOCK.release()
 
 
+def wait_for_engine(workspace: Path) -> None:
+    """Return once no engine run is in progress on ``workspace``. An export
+    session calls it after registering its claims, so a run that read the
+    claims before they existed finishes before the export goes on."""
+    with _RunLock(Path(workspace).resolve()):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Pending folders (copies left in claimed folders)
+# ---------------------------------------------------------------------------
+
+_PENDING_SCHEMA_VERSION = 1
+
+
+def _pending_path(ws: Path) -> Path:
+    return ws.joinpath(*store.PENDING_REL.split("/"))
+
+
+def _read_pending(ws: Path) -> dict[str, dict[str, Any]]:
+    """``{folder path: info}`` from the pending list."""
+    try:
+        doc = json.loads(_pending_path(ws).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    folders = (doc or {}).get("folders") if isinstance(doc, dict) else None
+    if not isinstance(folders, dict):
+        return {}
+    return {k: (v if isinstance(v, dict) else {}) for k, v in folders.items() if isinstance(k, str)}
+
+
+def _write_pending(ws: Path, folders: dict[str, dict[str, Any]]) -> None:
+    path = _pending_path(ws)
+    if not folders:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {"schema_version": _PENDING_SCHEMA_VERSION,
+           "folders": {k: folders[k] for k in sorted(folders)}}
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
@@ -616,27 +676,53 @@ def _run(
     cache = store.HashCache(ws)
     target_keys = None if targets is None else {_norm(t) for t in targets}
 
+    # Export roots that open sessions are still writing documents for, and
+    # the folders earlier runs left alone because of them.
+    claims = store.active_claims(ws)
+    pending = _read_pending(ws)
+    pending_free = {_norm(p) for p in pending if not store.is_claimed(p, claims)}
+    if target_keys is not None:
+        target_keys |= pending_free
+
+    def _movable(c: _Set) -> bool:
+        if target_keys is not None and c.folder_key in target_keys:
+            return True
+        return not store.is_claimed(c.folder_key, claims)
+
     # ── 1-2. scan + plan ──────────────────────────────────────────────
     with runner.step("scan", detail=", ".join(store.SCOPE_ROOTS)) as st:
         scan = _scan(ws, cache)
         shared, n_hashed = _plan(scan, target_keys, cache)
+        movable: dict[str, list[_Set]] = {}
+        deferred: list[_Set] = []
+        for key, sh in shared.items():
+            movable[key] = [c for c in sh.copies if _movable(c)]
+            deferred.extend(c for c in sh.copies if not _movable(c))
         n_copies = sum(len(sh.copies) for sh in shared.values())
         n_files = sum(len(c.files) for sh in shared.values() for c in sh.copies)
         st.annotate(
             f"{len(scan.sets)} set(s) in {len(scan.folders)} folder(s); "
-            f"{len(shared)} shared ({n_copies} copies, {n_files} files); "
+            f"{len(shared)} shared ({n_copies} copies, {n_files} files; "
+            f"{len(deferred)} copies in claimed folders left in place); "
             f"{n_hashed} file(s) hashed ({cache.misses} new)"
         )
+    for c in deferred:
+        log["deferred"].append({"path": str(c.folder), "stem": c.stem, "key": c.key})
 
     # ── 3. store ──────────────────────────────────────────────────────
     written = present = 0
     refs_by_key: dict[str, dict[str, str]] = {}  # key -> {copy name: ref}
     with runner.step("store") as st:
         for key, sh in sorted(shared.items()):
+            if not movable[key]:
+                continue  # every copy is in a claimed folder
             refs: dict[str, str] = {}
             ok = True
             by_name: dict[str, _File] = {}
-            for c in sh.copies:
+            # Read from a copy that is moving (a claimed folder's copy may
+            # be in the middle of being rewritten by its export).
+            moving_ids = {id(c) for c in movable[key]}
+            for c in movable[key] + [c for c in sh.copies if id(c) not in moving_ids]:
                 for f in c.files:
                     by_name.setdefault(f.name, f)
             entry_log = {"key": key, "copies": len(sh.copies),
@@ -664,7 +750,7 @@ def _run(
                 log["store_entries"].append(entry_log)
         st.annotate(f"{written} file(s) written, {present} already present")
 
-    moved_sets = [c for key, sh in shared.items() if key in refs_by_key for c in sh.copies]
+    moved_sets = [c for key in shared if key in refs_by_key for c in movable[key]]
     moved: dict[str, str] = {}
     for c in moved_sets:
         refs = refs_by_key[c.key]  # type: ignore[index]
@@ -719,6 +805,11 @@ def _run(
             roots = {r for r in (_export_root(ws, c.folder) for c in moved_sets) if r}
             roots |= {r for r in (_export_root(ws, t) for t in targets) if r}
         documents, unvisited = _documents(ws, roots)
+        if targets is None and claims:
+            # A claimed root's copies stay (deferred) and its export is
+            # writing its documents: leave them to the flush.
+            documents = [(p, k) for p, k in documents if not store.is_claimed(p.parent, claims)]
+            unvisited = [p for p in unvisited if not store.is_claimed(p.parent, claims)]
         for doc_path in unvisited:
             reason = f"{doc_path.name} is not a document this engine rewrites"
             blocked.setdefault(_norm(doc_path.parent), reason)
@@ -841,6 +932,24 @@ def _run(
                 log["legacy_removed"].append({"path": str(f), "size": st_f.st_size, "sha1": sha})
             st.annotate(f"{n_legacy} removed")
 
+    # ── pending list: folders left alone because a session claims them ─
+    if not dry_run:
+        # Folders this run took up (its targets, which include the free
+        # pending folders; or, for the whole workspace, every free one)
+        # are done; claimed ones wait.
+        done_keys = target_keys if target_keys is not None else pending_free
+        new_pending = {
+            p: info for p, info in pending.items()
+            if _norm(p) not in done_keys and Path(p).is_dir()
+        }
+        for c in deferred:
+            new_pending.setdefault(str(c.folder), {"since": log["started_at"], "by": log["mode"]})
+        if new_pending != pending:
+            try:
+                _write_pending(ws, new_pending)
+            except OSError as e:
+                warnings.append(f"could not write the pending list: {e}")
+
     if targets is None:
         cache.forget_missing(scan.all_keys | {cache.rel(store.resolve_ref(ws, r))
                                               for refs in refs_by_key.values()
@@ -874,6 +983,7 @@ def _run(
         set_copies_moved=len(moved_sets),
         store_entries=len(entries_after),
         files_hashed=cache.misses,
+        copies_deferred=sum(len(c.files) for c in deferred),
     )
     return result, dict(removed_by_dir)
 
@@ -891,6 +1001,7 @@ def _new_log(ws: Path, *, dry_run: bool, mode: str) -> dict[str, Any]:
         "documents": [],
         "removed": [],
         "kept": [],
+        "deferred": [],
         "legacy_removed": [],
     }
 
@@ -930,6 +1041,7 @@ def migrate_shared_textures(
         "references_rewritten": result.references_rewritten,
         "copies_removed": result.copies_removed,
         "copies_kept": result.copies_kept,
+        "copies_deferred": result.copies_deferred,
         "bytes_removed": result.bytes_removed,
         "bytes_freed": result.bytes_freed,
         "files_hashed": result.files_hashed,
@@ -954,7 +1066,9 @@ def converge_dirs(
     reason: str = "export",
 ) -> dict[Path, dict[str, str]]:
     """Export-time adoption: route the shared sets of ``dirs`` (and every
-    other folder's copy of them) through the store.
+    other folder's copy of them, except copies in folders an open export
+    session claims) through the store. The pending folders nobody claims
+    any more are taken up as well.
 
     Returns ``{folder: {name: store path}}`` for the files removed from the
     given folders. Appends one line to ``.cache/shared_textures/adopt.jsonl``.
@@ -969,7 +1083,7 @@ def converge_dirs(
                                runner=runner, log=log, warnings=warnings)
     for w in warnings:
         print(f"[shared_textures] {w}", file=sys.stderr)
-    if result.copies_removed or result.copies_kept or warnings:
+    if result.copies_removed or result.copies_kept or result.copies_deferred or warnings:
         line = {
             "at": log["started_at"],
             "reason": reason,
@@ -979,10 +1093,12 @@ def converge_dirs(
             "store_files_written": result.store_files_written,
             "copies_removed": result.copies_removed,
             "copies_kept": result.copies_kept,
+            "copies_deferred": result.copies_deferred,
             "bytes_removed": result.bytes_removed,
             "documents": log["documents"],
             "removed": [r["path"] for r in log["removed"]],
             "kept": log["kept"],
+            "deferred": sorted({d["path"] for d in log["deferred"]}),
             "warnings": warnings,
             "timings_ms": result.step_timings_ms,
         }
@@ -997,4 +1113,26 @@ def converge_dirs(
     return {d: m for d, m in removed.items() if _norm(d) in wanted}
 
 
-__all__ = ["converge_dirs", "migrate_shared_textures", "SharedTextureMigrationResult"]
+def flush_pending(workspace: Path) -> int:
+    """Move the copies of the pending folders that no export session
+    claims any more (called when a session ends). Returns the number of
+    folders taken up; 0 without a run when there is nothing to do."""
+    ws = Path(workspace).resolve()
+    pending = _read_pending(ws)
+    if not pending:
+        return 0
+    claims = store.active_claims(ws)
+    free = [p for p in pending if not store.is_claimed(p, claims)]
+    if not free:
+        return 0
+    converge_dirs(ws, [], reason="flush")
+    return len(free)
+
+
+__all__ = [
+    "converge_dirs",
+    "flush_pending",
+    "migrate_shared_textures",
+    "wait_for_engine",
+    "SharedTextureMigrationResult",
+]

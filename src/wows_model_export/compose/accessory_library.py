@@ -1012,6 +1012,16 @@ def _write_index(
             entry["attachments_dead_count"] = rec.attachments_dead_count
         assets[rec.key.asset_id] = entry
 
+    # Records resolved before a shared-texture adoption in this build may
+    # still name a folder copy that adoption moved to the store; repoint
+    # those through the folders' redirect files (no-op otherwise).
+    for entry in assets.values():
+        glb = entry.get("glb") if isinstance(entry, dict) else None
+        if isinstance(glb, str) and glb:
+            shared_textures.repair_refs(
+                entry, library_root.joinpath(*glb.replace("\\", "/").split("/")[:-1]),
+            )
+
     doc = {
         "version": time.strftime("%Y-%m-%d", time.gmtime()),
         "asset_count": len(assets),
@@ -1029,6 +1039,21 @@ def _write_index(
 # ---------------------------------------------------------------------------
 
 
+def _library_session_roots(
+    *_args: object,
+    workspace: Path | None = None,
+    config: PipelineConfig | None = None,
+    library_root: Path | None = None,
+    **_kwargs: object,
+) -> tuple[Path, list[Path]]:
+    """Export session of a library build: it claims the library root, so
+    no other export's texture adoption moves a copy the index records of
+    this build still name (see :func:`shared_textures.export_session`)."""
+    ws = Path(workspace or (config or PipelineConfig.load()).workspace)
+    return ws, [Path(library_root) if library_root else ws / "libraries" / "accessories"]
+
+
+@shared_textures.with_export_session(_library_session_roots)
 def build_accessory_library(
     *,
     workspace: Path | None = None,

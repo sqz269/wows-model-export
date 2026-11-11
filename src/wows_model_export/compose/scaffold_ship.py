@@ -1797,6 +1797,21 @@ def _absorb_gameparams_passes(
 # ---------------------------------------------------------------------------
 
 
+def _ship_session_roots(
+    ship: str,
+    *_args: object,
+    workspace: Path | None = None,
+    config: PipelineConfig | None = None,
+    **_kwargs: object,
+) -> tuple[Path, list[Path]]:
+    """Export session of a scaffold: it claims ``ships/<ship>``, so no other
+    export's texture adoption moves a copy the sidecar being composed still
+    names (see :func:`shared_textures.export_session`)."""
+    ws = Path(workspace or (config or PipelineConfig.load()).workspace)
+    return ws, [ws / "ships" / ship]
+
+
+@_shared_textures.with_export_session(_ship_session_roots)
 def scaffold_ship(
     ship: str,
     *,
@@ -2874,6 +2889,10 @@ def scaffold_ship(
     # ── Step: emit_sidecar ────────────────────────────────────────────
     timer.start("emit_sidecar", detail=sidecar_path.name)
     try:
+        # `materials` were resolved before the exterior hulls' texture
+        # adoption, which can move copies of this folder they name to the
+        # shared store; repoint those (no-op otherwise).
+        _shared_textures.repair_refs(doc, gm3d_dir)
         sidecar.write(doc, sidecar_path)
     except Exception as e:
         timer.emit("emit_sidecar", "failed")

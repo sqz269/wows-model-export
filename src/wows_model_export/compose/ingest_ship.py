@@ -81,6 +81,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import build_deps as _build_deps
+from .. import shared_textures as _shared_textures
 from ..config import PipelineConfig
 from ..errors import StepError, ToolkitError
 from ..resolve import sidecar as _sidecar
@@ -416,9 +417,12 @@ def _record_build_deps(fn):
 
     @functools.wraps(fn)
     def wrapper(ship_input: str, **kwargs: Any) -> IngestResult:
-        with _build_deps.recording() as deps:
-            result = fn(ship_input, **kwargs)
         cfg = kwargs.get("config") or PipelineConfig.load()
+        # Export session for the shared texture store: ingest_ship claims
+        # ships/<label> once the label is known (shared_textures.claim).
+        with _shared_textures.export_session(kwargs.get("workspace") or cfg.workspace):
+            with _build_deps.recording() as deps:
+                result = fn(ship_input, **kwargs)
         timer = StepRunner(kwargs.get("on_event"))
         timer.start("record_build_deps", detail=result.label)
         written = _build_tracking.write_export_deps_safely(
@@ -647,6 +651,9 @@ def ingest_ship(
         ship_dir = (workspace / "ships" / label).resolve()
         ship_models = ship_dir / _sidecar.MODELS_SUBDIR
         ship_models.mkdir(parents=True, exist_ok=True)
+        # No other export's texture adoption touches this ship's folders
+        # until the ingest has written its documents.
+        _shared_textures.claim(ship_dir)
         timer.complete(
             detail=f"{ship_dir}",
             data={

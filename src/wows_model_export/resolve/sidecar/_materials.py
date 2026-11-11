@@ -203,12 +203,17 @@ def _texture_manifest_for_slot(
     # dump keeps the VFS filename. Try each candidate stem in order
     # until one produces mip files.
     if textures_dds_dir is not None:
-        # Local files and names redirected to the shared texture store.
-        uri_by_name = dict(dds_dir_entries(textures_dds_dir, dds_uri_prefix=dds_uri_prefix))
+        # Local files and names redirected to the shared texture store,
+        # matched case-insensitively (as the file system does on Windows);
+        # the path keeps the on-disk / store spelling.
+        uri_by_name = {
+            name.lower(): uri
+            for name, uri in dds_dir_entries(textures_dds_dir, dds_uri_prefix=dds_uri_prefix)
+        }
         for dds_stem in _png_stem_to_dds_candidates(png_stem):
             dds_mips: list[str] = []
             for suffix in DDS_MIP_SUFFIXES:
-                uri = uri_by_name.get(f"{dds_stem}{suffix}")
+                uri = uri_by_name.get(f"{dds_stem}{suffix}".lower())
                 if uri is not None:
                     dds_mips.append(uri)
             if dds_mips:
