@@ -1229,6 +1229,30 @@ def _discover_permoflage_skins(
     except Exception as e:
         _warn(warnings, f"permoflages skip: read failed ({e})")
         return []
+    # Hull-linked Exteriors (``<Hull>.linkedCamouflage``) are skins of the
+    # ship too: selecting that hull shows them. They are usually absent from
+    # ``permoflages``, so append each one not already listed.
+    try:
+        linked = wg_camo.read_hull_linked_camouflages(full_ship_id)
+    except Exception as e:
+        _warn(warnings, f"hull-linked camouflages skip: read failed ({e})")
+        linked = {}
+    if linked:
+        flat = _gp_read.load_full()
+        listed = {pid for pid, _, _ in permos}
+        for exterior_id in dict.fromkeys(linked.values()):
+            if exterior_id in listed:
+                continue
+            ext = flat.get(exterior_id)
+            if not isinstance(ext, dict):
+                _warn(warnings, f"hull-linked exterior {exterior_id!r} not in GameParams")
+                continue
+            permos.append((
+                exterior_id,
+                ext.get("camouflage", "") or "",
+                ext.get("peculiarity", "") or "",
+            ))
+            listed.add(exterior_id)
     if not permos:
         return []
 
@@ -1250,6 +1274,66 @@ def _discover_permoflage_skins(
     return _emit_permoflage_skins(
         candidates, db=db, config=config, warnings=warnings,
     )
+
+
+def _stamp_hull_linked_skins(
+    doc: dict,
+    ship_id: str,
+    *,
+    config: PipelineConfig | None,
+    warnings: list[str] | None = None,
+) -> dict:
+    """Record each hull's linked skin on its ``hulls.<H>`` record.
+
+    ``hulls.<H>.linked_exterior_id`` is the hull component's
+    ``linkedCamouflage`` Exterior; ``hulls.<H>.linked_skin`` the
+    ``skins[].skin_id`` emitted for it (absent when the Exterior produced no
+    skin, e.g. no ``camouflages.xml`` block). Consumers apply ``linked_skin``
+    by default when that hull is selected. Hulls without a linked Exterior
+    are left untouched.
+    """
+    hulls = doc.get("hulls")
+    if not isinstance(hulls, dict) or not hulls:
+        return doc
+    full_ship_id = _resolve_full_ship_id(
+        ship_id, config=config, log_label="hull-linked skins", warnings=warnings,
+    )
+    if full_ship_id is None:
+        return doc
+    try:
+        linked = wg_camo.read_hull_linked_camouflages(full_ship_id)
+    except Exception as e:
+        _warn(warnings, f"hull-linked skins skip: read failed ({e})")
+        return doc
+    if not linked:
+        return doc
+    skin_by_exterior: dict[str, str] = {}
+    for s in doc.get("skins") or []:
+        if not isinstance(s, dict):
+            continue
+        ext, sid = s.get("exterior_id"), s.get("skin_id")
+        if isinstance(ext, str) and isinstance(sid, str):
+            skin_by_exterior.setdefault(ext, sid)
+    new_hulls = dict(hulls)
+    for hull_name, entry in hulls.items():
+        exterior_id = linked.get(hull_name)
+        if not exterior_id or not isinstance(entry, dict):
+            continue
+        rec = dict(entry)
+        rec["linked_exterior_id"] = exterior_id
+        skin_id = skin_by_exterior.get(exterior_id)
+        if skin_id:
+            rec["linked_skin"] = skin_id
+        else:
+            rec.pop("linked_skin", None)
+            _warn(
+                warnings,
+                f"hull {hull_name}: linked exterior {exterior_id!r} produced no skin",
+            )
+        new_hulls[hull_name] = rec
+    out = dict(doc)
+    out["hulls"] = new_hulls
+    return out
 
 
 def _discover_universal_skins(
@@ -1695,6 +1779,16 @@ def _absorb_gameparams_passes(
                 )
             else:
                 doc = sidecar.alias_active_hull_to_top_level(doc)
+            # Record which hull the top-level arrays (and the render doc
+            # built from the default-hull placements) now mirror, so a
+            # consumer showing a hull's linked skin knows the hull on screen.
+            top_hull = rendered_hull or active_hull
+            if (top_hull and isinstance(doc.get("variants"), dict)
+                    and top_hull in (doc.get("hulls") or {})):
+                doc = {
+                    **doc,
+                    "variants": {**doc["variants"], "rendered_hull": top_hull},
+                }
     except Exception as e:
         _warn(warnings, f"per-hull mount index failed ({e})")
 
@@ -2643,6 +2737,10 @@ def scaffold_ship(
                     )
                     if universal_skins:
                         doc["skins"].extend(universal_skins)
+
+                    doc = _stamp_hull_linked_skins(
+                        doc, ship_id_for_perm, config=cfg, warnings=warnings,
+                    )
         except Exception as e:
             timer.emit("materials_skins", "failed")
             raise StepError(

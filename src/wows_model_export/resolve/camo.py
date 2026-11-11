@@ -214,6 +214,45 @@ def read_vehicle_permoflages(
     return out
 
 
+def read_hull_linked_camouflages(
+    ship_id: str,
+    *,
+    gameparams_path: Path | None = None,
+) -> dict[str, str]:
+    """Return ``{hull_component: exterior_id}`` from each hull component's
+    ``linkedCamouflage``.
+
+    Some event and premium ships bind an Exterior to a hull component
+    (``PXSC999_Siegfried_1510.A_Hull.linkedCamouflage =
+    "PCEM239_Tile_Bermuda_Black"``): selecting that hull / branch in game
+    shows the linked skin. These Exteriors are usually NOT in the ship's
+    ``permoflages`` list. Every top-level component dict carrying a
+    non-empty string ``linkedCamouflage`` is reported (``A_Hull_TIER2``,
+    ``HullDefault`` …), in GameParams key order. ``ship_id`` resolves like
+    :func:`read_vehicle_permoflages`. Empty when nothing is linked.
+    """
+    flat = _gp.load_full(path=gameparams_path) if gameparams_path else _gp.load_full()
+    full_id = ship_id
+    if "_" not in ship_id:
+        needle = ship_id + "_"
+        full_id = next(
+            (k for k in flat if k == ship_id or k.startswith(needle)), None
+        )
+        if full_id is None:
+            return {}
+    vehicle = flat.get(full_id)
+    if not isinstance(vehicle, dict):
+        return {}
+    out: dict[str, str] = {}
+    for comp_key, comp in vehicle.items():
+        if not isinstance(comp_key, str) or not isinstance(comp, dict):
+            continue
+        linked = comp.get("linkedCamouflage")
+        if isinstance(linked, str) and linked:
+            out[comp_key] = linked
+    return out
+
+
 def read_universal_exteriors(
     *,
     gameparams_path: Path | None = None,
@@ -1878,6 +1917,7 @@ __all__ = [
     # Cache + GameParams discovery
     "ensure_camouflages_xml",
     "read_vehicle_permoflages",
+    "read_hull_linked_camouflages",
     "read_universal_exteriors",
     # Display-name resolution
     "display_name_for_camo_entry",
