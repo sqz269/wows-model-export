@@ -203,6 +203,13 @@ pip install -e ".[webview]"
 cd webview && npm install && npm run dev
 ```
 
+An editable install picks up code changes but not new console scripts:
+after a pull that adds a `wows-*` command to `pyproject.toml`, run
+`pip install -e .` again in each environment that has the package (stop a
+running `wows-webview-serve` from that environment first, or the
+reinstall cannot replace its executable), or call the module form,
+`python -m wows_model_export.cli.<module>`.
+
 `npm run dev` runs the FastAPI backend AND the Vite dev server with
 HMR. The frontend dev guide is in [`webview/README.md`](webview/README.md);
 the Python package layout is documented at the top of
