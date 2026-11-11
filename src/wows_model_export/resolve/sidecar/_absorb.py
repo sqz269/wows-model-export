@@ -120,10 +120,11 @@ def apply_variant_asset_swaps(
     The toolkit correctly bakes ``inverse(source_bone)`` into the
     placement at base export, but that correction is wrong for the
     variant once we've swapped the asset_id. When the source and
-    target meshes have opposite forward-Z direction (proxy for
-    ``Rotate_Y_BlendBone.col2.z`` sign — see
-    :mod:`tools.shared.wg_bone_orientation`), this post-multiplies the
-    placement matrix by Ry(180°). Confirmed pairs that need this on
+    target ``Rotate_Y_BlendBone`` rest poses disagree — read from each
+    library GLB's own bone node when both carry one, otherwise from the
+    mesh forward-Z extent proxy (see
+    :mod:`wows_model_export.resolve.bone_orientation`) — this
+    post-multiplies the placement matrix by Ry(180°). Confirmed pairs that need this on
     2026-05-09: AGM019 → AGM622 (Baltimore Azur main), JGS158 →
     JGS3094 (Azur Shinano secondary). Pairs that don't need it
     (AGM034 → AGM652 for Iowa Azur main) collapse to a no-op because
@@ -234,26 +235,19 @@ def apply_variant_asset_swaps(
             return library_root.joinpath("style", style, asset_id, f"{asset_id}.glb")
         return None
 
-    def _forward_sign(
-        asset_id: str | None,
+    glb_path_cache: dict[tuple[str, str, str, str], Path | None] = {}
+    bone_sign_cache: dict[tuple[str, str, str, str], int | None] = {}
+
+    def _resolve_glb(
+        asset_id: str,
         scope: str | None,
         category: str | None,
         subcategory: str | None,
-        vfs_dir: str | None = None,
-    ) -> int:
-        if not isinstance(asset_id, str):
-            return 0
-        # Empty / missing taxonomy → can't locate the GLB. Returning 0
-        # (no opinion) is safe — no Y flip will be applied. A known
-        # vfs_dir bypasses the taxonomy requirement entirely.
-        if not (scope and category) and not vfs_dir:
-            return 0
+        vfs_dir: str | None,
+    ) -> Path | None:
         cache_key = (asset_id, scope or "", category or "", subcategory or "")
-        if cache_key in forward_z_cache:
-            return forward_z_cache[cache_key]
-        # Lazy-import: keeps the sidecar module importable on hosts that
-        # don't have the orientation helper (e.g. minimal CI containers).
-        from ..bone_orientation import glb_forward_z_sign
+        if cache_key in glb_path_cache:
+            return glb_path_cache[cache_key]
         # Tier 1 — GameParams ground truth: the swap's actual VFS dir
         # mapped onto the library layout (exact for cross-scope assets).
         glb_path: Path | None = None
@@ -276,12 +270,57 @@ def apply_variant_asset_swaps(
             indexed = _index_glb(asset_id)
             if indexed is not None and indexed.is_file():
                 glb_path = indexed
-        if glb_path is not None:
-            sign = glb_forward_z_sign(glb_path)
-        else:
-            sign = 0
+        if glb_path is None:
             missing_glb_aids.add(asset_id)
+        glb_path_cache[cache_key] = glb_path
+        return glb_path
+
+    def _forward_sign(
+        asset_id: str | None,
+        scope: str | None,
+        category: str | None,
+        subcategory: str | None,
+        vfs_dir: str | None = None,
+    ) -> int:
+        if not isinstance(asset_id, str):
+            return 0
+        # Empty / missing taxonomy → can't locate the GLB. Returning 0
+        # (no opinion) is safe — no Y flip will be applied. A known
+        # vfs_dir bypasses the taxonomy requirement entirely.
+        if not (scope and category) and not vfs_dir:
+            return 0
+        cache_key = (asset_id, scope or "", category or "", subcategory or "")
+        if cache_key in forward_z_cache:
+            return forward_z_cache[cache_key]
+        # Lazy-import: keeps the sidecar module importable on hosts that
+        # don't have the orientation helper (e.g. minimal CI containers).
+        from ..bone_orientation import glb_forward_z_sign
+        glb_path = _resolve_glb(asset_id, scope, category, subcategory, vfs_dir)
+        sign = glb_forward_z_sign(glb_path) if glb_path is not None else 0
         forward_z_cache[cache_key] = sign
+        return sign
+
+    def _bone_sign(
+        asset_id: str | None,
+        scope: str | None,
+        category: str | None,
+        subcategory: str | None,
+        vfs_dir: str | None = None,
+    ) -> int | None:
+        """Forward sign from the GLB's own ``Rotate_Y_BlendBone`` node —
+        the bone the toolkit inverted into the base placement. ``None``
+        when the GLB can't be located or carries no such node."""
+        if not isinstance(asset_id, str):
+            return None
+        if not (scope and category) and not vfs_dir:
+            return None
+        cache_key = (asset_id, scope or "", category or "", subcategory or "")
+        if cache_key in bone_sign_cache:
+            return bone_sign_cache[cache_key]
+        from ..bone_orientation import glb_rotate_y_bone_sign
+        glb_path = _resolve_glb(asset_id, scope, category, subcategory, vfs_dir)
+        sign = glb_rotate_y_bone_sign(glb_path) if glb_path is not None else None
+        bone_sign_cache[cache_key] = sign
         return sign
 
     def _needs_y_flip(
@@ -291,13 +330,30 @@ def apply_variant_asset_swaps(
         category: str | None,
         subcategory: str | None,
     ) -> bool:
-        # Bone correction needed iff source and target meshes have
+        # Bone correction needed iff source and target have
         # confidently-opposite forward-Z direction. Either ``0`` (no
         # opinion / file missing / axially symmetric) → no flip; same
         # sign → no flip. The target's GLB resolves through its
         # GameParams vfs_dir when known (cross-scope swap targets).
         if not source_aid or not target_aid or source_aid == target_aid:
             return False
+        # When both GLBs carry ``Rotate_Y_BlendBone``, compare the bones
+        # themselves: the base placement holds ``inverse(source bone)``,
+        # so it is stale exactly when the target's bone differs. The
+        # mesh-extent proxy below misreads meshes whose bulk sits behind
+        # the pivot (e.g. AGS011 → AGM610 on a Gearing exterior: equal
+        # bones, opposite extents) and has no opinion on some barrels
+        # (JGS157 → JGS3033: opposite bones, flat extent). Catapults
+        # keep the proxy: their base placement keeps only the HP
+        # translation, so no bone was baked into it.
+        if category != "catapult":
+            s_bone = _bone_sign(source_aid, scope, category, subcategory)
+            t_bone = _bone_sign(
+                target_aid, scope, category, subcategory,
+                vfs_dir=vfs_dir_by_asset_id.get(target_aid),
+            )
+            if s_bone and t_bone:
+                return s_bone != t_bone
         s_sign = _forward_sign(source_aid, scope, category, subcategory)
         t_sign = _forward_sign(
             target_aid, scope, category, subcategory,

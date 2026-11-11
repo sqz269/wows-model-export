@@ -69,6 +69,7 @@ from . import (
 from .bone_orientation import (
     AXIAL_THRESHOLD_M,
     glb_forward_z_sign,
+    glb_rotate_y_bone_sign,
     post_multiply_ry180,
 )
 
@@ -204,6 +205,7 @@ __all__ = [
     "synth_emission",
     # bone_orientation
     "glb_forward_z_sign",
+    "glb_rotate_y_bone_sign",
     "post_multiply_ry180",
     "AXIAL_THRESHOLD_M",
     # camo

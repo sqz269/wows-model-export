@@ -10,25 +10,36 @@ export time, but the pipeline rewrites ``asset_id`` post-toolkit
 without recomputing the placement. When the bones disagree, the stale
 correction over- or under-rotates the variant's mesh by exactly 180°.
 
-This module exposes a single signal: the GLB's forward-axis sign. It's
-a proxy for ``Rotate_Y_BlendBone.col2.z`` sign — empirically 1:1
-across the 364-asset library on 2026-05-09:
+The decision needs the ``Rotate_Y_BlendBone.col2.z`` sign of both
+assets. This module reads it two ways, both from the library GLB's JSON
+chunk (no buffer parse):
 
-    +1  →  mesh barrels at +Z  →  ``col2.z = -1``  (Z-mirror bone)
-    -1  →  mesh barrels at -Z  →  ``col2.z = +1``  (identity bone)
-     0  →  axially symmetric / non-gun asset (no opinion)
+- :func:`glb_rotate_y_bone_sign` — the bone itself. Toolkit-exported
+  rotating mounts carry their skeleton as glTF nodes, including
+  ``Rotate_Y_BlendBone`` with its local matrix, so this is the exact
+  value the toolkit inverted into the base placement. ``None`` when the
+  GLB has no such node.
+- :func:`glb_forward_z_sign` — the mesh-extent proxy: which way the
+  mesh extends further along Z. It agrees with the bone for ordinary
+  gun barrels, but not for meshes whose bulk sits behind the pivot
+  (a Gearing crossover turret whose body outweighs its barrels, a
+  Lewis gun, catapults, directors, radars): of the 240 library GLBs
+  that carry the bone on 2026-11-10, 30 have the opposite extent sign
+  and 29 have no extent opinion.
 
-Use it at swap time: if
-``glb_forward_z_sign(source_glb) != glb_forward_z_sign(target_glb)``
-and neither is zero, post-multiply the placement matrix by Ry(180°).
+Both return the same convention:
 
-The signal is computed from the GLB's accessor min/max bounds (no
-buffer parse). All toolkit-exported accessories include
-``min`` / ``max`` on position accessors, so the computation is cheap.
+    +1  →  ``col2.z = -1``  (Z-mirror bone; mesh barrels at +Z)
+    -1  →  ``col2.z = +1``  (identity bone; mesh barrels at -Z)
+     0  →  no opinion (axially symmetric mesh / non-axis-aligned bone)
 
-Both functions are pure transforms in the resolve sense: no writes,
-deterministic outputs. `glb_forward_z_sign` touches disk to read the
-GLB header but produces no side effects.
+At swap time compare the bones when both GLBs carry one, and fall back
+to the extent proxy otherwise; when the two signs are confidently
+opposite, post-multiply the placement matrix by Ry(180°).
+
+All functions are pure transforms in the resolve sense: no writes,
+deterministic outputs. The GLB readers touch disk to read the JSON chunk
+but produce no side effects.
 """
 
 from __future__ import annotations
@@ -47,6 +58,75 @@ from pathlib import Path
 # (which sit within ±0.5m of zero).
 AXIAL_THRESHOLD_M: float = 0.5
 
+# Name of the bone whose rest pose the toolkit inverts into a rotating
+# mount's placement (``mount.transform = HP * inverse(bone)``).
+ROTATE_Y_BLEND_BONE: str = "Rotate_Y_BlendBone"
+
+
+def _read_glb_json(glb_path: str | Path) -> dict | None:
+    """Return the parsed JSON chunk of a binary glTF, or ``None``."""
+    p = Path(glb_path)
+    try:
+        data = p.read_bytes()
+    except OSError:
+        return None
+    if len(data) < 12 or data[:4] != b"glTF":
+        return None
+
+    try:
+        length = struct.unpack("<I", data[8:12])[0]
+    except struct.error:
+        return None
+
+    pos = 12
+    while pos + 8 <= length and pos + 8 <= len(data):
+        try:
+            clen, ctype = struct.unpack("<II", data[pos : pos + 8])
+        except struct.error:
+            return None
+        body_end = pos + 8 + clen
+        if body_end > len(data):
+            return None
+        body = data[pos + 8 : body_end]
+        pos = body_end
+        if ctype == 0x4E4F534A:  # JSON chunk magic
+            try:
+                js = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None
+            return js if isinstance(js, dict) else None
+    return None
+
+
+def glb_rotate_y_bone_sign(glb_path: str | Path) -> int | None:
+    """Return the forward sign implied by the GLB's ``Rotate_Y_BlendBone``.
+
+    ``+1`` when the bone's column-2 Z is negative (Z-mirror), ``-1`` when
+    it is positive (identity), ``0`` when it is near zero (a bone that is
+    not axis-aligned). Returns ``None`` when the GLB can't be read or has
+    no ``Rotate_Y_BlendBone`` node with a matrix — the caller then falls
+    back to :func:`glb_forward_z_sign`.
+    """
+    js = _read_glb_json(glb_path)
+    if js is None:
+        return None
+    for node in js.get("nodes") or []:
+        if not isinstance(node, dict) or node.get("name") != ROTATE_Y_BLEND_BONE:
+            continue
+        matrix = node.get("matrix")
+        if not (isinstance(matrix, list) and len(matrix) == 16):
+            return None
+        try:
+            col2_z = float(matrix[10])  # column-major: column 2, row 2
+        except (TypeError, ValueError):
+            return None
+        if col2_z < -0.5:
+            return 1
+        if col2_z > 0.5:
+            return -1
+        return 0
+    return None
+
 
 def glb_forward_z_sign(glb_path: str | Path) -> int:
     """Return +1 / -1 / 0 — the GLB's forward-axis sign as a bone proxy.
@@ -54,37 +134,7 @@ def glb_forward_z_sign(glb_path: str | Path) -> int:
     Returns ``0`` when the GLB doesn't exist, can't be parsed, or has
     no clear forward direction (axially-symmetric or empty).
     """
-    p = Path(glb_path)
-    try:
-        data = p.read_bytes()
-    except OSError:
-        return 0
-    if len(data) < 12 or data[:4] != b"glTF":
-        return 0
-
-    try:
-        length = struct.unpack("<I", data[8:12])[0]
-    except struct.error:
-        return 0
-
-    pos = 12
-    js: dict | None = None
-    while pos + 8 <= length and pos + 8 <= len(data):
-        try:
-            clen, ctype = struct.unpack("<II", data[pos : pos + 8])
-        except struct.error:
-            return 0
-        body_end = pos + 8 + clen
-        if body_end > len(data):
-            return 0
-        body = data[pos + 8 : body_end]
-        pos = body_end
-        if ctype == 0x4E4F534A:  # JSON chunk magic
-            try:
-                js = json.loads(body.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return 0
-            break
+    js = _read_glb_json(glb_path)
     if js is None:
         return 0
 
@@ -135,4 +185,10 @@ def post_multiply_ry180(
     return out
 
 
-__all__ = ["glb_forward_z_sign", "post_multiply_ry180", "AXIAL_THRESHOLD_M"]
+__all__ = [
+    "glb_forward_z_sign",
+    "glb_rotate_y_bone_sign",
+    "post_multiply_ry180",
+    "AXIAL_THRESHOLD_M",
+    "ROTATE_Y_BLEND_BONE",
+]
