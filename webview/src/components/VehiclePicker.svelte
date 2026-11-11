@@ -510,7 +510,12 @@
     >
       <div class="flex flex-wrap items-center gap-1.5">
         <code class="text-muted-foreground font-mono text-[10px]">{v.param_index}</code>
-        <span class="font-medium">{v.display_name}</span>
+        {#if v.localized_name && v.localized_name !== v.display_name}
+          <span class="font-medium">{v.localized_name}</span>
+          <span class="text-muted-foreground text-[11px]">{v.display_name}</span>
+        {:else}
+          <span class="font-medium">{v.display_name}</span>
+        {/if}
       </div>
       <div class="mt-0.5 flex flex-wrap items-center gap-1">
         {@render rowBadges(v, nested)}
@@ -569,7 +574,7 @@
         {/if}
         <span class="text-muted-foreground">
           {headlinerLive ? 'live: ' : 'e.g. '}
-          {headliner.display_name}
+          {headliner.localized_name || headliner.display_name}
         </span>
       </div>
     </button>

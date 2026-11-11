@@ -242,6 +242,8 @@ export function filterVehicles(
     return (
       v.top_key.toLowerCase().includes(q) ||
       v.param_index.toLowerCase().includes(q) ||
+      v.display_name.toLowerCase().includes(q) ||
+      (v.localized_name?.toLowerCase().includes(q) ?? false) ||
       (v.model_dir?.toLowerCase().includes(q) ?? false)
     );
   });

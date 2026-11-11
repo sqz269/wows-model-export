@@ -26,6 +26,10 @@ export interface Vehicle {
   param_index: string;
   top_key: string;
   display_name: string;
+  /** In-game English name (`IDS_<index>_FULL`, else `IDS_<index>`); can differ
+   *  from `display_name`, which comes from the GameParams key. Absent in
+   *  snapshots written before 2026-11-10. */
+  localized_name?: string | null;
   model_dir: string | null;
   tier: number | null;
   nation: string | null;
