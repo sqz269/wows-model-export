@@ -1443,7 +1443,7 @@ def _export_per_hull_placements(
     import tempfile
     _HULL_LETTER_RE = re.compile(r"^([A-Z])_Hull")
     out: dict[str, Path] = {}
-    for hull_name, _module_id in hulls:
+    for hull_name, module_id in hulls:
         placements_path = out_dir / f"{hull_name}.placements.json"
         if placements_path.is_file() and placements_path.stat().st_size > 0:
             out[hull_name] = placements_path
@@ -1451,7 +1451,12 @@ def _export_per_hull_placements(
         m = _HULL_LETTER_RE.match(hull_name)
         if not m:
             continue
-        hull_selector = m.group(1)
+        # Select the hull by its exact upgrade id. The toolkit matches a
+        # bare letter as a case-insensitive substring of the upgrade ids
+        # before it tries the "<letter>_" hull prefix, so "B" picks
+        # "PJUH706_Fubuki_1942" (the "b" in "Fubuki") and the B snapshot
+        # silently repeats the A hull's mounts.
+        hull_selector = module_id or m.group(1)
         with tempfile.NamedTemporaryFile(suffix=".glb", delete=False) as tmp_glb:
             tmp_glb_path = Path(tmp_glb.name)
         try:
