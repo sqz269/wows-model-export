@@ -33,9 +33,11 @@ from it: the authored LOD table, the render sets grouped into the parts the
 client toggles (gear down / up, propeller blades / blur disc / hub cap,
 antenna wires, ordnance racks), the propellers, the moving-part pivots
 (ailerons, elevators, rudders, flaps, air brakes, slats), the hardpoints by
-kind (ordnance mounts, engine lights, guns, effect anchors), the bounding
-box, the material manifest with its DDS mip chains, and the GameParams
-aircraft entries that use the model. The schema is documented in
+kind (ordnance mounts, engine lights, guns, effect anchors), the authored
+bounding box with the box and ground height measured from the LOD-0
+vertices, the render sets whose names only resemble a toggled family, the
+material manifest with its DDS mip chains, and the GameParams aircraft
+entries that use the model. The schema is documented in
 ``reference/schemas/AIRCRAFT_LIBRARY.md``.
 
 Selection: an explicit list of model folder names and/or GameParams
@@ -66,6 +68,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from .. import shared_textures, toolkit
 from .._glb import parse_glb, write_glb
@@ -126,6 +130,21 @@ _NUMBERED_PARTS: tuple[tuple[str, str], ...] = (
 _PYLON_RE = re.compile(
     r"^pylon_(?P<ordnance>[a-z]+)_(?P<variant>default|custom)(?:_(?P<index>\d+))?_BlendBone$"
 )
+# Render sets whose node name looks like a toggled family but is not one of
+# the client's names (`chassis_off_hull_lod2`, `chassis_on_BlendBone_2`,
+# `pylon_rocket_default`, `disc_1_cap`). The client's lists are matched by
+# exact name, so these sets read as always drawn; the index lists them in
+# `near_miss_render_sets`, because nobody has checked that the client draws
+# them in every state.
+_NEAR_MISS_FAMILIES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^chassis_on"), "gear_down"),
+    (re.compile(r"^chassis_off"), "gear_up"),
+    (re.compile(r"^pylon_"), "rack"),
+    (re.compile(r"^disc_\d+_cap$"), "propeller_cap"),
+)
+# The parts the STAND preset draws (`RENDER_PRESETS`): the lowest of their
+# LOD-0 vertices is the airframe's `ground_y_m`.
+_STAND_PARTS = frozenset({"airframe", "gear_down", "propeller_blades", "wire"})
 
 # ── Moving parts (`PlaneNode` prefixes, numbered from 1) ────────────────
 _MOVING_PART_PREFIXES: tuple[tuple[str, str], ...] = (
@@ -381,9 +400,82 @@ def _hardpoint_kind(name: str) -> str | None:
     return None
 
 
-def describe_airframe(visual: dict, gltf: dict) -> tuple[dict, list[str]]:
+_ACCESSOR_DTYPES = {5120: "<i1", 5121: "<u1", 5122: "<i2", 5123: "<u2", 5125: "<u4", 5126: "<f4"}
+
+
+def _local_matrix(node: dict) -> np.ndarray:
+    if "matrix" in node:
+        return np.array(node["matrix"], dtype=np.float64).reshape(4, 4).T
+    x, y, z, w = node.get("rotation") or (0.0, 0.0, 0.0, 1.0)
+    s = np.array(node.get("scale") or (1.0, 1.0, 1.0), dtype=np.float64)
+    r = np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ])
+    m = np.eye(4)
+    m[:3, :3] = r * s[None, :]
+    m[:3, 3] = node.get("translation") or (0.0, 0.0, 0.0)
+    return m
+
+
+def _positions(gltf: dict, bin_data: bytes, accessor_index: int) -> np.ndarray:
+    acc = gltf["accessors"][accessor_index]
+    view = gltf["bufferViews"][acc["bufferView"]]
+    dtype = np.dtype(_ACCESSOR_DTYPES[acc["componentType"]])
+    start = view.get("byteOffset", 0) + acc.get("byteOffset", 0)
+    stride = view.get("byteStride") or 3 * dtype.itemsize
+    count = acc["count"]
+    if count == 0:
+        return np.zeros((0, 3))
+    raw = np.frombuffer(bin_data, dtype=np.uint8, count=stride * (count - 1) + 3 * dtype.itemsize, offset=start)
+    rows = np.lib.stride_tricks.as_strided(raw, shape=(count, 3 * dtype.itemsize), strides=(stride, 1))
+    return np.ascontiguousarray(rows).view(dtype).reshape(count, 3).astype(np.float64)
+
+
+def mesh_extents(gltf: dict, bin_data: bytes) -> dict[str, tuple[list[float], list[float]]]:
+    """``{mesh name: (min, max)}`` of every GLB mesh's vertices in the model
+    frame: a static mesh through its node's world transform, a skinned mesh
+    as stored (its rest pose is the identity, see ``bake_skin_mirror``)."""
+    nodes = gltf.get("nodes") or []
+    scenes = gltf.get("scenes") or []
+    out: dict[str, tuple[list[float], list[float]]] = {}
+    if not scenes or not bin_data:
+        return out
+
+    def walk(i: int, parent: np.ndarray) -> None:
+        n = nodes[i]
+        world = parent @ _local_matrix(n)
+        if "mesh" in n:
+            mesh = gltf["meshes"][n["mesh"]]
+            m = np.eye(4) if "skin" in n else world
+            lo, hi = np.full(3, np.inf), np.full(3, -np.inf)
+            for prim in mesh.get("primitives") or []:
+                pos_index = (prim.get("attributes") or {}).get("POSITION")
+                if pos_index is None:
+                    continue
+                p = _positions(gltf, bin_data, pos_index) @ m[:3, :3].T + m[:3, 3]
+                if len(p):
+                    lo, hi = np.minimum(lo, p.min(0)), np.maximum(hi, p.max(0))
+            name = mesh.get("name") or ""
+            if np.isfinite(lo).all():
+                if name in out:
+                    lo = np.minimum(lo, out[name][0])
+                    hi = np.maximum(hi, out[name][1])
+                out[name] = ([float(v) for v in lo], [float(v) for v in hi])
+        for c in n.get("children") or []:
+            walk(c, world)
+
+    for root in scenes[gltf.get("scene", 0)].get("nodes") or []:
+        walk(root, np.eye(4))
+    return out
+
+
+def describe_airframe(visual: dict, gltf: dict, bin_data: bytes | None = None) -> tuple[dict, list[str]]:
     """Build the index description of one airframe from its toolkit visual
-    JSON and its GLB's JSON chunk. Returns ``(description, problems)``."""
+    JSON and its GLB's JSON chunk. With the GLB's binary chunk it also
+    measures ``mesh_bounds_m`` and ``ground_y_m`` from the LOD-0 vertices.
+    Returns ``(description, problems)``."""
     problems: list[str] = []
     glb_meshes = {m.get("name") for m in gltf.get("meshes", []) if m.get("name")}
     glb_nodes = [n.get("name") or "" for n in gltf.get("nodes", [])]
@@ -461,6 +553,19 @@ def describe_airframe(visual: dict, gltf: dict) -> tuple[dict, list[str]]:
     for carrier, entry in sorted(render_sets.items(), key=lambda kv: _natural_key(kv[0])):
         parts.setdefault(entry["part"], []).append(carrier)
 
+    near_miss = []
+    for carrier in parts.get("airframe", []):
+        for pattern, family in _NEAR_MISS_FAMILIES:
+            if pattern.search(carrier):
+                near_miss.append({"render_set": carrier, "family": family})
+                break
+    if near_miss:
+        problems.append(
+            "render sets drawn always although their node names resemble a toggled family "
+            "(the client toggles exact names): "
+            + ", ".join(f"{n['render_set']} ({n['family']})" for n in near_miss)
+        )
+
     racks = []
     for carrier in parts.get("rack", []):
         r = dict(render_sets[carrier]["rack"])
@@ -528,9 +633,29 @@ def describe_airframe(visual: dict, gltf: dict) -> tuple[dict, list[str]]:
             "length": round(bmax[2] - bmin[2], 3),
         }
 
+    # Measured from the LOD-0 vertices: the box of every part (an authored
+    # box can leave parts out: the N1K2's omits its gear and propeller), and
+    # the lowest point of the parts a parked plane draws.
+    mesh_bounds = None
+    ground_y = None
+    if bin_data is not None:
+        ext = mesh_extents(gltf, bin_data)
+        lod0 = [n for n in (lods_out[0]["meshes"] if lods_out else []) if n in ext]
+        if lod0:
+            lo = [min(ext[n][0][k] for n in lod0) for k in range(3)]
+            hi = [max(ext[n][1][k] for n in lod0) for k in range(3)]
+            mesh_bounds = {"min": [round(v, 4) for v in lo], "max": [round(v, 4) for v in hi]}
+        stand = [n for n in lod0 if meshes.get(n, {}).get("part") in _STAND_PARTS]
+        if stand:
+            ground_y = round(min(ext[n][0][1] for n in stand), 4)
+        else:
+            problems.append("no LOD-0 mesh of a standing part: ground_y_m not measured")
+
     desc = {
         "skinned": any(m["skinned"] for m in meshes.values()),
         "bounds_m": {"min": bmin, "max": bmax} if bmin and bmax else None,
+        "mesh_bounds_m": mesh_bounds,
+        "ground_y_m": ground_y,
         "dimensions_m": dims,
         "lods": lods_out,
         "meshes": dict(sorted(meshes.items(), key=lambda kv: _natural_key(kv[0]))),
@@ -540,6 +665,7 @@ def describe_airframe(visual: dict, gltf: dict) -> tuple[dict, list[str]]:
         "propellers": propellers,
         "moving_parts": moving,
         "hardpoints": dict(sorted(hardpoints.items())),
+        "near_miss_render_sets": near_miss,
     }
     return desc, problems
 
@@ -792,6 +918,12 @@ def validate_index(library_root: Path, *, workspace: Path | None = None) -> list
         b = e.get("bounds_m") or {}
         if not (b.get("min") and b.get("max")):
             problems.append(f"{tag} no bounds")
+        mb = e.get("mesh_bounds_m") or {}
+        if not (mb.get("min") and mb.get("max")):
+            problems.append(f"{tag} no mesh bounds")
+        elif not isinstance(e.get("ground_y_m"), (int, float)) or not \
+                mb["min"][1] - 1e-3 <= e["ground_y_m"] <= mb["max"][1] + 1e-3:
+            problems.append(f"{tag} ground_y_m {e.get('ground_y_m')!r} missing or outside the mesh bounds")
     return problems
 
 
@@ -974,7 +1106,8 @@ def build_aircraft_library(
                 visual = json.loads(p["visual"].read_text(encoding="utf-8"))
                 if parent_static_render_sets(p["glb"], visual):
                     rec.glb_bytes = p["glb"].stat().st_size
-                desc, problems = describe_airframe(visual, _read_glb_json(p["glb"]))
+                gltf_json, gltf_bin = parse_glb(p["glb"].read_bytes())
+                desc, problems = describe_airframe(visual, gltf_json, gltf_bin)
                 desc["visual_vfs"] = (visual.get("model") or {}).get("visual_path")
                 rec.description = desc
                 warnings.extend(f"{aid}: {x}" for x in problems)
