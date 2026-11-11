@@ -832,6 +832,16 @@ def resolve_components(
         else None
     )
 
+    # A standalone module (``_Artillery``, ``_Torpedoes``, ...) may list one
+    # component per hull for its slot (``artillery: [A1_Artillery,
+    # B1_Artillery]``), and the picked ``_Hull`` module lists the one it
+    # carries. The client builds the ship from the component the selected
+    # modules share, so the slot takes the first listed id that the hull
+    # module also lists, and the first id only when they share none.
+    hull_slots = (sui.get(hull_module) or {}).get("components") if hull_module else None
+    if not isinstance(hull_slots, dict):
+        hull_slots = {}
+
     out: dict[str, Any] = {}
     component_ids: dict[str, str] = {}
     active_hull_component_id: str | None = None
@@ -842,6 +852,9 @@ def resolve_components(
             out[key] = None
             continue
         component_id = ids[0]
+        hull_ids = hull_slots.get(key)
+        if len(ids) > 1 and isinstance(hull_ids, list) and hull_ids:
+            component_id = next((i for i in ids if i in hull_ids), ids[0])
         if isinstance(component_id, str):
             component_ids[key] = component_id
         if key == "hull":
