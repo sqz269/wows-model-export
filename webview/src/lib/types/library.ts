@@ -79,6 +79,13 @@ export interface LibraryAsset {
   attachments_dead_count?: number;
 }
 
+/**
+ * Asset-level slot -> mip-chain paths. A path starting with `libraries/` is
+ * workspace-relative (the shared texture store; see `resolveTextureUrl` in
+ * `$lib/dds`), any other path is relative to the asset's GLB directory.
+ * Any slot can carry either kind; `textures_dds` may hold no texture files
+ * at all when every set the asset binds lives in the store.
+ */
 export interface TextureSet {
   baseColor?: string[];
   metallicRoughness?: string[];

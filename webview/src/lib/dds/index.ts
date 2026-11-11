@@ -33,9 +33,12 @@ export type DdsMipPaths = string[];
 /**
  * Texture paths starting with this prefix are workspace-relative: the
  * shared libraries (camo masks / atlases, and the content-addressed store
- * `libraries/textures_shared/<sha1-8>/<file>` that holds textures shared
- * byte-for-byte across folders, e.g. the ship detail atlas). Every other
- * texture path is relative to the owning model's directory (`base`).
+ * `libraries/textures_shared/<key-8>/<file>` that holds every texture set
+ * shared byte-for-byte across export folders: the ship detail atlas, a
+ * turret's maps shared by its alive / dead / variant models, a skin that
+ * repeats its ship's hull maps, ...). Any slot of any sidecar / library
+ * entry can carry one. Every other texture path is relative to the owning
+ * model's directory (`base`).
  */
 const WORKSPACE_PATH_PREFIX = 'libraries/';
 

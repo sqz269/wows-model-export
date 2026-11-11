@@ -6,6 +6,12 @@ import type { BallisticsSection } from './ballistics';
 import type { Skin } from './skin';
 
 export interface SidecarSlot {
+  /**
+   * Mip-chain paths, top mip first. A path starting with `libraries/` is
+   * workspace-relative (the shared texture store or a camo library; see
+   * `resolveTextureUrl` in `$lib/dds`), any other path is relative to the
+   * ship's `models/` directory. Any slot can carry either kind.
+   */
   dds_mips?: string[];
 }
 
