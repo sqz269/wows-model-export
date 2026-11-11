@@ -99,7 +99,8 @@ _CAMO_DB_CACHE: wg_camo.CamouflageDb | None = None
 # resolved absolute path string. The index lists every built asset and
 # (when applicable) the relative path to that asset's
 # ``<asset>.attached_accessories.json``. Loaded once per scaffold to
-# back the variant-swap bespoke-children extension below.
+# back the variant-swap bespoke-children extension below; both caches
+# are cleared when :func:`scaffold_ship` starts.
 _ACCESSORY_INDEX_BY_ROOT: dict[str, dict[str, Any]] = {}
 
 # Cached (library_root → asset_id → set of attached-child asset_ids)
@@ -1635,6 +1636,33 @@ def _load_placements_with_id_override(
     return doc
 
 
+# Key the per-hull export writes into each ``per_hull/<hull>.placements.json``:
+# the exact ``_Hull`` upgrade id the snapshot was exported for. A snapshot
+# is reused only while its stamp and its ``ship.param_index`` name the
+# hull and ship being scaffolded.
+_PER_HULL_STAMP_KEY = "hull_upgrade"
+
+
+def _per_hull_snapshot_current(path: Path, module_id: str, param_index: str) -> bool:
+    """True when ``path`` is a per-hull snapshot exported for ``module_id``
+    of the ship ``param_index`` (its stamp and bound Vehicle match).
+
+    Snapshots without a stamp predate it. Some were exported with a bare
+    hull letter, which the toolkit matched as a substring of the wrong
+    upgrade id, so their mounts can repeat another hull's; they are not
+    trusted and get exported again.
+    """
+    try:
+        with open(path, "rb") as f:
+            doc = json.loads(f.read().decode("utf-8"))
+    except Exception:
+        return False
+    if not isinstance(doc, dict):
+        return False
+    bound = str(((doc.get("ship") or {}).get("param_index")) or "")
+    return doc.get(_PER_HULL_STAMP_KEY) == module_id and bound == param_index
+
+
 def _export_per_hull_placements(
     *,
     toolkit_name: str,
@@ -1642,8 +1670,19 @@ def _export_per_hull_placements(
     gameparams_ship_id: str | None,
     doc_wg_ship_id: str | None,
     config: PipelineConfig | None,
+    warnings: list[str] | None = None,
 ) -> dict[str, Path]:
-    """Run ``wowsunpack export-ship --hull <H>`` for every hull tier."""
+    """Run ``wowsunpack export-ship --hull <upgrade id>`` for every hull tier.
+
+    Each snapshot lands in ``per_hull/<hull>.placements.json`` stamped with
+    the upgrade id it was exported for (``_PER_HULL_STAMP_KEY``). A snapshot
+    already on disk is reused only when its stamp and bound Vehicle match
+    (:func:`_per_hull_snapshot_current`); any other is exported again. The
+    toolkit is given the ship's param index, so it binds the Vehicle the
+    upgrade ids belong to even when several Vehicles share the model
+    directory ``toolkit_name`` names; an export that still binds another
+    Vehicle is dropped with a warning.
+    """
     try:
         _ensure_gameparams_dump(config=config)
     except Exception:
@@ -1662,45 +1701,61 @@ def _export_per_hull_placements(
     hulls = _enumerate_hull_names(ship_dict)
     if len(hulls) <= 1:
         return {}
+    param_index = str(ship_dict.get("index") or "")
 
     out_dir = gm3d_dir / _PER_HULL_DIRNAME
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    import re
     import tempfile
-    _HULL_LETTER_RE = re.compile(r"^([A-Z])_Hull")
     out: dict[str, Path] = {}
     for hull_name, module_id in hulls:
         placements_path = out_dir / f"{hull_name}.placements.json"
-        if placements_path.is_file() and placements_path.stat().st_size > 0:
-            out[hull_name] = placements_path
+        if not module_id:
             continue
-        m = _HULL_LETTER_RE.match(hull_name)
-        if not m:
+        if _per_hull_snapshot_current(placements_path, module_id, param_index):
+            out[hull_name] = placements_path
             continue
         # Select the hull by its exact upgrade id. The toolkit matches a
         # bare letter as a case-insensitive substring of the upgrade ids
         # before it tries the "<letter>_" hull prefix, so "B" picks
         # "PJUH706_Fubuki_1942" (the "b" in "Fubuki") and the B snapshot
         # silently repeats the A hull's mounts.
-        hull_selector = module_id or m.group(1)
         with tempfile.NamedTemporaryFile(suffix=".glb", delete=False) as tmp_glb:
             tmp_glb_path = Path(tmp_glb.name)
         try:
             _toolkit_export_ship(
-                toolkit_name, tmp_glb_path,
-                hull=hull_selector,
+                param_index or toolkit_name, tmp_glb_path,
+                hull=module_id,
                 accessories="exclude",
                 placements_json=placements_path,
                 no_textures=True,
                 config=config,
             )
-            out[hull_name] = placements_path
         finally:
             try:
                 tmp_glb_path.unlink(missing_ok=True)
             except Exception:
                 pass
+        try:
+            with open(placements_path, "rb") as f:
+                snap = json.loads(f.read().decode("utf-8"))
+        except Exception as e:
+            _warn(warnings, f"per-hull snapshot {hull_name} ({module_id}) unreadable ({e}); dropped")
+            placements_path.unlink(missing_ok=True)
+            continue
+        bound = str(((snap.get("ship") or {}).get("param_index")) or "")
+        if param_index and bound != param_index:
+            _warn(
+                warnings,
+                f"per-hull snapshot {hull_name} ({module_id}) bound Vehicle "
+                f"{bound or '(none)'}, not {param_index}; dropped",
+            )
+            placements_path.unlink(missing_ok=True)
+            continue
+        snap[_PER_HULL_STAMP_KEY] = module_id
+        with open(placements_path, "wb") as f:
+            f.write(json.dumps(snap, indent=2, ensure_ascii=False).encode("utf-8"))
+        out[hull_name] = placements_path
     return out
 
 
@@ -1875,6 +1930,14 @@ def _absorb_gameparams_passes(
         per_hull_files: dict = {}
         if gm3d_dir is not None:
             per_hull_files = dict(_collect_per_hull_placements(gm3d_dir))
+        # Only this ship's hulls: a folder scaffolded earlier for another
+        # Vehicle that shares the model (Baltimore's PASC017 and PASC108)
+        # can still hold that Vehicle's snapshots.
+        ship_hulls = {name for name, _mid in _enumerate_hull_names(ship_dict)}
+        if ship_hulls:
+            per_hull_files = {
+                h: p for h, p in per_hull_files.items() if h in ship_hulls
+            }
         active_hull = (doc.get("variants") or {}).get("active_hull")
         if (active_hull and active_placements_json is not None
                 and Path(active_placements_json).is_file()
@@ -2187,6 +2250,13 @@ def scaffold_ship(
     if workspace is None:
         workspace = cfg.workspace
     workspace = Path(workspace)
+
+    # Read the accessory library afresh for every scaffold. An ingest
+    # scaffolds, builds the library, then refreshes the sidecar in one
+    # process; entries cached by the first pass would hide the attached
+    # children of variant assets the library build has just added.
+    _ACCESSORY_INDEX_BY_ROOT.clear()
+    _ATTACHED_CHILDREN_BY_ASSET.clear()
 
     toolkit_name = toolkit_ship or ship
     # Explicit GameParams vehicle id for the toolkit's armor/ammo/mount
@@ -2666,22 +2736,27 @@ def scaffold_ship(
         pl_doc = {}
     pl_ship_block = pl_doc.get("ship") if isinstance(pl_doc.get("ship"), dict) else {}
 
-    # Per-hull placements export (still runs under --skip-export so legacy
-    # ships scaffolded before v3.2 land on v3.2).
+    # Per-hull placements export. The snapshots feed the GameParams
+    # autofill's hulls block, so the export runs whenever that pass does
+    # (also under --skip-export, so legacy ships scaffolded before v3.2
+    # land on v3.2) and not on a refresh that keeps the existing hulls
+    # block (skip_gameparams_autofill with a sidecar on disk).
     toolkit_param_index = pl_ship_block.get("param_index")
-    try:
-        _export_per_hull_placements(
-            toolkit_name=toolkit_name,
-            gm3d_dir=gm3d_dir,
-            gameparams_ship_id=gameparams_ship_id,
-            doc_wg_ship_id=toolkit_param_index,
-            config=cfg,
-        )
-    except Exception as e:
-        warnings.append(
-            f"per-hull placements export failed ({e}); "
-            f"sidecar's hulls block will only carry the active hull"
-        )
+    if not (skip_gameparams_autofill and sidecar_path.is_file()):
+        try:
+            _export_per_hull_placements(
+                toolkit_name=toolkit_name,
+                gm3d_dir=gm3d_dir,
+                gameparams_ship_id=gameparams_ship_id,
+                doc_wg_ship_id=toolkit_param_index,
+                config=cfg,
+                warnings=warnings,
+            )
+        except Exception as e:
+            warnings.append(
+                f"per-hull placements export failed ({e}); "
+                f"sidecar's hulls block will only carry the active hull"
+            )
 
     # Warn if the merged accessories.json is stale.
     accessories_json = gm3d_dir / f"{ship}_accessories.json"
