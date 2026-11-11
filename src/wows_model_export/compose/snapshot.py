@@ -16,6 +16,7 @@ Output shape (stable contract for the Extract webview):
 {
   "vehicles": [
     { "param_index": "...",  "top_key": "...",  "display_name": "...",
+      "localized_name": "..." | null,
       "model_dir": "...",  "tier": 9,  "nation": "usa",  "species": "...",
       "class": "BB",  "is_premium": false,  "permoflages_count": 7,
       "shares_model_dir_with": [...],  "group": "...",
@@ -438,6 +439,23 @@ def _resolve_display_name(
         return exterior_id
 
 
+def _localized_ship_name(
+    param_index: str,
+    *,
+    loc_db: _localization.LocalizationDb | None,
+) -> str | None:
+    """The in-game English name of a Vehicle (``IDS_<index>_FULL``, then
+    ``IDS_<index>``), or ``None`` when the catalogue has no entry.
+
+    It can differ from the name in the GameParams key: event and special
+    ships often reuse another hull's key (``PXSC999_Siegfried_1510`` is
+    "Expeditioner" in game)."""
+    if loc_db is None or not param_index:
+        return None
+    key = f"IDS_{param_index.upper()}"
+    return loc_db.get(f"{key}_FULL") or loc_db.get(key)
+
+
 # ---------------------------------------------------------------------------
 # Peculiarity label derivation
 # ---------------------------------------------------------------------------
@@ -631,6 +649,9 @@ def _build_snapshot(
                 "param_index":           str(v.get("index") or ""),
                 "top_key":               top_key,
                 "display_name":          _name_from_top_key(top_key),
+                "localized_name":        _localized_ship_name(
+                    str(v.get("index") or ""), loc_db=loc_db
+                ),
                 "model_dir":             model_dir,
                 "tier":                  _safe_int(v.get("level")),
                 "nation":                nation,
