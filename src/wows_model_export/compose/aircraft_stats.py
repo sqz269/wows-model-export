@@ -21,10 +21,10 @@ dispersion. The block gives every number in one unit system:
 * times in seconds, angles in degrees, HP in GameParams points.
 
 The dispersion fields are also kept as GameParams writes them; the block
-resolves them into metres (ellipse semi-axes, torpedo-fan widths and
-angles) by the client's own formulas (``AirPlanes.AirplaneUtils``). The
-schema, the field-by-field sources and the client rules are in
-``reference/schemas/AIRCRAFT_STATS.md``.
+resolves them into metres (ellipse semi-axes, the torpedo fan's width at
+the aim distance) by the client's own formulas (``AirPlanes.AirplaneUtils``),
+plus a point-origin half-angle of the fan. The schema, the field-by-field
+sources and the client rules are in ``reference/schemas/AIRCRAFT_STATS.md``.
 
 The composer emits these canonical :class:`StepEvent` names::
 
@@ -55,6 +55,8 @@ STATS_FILE = "stats.json"
 BW_TO_M = 30.0
 
 #: ``returnHeight`` at or above this many BW is GameParams' "no cap".
+#: ``returnHeight`` is the height a returning flight reaches; the client holds
+#: both escape thresholds just under it (``AirplaneUtils.getVisibilityLimit``).
 RETURN_HEIGHT_NO_CAP_BW = 9999.0
 
 #: GameParams `model` path of an aircraft entry → its model folder name.
@@ -113,8 +115,14 @@ def _dispersion(entry: dict, kind: str) -> dict | None:
       ``salvoSize × spread`` (BW); ``minSpread`` / ``maxSpread`` are
       per-axis factors and carry no unit;
     * a torpedo flight's fan is ``spread`` wide (BW) at ``torpedoAimDist``
-      ahead of the drop line, so its half-angle is
-      ``atan(spread / 2 / torpedoAimDist)``.
+      ahead of the drop line (``getTorpedoingArea``). The fan is a
+      trapezoid: its edges start at the ends of the drop line, which is as
+      wide as the attack formation (not in the block). ``fan_half_angle_deg``
+      is ``atan(spread / 2 / torpedoAimDist)``, the point-origin
+      approximation that ignores the drop line's width and so overstates the
+      client's edge angle, about ``atan((spread - width) / 2 /
+      torpedoAimDist)``. Consumers build the trapezoid from ``fan_width_m``,
+      ``aim_dist_m`` and the formation's width.
     """
     mn, mx = entry.get("minSpread"), entry.get("maxSpread")
     if kind == "torpedo":
@@ -183,6 +191,10 @@ def plane_stats(key: str, entry: dict, gp: dict[str, Any]) -> tuple[dict, list[s
     cap = None if ret is None or ret >= RETURN_HEIGHT_NO_CAP_BW else ret
 
     def escape(field: str) -> float | None:
+        # An escape threshold, not a height the flight climbs to: the client's
+        # getVisibilityLimit gives an attack flight escapeHeightAttack (sent to
+        # drop) or escapeHeightLanding (any other order), held just under
+        # returnHeight, and Attacker counts the flight as escaped above it.
         v = _num(entry.get(field))
         if v is None:
             return None
@@ -255,8 +267,10 @@ def plane_stats(key: str, entry: dict, gp: dict[str, Any]) -> tuple[dict, list[s
             "cruise": _m(entry.get("flightHeight")),
             "preparation": _m(entry.get("preparationHeight")),
             "aiming": _m(entry.get("aimingHeight")),
+            # escape thresholds (see escape() above)
             "escape_after_attack": escape("escapeHeightAttack"),
             "escape_to_land": escape("escapeHeightLanding"),
+            # returnHeight: the height a returning flight reaches; null = no cap
             "return_cap": _m(cap) if cap is not None else None,
         },
         "endurance_s": _num(entry.get("fuelTime")),
