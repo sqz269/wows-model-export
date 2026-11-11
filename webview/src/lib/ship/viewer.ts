@@ -44,6 +44,7 @@ import type {
   ShipSectionKey,
   ShipSummary,
   SidecarDoc,
+  SidecarHull,
   Skin,
 } from '$lib/types';
 import {
@@ -471,6 +472,66 @@ const DEFAULT_EXTERIOR: ExteriorRecord = {
   variant_swapped_asset_ids: [],
 };
 
+/** One hull module as offered by the ship viewer's hull picker. */
+export interface HullOption {
+  /** `sidecar.hulls` key (hull component name, e.g. `A_Hull`). */
+  name: string;
+  module_id: string | null;
+  is_stock: boolean;
+  /** Gameplay-active hull (`variants.active_hull`). */
+  is_active: boolean;
+  /** The hull the render doc (`<Ship>_accessories.json`) mirrors. */
+  is_rendered: boolean;
+  /** Skin applied by default when this hull is shown. */
+  linked_skin: string | null;
+  /** Distinct main-battery asset ids of this hull. */
+  main_assets: string[];
+}
+
+/** The hull the top-level placements mirror: `variants.rendered_hull`, else
+ *  the `is_active` hull, else the first hull. */
+function defaultHullName(sidecar: SidecarDoc | null): string | null {
+  const hulls = sidecar?.hulls;
+  if (!hulls) return null;
+  const rendered = sidecar?.variants?.rendered_hull;
+  if (rendered && hulls[rendered]) return rendered;
+  const active = Object.entries(hulls).find(([, h]) => h.is_active);
+  if (active) return active[0];
+  return Object.keys(hulls)[0] ?? null;
+}
+
+/**
+ * Replace the render doc's HP-bound mounts with hull `name`'s snapshot.
+ * Typed sections are hull-bound wholesale. Accessories split like the
+ * producer's active-hull alias: an instance listed in ANY hull's snapshot is
+ * HP-bound (replaced), everything else is a decorative (kept). Render-doc
+ * fields absent from the snapshot (`parent_mesh`, `source`, …) carry over
+ * for the same instance at the same HP + asset.
+ */
+function applyHullSnapshot(
+  doc: ShipPlacementsDoc,
+  hulls: Record<string, SidecarHull>,
+  name: string,
+): void {
+  const target = hulls[name];
+  const hpBound = new Set<string>();
+  for (const h of Object.values(hulls)) {
+    for (const a of h.accessories ?? []) if (a.instance_id) hpBound.add(a.instance_id);
+  }
+  for (const section of SHIP_SECTIONS) {
+    const current = doc[section] ?? [];
+    const byId = new Map(current.map((p) => [p.instance_id, p]));
+    const snapshot = (target[section] ?? []).map((m) => {
+      const prev = byId.get(m.instance_id);
+      return prev && prev.hp_name === m.hp_name && prev.asset_id === m.asset_id
+        ? { ...prev, ...m }
+        : m;
+    });
+    const kept = section === 'accessories' ? current.filter((p) => !hpBound.has(p.instance_id)) : [];
+    doc[section] = [...snapshot, ...kept];
+  }
+}
+
 /** Context captured at `loadShip` time so `setActiveExterior` can later
  *  re-instantiate individual mounts with the exact machinery (library
  *  index, sidecar-derived per-instance maps, texture base URL) the
@@ -646,6 +707,13 @@ export class ShipViewer {
   private activeHullExteriorId: string | null = null;
   private exteriorOverrideId: string | null = null;
   private currentShip: ShipSummary | null = null;
+  // Hull-module selection (sidecar `hulls.<H>`): the hull the user picked
+  // for `hullOverrideShip` (null = the producer's rendered hull), and the
+  // hull the current composition shows. The pick survives reloads of the
+  // same ship (exterior hull swaps) and resets when another ship loads.
+  private hullOverrideName: string | null = null;
+  private hullOverrideShip: string | null = null;
+  private shownHullName: string | null = null;
 
   // WG-authored bones & VFX-points overlay. Lives in the scene from
   // construction (like the accessory viewer's rig overlay); rebuilt per
@@ -800,6 +868,10 @@ export class ShipViewer {
     const t0 = performance.now();
     this.clearShip();
     this.currentShip = ship;
+    if (this.hullOverrideShip !== ship.hull_glb) {
+      this.hullOverrideName = null;
+      this.hullOverrideShip = null;
+    }
     const report = (msg: string) => onProgress?.(msg);
 
     // Fetch the sidecar FIRST (best-effort) — a hull-swap exterior override
@@ -926,6 +998,19 @@ export class ShipViewer {
         console.warn('[exterior] decoratives doc fetch failed; base decoratives kept:', err);
       }
     }
+
+    // Hull-module selection: the render doc mirrors the producer's rendered
+    // hull; a different picked hull swaps in that hull's HP-bound mounts
+    // from its sidecar snapshot (decoratives stay).
+    const hulls = sidecar?.hulls ?? null;
+    const renderedHull = defaultHullName(sidecar);
+    const pickedHull =
+      this.hullOverrideName && hulls?.[this.hullOverrideName] ? this.hullOverrideName : null;
+    if (pickedHull && hulls && pickedHull !== renderedHull) {
+      applyHullSnapshot(placementsDoc, hulls, pickedHull);
+      report(`Hull ${pickedHull}: mounts from its snapshot.`);
+    }
+    this.shownHullName = pickedHull ?? renderedHull;
 
     // Build the per-HP miscFilter lookup from sidecar mounts. WG runtime
     // treats miscFilter as a WHITELIST (verified 2026-05-08 from
@@ -1090,6 +1175,20 @@ export class ShipViewer {
       if (native) {
         report(`Applying native exterior ${native.exterior_id}…`);
         await this.setActiveExterior(native.exterior_id, onProgress);
+      }
+      // Hull-linked skin: a hull bound to an Exterior (`linkedCamouflage`,
+      // sidecar `hulls.<H>.linked_skin`) shows that skin by default, as in
+      // game when the hull / branch is selected. Other skins stay pickable.
+      const linkedSkin = this.shownHullName
+        ? hulls?.[this.shownHullName]?.linked_skin
+        : undefined;
+      if (
+        linkedSkin &&
+        this.activeExteriorId === 'default' &&
+        this.textures.getSkins().some((s) => s.skin_id === linkedSkin)
+      ) {
+        report(`Applying hull-linked skin ${linkedSkin}…`);
+        await this.textures.setActiveSkin(linkedSkin, onProgress);
       }
     }
 
@@ -2411,6 +2510,58 @@ export class ShipViewer {
       }
     }
     await this.textures.setActiveSkin(skinId, onProgress);
+  }
+
+  // ── Hull modules (sidecar `hulls`) ────────────────────────────────────
+
+  /** Hull modules of the loaded ship in sidecar order (empty when the
+   *  sidecar carries no `hulls` block). */
+  getHulls(): readonly HullOption[] {
+    const hulls = this.sidecar?.hulls;
+    if (!hulls) return [];
+    const rendered = defaultHullName(this.sidecar);
+    return Object.entries(hulls).map(([name, h]) => ({
+      name,
+      module_id: h.module_id ?? null,
+      is_stock: !!h.is_stock,
+      is_active: !!h.is_active,
+      is_rendered: name === rendered,
+      linked_skin: h.linked_skin ?? null,
+      main_assets: [...new Set((h.turrets ?? []).map((m) => m.asset_id))],
+    }));
+  }
+
+  /** The hull module the current composition shows. */
+  getActiveHullName(): string | null {
+    return this.shownHullName;
+  }
+
+  /**
+   * Show another hull module: reload the ship with that hull's mount
+   * snapshot, then apply its linked skin (if any) as the default skin.
+   * Hull swaps are a full reload, like hull-swap exteriors.
+   */
+  async setActiveHull(name: string, onProgress?: (msg: string) => void): Promise<void> {
+    const ship = this.currentShip;
+    const library = this.shipCtx?.library;
+    if (!ship || !library || !this.sidecar?.hulls?.[name]) return;
+    if (name === this.shownHullName) return;
+    const wasShowing = this.textures.isShowingTextures();
+    const particlesEnabled = this.particleLayerEnabled;
+    const particleMode = this.particleMode;
+    const particleLoops = [...this.particleLoopKeys];
+    const waterEnabled = this.shipWaterEnabled;
+    this.hullOverrideName = name;
+    this.hullOverrideShip = ship.hull_glb;
+    await this.loadShip(ship, library, onProgress);
+    if (wasShowing && !this.textures.isShowingTextures()) {
+      await this.textures.setShowTextures(true, onProgress);
+      this.textures.reapplyWetness();
+    }
+    this.particleMode = particleMode;
+    this.particleLoopKeys = new Set(particleLoops);
+    this.shipWaterEnabled = waterEnabled;
+    if (particlesEnabled) await this.setShipParticlesVisible(true);
   }
 
   // ── Exteriors (mesh-swap permoflage selector) ─────────────────────────

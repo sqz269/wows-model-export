@@ -13,6 +13,7 @@ export type {
   PickResult,
   ArmorPickResult,
   WgEnvironmentInfo,
+  HullOption,
 } from './viewer';
 export { DEFAULT_BLOOM_PARAMS } from '$lib/three/scene';
 export type { BloomParams } from '$lib/three/scene';

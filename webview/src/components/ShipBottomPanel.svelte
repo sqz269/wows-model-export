@@ -37,6 +37,7 @@
     Skin,
   } from '$lib/types';
   import type {
+    HullOption,
     NodeCategory,
     NodeEntry,
     PickResult,
@@ -59,6 +60,7 @@
     | 'hull'
     | 'armor'
     | 'skins'
+    | 'hulls'
     | 'exteriors'
     | 'damage'
     | 'textures'
@@ -112,6 +114,10 @@
     exteriors: readonly ExteriorRecord[];
     activeExteriorId: string | null;
     onPickExterior: (exteriorId: string) => void;
+    /** Hull modules (sidecar `hulls`); hidden when there is only one. */
+    hulls: readonly HullOption[];
+    activeHull: string | null;
+    onPickHull: (name: string) => void;
     /** Snapshot of seam states. Updated on `revision` bump. */
     seamStates: Readonly<Record<SeamKey, SeamState>>;
     /** Currently-picked mesh (null = nothing picked). Drives the Pick
@@ -138,6 +144,9 @@
     exteriors,
     activeExteriorId,
     onPickExterior,
+    hulls,
+    activeHull,
+    onPickHull,
     seamStates,
     selectedPick,
     onClosePick,
@@ -166,6 +175,7 @@
     'hull',
     'armor',
     'skins',
+    'hulls',
     'exteriors',
     'damage',
     'textures',
@@ -552,6 +562,7 @@
       { id: 'hull', label: 'Hull' },
       { id: 'armor', label: 'Armor', hide: !hasArmorTab },
       { id: 'skins', label: 'Skins', hide: skins.length <= 1 },
+      { id: 'hulls', label: 'Hulls', hide: hulls.length <= 1 },
       { id: 'exteriors', label: 'Exteriors', hide: exteriors.length <= 1 },
       { id: 'damage', label: 'Damage' },
       { id: 'textures', label: 'Textures', hide: !hasHullTextures },
@@ -1051,6 +1062,63 @@
             {/each}
           </div>
         {/if}
+      {:else if activeTab === 'hulls'}
+        <div class="flex flex-col gap-2">
+          <div class="text-muted-foreground max-w-[64ch] text-[11px]">
+            Selecting a hull shows that hull module's mounts. A hull with a linked skin applies it
+            by default; any other skin stays selectable in Skins.
+          </div>
+          <div class="flex flex-col gap-1">
+            {#each hulls as hull (hull.name)}
+              <button
+                type="button"
+                onclick={() => onPickHull(hull.name)}
+                class="flex items-center gap-2 rounded border px-2 py-1 text-left text-[11px] {activeHull ===
+                hull.name
+                  ? 'border-primary bg-primary/10'
+                  : 'border-border bg-popover hover:bg-accent'}"
+                title={hull.module_id ?? hull.name}
+              >
+                <span
+                  class="inline-flex size-3 flex-none items-center justify-center rounded-full border {activeHull ===
+                  hull.name
+                    ? 'border-primary bg-primary'
+                    : 'border-border'}"
+                ></span>
+                <span class="min-w-0 flex-1">
+                  <span class="block truncate font-medium text-foreground">{hull.name}</span>
+                  <span class="text-muted-foreground block truncate font-mono text-[10px]">
+                    {hull.module_id ?? ''}{hull.main_assets.length
+                      ? ` · ${hull.main_assets.join(', ')}`
+                      : ' · no main battery'}
+                  </span>
+                </span>
+                {#if hull.linked_skin}
+                  <span
+                    class="flex-none rounded bg-primary/15 px-1 text-[9px] tracking-wider text-primary"
+                    title="Skin applied by default when this hull is selected"
+                  >
+                    {skins.find((s) => s.skin_id === hull.linked_skin)?.display_name ??
+                      hull.linked_skin}
+                  </span>
+                {/if}
+                {#if hull.is_stock}
+                  <span class="text-muted-foreground flex-none text-[9px] uppercase tracking-wider">
+                    stock
+                  </span>
+                {/if}
+                {#if hull.is_active}
+                  <span
+                    class="text-muted-foreground flex-none text-[9px] uppercase tracking-wider"
+                    title="Gameplay-active (fully upgraded) hull"
+                  >
+                    active
+                  </span>
+                {/if}
+              </button>
+            {/each}
+          </div>
+        </div>
       {:else if activeTab === 'exteriors'}
         <div class="flex flex-col gap-2">
           <div class="text-muted-foreground max-w-[64ch] text-[11px]">

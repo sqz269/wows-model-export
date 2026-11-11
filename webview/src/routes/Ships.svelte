@@ -31,7 +31,13 @@
     ShipSummary,
     Skin,
   } from '$lib/types';
-  import type { PickResult, ShipLoadStats, ShipViewer, WgEnvironmentInfo } from '$lib/ship';
+  import type {
+    HullOption,
+    PickResult,
+    ShipLoadStats,
+    ShipViewer,
+    WgEnvironmentInfo,
+  } from '$lib/ship';
   import ShipPicker from '$components/ShipPicker.svelte';
   import ShipViewerCmp from '$components/ShipViewer.svelte';
   import ShipControls from '$components/ShipControls.svelte';
@@ -89,6 +95,11 @@
   // Exteriors tab drives pickExterior the same way Skins drives pickSkin.
   let exteriors = $state<readonly ExteriorRecord[]>([]);
   let activeExteriorId = $state<string | null>(null);
+  // Hull-module selector (sidecar `hulls`): mirrors of viewer.getHulls() /
+  // getActiveHullName(). Picking a hull reloads its mounts and applies its
+  // linked skin, so the skin mirrors re-read too.
+  let hulls = $state<readonly HullOption[]>([]);
+  let activeHull = $state<string | null>(null);
   let envInfo = $state<WgEnvironmentInfo | null>(null);
   let seamStates = $state<Readonly<Record<SeamKey, SeamState>>>({
     'Bow-MidFront': 'Intact',
@@ -144,6 +155,33 @@
       } else {
         toast.error(`Failed to apply ${skinId}`, { description: msg, duration: 8000 });
       }
+    }
+  }
+
+  async function pickHull(name: string) {
+    if (!viewer) return;
+    const toastId = toast.loading(`Switching hull to ${name}…`, {
+      duration: Number.POSITIVE_INFINITY,
+    });
+    try {
+      await viewer.setActiveHull(name, (msg) => {
+        toast.loading(msg, { id: toastId, duration: Number.POSITIVE_INFINITY });
+      });
+      hulls = viewer.getHulls();
+      activeHull = viewer.getActiveHullName();
+      skins = viewer.getSkins();
+      activeSkin = viewer.getActiveSkinId();
+      exteriors = viewer.getExteriors();
+      activeExteriorId = viewer.getActiveExteriorId();
+      controlsRevision++;
+      toast.success(`Hull: ${name}`, { id: toastId, duration: 2000 });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`Failed to switch hull to ${name}`, {
+        id: toastId,
+        description: msg,
+        duration: 8000,
+      });
     }
   }
 
@@ -334,6 +372,8 @@
       // ships) — read back rather than assuming 'default'.
       exteriors = viewer.getExteriors();
       activeExteriorId = viewer.getActiveExteriorId();
+      hulls = viewer.getHulls();
+      activeHull = viewer.getActiveHullName();
       seamStates = { ...viewer.getSeamStates() };
       hullGroups = viewer.getHullGroups();
       lodLevels = viewer.getAvailableLodLevels();
@@ -438,6 +478,9 @@
         {exteriors}
         {activeExteriorId}
         onPickExterior={pickExterior}
+        {hulls}
+        {activeHull}
+        onPickHull={pickHull}
         {seamStates}
         {selectedPick}
         onClosePick={() => (selectedPick = null)}

@@ -4,6 +4,7 @@
 
 import type { BallisticsSection } from './ballistics';
 import type { Skin } from './skin';
+import type { ShipPlacement } from './ship';
 
 export interface SidecarSlot {
   /**
@@ -891,6 +892,37 @@ export interface ExteriorRecord {
   variant_swapped_asset_ids?: string[];
 }
 
+/** `variants` (METADATA_SPEC §11.1): the ship's hull-module tree. */
+export interface SidecarVariants {
+  /** Gameplay-active hull (chain end of the `_Hull` upgrades). */
+  active_hull?: string | null;
+  stock_hull?: string | null;
+  /** The hull whose mounts the top-level placement arrays (and the
+   *  `<Ship>_accessories.json` render doc) mirror. Absent on older sidecars
+   *  (fall back to the `is_active` hull). */
+  rendered_hull?: string | null;
+  research_path?: string[];
+}
+
+/** One `hulls.<H>` record (METADATA_SPEC §11.2): the mount snapshot of one
+ *  hull module. Placement lists carry the same per-instance shape as the
+ *  top-level placement sections. */
+export interface SidecarHull {
+  module_id?: string | null;
+  is_stock?: boolean;
+  is_active?: boolean;
+  turrets?: ShipPlacement[];
+  secondaries?: ShipPlacement[];
+  antiair?: ShipPlacement[];
+  torpedoes?: ShipPlacement[];
+  accessories?: ShipPlacement[];
+  /** `skins[].skin_id` of the hull's linked Exterior: the skin this hull
+   *  shows by default when selected. Absent when the hull links none. */
+  linked_skin?: string;
+  /** GameParams Exterior id the hull component links (`linkedCamouflage`). */
+  linked_exterior_id?: string;
+}
+
 export interface SidecarDoc {
   ship?: SidecarShip;
   materials?: SidecarMaterial[];
@@ -907,6 +939,9 @@ export interface SidecarDoc {
   /** Ship-exterior unification: indexable mesh-swap permoflage selector.
    *  Absent on pre-Step-0 sidecars (treat as `[default]`). */
   exteriors?: ExteriorRecord[];
+  variants?: SidecarVariants;
+  /** Per-hull-module mount snapshots, keyed by hull component name. */
+  hulls?: Record<string, SidecarHull>;
 }
 
 /** Per-material scheme inventory surfaced on the Camos tab. */
