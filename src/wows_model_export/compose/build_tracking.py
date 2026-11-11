@@ -710,6 +710,7 @@ def _ship_ingest_plan(
             "export_exterior_hulls": bool(rx.get("export_exterior_hulls")),
             "toolkit_ship_override": rx.get("toolkit_ship_override"),
             "gameparams_ship_id": rx.get("gameparams_ship_id"),
+            "hull": rx.get("hull"),
             "class_override": rx.get("class_override"),
             "ship_key_suffix": rx.get("ship_key_suffix"),
         }
@@ -729,6 +730,7 @@ def _ship_ingest_plan(
         "variant_permoflage": plan.permoflage or "auto",
         "toolkit_ship_override": model_dir,
         "gameparams_ship_id": plan.vehicle,
+        "hull": plan.hull,
     }
     return kwargs, skins, plan.build_library, f"sidecar ({plan.provenance_source})"
 

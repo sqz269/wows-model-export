@@ -10,6 +10,7 @@ Drives the one-shot per-ship pipeline composer end-to-end. Argv shape::
         [--and-publish --publish-target P] [--publish-force]
         [--variant-permoflage ID]
         [--toolkit-ship NAME] [--gameparams-ship-id ID]
+        [--hull UPGRADE]
         [common flags ...]
 """
 
@@ -128,6 +129,16 @@ def _build_parser() -> argparse.ArgumentParser:
              "permoflage discovery. Required when multiple Vehicles "
              "share one model_dir.",
     )
+    ap.add_argument(
+        "--hull",
+        default=None,
+        help="Hull upgrade to render: a _Hull upgrade id (e.g. "
+             "PJUH432_Furutaka_1930) or a hull component name (B_Hull). "
+             "The mount placements and the sidecar's top-level mounts "
+             "follow it; the hull mesh stays the model of the lowest "
+             "upgrade id. Default: the lowest upgrade id (normally the "
+             "stock hull).",
+    )
     add_common_args(ap)
     return ap
 
@@ -176,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
             export_exterior_hulls=args.exterior_hulls,
             toolkit_ship_override=args.toolkit_ship,
             gameparams_ship_id=args.gameparams_ship_id,
+            hull=args.hull,
             on_event=printer,
         )
     except StepError as e:

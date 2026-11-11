@@ -1339,6 +1339,60 @@ def _enumerate_hull_names(ship_dict: dict) -> list[tuple[str, str]]:
     return out
 
 
+def _resolve_hull_upgrade(
+    hull: str,
+    ship_id: str | None,
+    *,
+    config: PipelineConfig | None,
+    warnings: list[str] | None = None,
+) -> str:
+    """Return the exact ``_Hull`` upgrade id that ``hull`` names.
+
+    ``hull`` is an upgrade id (``PJUH432_Furutaka_1930``) or a hull
+    component name (``B_Hull``) of the ship ``ship_id``. The toolkit's
+    ``--hull`` also matches a bare value as a substring of the upgrade
+    ids (``B`` matches ``PJUH706_Fubuki_1942``), so only the exact id is
+    passed on. When the ship is not in GameParams, ``hull`` is passed
+    through unchanged with a warning; when it is, a value that names none
+    of its hulls raises :class:`ValueError`.
+
+    The toolkit always loads the mesh of the hull with the lowest upgrade
+    id. A selected hull on another model (Pensacola's ``B_Hull``) would
+    get its mounts placed on that mesh; this is reported as a warning.
+    """
+    ship_dict = None
+    if ship_id:
+        try:
+            _ensure_gameparams_dump(config=config)
+            ship_dict = _gp_read.get_ship(ship_id)
+        except Exception as e:
+            _warn(warnings, f"hull {hull!r}: GameParams lookup failed ({e}); passed as given")
+            return hull
+    if not isinstance(ship_dict, dict):
+        _warn(warnings, f"hull {hull!r}: ship {ship_id!r} not in GameParams; passed as given")
+        return hull
+    pairs = _enumerate_hull_names(ship_dict)
+    for hull_name, module_id in pairs:
+        if hull not in (module_id, hull_name):
+            continue
+
+        def _model(name: str) -> str:
+            comp = ship_dict.get(name)
+            return (comp.get("model") or "") if isinstance(comp, dict) else ""
+
+        mesh_hull = min(pairs, key=lambda p: p[1])[0]
+        if _model(hull_name) != _model(mesh_hull):
+            _warn(
+                warnings,
+                f"hull {module_id} ({hull_name}) uses {_model(hull_name) or 'no model'}, "
+                f"but the toolkit loads the mesh of {mesh_hull} "
+                f"({_model(mesh_hull) or 'no model'}); its mounts are placed on that mesh",
+            )
+        return module_id
+    choices = ", ".join(f"{mid} ({name})" for name, mid in pairs) or "none"
+    raise ValueError(f"hull {hull!r} is not a hull of {ship_id}; its hulls: {choices}")
+
+
 def _load_placements_with_id_override(
     placements_path: Path,
     gameparams_ship_id: str | None,
@@ -1836,6 +1890,7 @@ def scaffold_ship(
     skip_geometry_hitbox: bool = False,
     variant_permoflage: str | None = "auto",
     export_exterior_hulls: bool = False,
+    hull: str | None = None,
     on_event: OnEvent | None = None,
     cancel: threading.Event | None = None,
 ) -> ScaffoldResult:
@@ -1868,6 +1923,17 @@ def scaffold_ship(
     entries on every subsequent emit. Default False — one extra toolkit
     subprocess per hull-swap exterior is too heavy for routine refresh
     passes; previously-exported hull data survives merges either way.
+
+    ``hull`` selects the hull upgrade the export renders: an upgrade id
+    (``PJUH432_Furutaka_1930``) or a hull component name (``B_Hull``),
+    resolved to the exact upgrade id (:func:`_resolve_hull_upgrade`). The
+    toolkit's mount placements and the ammo ``ranges`` follow it; the hull
+    mesh stays the toolkit's (the lowest upgrade id's model), so the
+    option suits hulls that share one model. The sidecar's
+    top-level mounts then follow it through the rendered-hull detection
+    (:func:`_detect_rendered_hull`). ``None`` (default) renders the
+    toolkit's default, the lowest upgrade id (normally the stock hull).
+    Unused when the export, armor and ammo steps are all skipped.
 
     ``on_event`` is an optional callback invoked at each step boundary
     with a :class:`StepEvent`.  Canonical step names:
@@ -1926,7 +1992,22 @@ def scaffold_ship(
             underlying=e,
             detail=f"failed to set up paths under {workspace!r}",
         ) from e
-    timer.complete()
+    # The hull upgrade the export renders (None = the toolkit's default).
+    hull_upgrade: str | None = None
+    if hull and not (skip_export and skip_armor and skip_ammo):
+        try:
+            hull_upgrade = _resolve_hull_upgrade(
+                hull, gameparams_ship_id or toolkit_name,
+                config=cfg, warnings=warnings,
+            )
+        except Exception as e:
+            timer.emit("resolve_identity", "failed")
+            raise StepError(
+                step="resolve_identity",
+                underlying=e,
+                detail=f"hull {hull!r} not resolved",
+            ) from e
+    timer.complete(detail=f"hull {hull_upgrade}" if hull_upgrade else "")
 
     variant_routed: bool = False
     variant_exterior_id: str | None = None
@@ -2060,6 +2141,7 @@ def scaffold_ship(
         try:
             _toolkit_export_ship(
                 toolkit_name, hull_glb,
+                hull=hull_upgrade,
                 accessories="exclude",
                 all_render_sets=True,
                 placements_json=placements_json,
@@ -2095,7 +2177,10 @@ def scaffold_ship(
         _emit_locked("export_armor", "started", detail=detail)
         t0 = time.perf_counter()
         try:
-            _toolkit_armor_json(toolkit_name, armor_json_path, config=cfg, vehicle=vehicle_id)
+            _toolkit_armor_json(
+                toolkit_name, armor_json_path, config=cfg, vehicle=vehicle_id,
+                hull=hull_upgrade,
+            )
         except Exception as e:
             step_ms = (time.perf_counter() - t0) * 1000.0
             _record_timing("export_armor", step_ms)
@@ -2114,7 +2199,10 @@ def scaffold_ship(
         _emit_locked("export_ammo", "started", detail=detail)
         t0 = time.perf_counter()
         try:
-            _toolkit_ammo_json(toolkit_name, ballistics_json, config=cfg, vehicle=vehicle_id)
+            _toolkit_ammo_json(
+                toolkit_name, ballistics_json, config=cfg, vehicle=vehicle_id,
+                hull=hull_upgrade,
+            )
         except Exception as e:
             step_ms = (time.perf_counter() - t0) * 1000.0
             _record_timing("export_ammo", step_ms)
@@ -2188,6 +2276,7 @@ def scaffold_ship(
         try:
             _toolkit_ingest_ship_bundle(
                 toolkit_name, hull_glb,
+                hull=hull_upgrade,
                 accessories="exclude",
                 all_render_sets=True,
                 placements_json=placements_json,
@@ -2197,6 +2286,7 @@ def scaffold_ship(
                 raw_dds_dir=textures_dds_dir,
                 armor_json=armor_json_path,
                 ammo_json=ballistics_json,
+                ammo_hull=hull_upgrade,
                 vehicle=vehicle_id,
                 config=cfg,
                 adopt_shared=False,

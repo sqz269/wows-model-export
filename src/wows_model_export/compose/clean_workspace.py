@@ -137,6 +137,9 @@ class ShipReplayPlan:
     # nor the snapshot lookup could supply it; the replay then falls back
     # to ``resolve_ship_identity(vehicle)`` (which fails for a top_key).
     model_dir:          str | None = None
+    # The ``_Hull`` upgrade id the ingest rendered (``ingest_ship(hull=)``);
+    # ``None`` = the toolkit's default.
+    hull:               str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +244,11 @@ def _plan_from_sidecar(sidecar_path: Path) -> ShipReplayPlan | None:
             model_dir=(
                 str(prov["model_dir"])
                 if isinstance(prov.get("model_dir"), str) and prov["model_dir"]
+                else None
+            ),
+            hull=(
+                str(prov["hull"])
+                if isinstance(prov.get("hull"), str) and prov["hull"]
                 else None
             ),
         )
@@ -709,6 +717,7 @@ def clean_and_reextract(
                         toolkit_ship_override=model_dir,
                         gameparams_ship_id=plan.vehicle,
                         variant_permoflage=plan.permoflage or "auto",
+                        hull=plan.hull,
                         build_library=plan.build_library,
                         interactive=False,
                         on_event=on_event,

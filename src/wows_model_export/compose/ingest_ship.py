@@ -266,6 +266,7 @@ def refresh_ship_sidecar(
     class_override: str | None = None,
     ship_key_suffix: str | None = None,
     export_exterior_hulls: bool = False,
+    hull: str | None = None,
     on_event: OnEvent | None = None,
     cancel: threading.Event | None = None,
 ) -> "_scaffold_ship_mod.ScaffoldResult":
@@ -297,6 +298,7 @@ def refresh_ship_sidecar(
         skip_geometry_hitbox=True,
         variant_permoflage=variant_permoflage,
         export_exterior_hulls=export_exterior_hulls,
+        hull=hull,
         on_event=on_event,
         cancel=cancel,
     )
@@ -446,6 +448,7 @@ def _record_build_deps(fn):
                 "export_exterior_hulls": bool(kwargs.get("export_exterior_hulls", False)),
                 "toolkit_ship_override": kwargs.get("toolkit_ship_override"),
                 "gameparams_ship_id": kwargs.get("gameparams_ship_id"),
+                "hull": kwargs.get("hull"),
                 "class_override": kwargs.get("class_override"),
                 "ship_key_suffix": kwargs.get("ship_key_suffix"),
             },
@@ -476,6 +479,7 @@ def ingest_ship(
     export_exterior_hulls: bool = False,
     toolkit_ship_override: str | None = None,
     gameparams_ship_id: str | None = None,
+    hull: str | None = None,
     provenance_build_library: bool | None = None,
     on_event: OnEvent | None = None,
     cancel: threading.Event | None = None,
@@ -551,6 +555,14 @@ def ingest_ship(
             Override the GameParams Vehicle id used for autofill +
             permoflage discovery.  Required when multiple Vehicles
             share one model_dir.
+        hull
+            Hull upgrade to render: a ``_Hull`` upgrade id
+            (``PJUH432_Furutaka_1930``) or a hull component name
+            (``B_Hull``).  The toolkit's mount placements, and with
+            them the sidecar's top-level mounts, follow it; the hull
+            mesh stays the model of the lowest upgrade id.  ``None``
+            (default) renders the lowest upgrade id (normally stock).
+            See :func:`scaffold_ship`.
         on_event
             Optional progress callback.  Receives :class:`StepEvent`s
             at the canonical step boundaries listed in the module
@@ -690,6 +702,7 @@ def ingest_ship(
             gameparams_ship_id=gameparams_ship_id,
             variant_permoflage=variant_permoflage,
             export_exterior_hulls=export_exterior_hulls,
+            hull=hull,
             on_event=on_event,
             cancel=cancel,
         )
@@ -905,6 +918,7 @@ def ingest_ship(
                     "model_dir":     toolkit_name,
                     "label":         label,
                     "permoflage":    variant_permoflage,
+                    "hull":          hull,
                     # Record the library-build INTENT for replay, which can
                     # differ from the value this call ran with: the queue
                     # forces build_library=False per item (the library is
