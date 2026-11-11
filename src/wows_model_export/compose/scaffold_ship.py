@@ -2142,7 +2142,8 @@ def _absorb_gameparams_passes(
     # Pass 9: air operations (launchpad, deck spots, take-off and landing
     # runs, catapults) from the rendered hull's airArmament and the export's
     # air_ops_nodes. Ships that launch no planes, and exports made before the
-    # toolkit wrote air_ops_nodes, get no block. Best-effort.
+    # toolkit wrote air_ops_nodes, get no block (a water launchpad without
+    # catapults needs no nodes and always gets one). Best-effort.
     try:
         from ..resolve import air_ops as _air_ops
         nodes = None
@@ -3019,6 +3020,10 @@ def scaffold_ship(
             if not skip_gameparams_autofill:
                 existing.pop("variants", None)
                 existing.pop("hulls", None)
+                # Replace-by-section: a run that writes no air_ops block (the
+                # rendered hull launches no planes) must not keep the old one,
+                # and a new block must not merge with the old one's keys.
+                existing.pop("air_ops", None)
             new_inst_ids: dict[str, set[str]] = {
                 sec: {
                     p.get("instance_id")

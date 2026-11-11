@@ -144,6 +144,10 @@ def collect_air_ops_block(
     ``None`` for a ship that launches no planes, and for an export made before
     the toolkit wrote ``air_ops_nodes`` (a warning then asks for a re-export):
     a block always carries the frames the export has.
+
+    A ``water`` launchpad with no catapults uses no nodes, and the toolkit
+    writes no ``air_ops_nodes`` for a ship without deck nodes or catapults, so
+    such a ship gets its block whether the section is there or not.
     """
     lp_type = launchpad_type(air_armament)
     if lp_type is None:
@@ -151,12 +155,15 @@ def collect_air_ops_block(
     assert air_armament is not None
     warn = warnings if warnings is not None else []
     if not isinstance(air_ops_nodes, dict):
-        warn.append(
-            "air_ops: the placements JSON has no air_ops_nodes (exported before the "
-            "toolkit wrote them; re-export with a toolkit that lists "
-            "export_ship.placements_json.air_ops_nodes); no air_ops block"
-        )
-        return None
+        if lp_type == "water" and not catapult_components(air_armament):
+            air_ops_nodes = {}
+        else:
+            warn.append(
+                "air_ops: the placements JSON has no air_ops_nodes (exported before the "
+                "toolkit wrote them; re-export with a toolkit that lists "
+                "export_ship.placements_json.air_ops_nodes); no air_ops block"
+            )
+            return None
     nodes_doc = air_ops_nodes
 
     launchpad: dict[str, Any] = {"type": lp_type}
