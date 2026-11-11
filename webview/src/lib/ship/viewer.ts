@@ -488,8 +488,8 @@ export interface HullOption {
   main_assets: string[];
 }
 
-/** The hull the top-level placements mirror: `variants.rendered_hull`, else
- *  the `is_active` hull, else the first hull. */
+/** The hull the render doc's mounts belong to: `variants.rendered_hull`,
+ *  else the `is_active` hull, else the first hull. */
 function defaultHullName(sidecar: SidecarDoc | null): string | null {
   const hulls = sidecar?.hulls;
   if (!hulls) return null;

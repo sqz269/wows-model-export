@@ -897,9 +897,9 @@ export interface SidecarVariants {
   /** Gameplay-active hull (chain end of the `_Hull` upgrades). */
   active_hull?: string | null;
   stock_hull?: string | null;
-  /** The hull whose mounts the top-level placement arrays (and the
-   *  `<Ship>_accessories.json` render doc) mirror. Absent on older sidecars
-   *  (fall back to the `is_active` hull). */
+  /** The hull the export rendered: its mounts are the HP-bound mounts of the
+   *  `<Ship>_accessories.json` render doc. Absent on older sidecars (fall
+   *  back to the `is_active` hull). */
   rendered_hull?: string | null;
   research_path?: string[];
 }

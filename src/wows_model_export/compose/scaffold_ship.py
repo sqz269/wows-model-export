@@ -1628,6 +1628,48 @@ def _collect_per_hull_placements(gm3d_dir: Path) -> dict[str, Path]:
     return out
 
 
+def _placements_hull(
+    placements_json: Path | None,
+    per_hull_files: dict[str, Path],
+    *,
+    preferred: str | None,
+) -> str | None:
+    """Return the hull whose per-hull placements carry exactly the mounts of
+    the export's own placements file (the source of the render doc).
+
+    Mounts compare as ``(section, hp_name, asset_id)`` sets. Unlike
+    :func:`_detect_rendered_hull`'s best-overlap score, a hull whose mounts
+    are a superset (Kagero's ``B_Hull`` adds AA guns to ``A_Hull``'s) does
+    not match. Hulls with identical mounts (``A_Hull`` / ``A_Hull_TIER2``)
+    resolve to ``preferred`` when it is one of them, else to the first hull
+    name in sort order. Falls back to ``preferred`` when nothing matches
+    exactly or a file is unreadable.
+    """
+    def keyset(path: Path) -> set[tuple[str, str, str]]:
+        with open(path, "rb") as f:
+            d = json.loads(f.read().decode("utf-8"))
+        return {
+            (sec, e.get("hp_name"), e.get("asset_id"))
+            for sec in ("turrets", "secondaries", "antiair", "torpedoes", "accessories")
+            for e in (d.get(sec) or [])
+            if isinstance(e, dict)
+        }
+
+    if placements_json is None or not Path(placements_json).is_file():
+        return preferred
+    try:
+        target = keyset(Path(placements_json))
+        exact = [h for h, p in per_hull_files.items()
+                 if Path(p).is_file() and keyset(Path(p)) == target]
+    except Exception:
+        return preferred
+    if not exact:
+        return preferred
+    if preferred in exact:
+        return preferred
+    return sorted(exact)[0]
+
+
 def _detect_rendered_hull(doc: dict[str, Any], active_hull: str | None) -> str | None:
     """Return the hull whose per-hull mount set best matches the rendered
     top-level placements.
@@ -1779,15 +1821,18 @@ def _absorb_gameparams_passes(
                 )
             else:
                 doc = sidecar.alias_active_hull_to_top_level(doc)
-            # Record which hull the top-level arrays (and the render doc
-            # built from the default-hull placements) now mirror, so a
-            # consumer showing a hull's linked skin knows the hull on screen.
-            top_hull = rendered_hull or active_hull
-            if (top_hull and isinstance(doc.get("variants"), dict)
-                    and top_hull in (doc.get("hulls") or {})):
+            # Record the hull whose mounts the export's placements (and so
+            # the render doc built from them) carry, so a consumer showing a
+            # hull's linked skin knows the hull on screen.
+            shown_hull = _placements_hull(
+                active_placements_json, per_hull_files,
+                preferred=rendered_hull or active_hull,
+            )
+            if (shown_hull and isinstance(doc.get("variants"), dict)
+                    and shown_hull in (doc.get("hulls") or {})):
                 doc = {
                     **doc,
-                    "variants": {**doc["variants"], "rendered_hull": top_hull},
+                    "variants": {**doc["variants"], "rendered_hull": shown_hull},
                 }
     except Exception as e:
         _warn(warnings, f"per-hull mount index failed ({e})")
