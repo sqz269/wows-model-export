@@ -152,6 +152,8 @@ also available if you'd rather script extractions.
 | `wows-snapshot` | Dump GameParams + Vehicles/Permoflages cache. |
 | `wows-find-ship-variants` | Enumerate ship variants from GameParams. |
 | `wows-dedup-textures` | Move every texture set shared by two or more export folders into `libraries/textures_shared/` and repoint sidecars + library indexes (older exports). |
+| `wows-export-building` | Export GameParams Building entries (shore structures) into `buildings/`. |
+| `wows-compose-building` | Compose buildings from an old-format base model and GameParams gun mounts, from a spec you supply (`reference/schemas/BUILDING_SIDECAR.md`). |
 
 Each accepts `--help` for the full argument list. Run `wows-` then Tab
 in a modern shell to discover the rest.

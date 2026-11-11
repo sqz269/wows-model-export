@@ -52,6 +52,16 @@ GLB rendered at that matrix faces the way WG's engine renders it.
 (dead gun models carry none, so it is the raw node), and ``hp_transform``
 is the raw node. A consumer that parents a gun under the ``HP_*`` node
 uses ``inverse(hp_transform) x transform`` as the local matrix.
+
+Gun rig. ``turrets[].rig`` names the nodes of the gun GLB a gunner drives
+(``Rotate_Y`` training, ``Rotate_X`` / ``Rotate_X1`` elevation,
+``HP_gunFire<n>`` muzzles, ``HP_gunFireEffect``) and gives their rest
+positions and the rest muzzle direction in the building GLB frame, with
+the live gun rendered at ``transform``.
+
+Composed buildings (``building_compose``) are written in this same layout
+from a caller's spec: an old-format base model plus gun mounts taken from
+GameParams, for structures whose own model the toolkit cannot read yet.
 """
 
 from __future__ import annotations
@@ -77,8 +87,9 @@ GUN_INDEX_SCHEMA_VERSION = 1
 # Sidecar schema version for building meta.json files. Independent of the
 # ship sidecar's schema_version — consumers key off ``pipeline.kind``.
 # Additions since the first version (materials, dead_materials,
-# turrets[].hp_transform / dead_transform) are additive; ``transform`` now
-# follows the ship-placement rule (see the module docstring).
+# turrets[].hp_transform / dead_transform / rig, and the ``composition``
+# block of composed buildings) are additive; ``transform`` now follows the
+# ship-placement rule (see the module docstring).
 BUILDING_SCHEMA_VERSION = 1
 
 # The gun bone whose rest rotation the ship-placement rule inverts.
@@ -396,6 +407,89 @@ def _transform_entry(m: list[float]) -> dict[str, Any]:
     return {"matrix": m, "position": [m[12], m[13], m[14]]}
 
 
+# ── gun rig (the nodes a gunner drives) ───────────────────────────────
+
+# WG's names for the nodes a gun mount moves: training (yaw) and elevation
+# (pitch) joints, one muzzle locator per barrel, the shot-effect anchor.
+RIG_YAW_NODE = "Rotate_Y"
+RIG_PITCH_NODES = ("Rotate_X", "Rotate_X1")
+RIG_MUZZLE_PREFIX = "HP_gunFire"
+RIG_EFFECT_NODE = "HP_gunFireEffect"
+
+
+def _point(m: list[float], p: list[float]) -> list[float]:
+    return [
+        m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+        m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+        m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+    ]
+
+
+def _gun_rig_nodes(gltf: dict[str, Any]) -> dict[str, Any]:
+    """The rig nodes of a gun GLB and their rest positions in the GLB's
+    scene-root frame: ``yaw`` (name, pos) or None, ``pitch`` list,
+    ``muzzles`` ordered by barrel number, ``effect`` (name, pos) or None."""
+    world = _world_transforms(gltf)
+
+    def pos(name: str) -> list[float]:
+        m = world[name]
+        return [m[12], m[13], m[14]]
+
+    muzzles = []
+    for name in world:
+        suffix = name[len(RIG_MUZZLE_PREFIX):]
+        if name.startswith(RIG_MUZZLE_PREFIX) and suffix.isdigit():
+            muzzles.append((int(suffix), name))
+    return {
+        "yaw": (RIG_YAW_NODE, pos(RIG_YAW_NODE)) if RIG_YAW_NODE in world else None,
+        "pitch": [(n, pos(n)) for n in RIG_PITCH_NODES if n in world],
+        "muzzles": [(n, pos(n)) for _i, n in sorted(muzzles)],
+        "effect": (RIG_EFFECT_NODE, pos(RIG_EFFECT_NODE)) if RIG_EFFECT_NODE in world else None,
+    }
+
+
+def _rest_muzzle_dir(rig: dict[str, Any]) -> list[float] | None:
+    """Unit vector from the elevation pivot (else the training pivot) to
+    the mean muzzle, in the gun GLB frame; None without muzzles."""
+    if not rig["muzzles"]:
+        return None
+    pivot = rig["pitch"][0][1] if rig["pitch"] else (rig["yaw"][1] if rig["yaw"] else [0.0, 0.0, 0.0])
+    n = len(rig["muzzles"])
+    mean = [sum(p[k] for _nm, p in rig["muzzles"]) / n for k in range(3)]
+    d = [mean[k] - pivot[k] for k in range(3)]
+    length = sum(v * v for v in d) ** 0.5
+    return [v / length for v in d] if length > 1e-9 else None
+
+
+def _rig_entry(rig: dict[str, Any], placement: list[float]) -> dict[str, Any]:
+    """Sidecar ``rig`` block: node names in the gun GLB plus their rest
+    positions in the building GLB frame with the gun rendered at
+    ``placement`` (the turret's ``transform``)."""
+    def r3(v: list[float]) -> list[float]:
+        return [round(x, 4) for x in v]
+
+    d = _rest_muzzle_dir(rig)
+    muzzle_dir = None
+    if d is not None:
+        w = [placement[0] * d[0] + placement[4] * d[1] + placement[8] * d[2],
+             placement[1] * d[0] + placement[5] * d[1] + placement[9] * d[2],
+             placement[2] * d[0] + placement[6] * d[1] + placement[10] * d[2]]
+        length = sum(v * v for v in w) ** 0.5
+        muzzle_dir = r3([v / length for v in w]) if length > 1e-9 else None
+    return {
+        "yaw_node": rig["yaw"][0] if rig["yaw"] else None,
+        "pitch_nodes": [n for n, _p in rig["pitch"]],
+        "muzzle_nodes": [n for n, _p in rig["muzzles"]],
+        "fire_effect_node": rig["effect"][0] if rig["effect"] else None,
+        "rest": {
+            "yaw_pivot": r3(_point(placement, rig["yaw"][1])) if rig["yaw"] else None,
+            "pitch_pivot": r3(_point(placement, rig["pitch"][0][1])) if rig["pitch"] else None,
+            "muzzles": [r3(_point(placement, p)) for _n, p in rig["muzzles"]],
+            "muzzle_dir": muzzle_dir,
+        },
+    }
+
+
 # ── textures ──────────────────────────────────────────────────────────
 
 
@@ -580,15 +674,20 @@ def _compose_sidecar(
         "hit_locations": {"Hull": hull_hit_location},
     }
 
-    # Gun model bones for the mount rule, read once per stem from the
-    # exported gun GLBs. A stem whose GLB is missing maps to False.
-    bones: dict[str, list[float] | None | bool] = {}
+    # Gun model bones for the mount rule and the rig nodes, read once per
+    # stem from the exported gun GLBs. A stem whose GLB is missing maps to
+    # False.
+    gun_gltfs: dict[str, dict[str, Any] | None] = {}
+
+    def gun_gltf(stem: str) -> dict[str, Any] | None:
+        if stem not in gun_gltfs:
+            glb = shared_gun_dir(cfg, stem) / f"{stem}.glb"
+            gun_gltfs[stem] = _read_glb_json(glb) if glb.is_file() else None
+        return gun_gltfs[stem]
 
     def gun_bone(stem: str) -> list[float] | None | bool:
-        if stem not in bones:
-            glb = shared_gun_dir(cfg, stem) / f"{stem}.glb"
-            bones[stem] = _rotate_y_bone(_read_glb_json(glb)) if glb.is_file() else False
-        return bones[stem]
+        g = gun_gltf(stem)
+        return False if g is None else _rotate_y_bone(g)
 
     # turrets — ship-turret-shaped entries for every gun mount.
     artillery = entry.get("artillery") if isinstance(entry.get("artillery"), dict) else {}
@@ -671,6 +770,17 @@ def _compose_sidecar(
         hl = gun.get("HitLocationArtillery") or gun.get("HitLocationAirDefense")
         if isinstance(hl, dict):
             turret["hit_location"] = _hit_location_meta(hl)
+        # The nodes a gunner drives (training, elevation, muzzles) and
+        # where they rest with the live gun at ``transform``.
+        g = gun_gltf(stem)
+        if g is not None and transform is not None:
+            rig = _gun_rig_nodes(g)
+            turret["rig"] = _rig_entry(rig, transform["matrix"])
+            n_barrels = turret["barrel_count"]
+            if n_barrels and rig["muzzles"] and len(rig["muzzles"]) != n_barrels:
+                warn(f"{index}: {hp_name} {stem} has {len(rig['muzzles'])} muzzle node(s) for {n_barrels} barrel(s)")
+        else:
+            turret["rig"] = None
         turrets.append(turret)
 
     # ballistics — shells formatted straight from GameParams Projectile

@@ -29,6 +29,8 @@ Available entry points (also listed in ``pyproject.toml``):
   * ``wows-build-ammo-profiles``   -> :mod:`.build_ammo_profiles`
   * ``wows-rig-normalize-bones``   -> :mod:`.rig_normalize_bones`
   * ``wows-export-map``            -> :mod:`.export_map`
+  * ``wows-export-building``       -> :mod:`.export_building`
+  * ``wows-compose-building``      -> :mod:`.compose_building`
 """
 
 from __future__ import annotations
