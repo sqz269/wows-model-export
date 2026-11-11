@@ -6,7 +6,7 @@ Build / refresh the aircraft library. Argv shape::
         [--list FILE] [--all]
         [--library-root P] [--rebuild] [--no-gameparams]
         [--manifest P] [--refresh-manifest]
-        [--validate]
+        [--validate] [--stats-only]
         [common flags ...]
 
 Each MODEL_OR_KEY is an aircraft model folder name
@@ -14,7 +14,10 @@ Each MODEL_OR_KEY is an aircraft model folder name
 (``PAAB508_Enterprise_stock``, resolved to its model). ``--list`` reads more
 of them from a file (one per line, ``#`` comments allowed). With no
 selection and no ``--all`` the index is rewritten from the airframes
-already on disk. ``--validate`` only checks the existing index.
+already on disk. ``--validate`` only checks the existing index and its
+stats sidecar. ``--stats-only`` rewrites only the stats sidecar
+(``stats.json``: per-plane stats and loadouts, from GameParams) for the
+airframes of the existing index.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import traceback
 from pathlib import Path
 
 from ..compose.aircraft_library import build_aircraft_library, validate_index
+from ..compose.aircraft_stats import STATS_FILE, build_aircraft_stats, validate_stats
 from ..errors import ConfigError, StepError, ToolkitError
 from ..types import AircraftLibraryResult
 from ._args import (
@@ -83,7 +87,13 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--validate",
         action="store_true",
-        help="Only validate the existing index against its files.",
+        help="Only validate the existing index against its files, and the stats sidecar.",
+    )
+    ap.add_argument(
+        "--stats-only",
+        action="store_true",
+        help="Only rewrite stats.json (per-plane stats and loadouts from GameParams) "
+             "for the airframes of the existing index.",
     )
     add_common_args(ap)
     return ap
@@ -105,6 +115,8 @@ def _summarize(result: AircraftLibraryResult) -> str:
         f"indexed={result.aircraft_indexed}",
         f"available={result.aircraft_available}",
     ]
+    if result.stats_entries is not None:
+        bits.append(f"stats={result.stats_entries}")
     if result.warnings:
         bits.append(f"warnings={len(result.warnings)}")
     total = result.step_timings_ms.get("total")
@@ -127,7 +139,26 @@ def main(argv: list[str] | None = None) -> int:
         for p in problems:
             print(f"  problem: {p}", file=sys.stderr)
         print(f"{lib_root / 'index.json'}: {len(problems)} problem(s)", file=sys.stderr)
-        return EXIT_OK if not problems else EXIT_STEP_ERROR
+        stats_problems = validate_stats(Path(lib_root))
+        for p in stats_problems:
+            print(f"  problem: {p}", file=sys.stderr)
+        print(f"{lib_root / STATS_FILE}: {len(stats_problems)} problem(s)", file=sys.stderr)
+        return EXIT_OK if not (problems or stats_problems) else EXIT_STEP_ERROR
+
+    if args.stats_only:
+        try:
+            stats = build_aircraft_stats(
+                workspace=cfg.workspace, config=cfg, library_root=args.library_root,
+                on_event=build_printer(args),
+            )
+        except StepError as e:
+            print(f"\nerror: step {e.step!r} failed: {e.detail or e}", file=sys.stderr)
+            return EXIT_STEP_ERROR
+        print(f"{stats.stats_path}: {stats.entries} entr(ies) over {stats.airframes} airframe(s)",
+              file=sys.stderr)
+        for warn in stats.warnings:
+            print(f"  warn: {warn}", file=sys.stderr)
+        return EXIT_OK if not stats.warnings else EXIT_STEP_ERROR
 
     select = list(args.select)
     if args.list_file:

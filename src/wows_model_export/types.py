@@ -340,6 +340,23 @@ class AircraftLibraryResult:
     aircraft_available:  int
     warnings:            tuple[str, ...] = ()
     step_timings_ms:     dict[str, float] = field(default_factory=dict)
+    stats_entries:       int | None = None
+
+
+@dataclass(frozen=True)
+class AircraftStatsResult:
+    """Outcome of `compose.aircraft_stats.build_aircraft_stats`.
+
+    ``airframes`` counts the library airframes in the written
+    ``stats.json``; ``entries`` the GameParams aircraft entries (stats
+    blocks) over them.
+    """
+
+    stats_path:          Path
+    airframes:           int
+    entries:             int
+    warnings:            tuple[str, ...] = ()
+    step_timings_ms:     dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -397,6 +414,7 @@ __all__ = [
     "SnapshotResult",
     "ProjectileLibraryResult",
     "AircraftLibraryResult",
+    "AircraftStatsResult",
     "DecalLibraryResult",
     "AmmoProfilesResult",
     # Config (re-exported from .config)

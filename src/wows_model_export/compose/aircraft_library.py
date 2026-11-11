@@ -42,10 +42,17 @@ Selection: an explicit list of model folder names and/or GameParams
 aircraft keys (resolved to their model), or every aircraft model in the
 VFS. Airframes already on disk outside the selection keep their entries.
 
+With the GameParams join, the build also writes the per-plane stats
+sidecar ``stats.json`` beside the index (:mod:`.aircraft_stats`, schema
+in ``reference/schemas/AIRCRAFT_STATS.md``): HP, speeds, heights,
+squadron and hangar sizes, attack timing and the ordnance of every
+GameParams entry that flies an indexed airframe.
+
 The composer emits these canonical :class:`StepEvent` names::
 
     "discover_aircraft"  "plan_batch"  "batch_export"
     "populate_materials"  "describe_airframes"  "write_index"
+    "write_stats"
 """
 
 from __future__ import annotations
@@ -67,6 +74,7 @@ from ..errors import StepError, ToolkitError
 from ..resolve import sidecar as resolve_sidecar
 from ..toolkit._subprocess import toolkit_capabilities, toolkit_supports
 from ..types import AircraftLibraryResult, OnEvent
+from . import aircraft_stats
 from ._step_runner import StepRunner
 
 #: Index schema identifier (bump on a breaking change).
@@ -855,9 +863,16 @@ def build_aircraft_library(
             toolkit.ensure_manifest(manifest_path=manifest, refresh=refresh_manifest, config=cfg)
             records = discover_aircraft(manifest)
             by_model: dict[str, list[dict]] = {}
+            stats_entries: dict[str, dict] | None = None
             if gameparams:
                 from ..read import gameparams as read_gameparams
-                by_model = gameparams_aircraft_by_model(read_gameparams.load_full(config=cfg))
+                gp_full = read_gameparams.load_full(config=cfg)
+                by_model = gameparams_aircraft_by_model(gp_full)
+                # The stats sidecar's blocks, for every entry with a model
+                # folder; write_stats keeps those of the indexed airframes.
+                _, stats_entries, stats_problems = aircraft_stats.compute_stats(gp_full)
+                warnings.extend(f"stats: {p}" for p in stats_problems)
+                del gp_full
                 read_gameparams.unload_full()
             for aid, rows in by_model.items():
                 if aid in records:
@@ -980,6 +995,27 @@ def build_aircraft_library(
     except Exception as e:
         raise StepError(step="write_index", underlying=e, detail=str(e)) from e
 
+    # ── write_stats ───────────────────────────────────────────────────
+    # The per-plane stats sidecar beside the index (aircraft_stats). A
+    # run without the GameParams join keeps the previous file.
+    n_stats: int | None = None
+    if stats_entries is not None:
+        with runner.step("write_stats") as st:
+            want = aircraft_stats.index_airframes(lib_root)
+            entries = {k: stats_entries[k] for keys in want.values() for k in keys if k in stats_entries}
+            missing = sorted({k for keys in want.values() for k in keys} - set(entries))
+            warnings.extend(f"stats: {k} has no stats block" for k in missing)
+            from ..toolkit import build as _build
+            path = aircraft_stats.write_stats(
+                lib_root, want, entries, game_build=_build.current_build(cfg),
+            )
+            problems = aircraft_stats.validate_stats(lib_root)
+            warnings.extend(f"stats: {x}" for x in problems)
+            n_stats = len(entries)
+            st.annotate(f"wrote {path.name}: {n_stats} entr(ies); {len(problems)} problem(s)")
+    else:
+        runner.emit("write_stats", "skipped", detail="no GameParams join; stats.json kept")
+
     return AircraftLibraryResult(
         library_root=lib_root,
         aircraft_built=built,
@@ -987,6 +1023,7 @@ def build_aircraft_library(
         aircraft_available=len(records),
         warnings=tuple(warnings),
         step_timings_ms=dict(runner.step_timings_ms),
+        stats_entries=n_stats,
     )
 
 
