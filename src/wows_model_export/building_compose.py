@@ -47,7 +47,8 @@ or a floor), plus an optional ``y_offset``. The ``HP_*`` node is turned
 about +Y so that the gun, placed by the ship-mount rule
 (``building_export._mount_matrix``), rests with its muzzle along
 ``facing_deg``; the rest muzzle direction is measured from the gun GLB's
-own elevation pivot and muzzle nodes.
+own elevation pivot and muzzle nodes (a static mount, which has no
+pivot: from its muzzle nodes' forward axis).
 
 Hit geometry. A base without collision groups (map props carry none)
 gets an ``Armor`` group (``Armor_Hull``: the base's render triangles with
@@ -55,7 +56,9 @@ gets an ``Armor`` group (``Armor_Hull``: the base's render triangles with
 and a ``Hitboxes`` group (``CM_SB_Hull_0``: the base's render bounds), in
 the shapes the toolkit writes for buildings. ``armor_mm`` becomes that
 material's thickness. A base that has its own groups keeps them, and its
-thickness table comes from ``armor_from``.
+thickness table comes from ``armor_from``; a run whose base kept its own
+``Armor`` group but whose spec gives no ``armor_from`` warns, since only
+material 77 then gets a thickness.
 """
 
 from __future__ import annotations
@@ -639,8 +642,17 @@ def run_compose(
             report["buildings"][cid] = {"skipped": "hull GLB missing", "warnings": warnings[cid]}
             on_event(f"  {cid}: SKIPPED (hull GLB missing)")
             continue
-        sidecar = _compose_sidecar(cid, entries[cid], cfg, gp, warnings[cid])
         glb_extras = (_read_glb_json(hull_glb).get("extras") or {}).get("wows_composite") or {}
+        synthesized = glb_extras.get("synthesized")
+        if (isinstance(synthesized, list) and "Armor" not in synthesized
+                and not comp["base"].get("armor_from")):
+            warnings[cid].append(
+                f"base {_stem(comp['base']['model'])} keeps its own Armor group, but the spec "
+                f"gives no armor_from: only material {ARMOR_MATERIAL_ID} gets a thickness "
+                f"(armor_mm {comp['base'].get('armor_mm', 0.0)}); the base's other material ids "
+                f"get none"
+            )
+        sidecar = _compose_sidecar(cid, entries[cid], cfg, gp, warnings[cid])
         sidecar["pipeline"] = {"kind": "building", "generator": GENERATOR, "composite": True}
         sidecar["provenance"]["generator"] = GENERATOR
         sidecar["building"]["display_name"] = comp.get("name")

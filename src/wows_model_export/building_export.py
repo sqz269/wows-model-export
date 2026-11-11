@@ -49,15 +49,20 @@ times the inverse rotation of the gun model's ``Rotate_Y_BlendBone``,
 made a proper rotation (a Z-mirror bone gives ``HP x Ry(180)``). The gun
 GLB rendered at that matrix faces the way WG's engine renders it.
 ``dead_transform`` applies the same rule with the dead model's own bone
-(dead gun models carry none, so it is the raw node), and ``hp_transform``
-is the raw node. A consumer that parents a gun under the ``HP_*`` node
-uses ``inverse(hp_transform) x transform`` as the local matrix.
+(dead gun models carry no Z-mirror bone: none, or an identity bone, so
+it is the raw node), and ``hp_transform`` is the raw node. A consumer
+that parents a gun under the ``HP_*`` node uses
+``inverse(hp_transform) x transform`` as the local matrix.
 
 Gun rig. ``turrets[].rig`` names the nodes of the gun GLB a gunner drives
 (``Rotate_Y`` training, ``Rotate_X`` / ``Rotate_X1`` elevation,
 ``HP_gunFire<n>`` muzzles, ``HP_gunFireEffect``) and gives their rest
 positions and the rest muzzle direction in the building GLB frame, with
-the live gun rendered at ``transform``.
+the live gun rendered at ``transform``. The rest direction runs from the
+elevation pivot (else the training pivot) to the mean muzzle; a static
+mount (no pivot) takes the mean forward axis of its muzzle nodes (their
+-Z in the GLB frame), which on every rigged gun runs within a degree of
+pivot to muzzle.
 
 Composed buildings (``building_compose``) are written in this same layout
 from a caller's spec: an old-format base model plus gun mounts taken from
@@ -428,7 +433,9 @@ def _point(m: list[float], p: list[float]) -> list[float]:
 def _gun_rig_nodes(gltf: dict[str, Any]) -> dict[str, Any]:
     """The rig nodes of a gun GLB and their rest positions in the GLB's
     scene-root frame: ``yaw`` (name, pos) or None, ``pitch`` list,
-    ``muzzles`` ordered by barrel number, ``effect`` (name, pos) or None."""
+    ``muzzles`` ordered by barrel number, ``effect`` (name, pos) or None,
+    and ``muzzle_axes``, each muzzle node's forward axis (its -Z), in
+    ``muzzles`` order."""
     world = _world_transforms(gltf)
 
     def pos(name: str) -> list[float]:
@@ -440,20 +447,37 @@ def _gun_rig_nodes(gltf: dict[str, Any]) -> dict[str, Any]:
         suffix = name[len(RIG_MUZZLE_PREFIX):]
         if name.startswith(RIG_MUZZLE_PREFIX) and suffix.isdigit():
             muzzles.append((int(suffix), name))
+    muzzles.sort()
     return {
         "yaw": (RIG_YAW_NODE, pos(RIG_YAW_NODE)) if RIG_YAW_NODE in world else None,
         "pitch": [(n, pos(n)) for n in RIG_PITCH_NODES if n in world],
-        "muzzles": [(n, pos(n)) for _i, n in sorted(muzzles)],
+        "muzzles": [(n, pos(n)) for _i, n in muzzles],
+        "muzzle_axes": [[-world[n][8], -world[n][9], -world[n][10]] for _i, n in muzzles],
         "effect": (RIG_EFFECT_NODE, pos(RIG_EFFECT_NODE)) if RIG_EFFECT_NODE in world else None,
     }
 
 
 def _rest_muzzle_dir(rig: dict[str, Any]) -> list[float] | None:
-    """Unit vector from the elevation pivot (else the training pivot) to
-    the mean muzzle, in the gun GLB frame; None without muzzles."""
+    """Rest fire direction in the gun GLB frame (unit vector); None
+    without muzzles.
+
+    From the elevation pivot (else the training pivot) to the mean
+    muzzle. A static mount has no pivot, and the GLB origin under its
+    muzzles would read the barrels far too steep (52-66 degrees against
+    WG's 30 on JGA173 / AGA013 / AGA055), so it takes the mean forward
+    axis of its muzzle nodes (their -Z), which on every rigged gun runs
+    within a degree of pivot to muzzle.
+    """
     if not rig["muzzles"]:
         return None
-    pivot = rig["pitch"][0][1] if rig["pitch"] else (rig["yaw"][1] if rig["yaw"] else [0.0, 0.0, 0.0])
+    pivot = rig["pitch"][0][1] if rig["pitch"] else (rig["yaw"][1] if rig["yaw"] else None)
+    if pivot is None:
+        axes = rig.get("muzzle_axes") or []
+        d = [sum(a[k] for a in axes) for k in range(3)]
+        length = sum(v * v for v in d) ** 0.5
+        if length > 1e-9:
+            return [v / length for v in d]
+        pivot = [0.0, 0.0, 0.0]
     n = len(rig["muzzles"])
     mean = [sum(p[k] for _nm, p in rig["muzzles"]) / n for k in range(3)]
     d = [mean[k] - pivot[k] for k in range(3)]
