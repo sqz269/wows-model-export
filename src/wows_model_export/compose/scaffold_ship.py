@@ -2163,7 +2163,96 @@ def _absorb_gameparams_passes(
     except Exception as e:
         _warn(warnings, f"gameparams air ops failed ({e})")
 
+    # Pass 10: air defence (the AA auras: range band, ring, continuous
+    # damage, hit chance, flak) of the rendered hull and of every hull.
+    # Every ship gets a block; one without AA has no auras. Best-effort.
+    try:
+        doc = air_defense_pass(doc, ship_dict)
+    except Exception as e:
+        _warn(warnings, f"gameparams air defense failed ({e})")
+
     return doc
+
+
+def _exact_mount_hull(doc: dict[str, Any], preferred: str | None) -> str | None:
+    """The hull of ``doc.hulls`` whose mounts equal the top-level mounts.
+
+    Mounts compare as ``(section, hp_name, asset_id)`` sets over the weapon
+    sections (the top-level ``accessories`` also carry decoratives merged in
+    after the per-hull snapshots), so unlike :func:`_detect_rendered_hull`'s
+    best overlap a hull whose mounts are a superset of the rendered ones does
+    not match. Ties resolve to ``preferred`` when it is one of them, else to
+    the first name in sort order; ``None`` when no hull matches.
+    """
+    hulls = doc.get("hulls")
+    if not isinstance(hulls, dict) or not hulls:
+        return None
+
+    def keyset(container: dict[str, Any]) -> set[tuple[str, str, str]]:
+        return {
+            (sec, e.get("hp_name"), e.get("asset_id"))
+            for sec in ("turrets", "secondaries", "antiair", "torpedoes")
+            for e in (container.get(sec) or [])
+            if isinstance(e, dict)
+        }
+
+    target = keyset(doc)
+    exact = [name for name, he in hulls.items() if isinstance(he, dict) and keyset(he) == target]
+    if not exact:
+        return None
+    if preferred in exact:
+        return preferred
+    return sorted(exact)[0]
+
+
+def rendered_hull_name(doc: dict[str, Any]) -> str | None:
+    """The hull the export renders.
+
+    ``variants.rendered_hull`` (the hull whose mounts the export's placements
+    carry). A sidecar written before that field existed falls back to the hull
+    in its ``hulls`` block whose mounts equal the top-level ones exactly (the
+    rule ``rendered_hull`` is set by, :func:`_placements_hull`), then to
+    :func:`_detect_rendered_hull`'s best overlap, then to the active hull.
+    """
+    variants = doc.get("variants") or {}
+    active = variants.get("active_hull")
+    return (
+        variants.get("rendered_hull")
+        or _exact_mount_hull(doc, active)
+        or _detect_rendered_hull(doc, active)
+        or active
+    )
+
+
+def hull_components(doc: dict[str, Any], ship_dict: dict[str, Any], hull: str | None) -> dict[str, Any]:
+    """Resolve the GameParams components of ``hull`` as the mount pass does.
+
+    The active hull resolves ``upgraded`` and the stock hull ``stock`` (every
+    module ucType at its chain end or root), any other hull by its name (the
+    ``_Hull``-derived slots follow it, the other modules stay upgraded).
+    """
+    variants = doc.get("variants") or {}
+    choice = "upgraded"
+    if hull and hull != variants.get("active_hull"):
+        choice = "stock" if hull == variants.get("stock_hull") else hull
+    return _gp_autofill.resolve_components(ship_dict, hull_choice=choice)
+
+
+def air_defense_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str, Any]:
+    """Write ``doc.air_defense`` from the ship's GameParams entry.
+
+    The top level holds the auras of the hull the export renders
+    (:func:`rendered_hull_name`), ``by_hull`` every hull's; each hull resolves
+    through :func:`hull_components`, so ``by_hull[<rendered hull>]`` equals the
+    top level.
+    """
+    from ..resolve import air_defense as _air_defense
+    block = _air_defense.collect_air_defense_block(
+        ship_dict,
+        hull_components(doc, ship_dict, rendered_hull_name(doc)),
+        resolve_hull=lambda name: hull_components(doc, ship_dict, name),
+    )
+    return sidecar.absorb_air_defense(doc, block)
 
 
 # ---------------------------------------------------------------------------

@@ -708,7 +708,9 @@ def resolve_components(
       A dict keyed by every key in :data:`_COMPONENT_KEYS`, plus
       ``__active_hull_id__`` / ``__stock_hull_id__`` recording the picked
       ``A_Hull`` / ``B_Hull`` slot name (so callers building a ``variants``
-      summary don't have to re-walk).
+      summary don't have to re-walk), and ``__component_ids__``: the
+      GameParams key each resolved slot was read from
+      (``{"airDefense": "B_AirDefense", ...}``; unset slots are absent).
     """
     # ``hull_choice`` is normally "upgraded" / "stock" (the _Hull chain end /
     # root). It may also be an explicit hull NAME (e.g. "A_Hull") — used when
@@ -831,6 +833,7 @@ def resolve_components(
     )
 
     out: dict[str, Any] = {}
+    component_ids: dict[str, str] = {}
     active_hull_component_id: str | None = None
     stock_hull_component_id: str | None = None
     for key in _COMPONENT_KEYS:
@@ -839,6 +842,8 @@ def resolve_components(
             out[key] = None
             continue
         component_id = ids[0]
+        if isinstance(component_id, str):
+            component_ids[key] = component_id
         if key == "hull":
             active_hull_component_id = component_id
             stock_components = (
@@ -860,6 +865,7 @@ def resolve_components(
 
     out["__active_hull_id__"] = active_hull_component_id
     out["__stock_hull_id__"] = stock_hull_component_id
+    out["__component_ids__"] = component_ids
     return out
 
 
@@ -1330,9 +1336,15 @@ def _dispersion_fields(group: dict[str, Any], mount: dict[str, Any]) -> dict[str
 
 
 def _fill_aa_fields(mount: dict[str, Any], out: dict[str, Any]) -> None:
-    """AA mount fields. ``aa_range_km`` and ``aa_dps`` are the aura
-    coefficients — consumers scale them to per-frame DPS at ``AAMount``
-    instantiation. Yaw / elev arcs are also exposed where present."""
+    """AA mount fields: caliber, barrels, yaw / elev arcs where present.
+
+    ``aa_range_km`` and ``aa_dps`` are deprecated and kept only for readers
+    that declare them. They copy the mount's legacy ``antiAirAuraDistance``
+    (BW units, so 67 → 0.067 stands for the 2.0 km band) / 1000 and
+    ``antiAirAuraStrength`` (a coefficient of the AA model before the
+    rework), which the client no longer reads. The ship's AA range bands,
+    damage, hit chance and flak are the sidecar's ``air_defense`` block
+    (:mod:`wows_model_export.resolve.air_defense`)."""
     barrel_d = _safe_float(mount.get("barrelDiameter"))
     if barrel_d is not None and barrel_d > 0:
         out["caliber_mm"] = round(barrel_d * 1000.0, 2)

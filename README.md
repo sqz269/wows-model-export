@@ -156,6 +156,7 @@ also available if you'd rather script extractions.
 | `wows-ingest-ship <vehicle>` | Extract one ship from the game install. |
 | `wows-build-accessory-library` | Rebuild the fleet-wide accessory index. |
 | `wows-build-aircraft-library [MODEL_OR_KEY ...]` | Export airframes (aircraft model folders, or GameParams aircraft keys) into `libraries/aircraft/`; `--all` for every one, `--validate` to check the index (`reference/schemas/AIRCRAFT_LIBRARY.md`). With the GameParams join it also writes the per-plane stats sidecar `stats.json`; `--stats-only` rewrites only that (`reference/schemas/AIRCRAFT_STATS.md`). |
+| `wows-refresh-sidecars (SHIP ... \| --all)` | Re-run single GameParams passes (`--pass air_defense`, the default) over ship sidecars already in the workspace, without a toolkit call or a re-scaffold; only the sections the pass owns change. `--dry-run` reports, writes nothing. |
 | `wows-snapshot` | Dump GameParams + Vehicles/Permoflages cache. |
 | `wows-find-ship-variants` | Enumerate ship variants from GameParams. |
 | `wows-dedup-textures` | Move every texture set shared by two or more export folders into `libraries/textures_shared/` and repoint sidecars + library indexes (older exports). |

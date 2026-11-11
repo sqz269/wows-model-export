@@ -511,9 +511,13 @@ def make_antiair(
 ) -> dict[str, Any]:
     """Build an entry for ``antiair[]`` (AA mount).
 
-    AA mounts add ``aa_range_km`` + ``aa_dps`` for aura math. Standard
-    gun-gameplay fields (``ammo_types``, ``reload_s``, ``dispersion``) are
-    omitted by convention — auto-AA doesn't expose them to players.
+    ``aa_range_km`` / ``aa_dps`` are deprecated: the mount's legacy
+    ``antiAirAuraDistance`` (BW units) / 1000 and ``antiAirAuraStrength``,
+    which the client no longer reads. The ship's AA lives in the sidecar's
+    ``air_defense`` block (:mod:`wows_model_export.resolve.air_defense`).
+    Standard gun-gameplay fields (``ammo_types``, ``reload_s``,
+    ``dispersion``) are omitted by convention — auto-AA doesn't expose them
+    to players.
     """
     out = _make_placement_common(
         instance_id=instance_id, asset_id=asset_id, hp_name=hp_name,

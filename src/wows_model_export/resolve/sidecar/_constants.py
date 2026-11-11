@@ -299,7 +299,7 @@ _PLACEMENT_ORDER: tuple[str, ...] = (
     # consumer module-destruction model (turret incap/destroy + repair).
     # Absent for mounts WG doesn't make destructible.
     "hit_location",
-    # AA-specific.
+    # AA-specific (deprecated: the ship's AA is the air_defense block).
     "aa_range_km",
     "aa_dps",
     # Torpedo-specific.

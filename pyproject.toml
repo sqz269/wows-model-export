@@ -63,6 +63,7 @@ webview = [
 [project.scripts]
 wows-ingest-ship             = "wows_model_export.cli.ingest_ship:main"
 wows-scaffold-ship           = "wows_model_export.cli.scaffold_ship:main"
+wows-refresh-sidecars        = "wows_model_export.cli.refresh_sidecars:main"
 wows-build-accessory-library = "wows_model_export.cli.build_accessory_library:main"
 wows-ingest-skin-pack        = "wows_model_export.cli.ingest_skin_pack:main"
 wows-turret-autorig          = "wows_model_export.cli.turret_autorig:main"

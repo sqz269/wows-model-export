@@ -712,7 +712,7 @@ def _longest_parent_hp_match(
 #   * :func:`absorb_gameparams_variants` — top-level ``variants`` block
 #   * :func:`absorb_gameparams_mounts`   — placement gameplay fields
 #     (caliber_mm / barrel_count / yaw / elev / reload / dispersion
-#     / ammo_types / aa_range_km / aa_dps / tube_count / display_name)
+#     / ammo_types / aa_range_km / aa_dps (deprecated) / tube_count / display_name)
 #   * :func:`absorb_gameparams_armor`    — per-mount armor + barbettes
 #   * :func:`absorb_gameparams_hitbox`   — per-cube classification
 #     (``boxes`` + ``hit_locations``)
@@ -1334,6 +1334,27 @@ def absorb_air_ops(
         return doc
     new_doc = _deepcopy_jsonish(doc)
     new_doc["air_ops"] = {"source": {"generated_at": _now_iso()}, **block}
+    return new_doc
+
+
+def absorb_air_defense(
+    doc: dict[str, Any],
+    block: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Stamp the ship's anti-aircraft auras into ``doc.air_defense``.
+
+    ``block`` comes from
+    :func:`wows_model_export.resolve.air_defense.collect_air_defense_block`:
+    the rendered hull's auras (range band, ring, continuous damage, hit
+    chance, flak, guns) and every hull's in ``by_hull``. A ship with no AA
+    still gets a block, with empty ``auras``. ``None`` leaves ``doc`` as it is.
+
+    Replace-by-section, like the air-ops block: re-running drops stale entries.
+    """
+    if block is None:
+        return doc
+    new_doc = _deepcopy_jsonish(doc)
+    new_doc["air_defense"] = {"source": {"generated_at": _now_iso()}, **block}
     return new_doc
 
 
