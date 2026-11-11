@@ -60,7 +60,14 @@ emit their own sub-step events through the parent's ``on_event``):
     "wipe_library_accessories"     (skipped when ``prune_library=False``)
     "teardown_ships"
     "reextract_ships"              (clean_and_reextract only)
+    "rebuild_prop_hulls"           (clean_and_reextract only)
     "replay_skin_packs"            (clean_and_reextract only, gated on replay_skins)
+
+Prop hulls (``pipeline.kind == "prop_hull"``, :mod:`..prop_hull`) name no
+GameParams vehicle. Both flows list them as ``prop_hulls``, not as
+unrecoverable, when the sidecar records the spec entry they were built
+from (``provenance.spec_entry``); clean_and_reextract rebuilds them from it
+after the ships.
 """
 from __future__ import annotations
 
@@ -68,7 +75,7 @@ import json
 import re
 import shutil
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -271,6 +278,42 @@ def _plan_from_sidecar(sidecar_path: Path) -> ShipReplayPlan | None:
     )
 
 
+@dataclass(frozen=True)
+class PropHullReplayPlan:
+    """One prop hull (``pipeline.kind == "prop_hull"``) and the spec entry
+    it was built from (``provenance.spec_entry``), for
+    :func:`prop_hull.build_prop_hull`. ``entry`` is ``None`` when the
+    sidecar does not record it; the folder then cannot be rebuilt."""
+
+    label:  str
+    entry:  dict[str, Any] | None
+
+
+def scan_prop_hulls(workspace: Path) -> list[PropHullReplayPlan]:
+    """Every prop hull under ``<workspace>/ships/``, by label. A prop hull
+    names no GameParams vehicle, so :func:`scan_extracted_ships` has no
+    plan for it; it is rebuilt from its spec entry instead."""
+    from ..prop_hull import is_prop_hull
+
+    ships_root = workspace / "ships"
+    if not ships_root.is_dir():
+        return []
+    out: list[PropHullReplayPlan] = []
+    for entry in sorted(ships_root.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        sidecar_path = entry / f"{entry.name}.meta.json"
+        try:
+            doc = _sidecar.read(sidecar_path)
+        except Exception:
+            continue
+        if not is_prop_hull(doc):
+            continue
+        spec = (doc.get("provenance") or {}).get("spec_entry")
+        out.append(PropHullReplayPlan(entry.name, spec if isinstance(spec, dict) and spec.get("id") else None))
+    return out
+
+
 def scan_extracted_ships(workspace: Path) -> list[ShipReplayPlan]:
     """Walk ``<workspace>/ships/`` and yield a replay plan per ship.
 
@@ -278,6 +321,8 @@ def scan_extracted_ships(workspace: Path) -> list[ShipReplayPlan]:
     and the event stream is easy to follow. Ships whose sidecar is
     unparseable or whose vehicle id is unrecoverable are silently
     dropped - the result dict tracks ``ships_unrecoverable`` for those.
+    Prop hulls are not ships of a vehicle: :func:`scan_prop_hulls` lists
+    them.
     """
     ships_root = workspace / "ships"
     if not ships_root.is_dir():
@@ -388,6 +433,7 @@ def clean_workspace(
         "ship_count":            0,
         "ships_torn_down":       [],
         "ships_unrecoverable":   [],
+        "prop_hulls":            [],
         "library_existed":       False,
         "library_wiped":         False,
         "errors":                [],
@@ -397,10 +443,13 @@ def clean_workspace(
     # ── Step: scan_extracted_ships ────────────────────────────────────
     with runner.step("scan_extracted_ships", detail=str(workspace)) as ctx:
         plans = scan_extracted_ships(workspace)
+        props = scan_prop_hulls(workspace)
         # Anything in ships/ that scan dropped (parse failure / no
         # vehicle id) becomes ships_unrecoverable - we still rmtree the
         # dir, just can't tell the caller what was in it for a hypothetical
-        # re-extract.
+        # re-extract. Prop hulls with a recorded spec entry are listed
+        # apart (`prop_hulls`): `wows-build-prop-hull` or
+        # clean_and_reextract rebuilds them.
         ships_root = workspace / "ships"
         on_disk: list[str] = []
         if ships_root.is_dir():
@@ -408,13 +457,15 @@ def clean_workspace(
                 p.name for p in ships_root.iterdir()
                 if p.is_dir() and not p.name.startswith(".")
             )
-        planned = {p.label for p in plans}
+        planned = {p.label for p in plans} | {p.label for p in props if p.entry}
         report["ships_unrecoverable"] = [n for n in on_disk if n not in planned]
+        report["prop_hulls"] = [p.label for p in props if p.entry]
         report["ship_count"] = len(on_disk)
         ctx.annotate(
-            f"{len(plans)} replay-able / {len(on_disk)} on disk",
+            f"{len(plans)} replay-able, {len(report['prop_hulls'])} prop hull(s) / {len(on_disk)} on disk",
             data={
                 "planned": len(plans),
+                "prop_hulls": len(report["prop_hulls"]),
                 "on_disk": len(on_disk),
                 "unrecoverable": len(report["ships_unrecoverable"]),
             },
@@ -568,6 +619,8 @@ def clean_and_reextract(
         "plans":                    [],
         "ships_reextracted":        [],
         "ships_unresolved_model_dir": [],
+        "prop_hulls":               [],
+        "prop_hulls_rebuilt":       [],
         "skins_replayed":           [],
         "errors":                   [],
         "step_timings_ms":          {},
@@ -576,6 +629,7 @@ def clean_and_reextract(
     # ── Phase 1: scan ─────────────────────────────────────────────────
     with runner.step("scan_extracted_ships", detail=str(workspace)) as ctx:
         plans = scan_extracted_ships(workspace)
+        props = [p for p in scan_prop_hulls(workspace) if p.entry]
         ships_root = workspace / "ships"
         on_disk: list[str] = []
         if ships_root.is_dir():
@@ -583,8 +637,9 @@ def clean_and_reextract(
                 p.name for p in ships_root.iterdir()
                 if p.is_dir() and not p.name.startswith(".")
             )
-        planned = {p.label for p in plans}
+        planned = {p.label for p in plans} | {p.label for p in props}
         report["ships_unrecoverable"] = [n for n in on_disk if n not in planned]
+        report["prop_hulls"] = [p.label for p in props]
         report["ship_count"] = len(on_disk)
         report["plans"] = [
             {
@@ -747,6 +802,48 @@ def clean_and_reextract(
                 },
             )
 
+    # ── Phase 4b: rebuild prop hulls ─────────────────────────────────
+    # After the ships: a prop hull from a WoWS model runs its own toolkit
+    # export, and none depends on the accessory library.
+    if not props:
+        runner.emit(
+            "rebuild_prop_hulls", "skipped",
+            detail="no prop hulls with a recorded spec entry",
+        )
+    else:
+        from ..prop_hull import build_prop_hull
+
+        # build_prop_hull writes under its config's workspace.
+        prop_cfg = cfg if Path(cfg.workspace or "").resolve() == workspace.resolve() \
+            else replace(cfg, workspace=workspace)
+        with runner.step(
+            "rebuild_prop_hulls", detail=f"{len(props)} prop hull(s)",
+        ) as ctx:
+            rebuilt: list[str] = []
+            for prop in props:
+                try:
+                    built = build_prop_hull(prop.entry, config=prop_cfg, on_event=lambda _line: None)
+                    if built.get("problems"):
+                        report["errors"].append({
+                            "label":   prop.label,
+                            "phase":   "rebuild_prop_hull",
+                            "message": "; ".join(built["problems"]),
+                        })
+                    rebuilt.append(prop.label)
+                except CancelledError:
+                    raise
+                except Exception as e:
+                    report["errors"].append({
+                        "label":   prop.label,
+                        "phase":   "rebuild_prop_hull",
+                        "message": f"{type(e).__name__}: {e}",
+                    })
+            report["prop_hulls_rebuilt"] = rebuilt
+            ctx.annotate(
+                f"{len(rebuilt)}/{len(props)} prop hull(s) rebuilt",
+                data={"succeeded": len(rebuilt), "failed": len(props) - len(rebuilt)},
+            )
+
     # ── Phase 5: replay skin packs ───────────────────────────────────
     if not replay_skins:
         runner.emit(
@@ -810,9 +907,11 @@ def clean_and_reextract(
 
 
 __all__ = [
+    "PropHullReplayPlan",
     "SkinReplayPlan",
     "ShipReplayPlan",
     "scan_extracted_ships",
+    "scan_prop_hulls",
     "clean_workspace",
     "clean_and_reextract",
 ]

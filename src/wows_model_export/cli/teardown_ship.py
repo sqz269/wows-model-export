@@ -35,6 +35,7 @@ from ..compose.clean_workspace import (
     clean_and_reextract,
     clean_workspace,
     scan_extracted_ships,
+    scan_prop_hulls,
 )
 from ..compose.teardown_ship import teardown_ship
 from ..errors import CancelledError, ConfigError, StepError, ToolkitError
@@ -126,13 +127,18 @@ def _validate_mode(args: argparse.Namespace, ap: argparse.ArgumentParser) -> Non
         ap.error("--reextract requires --all")
 
 
-def _print_dry_run_inventory(plans: list, on_disk: list[str], *, reextract: bool) -> None:
+def _print_dry_run_inventory(
+    plans: list, on_disk: list[str], *, reextract: bool, prop_hulls: list[str] | None = None,
+) -> None:
     """Render the inventory the actual --all run would touch."""
     print("DRY RUN — pass --no-dry-run to actually clean.", file=sys.stderr)
     print(f"  ships on disk:           {len(on_disk)}", file=sys.stderr)
+    props = sorted(prop_hulls or [])
+    if props:
+        print(f"  prop hulls:              {len(props)} ({', '.join(props)})", file=sys.stderr)
     if reextract:
         print(f"  replay plans recovered:  {len(plans)}", file=sys.stderr)
-        unrecoverable = sorted(set(on_disk) - {p.label for p in plans})
+        unrecoverable = sorted(set(on_disk) - {p.label for p in plans} - set(props))
         if unrecoverable:
             print(
                 f"  unrecoverable (would clean but cannot replay):  "
@@ -194,6 +200,9 @@ def _format_all_report(report: dict[str, Any], *, with_reextract: bool) -> str:
             f"reextracted={len(report.get('ships_reextracted') or [])}"
         )
         bits.append(
+            f"prop_hulls_rebuilt={len(report.get('prop_hulls_rebuilt') or [])}"
+        )
+        bits.append(
             f"skins_replayed={len(report.get('skins_replayed') or [])}"
         )
     errors = report.get("errors") or []
@@ -252,7 +261,8 @@ def _run_all(args: argparse.Namespace, cfg, printer) -> int:
             if ships_root.is_dir()
             else []
         )
-        _print_dry_run_inventory(plans, on_disk, reextract=args.reextract)
+        props = [p.label for p in scan_prop_hulls(cfg.workspace) if p.entry]
+        _print_dry_run_inventory(plans, on_disk, reextract=args.reextract, prop_hulls=props)
         return EXIT_OK
 
     try:

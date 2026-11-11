@@ -19,7 +19,9 @@ history.
 ``stale`` compares each export's ``build_deps.json`` against the current
 build's manifest. ``reexport`` re-runs stale exports with the arguments
 they were made with (``--include-untracked`` also re-runs exports made
-before tracking existed, from their sidecar / ``export.json``).
+before tracking existed, from their sidecar / ``export.json``). With
+``--kind map`` or ``--kind prop_hull`` it never rebuilds the accessory
+library, which neither kind uses.
 """
 
 from __future__ import annotations
@@ -353,8 +355,11 @@ def _cmd_stale(args: argparse.Namespace, cfg) -> int:
 
 def _cmd_reexport(args: argparse.Namespace, cfg) -> int:
     targets = _select(args, cfg, include_untracked=args.include_untracked)
+    # Maps and prop hulls use no accessory library: a re-export of either
+    # kind never falls back to rebuilding it.
+    no_library = args.no_library or args.kind in ("map", "prop_hull")
     if not targets:
-        lib = None if (args.no_library or args.names or args.kind == "map") else bt.library_status(cfg)
+        lib = None if (no_library or args.names) else bt.library_status(cfg)
         pending = (len(lib["stale"]) + lib["untracked"]) if lib else 0
         if not pending or args.dry_run:
             _out("nothing to re-export" + (
@@ -383,7 +388,7 @@ def _cmd_reexport(args: argparse.Namespace, cfg) -> int:
         targets,
         config=cfg,
         replay_skins=not args.no_skins,
-        build_library=not args.no_library,
+        build_library=not no_library,
         jobs=args.jobs,
         on_event=build_printer(args),
         on_progress=progress,

@@ -82,7 +82,10 @@ def make_router(config: PipelineConfig) -> APIRouter:
             )
 
         plans = compose.scan_extracted_ships(workspace)
-        planned_labels = {p.label for p in plans}
+        # Prop hulls name no vehicle; the re-extract rebuilds them from
+        # their recorded spec entry, so they are not unrecoverable.
+        prop_hulls = [p.label for p in compose.scan_prop_hulls(workspace) if p.entry]
+        planned_labels = {p.label for p in plans} | set(prop_hulls)
         unrecoverable = [n for n in on_disk if n not in planned_labels]
 
         # Provenance breakdown so the UI can warn about fallback ships.
@@ -96,6 +99,7 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 "on_disk":         len(on_disk),
                 "planned":         len(plans),
                 "unrecoverable":   unrecoverable,
+                "prop_hulls":      prop_hulls,
                 "stamped":         stamped,
                 "fallback":        fallback,
                 "total_skins":     total_skins,

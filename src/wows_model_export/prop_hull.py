@@ -29,7 +29,10 @@ Sources (one per prop):
   (a relative path resolves against the workspace root). Its own glTF
   materials and textures are kept in the GLB; the sidecar lists the
   materials with no ``texture_sets`` and ``prop_hull.textures`` is
-  ``"glb"``, which tells a consumer to keep the GLB's own materials.
+  ``"glb"``, which tells a consumer to keep the GLB's own materials. The
+  outputs record the path workspace-relative when the file lies in the
+  workspace (else as the spec gave it) and ``inputs_sha1``, a SHA-1 over
+  the file and the buffers and images it names.
 
 Models whose ``.geometry`` the client does not ship (only their assets.bin
 prototypes exist) are refused with a clear error; no reader can export them
@@ -225,12 +228,19 @@ def _resolve_source(e: dict[str, Any], cfg: PipelineConfig, vfs: Callable[[], se
     if src.get("glb"):
         p = Path(src["glb"])
         if not p.is_absolute():
-            p = (cfg.workspace / p).resolve()
+            p = cfg.workspace / p
+        p = p.resolve()
         if not p.is_file():
             raise PropHullError(f"{pid}: GLB {p} not found")
         if p.suffix.lower() not in (".glb", ".gltf"):
             raise PropHullError(f"{pid}: {p} is not a .glb or .gltf")
-        return {"kind": "glb", "glb": str(p)}
+        # Recorded workspace-relative when the file lies in the workspace,
+        # else as the spec gave it, so the outputs name no machine path.
+        try:
+            recorded = p.relative_to(Path(cfg.workspace).resolve()).as_posix()
+        except ValueError:
+            recorded = str(src["glb"]).replace("\\", "/")
+        return {"kind": "glb", "glb": recorded, "_path": str(p)}
     paths = vfs()
     if src.get("prop"):
         stem = src["prop"]
@@ -778,12 +788,45 @@ def _add_hitbox_group(gltf: dict[str, Any], bin_data: bytes, lo: np.ndarray, hi:
 # ── sidecar ───────────────────────────────────────────────────────────
 
 
-def _sha1(path: Path) -> str:
+def _source_inputs(path: Path) -> list[Path]:
+    """A glTF source and the files it names: the .glb / .gltf, then its
+    external buffers, then its external images (data URIs are inside the
+    file itself)."""
+    path = Path(path)
+    if path.suffix.lower() == ".glb":
+        gltf, _ = parse_glb(path.read_bytes())
+    else:
+        gltf = json.loads(path.read_text(encoding="utf-8"))
+    out = [path]
+    for item in [*(gltf.get("buffers") or []), *(gltf.get("images") or [])]:
+        uri = item.get("uri") or ""
+        if uri and not uri.startswith("data:"):
+            out.append(path.parent / unquote(uri))
+    return out
+
+
+def _inputs_sha1(path: Path) -> str:
+    """SHA-1 over a glTF source and every file it names, in
+    :func:`_source_inputs` order (each file's name relative to the source's
+    folder, a NUL, then its bytes), so a changed buffer or texture changes
+    the hash."""
     h = hashlib.sha1()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
+    base = Path(path).parent
+    for p in _source_inputs(path):
+        try:
+            name = p.relative_to(base).as_posix()
+        except ValueError:
+            name = p.name
+        h.update(name.encode("utf-8") + b"\0")
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
     return h.hexdigest()
+
+
+def _public_source(source: dict[str, Any]) -> dict[str, Any]:
+    """The source as recorded in the outputs: no resolved local path."""
+    return {k: v for k, v in source.items() if not k.startswith("_") and k != "geometry"}
 
 
 def _now() -> str:
@@ -888,7 +931,7 @@ def _compose_sidecar(
     if source["kind"] == "model":
         src_block.update({"model": source["model"], "prop": source.get("prop")})
     else:
-        src_block.update({"glb": source["glb"], "glb_sha1": source.get("glb_sha1")})
+        src_block.update({"glb": source["glb"], "inputs_sha1": source.get("inputs_sha1")})
     doc["prop_hull"] = {
         "schema": BLOCK_SCHEMA,
         "source": src_block,
@@ -916,33 +959,55 @@ def _write_hull_glb(
 ) -> dict[str, Any]:
     pid = e["id"]
     out = models / f"{pid}_hull.glb"
-    if source["kind"] == "model":
-        raw = models / f"{pid}_source.glb"
-        on_event(f"  {pid}: exporting {source['geometry']}")
-        batch_export_model([{
-            "geometry": source["geometry"],
-            "output": raw,
-            "raw_dds_dir": models / "textures_dds",
-            "material_mappings_json": models / f"{pid}_material_mappings.json",
-        }], shared={"all_render_sets": True, "no_textures": True}, config=cfg)
-        if not raw.is_file():
-            raise PropHullError(f"{pid}: the toolkit wrote no GLB for {source['geometry']}")
-        gltf, buffers = load_gltf(raw)
-    else:
-        src = Path(source["glb"])
-        source["glb_sha1"] = _sha1(src)
-        gltf, buffers = load_gltf(src)
-    drop_materials = e.get("drop_materials", DEFAULT_DROP_MATERIALS)
-    doc, bin_data, report = _restructure(
-        gltf, buffers, drop_nodes=e.get("drop_nodes"), drop_materials=drop_materials,
-        rename=[list(p) for p in e.get("rename") or []], scale=float(e.get("scale", 1.0)),
-    )
-    flat = hull_triangles(doc, bin_data, lod0_only=False).reshape(-1, 3)
-    bin_data = _add_hitbox_group(doc, bin_data, flat.min(0), flat.max(0))
-    doc.setdefault("asset", {})["generator"] = GENERATOR
-    doc["extras"] = {"wows_prop_hull": {"id": pid, "source": {k: v for k, v in source.items() if k != "geometry"}}}
-    write_glb(doc, bin_data, out)
-    if source["kind"] == "model":
+    # A WoWS model exports into a staging folder; the textures and material
+    # mappings replace the previous ones only once the new hull GLB is
+    # written, so a failed rebuild leaves the previous export whole and no
+    # stray source GLB in models/ (publishing copies every .glb there).
+    stage = models.parent / f".{resolve_sidecar.MODELS_SUBDIR}_build"
+    try:
+        if source["kind"] == "model":
+            shutil.rmtree(stage, ignore_errors=True)
+            stage.mkdir(parents=True)
+            raw = stage / f"{pid}_source.glb"
+            on_event(f"  {pid}: exporting {source['geometry']}")
+            # The staged textures are routed through the shared store only
+            # once they are in models/: adopted here, beside the previous
+            # export's copies, they would read as a set two folders share.
+            batch_export_model([{
+                "geometry": source["geometry"],
+                "output": raw,
+                "raw_dds_dir": stage / "textures_dds",
+                "material_mappings_json": stage / f"{pid}_material_mappings.json",
+            }], shared={"all_render_sets": True, "no_textures": True}, config=cfg, adopt_shared=False)
+            if not raw.is_file():
+                raise PropHullError(f"{pid}: the toolkit wrote no GLB for {source['geometry']}")
+            gltf, buffers = load_gltf(raw)
+        else:
+            src = Path(source["_path"])
+            source["inputs_sha1"] = _inputs_sha1(src)
+            gltf, buffers = load_gltf(src)
+        drop_materials = e.get("drop_materials", DEFAULT_DROP_MATERIALS)
+        doc, bin_data, report = _restructure(
+            gltf, buffers, drop_nodes=e.get("drop_nodes"), drop_materials=drop_materials,
+            rename=[list(p) for p in e.get("rename") or []], scale=float(e.get("scale", 1.0)),
+        )
+        flat = hull_triangles(doc, bin_data, lod0_only=False).reshape(-1, 3)
+        bin_data = _add_hitbox_group(doc, bin_data, flat.min(0), flat.max(0))
+        doc.setdefault("asset", {})["generator"] = GENERATOR
+        doc["extras"] = {"wows_prop_hull": {"id": pid, "source": _public_source(source)}}
+        models.mkdir(parents=True, exist_ok=True)
+        if source["kind"] == "model":
+            # Textures of an earlier source must not linger.
+            shutil.rmtree(models / "textures_dds", ignore_errors=True)
+            if (stage / "textures_dds").is_dir():
+                shutil.move(str(stage / "textures_dds"), str(models / "textures_dds"))
+                shared_textures.adopt_dirs([models / "textures_dds"], workspace=Path(cfg.workspace))
+            mm = stage / f"{pid}_material_mappings.json"
+            if mm.is_file():
+                shutil.move(str(mm), str(models / mm.name))
+        write_glb(doc, bin_data, out)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
         (models / f"{pid}_source.glb").unlink(missing_ok=True)
     return report
 
@@ -984,12 +1049,8 @@ def build_prop_hull(
                 restructure["position_bounds_fixed"] = (
                     ((prior.get("prop_hull") or {}).get("repairs") or {}).get("position_bounds", 0))
                 if source["kind"] == "glb":
-                    source["glb_sha1"] = ((prior.get("prop_hull") or {}).get("source") or {}).get("glb_sha1")
+                    source["inputs_sha1"] = ((prior.get("prop_hull") or {}).get("source") or {}).get("inputs_sha1")
             else:
-                if source["kind"] == "model" and models.is_dir():
-                    # A fresh export: textures of an earlier source must not linger.
-                    shutil.rmtree(models / "textures_dds", ignore_errors=True)
-                models.mkdir(parents=True, exist_ok=True)
                 restructure = _write_hull_glb(e, source, models, cfg, on_event)
             doc = _compose_sidecar(e, source, glb, models, restructure, cfg, warnings.append)
             resolve_sidecar.write(doc, existing)
@@ -1006,7 +1067,7 @@ def build_prop_hull(
         f"draft {buoy['draft_max_m']:.2f} m, {buoy['displacement_t']:.1f} t, {len(doc['materials'])} material(s)"
         + (f", {len(problems)} problem(s)" if problems else ", valid")
     )
-    return {"id": pid, "sidecar": str(existing), "source": source, "dropped": restructure,
+    return {"id": pid, "sidecar": str(existing), "source": _public_source(source), "dropped": restructure,
             "warnings": warnings, "problems": problems}
 
 
@@ -1065,7 +1126,8 @@ def validate_prop_hull(folder: Path, *, config: PipelineConfig | None = None) ->
     Checks the layout, the sidecar's sections against the spec (section 17
     of METADATA_SPEC), that the hull GLB has a ``Hull`` group with render
     triangles, a ``Hitboxes`` group holding exactly the boxes the sidecar
-    names and no ``Armor`` group, that ``geometry`` and
+    names and no ``Armor`` group, that the hull lies along Z (the frame's
+    bow is -Z, so a hull longer along X is refused), that ``geometry`` and
     ``prop_hull.buoyancy`` equal a fresh measurement of the GLB, that every
     material a ``Hull`` mesh uses is listed, and that every texture path
     resolves (the shared texture store rule)."""
@@ -1137,7 +1199,14 @@ def validate_prop_hull(folder: Path, *, config: PipelineConfig | None = None) ->
         tris = hull_triangles(gltf, bin_data)
     except PropHullError as err:
         return p + [f"{pid}: {err}"]
-    geo = geometry_from_triangles(hull_triangles(gltf, bin_data, lod0_only=False))
+    every_lod = hull_triangles(gltf, bin_data, lod0_only=False).reshape(-1, 3)
+    span = every_lod.max(0) - every_lod.min(0)
+    if span[0] > span[2]:
+        # The frame puts the bow at -Z: a prop modelled along X would pass
+        # every other check with its beam as the waterline length.
+        p.append(f"{pid}: the hull is longer along X ({span[0]:.2f} m) than along Z ({span[2]:.2f} m); "
+                 "the bow must point to -Z (turn the source model)")
+    geo = geometry_from_triangles(every_lod)
     for k in ("length_m", "beam_m", "height_m"):
         a, b = (doc.get("geometry") or {}).get("bounds", {}).get(k), geo["bounds"][k]
         if not isinstance(a, (int, float)) or abs(a - b) > 0.01:

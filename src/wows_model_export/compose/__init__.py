@@ -52,11 +52,13 @@ from .accessory_library import build_accessory_library
 from .aircraft_library import build_aircraft_library
 from .ammo_profiles import build_ammo_profiles
 from .clean_workspace import (
+    PropHullReplayPlan,
     ShipReplayPlan,
     SkinReplayPlan,
     clean_and_reextract,
     clean_workspace,
     scan_extracted_ships,
+    scan_prop_hulls,
 )
 from .decal_library import build_decal_library
 from .dedup_textures import dedup_textures
@@ -99,6 +101,8 @@ __all__ = [
     "clean_workspace",
     "clean_and_reextract",
     "scan_extracted_ships",
+    "scan_prop_hulls",
+    "PropHullReplayPlan",
     "ShipReplayPlan",
     "SkinReplayPlan",
     # Fleet-wide composers
