@@ -942,6 +942,51 @@ export interface SidecarDoc {
   variants?: SidecarVariants;
   /** Per-hull-module mount snapshots, keyed by hull component name. */
   hulls?: Record<string, SidecarHull>;
+  /** Air operations (launchpad, deck spots, take-off / landing runs,
+   *  catapults). Absent on ships that launch no planes. */
+  air_ops?: SidecarAirOps;
+}
+
+/** A placement-convention transform: column-major 4×4 in hull-GLB metres;
+ *  a node's local −Z is its forward, +Y its up. */
+export interface SidecarFrame {
+  matrix: number[];
+  position: [number, number, number];
+}
+
+/** A named hull node of the deck launchpad. */
+export interface SidecarAirOpsNode {
+  name: string;
+  parent_section?: string | null;
+  transform: SidecarFrame;
+}
+
+export interface SidecarAirOpsRun {
+  start: SidecarAirOpsNode;
+  end: SidecarAirOpsNode;
+}
+
+export interface SidecarAirOpsCatapult {
+  hp_name: string;
+  instance_id?: string | null;
+  asset_id?: string | null;
+  hardpoint?: SidecarFrame | null;
+  launch_start?: SidecarFrame | null;
+  launch_end?: SidecarFrame | null;
+  pivot?: { node: string; transform: SidecarFrame } | null;
+  rest_yaw_deg?: number | null;
+  rotate_time_s?: number | null;
+  slide_m?: number | null;
+}
+
+/** `air_ops` sidecar block (METADATA_SPEC §15). */
+export interface SidecarAirOps {
+  launchpad: { type: string; deck_place_count?: number; [k: string]: unknown };
+  launch_from: 'deck' | 'catapults' | 'water';
+  deck_spots: (SidecarAirOpsNode & { index: number; used: boolean })[];
+  launch_run: SidecarAirOpsRun | null;
+  landing_run: SidecarAirOpsRun | null;
+  catapults: SidecarAirOpsCatapult[];
 }
 
 /** Per-material scheme inventory surfaced on the Camos tab. */

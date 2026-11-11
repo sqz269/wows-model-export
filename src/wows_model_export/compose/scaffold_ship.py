@@ -2139,6 +2139,29 @@ def _absorb_gameparams_passes(
     except Exception as e:
         _warn(warnings, f"gameparams death presentation failed ({e})")
 
+    # Pass 9: air operations (launchpad, deck spots, take-off and landing
+    # runs, catapults) from the rendered hull's airArmament and the export's
+    # air_ops_nodes. Ships that launch no planes, and exports made before the
+    # toolkit wrote air_ops_nodes, get no block. Best-effort.
+    try:
+        from ..resolve import air_ops as _air_ops
+        nodes = None
+        if active_placements_json is not None and Path(active_placements_json).is_file():
+            with open(active_placements_json, "rb") as f:
+                nodes = json.loads(f.read().decode("utf-8")).get("air_ops_nodes")
+        air_warnings: list[str] = []
+        block = _air_ops.collect_air_ops_block(
+            components.get("airArmament"),
+            nodes,
+            hull_component=components.get("__active_hull_id__"),
+            warnings=air_warnings,
+        )
+        doc = sidecar.absorb_air_ops(doc, block)
+        for line in air_warnings:
+            _warn(warnings, line)
+    except Exception as e:
+        _warn(warnings, f"gameparams air ops failed ({e})")
+
     return doc
 
 

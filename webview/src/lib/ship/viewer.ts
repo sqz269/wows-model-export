@@ -1147,7 +1147,11 @@ export class ShipViewer {
     // scene graph (accessory bones + hardpoints + gun-fire anchors) plus
     // the sidecar's resolved hull EP_ positions. Markers stay hidden until
     // the user enables the overlay.
-    this.nodeOverlay.rebuild(this.shipRoot, [...this.getActiveParticleAttachments()]);
+    this.nodeOverlay.rebuild(
+      this.shipRoot,
+      [...this.getActiveParticleAttachments()],
+      this.sidecar?.air_ops ?? null,
+    );
 
     // Re-push the active weather's rain wetness onto the freshly-built hull/
     // accessory materials — the WG environment is applied in the constructor,
@@ -1960,7 +1964,11 @@ export class ShipViewer {
   /** Re-capture accessory marker positions (e.g. after the user aims the
    *  turrets). Hull EP_ points are static. */
   refreshNodes(): void {
-    this.nodeOverlay.refresh(this.shipRoot, [...this.getActiveParticleAttachments()]);
+    this.nodeOverlay.refresh(
+      this.shipRoot,
+      [...this.getActiveParticleAttachments()],
+      this.sidecar?.air_ops ?? null,
+    );
   }
 
   // ── Ship particle layer ───────────────────────────────────────────────
@@ -2822,7 +2830,11 @@ export class ShipViewer {
 
     // Node overlay anchors were captured by world position from the old
     //    Object3Ds — re-derive against the live graph.
-    this.nodeOverlay.refresh(this.shipRoot, [...this.getActiveParticleAttachments()]);
+    this.nodeOverlay.refresh(
+      this.shipRoot,
+      [...this.getActiveParticleAttachments()],
+      this.sidecar?.air_ops ?? null,
+    );
   }
 
   setAoEnabled(on: boolean): void {

@@ -30,11 +30,12 @@
 
 import * as THREE from 'three';
 
-import type { ParticleAttachment } from '$lib/types/sidecar';
+import type { ParticleAttachment, SidecarAirOps, SidecarFrame } from '$lib/types/sidecar';
 
 /** Marker category. Drives colour + the per-category visibility toggles. */
 export type NodeCategory =
   | 'hullEffect' // EP_* hull VFX points (sidecar-sourced)
+  | 'airOps' // deck spots, take-off / landing runs, catapult runs (sidecar air_ops)
   | 'gunfire' // HP_gunFire* / HP_gunFireEffect — muzzle VFX anchors
   | 'hardpoint' // other HP_* attach points
   | 'rig' // Rotate_Y / Rotate_X / Rotate_X1 / Roll_Back* rig bones
@@ -45,6 +46,7 @@ export type NodeCategory =
 /** Ordered for the legend / control panel. */
 export const NODE_CATEGORIES: NodeCategory[] = [
   'hullEffect',
+  'airOps',
   'gunfire',
   'hardpoint',
   'rig',
@@ -55,6 +57,7 @@ export const NODE_CATEGORIES: NodeCategory[] = [
 
 export const NODE_CATEGORY_LABEL: Record<NodeCategory, string> = {
   hullEffect: 'Hull VFX (EP_)',
+  airOps: 'Air ops (deck, catapults)',
   gunfire: 'Gun-fire VFX',
   hardpoint: 'Hardpoints',
   rig: 'Rig bones',
@@ -66,6 +69,7 @@ export const NODE_CATEGORY_LABEL: Record<NodeCategory, string> = {
 /** Marker colour per category (hex). */
 export const NODE_CATEGORY_COLOR: Record<NodeCategory, number> = {
   hullEffect: 0xff3399, // magenta — the headline hull VFX points
+  airOps: 0x7dff5a, // lime — deck spots, launch / landing runs, catapults
   gunfire: 0xff5a1f, // orange — muzzle blast / effect
   hardpoint: 0x33ccff, // cyan — attach hardpoints
   rig: 0xffd23f, // amber — yaw/pitch/recoil bones
@@ -77,6 +81,7 @@ export const NODE_CATEGORY_COLOR: Record<NodeCategory, number> = {
 /** Categories shown when the overlay is first switched on. */
 export const NODE_CATEGORY_DEFAULT_ON: Record<NodeCategory, boolean> = {
   hullEffect: true,
+  airOps: true,
   gunfire: true,
   hardpoint: true,
   rig: true,
@@ -127,6 +132,8 @@ export class NodeOverlay {
   readonly group: THREE.Group;
 
   private categoryPoints = new Map<NodeCategory, THREE.Points>();
+  /** Air-ops frame glyphs + run lines (shown with the `airOps` category). */
+  private airFrameLines: THREE.LineSegments | null = null;
   private entries: NodeEntry[] = [];
   /** Per-category flat world-position arrays, index-aligned with the
    *  per-category entry list — for screen-space picking. */
@@ -159,7 +166,11 @@ export class NodeOverlay {
    * accessory nodes; `effects` supplies hull EP_ points (those carrying a
    * resolved `position`). Safe to call repeatedly — clears prior markers.
    */
-  rebuild(shipRoot: THREE.Object3D, effects: ParticleAttachment[] | null): void {
+  rebuild(
+    shipRoot: THREE.Object3D,
+    effects: ParticleAttachment[] | null,
+    airOps: SidecarAirOps | null = null,
+  ): void {
     this.clearMarkers();
     shipRoot.updateMatrixWorld(true);
 
@@ -205,6 +216,48 @@ export class NodeOverlay {
       }
     }
 
+    // 3. Air operations from the sidecar (hull-GLB space, like the EP_
+    //    points): deck spots, the take-off / landing run ends and each
+    //    catapult's launch run, plus a frame glyph per node (forward = the
+    //    node's local −Z, up = +Y) and a line along each run.
+    const airFrames: { frame: SidecarFrame; run?: SidecarFrame }[] = [];
+    if (airOps) {
+      const add = (name: string, frame: SidecarFrame | null | undefined, role: string) => {
+        if (!frame?.position || frame.position.length !== 3) return;
+        const [x, y, z] = frame.position;
+        collected.push({
+          name,
+          category: 'airOps',
+          position: { x, y, z },
+          owner: 'Hull',
+          section: 'air_ops',
+          effectGroup: role,
+        });
+      };
+      for (const s of airOps.deck_spots ?? []) {
+        add(s.name, s.transform, s.used ? 'deck spot' : 'deck spot (spare)');
+        if (s.transform) airFrames.push({ frame: s.transform });
+      }
+      for (const [key, role] of [
+        ['launch_run', 'take-off run'],
+        ['landing_run', 'landing run'],
+      ] as const) {
+        const run = airOps[key];
+        if (!run) continue;
+        add(run.start.name, run.start.transform, role);
+        add(run.end.name, run.end.transform, role);
+        airFrames.push({ frame: run.start.transform, run: run.end.transform });
+        airFrames.push({ frame: run.end.transform });
+      }
+      for (const c of airOps.catapults ?? []) {
+        add(`${c.hp_name}/HP_Plane_Start`, c.launch_start, 'catapult launch run');
+        add(`${c.hp_name}/HP_Plane_End`, c.launch_end, 'catapult launch run');
+        if (c.launch_start) {
+          airFrames.push({ frame: c.launch_start, run: c.launch_end ?? undefined });
+        }
+      }
+    }
+
     collected.sort((x, y) => x.name.localeCompare(y.name));
     this.entries = collected;
 
@@ -241,15 +294,25 @@ export class NodeOverlay {
       this.group.add(pts);
       this.categoryPoints.set(cat, pts);
     }
+
+    if (airFrames.length > 0) {
+      this.airFrameLines = buildAirFrameLines(airFrames);
+      this.airFrameLines.visible = this.categoryVisible.airOps;
+      this.group.add(this.airFrameLines);
+    }
   }
 
   /** Re-read accessory world positions (e.g. after the user aims turrets).
    *  Hull EP_ points are static so they're left untouched. Cheap — just
    *  rewrites the position buffers. Requires the original Object3Ds, so it
    *  re-walks from `shipRoot`. */
-  refresh(shipRoot: THREE.Object3D, effects: ParticleAttachment[] | null): void {
+  refresh(
+    shipRoot: THREE.Object3D,
+    effects: ParticleAttachment[] | null,
+    airOps: SidecarAirOps | null = null,
+  ): void {
     if (this.entries.length === 0) return;
-    this.rebuild(shipRoot, effects);
+    this.rebuild(shipRoot, effects, airOps);
   }
 
   // ── Visibility ────────────────────────────────────────────────────────
@@ -270,6 +333,7 @@ export class NodeOverlay {
     this.categoryVisible[cat] = on;
     const pts = this.categoryPoints.get(cat);
     if (pts) pts.visible = on;
+    if (cat === 'airOps' && this.airFrameLines) this.airFrameLines.visible = on;
   }
 
   getCategoryVisible(cat: NodeCategory): boolean {
@@ -402,6 +466,12 @@ export class NodeOverlay {
       (pts.material as THREE.Material).dispose();
     }
     this.categoryPoints.clear();
+    if (this.airFrameLines) {
+      this.group.remove(this.airFrameLines);
+      this.airFrameLines.geometry.dispose();
+      (this.airFrameLines.material as THREE.Material).dispose();
+      this.airFrameLines = null;
+    }
     this.byCategory.clear();
     this.entries = [];
     this.pin(null);
@@ -424,6 +494,50 @@ export class NodeOverlay {
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────
+
+/** Line glyphs for air-ops frames: per node a 6 m forward stroke (local −Z,
+ *  lime) and a 3 m up stroke (+Y, white), and a line to the run's end node
+ *  when there is one (amber). Drawn on top of the hull like the markers. */
+function buildAirFrameLines(
+  items: { frame: SidecarFrame; run?: SidecarFrame }[],
+): THREE.LineSegments {
+  const pos: number[] = [];
+  const col: number[] = [];
+  const fwd = new THREE.Color(0x7dff5a);
+  const up = new THREE.Color(0xffffff);
+  const run = new THREE.Color(0xffc23f);
+  const seg = (a: number[], b: number[], c: THREE.Color) => {
+    pos.push(a[0], a[1], a[2], b[0], b[1], b[2]);
+    col.push(c.r, c.g, c.b, c.r, c.g, c.b);
+  };
+  const axis = (m: number[], i: number) => {
+    const v = new THREE.Vector3(m[i], m[i + 1], m[i + 2]);
+    return v.lengthSq() > 0 ? v.normalize() : v;
+  };
+  for (const { frame, run: end } of items) {
+    const m = frame.matrix;
+    const p = frame.position;
+    if (!m || m.length !== 16 || !p) continue;
+    const f = axis(m, 8).multiplyScalar(-6);
+    const u = axis(m, 4).multiplyScalar(3);
+    seg(p, [p[0] + f.x, p[1] + f.y, p[2] + f.z], fwd);
+    seg(p, [p[0] + u.x, p[1] + u.y, p[2] + u.z], up);
+    if (end?.position) seg(p, end.position, run);
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geom.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  const mat = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    depthTest: false,
+    depthWrite: false,
+    transparent: true,
+  });
+  const lines = new THREE.LineSegments(geom, mat);
+  lines.name = '__bonePoints_airOps_frames';
+  lines.renderOrder = 996;
+  return lines;
+}
 
 /** Walk up to the owning accessory (userData.asset_id /
  *  attached_asset_id) and section, for list grouping. Falls back to
