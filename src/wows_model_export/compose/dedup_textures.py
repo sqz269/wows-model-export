@@ -1,11 +1,12 @@
 """Reclaim disk by hardlinking byte-identical duplicate textures.
 
-Superseded for ``ship_atlas_detail.dds``: new exports keep one copy of it
-in the content-addressed store ``libraries/textures_shared/<sha1-8>/``
-and sidecars name that copy (:mod:`wows_model_export.shared_textures`);
-``wows-dedup-textures`` without ``--hardlink`` converts older exports
-(:mod:`.shared_texture_migration`). This module remains for other
-byte-identical textures that still sit at per-folder paths.
+Superseded by the shared texture store: new exports keep one copy of
+every texture set that two or more export folders hold byte-for-byte in
+``libraries/textures_shared/<key-8>/`` and sidecars name that copy
+(:mod:`wows_model_export.shared_textures`); ``wows-dedup-textures``
+without ``--hardlink`` converts older exports
+(:mod:`.shared_texture_migration`). This module remains for files outside
+the store's scope (e.g. map exports) that still sit at per-folder paths.
 
 The toolkit's raw-DDS dumper dedups only by filename WITHIN one export
 session, and each accessory gets its own session, so an engine-global

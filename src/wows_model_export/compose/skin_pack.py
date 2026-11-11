@@ -1008,7 +1008,11 @@ def _apply_plan(
 
     Engine-global textures (``shared_textures.SHARED_TEXTURE_NAMES``) are
     never copied into the skin directory: with a ``workspace`` they go to
-    the shared store and the sidecar names the store path.
+    the shared store and the sidecar names the store path. After the
+    sidecar is written, the skin directories' texture sets that another
+    export folder or the store already holds byte-for-byte are routed
+    through the store too (:func:`shared_textures.adopt_dirs`, which
+    repoints the sidecar paths it wrote).
     """
     skin_dir = ship_dir / read_sidecar.MODELS_SUBDIR / "skins" / plan.skin_id
     skin_dir.mkdir(parents=True, exist_ok=True)
@@ -1155,6 +1159,14 @@ def _apply_plan(
     # Write back via the compose layer's atomic writer.
     from . import sidecar as compose_sidecar
     compose_sidecar.write(sc, sidecar_path)
+
+    # Skin textures that repeat the ship's own maps (or another export's)
+    # live once in the shared texture store.
+    if workspace is not None:
+        adopt = [skin_dir]
+        if accessories_subdir.is_dir():
+            adopt += sorted(d for d in accessories_subdir.iterdir() if d.is_dir())
+        shared_textures.adopt_dirs(adopt, workspace=Path(workspace))
 
     return {
         "skin_dir":             str(skin_dir),

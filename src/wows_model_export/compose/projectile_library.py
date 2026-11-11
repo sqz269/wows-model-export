@@ -54,6 +54,7 @@ from ..config import PipelineConfig
 from ..errors import StepError, ToolkitError
 from ..resolve import sidecar as resolve_sidecar
 from ..resolve import synth_emission
+from .. import shared_textures
 from ..types import OnEvent, ProjectileLibraryResult
 from ._step_runner import StepRunner
 
@@ -402,10 +403,9 @@ def _stems_in_dir(dds_dir: Path) -> set[str]:
     if not dds_dir.is_dir():
         return set()
     stems: set[str] = set()
-    for f in dds_dir.iterdir():
-        if not f.is_file():
-            continue
-        m = _CHANNEL_SUFFIX_RE.match(f.name)
+    # Names moved to the shared texture store (redirect records) count.
+    for name in shared_textures.dir_names(dds_dir):
+        m = _CHANNEL_SUFFIX_RE.match(name)
         if m:
             stems.add(m.group("stem"))
     return stems
@@ -466,11 +466,15 @@ def build_projectiles_batch(
         "all_render_sets": True,
     }
     try:
+        # Shared-texture routing waits for the diffuse recovery and the
+        # emissive synthesis, which still write into these folders
+        # (build_projectile_library adopts them afterwards).
         toolkit.batch_export_model(
             items,
             shared=shared,
             keep_going=True,
             config=config,
+            adopt_shared=False,
         )
     except ToolkitError as e:
         return (
@@ -536,7 +540,7 @@ def recover_missing_diffuses(
         out_dir = output_dir_for(library_root, rec.key)
         dds_dir = out_dir / "textures_dds"
         existing = (
-            {f.name for f in dds_dir.iterdir() if f.is_file()}
+            set(shared_textures.dir_names(dds_dir))
             if dds_dir.is_dir() else set()
         )
         # If the asset already has any `_a.dd?`, treat it as covered.
@@ -575,7 +579,7 @@ def recover_missing_diffuses(
                 continue
             dst = asset_dir / src.name
             asset_dir.mkdir(parents=True, exist_ok=True)
-            if not dst.exists():
+            if shared_textures.dir_file(asset_dir, src.name) is None:
                 shutil.copy2(src, dst)
                 copied += 1
         return copied
@@ -1003,6 +1007,18 @@ def build_projectile_library(
             stat = glb_path.stat()
             rec.glb_bytes = stat.st_size
             rec.built_at = int(stat.st_mtime)
+
+    # ── Shared texture store ──────────────────────────────────────────
+    # Every writer of the raw-DDS folders has run (export, diffuse
+    # recovery, emissive synthesis): route their shared texture sets
+    # through the store before the manifests are read back from disk.
+    if mode in ("dds", "both"):
+        adopt_dirs = [
+            output_dir_for(lib_root, rec.key) / "textures_dds"
+            for rec in records.values() if rec.glb_rel_path is not None
+        ]
+        if adopt_dirs and cfg.workspace is not None:
+            shared_textures.adopt_dirs(adopt_dirs, workspace=Path(cfg.workspace))
 
     # ── Step: populate_materials ──────────────────────────────────────
     try:

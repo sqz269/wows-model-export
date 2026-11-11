@@ -116,19 +116,23 @@ toolchain required to use it.
     │   ├── index.json             ← fleet-wide accessory index
     │   └── <asset_id>/            ← GLB + DDS per shared accessory
     └── textures_shared/
-        └── <sha1-8>/<file>        ← one copy of each texture shared
-                                     byte-for-byte across folders
-                                     (the ship detail atlas)
+        └── <key-8>/<file>         ← one copy of each texture set shared
+                                     byte-for-byte across export folders
+                                     (detail atlas, shared turret / skin /
+                                     camo maps, ...)
 ```
 
 Texture paths in the sidecar and the library indexes are relative to the
 model directory that owns them (`models/` for a ship, the asset directory
 for a library entry), except paths that start with `libraries/`, which are
-relative to the workspace root. The ship detail atlas is one of those: the
-toolkit dumps it into every raw-DDS folder, and the pipeline moves it into
-`libraries/textures_shared/` right after each export, leaving a
-`shared_textures.json` redirect behind. `wows-dedup-textures` converts a
-workspace exported before this layout.
+relative to the workspace root. The shared texture store is one of
+those: every texture set (the split-mip files of one texture) that two or
+more export folders would hold byte-for-byte lives once in
+`libraries/textures_shared/`, for any slot. Each export moves its shared
+sets there right after writing them, leaving a `shared_textures.json`
+redirect behind, and repoints the documents of the other folders that
+held them. `wows-dedup-textures` converts a workspace exported before this
+layout.
 
 Re-build the accessory library (`Build → Accessory library index` on
 the Settings page) after extracting new ships so they surface in the
@@ -146,7 +150,7 @@ also available if you'd rather script extractions.
 | `wows-build-accessory-library` | Rebuild the fleet-wide accessory index. |
 | `wows-snapshot` | Dump GameParams + Vehicles/Permoflages cache. |
 | `wows-find-ship-variants` | Enumerate ship variants from GameParams. |
-| `wows-dedup-textures` | Move per-folder copies of shared textures into `libraries/textures_shared/` and repoint sidecars (older exports). |
+| `wows-dedup-textures` | Move every texture set shared by two or more export folders into `libraries/textures_shared/` and repoint sidecars + library indexes (older exports). |
 
 Each accepts `--help` for the full argument list. Run `wows-` then Tab
 in a modern shell to discover the rest.

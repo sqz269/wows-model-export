@@ -43,6 +43,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from .. import shared_textures
 from ..config import PipelineConfig
 
 #: Default ``emissivePower`` when an ``*_emissive.mfm`` doesn't carry one.
@@ -182,6 +183,24 @@ def synth_emissive_dds(
     return out_path
 
 
+def _has(textures_dds_dir: Path, name: str) -> bool:
+    """Whether a raw-DDS folder holds ``name``, locally or as a redirect to
+    the workspace's shared texture store (a set moved there by
+    :func:`wows_model_export.shared_textures.adopt_dirs`)."""
+    return shared_textures.dir_file(textures_dds_dir, name) is not None
+
+
+def _stems_with(textures_dds_dir: Path, suffixes: tuple[str, ...]) -> set[str]:
+    """Stems of the folder's files (local or redirected) ending in one of
+    ``suffixes`` (e.g. ``_a.dd0``), with the suffix stripped."""
+    out: set[str] = set()
+    for name in shared_textures.dir_names(textures_dds_dir):
+        for sfx in suffixes:
+            if name.endswith(sfx):
+                out.add(name[: -len(sfx)])
+    return out
+
+
 def _paired_emissive_mip_inputs(
     textures_dds_dir: Path,
     diffuse_stem: str,
@@ -192,9 +211,10 @@ def _paired_emissive_mip_inputs(
     suffixes: list[str] = []
 
     for suffix in _WG_DDS_MIP_SUFFIXES:
-        diffuse_path = textures_dds_dir / f"{diffuse_stem}_a{suffix}"
-        mg_path = textures_dds_dir / f"{mg_stem}_mg{suffix}"
-        if diffuse_path.is_file() and mg_path.is_file():
+        # Inputs may live in the shared texture store (redirected names).
+        diffuse_path = shared_textures.dir_file(textures_dds_dir, f"{diffuse_stem}_a{suffix}")
+        mg_path = shared_textures.dir_file(textures_dds_dir, f"{mg_stem}_mg{suffix}")
+        if diffuse_path is not None and mg_path is not None:
             diffuse_paths.append(diffuse_path)
             mg_paths.append(mg_path)
             suffixes.append(suffix)
@@ -369,15 +389,10 @@ def synthesize_emissive_textures(
     )
 
     # Discover stems from extracted `_a.{dd0,dds}` AND `_mg.{dd0,dds}` files.
-    stems: set[str] = set()
-    for f in textures_dds_dir.glob("*_a.dd0"):
-        stems.add(f.name[: -len("_a.dd0")])
-    for f in textures_dds_dir.glob("*_mg.dd0"):
-        stems.add(f.name[: -len("_mg.dd0")])
-    for f in textures_dds_dir.glob("*_a.dds"):
-        stems.add(f.name[: -len("_a.dds")])
-    for f in textures_dds_dir.glob("*_mg.dds"):
-        stems.add(f.name[: -len("_mg.dds")])
+    # (Names redirected to the shared texture store count as present.)
+    stems: set[str] = _stems_with(
+        textures_dds_dir, ("_a.dd0", "_mg.dd0", "_a.dds", "_mg.dds"),
+    )
     if not stems and not path_b_targets:
         return []
 
@@ -414,21 +429,21 @@ def synthesize_emissive_textures(
     for mfm in textures_dds_dir.glob("*_emissive.mfm"):
         stem = mfm.name[: -len("_emissive.mfm")]
         mg_stem = mg_fallback.get(stem, stem)
-        if not (textures_dds_dir / f"{stem}_a.dd0").is_file() \
-                and not (textures_dds_dir / f"{stem}_a.dds").is_file():
+        if not _has(textures_dds_dir, f"{stem}_a.dd0") \
+                and not _has(textures_dds_dir, f"{stem}_a.dds"):
             fill_patterns.append(f"**/{stem}_a.dd?")
             fill_patterns.append(f"**/{stem}_a.dds")
-        if not (textures_dds_dir / f"{mg_stem}_mg.dd0").is_file() \
-                and not (textures_dds_dir / f"{mg_stem}_mg.dds").is_file():
+        if not _has(textures_dds_dir, f"{mg_stem}_mg.dd0") \
+                and not _has(textures_dds_dir, f"{mg_stem}_mg.dds"):
             fill_patterns.append(f"**/{mg_stem}_mg.dd?")
             fill_patterns.append(f"**/{mg_stem}_mg.dds")
     for diffuse_stem, mg_stem, _ in path_b_targets:
-        if not (textures_dds_dir / f"{diffuse_stem}_a.dd0").is_file() \
-                and not (textures_dds_dir / f"{diffuse_stem}_a.dds").is_file():
+        if not _has(textures_dds_dir, f"{diffuse_stem}_a.dd0") \
+                and not _has(textures_dds_dir, f"{diffuse_stem}_a.dds"):
             fill_patterns.append(f"**/{diffuse_stem}_a.dd?")
             fill_patterns.append(f"**/{diffuse_stem}_a.dds")
-        if not (textures_dds_dir / f"{mg_stem}_mg.dd0").is_file() \
-                and not (textures_dds_dir / f"{mg_stem}_mg.dds").is_file():
+        if not _has(textures_dds_dir, f"{mg_stem}_mg.dd0") \
+                and not _has(textures_dds_dir, f"{mg_stem}_mg.dds"):
             fill_patterns.append(f"**/{mg_stem}_mg.dd?")
             fill_patterns.append(f"**/{mg_stem}_mg.dds")
     if fill_patterns:
@@ -553,18 +568,10 @@ def synthesize_emissive_textures_batch(
     for d in textures_dds_dirs:
         if not d.is_dir():
             continue
-        for f in d.glob("*_a.dd0"):
-            stem = f.name[: -len("_a.dd0")]
-            stem_to_dir.setdefault(stem, d)
-        for f in d.glob("*_mg.dd0"):
-            stem = f.name[: -len("_mg.dd0")]
-            stem_to_dir.setdefault(stem, d)
-        for f in d.glob("*_a.dds"):
-            stem = f.name[: -len("_a.dds")]
-            stem_to_dir.setdefault(stem, d)
-        for f in d.glob("*_mg.dds"):
-            stem = f.name[: -len("_mg.dds")]
-            stem_to_dir.setdefault(stem, d)
+        # (Names redirected to the shared texture store count as present.)
+        for sfx in ("_a.dd0", "_mg.dd0", "_a.dds", "_mg.dds"):
+            for stem in sorted(_stems_with(d, (sfx,))):
+                stem_to_dir.setdefault(stem, d)
         # Path B discovery: each accessory carries
         # `<asset_id>_material_mappings.json` one level above the
         # textures_dds dir. The asset_id is the parent dir's name.
@@ -628,12 +635,12 @@ def synthesize_emissive_textures_batch(
             target_mfm = owner / mfm.name
             if not target_mfm.is_file():
                 shutil.copy2(mfm, target_mfm)
-            if not (owner / f"{stem}_a.dd0").is_file() \
-                    and not (owner / f"{stem}_a.dds").is_file():
+            if not _has(owner, f"{stem}_a.dd0") \
+                    and not _has(owner, f"{stem}_a.dds"):
                 fill_patterns.append(f"**/{stem}_a.dd?")
                 fill_patterns.append(f"**/{stem}_a.dds")
-            if not (owner / f"{stem}_mg.dd0").is_file() \
-                    and not (owner / f"{stem}_mg.dds").is_file():
+            if not _has(owner, f"{stem}_mg.dd0") \
+                    and not _has(owner, f"{stem}_mg.dds"):
                 fill_patterns.append(f"**/{stem}_mg.dd?")
                 fill_patterns.append(f"**/{stem}_mg.dds")
 
@@ -646,12 +653,12 @@ def synthesize_emissive_textures_batch(
                 target_mfm = owner / mfm_basename
                 if src_mfm.is_file() and not target_mfm.is_file():
                     shutil.copy2(src_mfm, target_mfm)
-                if not (owner / f"{diffuse_stem}_a.dd0").is_file() \
-                        and not (owner / f"{diffuse_stem}_a.dds").is_file():
+                if not _has(owner, f"{diffuse_stem}_a.dd0") \
+                        and not _has(owner, f"{diffuse_stem}_a.dds"):
                     fill_patterns.append(f"**/{diffuse_stem}_a.dd?")
                     fill_patterns.append(f"**/{diffuse_stem}_a.dds")
-                if not (owner / f"{mg_stem}_mg.dd0").is_file() \
-                        and not (owner / f"{mg_stem}_mg.dds").is_file():
+                if not _has(owner, f"{mg_stem}_mg.dd0") \
+                        and not _has(owner, f"{mg_stem}_mg.dds"):
                     fill_patterns.append(f"**/{mg_stem}_mg.dd?")
                     fill_patterns.append(f"**/{mg_stem}_mg.dds")
 
@@ -702,7 +709,7 @@ def synthesize_emissive_textures_batch(
             if owner is None:
                 continue
             target = owner / name
-            if not target.is_file():
+            if not _has(owner, name):
                 shutil.copy2(src, target)
 
     # Phase 2: synth per-asset using the now-local files. Reuse the

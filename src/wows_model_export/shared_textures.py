@@ -1,18 +1,18 @@
 """Content-addressed store for textures shared byte-for-byte across exports.
 
-Some engine-global textures are bound by materials in every export folder.
-``ship_atlas_detail.dds`` (the 2048² detail atlas, 16.8 MB) is the main
-one: the toolkit's raw-DDS dumper writes it into every ship, accessory,
-projectile and building ``textures_dds/`` directory it touches, so a full
-workspace held well over a thousand identical copies, and every consumer
-that loaded each folder's copy loaded the same texture hundreds of times.
+The toolkit's raw-DDS dumper writes every texture a model binds into that
+model's own folder. Many textures are bound by models in several folders:
+the engine-global detail atlas ``ship_atlas_detail.dds`` (every ship,
+accessory, projectile and building), and also whole texture sets that one
+asset family shares (a turret's maps copied into its alive / dead / fired /
+variant model folders, a camo pattern in every ship, a skin that repeats
+its ship's hull maps, ``default_ao.dds`` in a thousand accessories). The
+pipeline keeps ONE copy of each such set instead::
 
-The pipeline keeps ONE copy per (file name, content) instead::
-
-    <workspace>/libraries/textures_shared/<sha1-8>/<file name>
+    <workspace>/libraries/textures_shared/<key-8>/<file name>
 
 and every sidecar / library-index texture path that would have named a
-local copy names the store copy by its workspace-relative path::
+folder copy names the store copy by its workspace-relative path::
 
     libraries/textures_shared/54b48161/ship_atlas_detail.dds
 
@@ -22,61 +22,106 @@ workspace root; every other texture path is relative to the directory of
 the model that owns it (``models/`` for a ship, the asset directory for a
 library entry).
 
+**Texture sets.** The unit the store handles is a *texture set*: every
+file of one texture in one folder, i.e. the split-mip files
+``<stem>.dds`` / ``<stem>.dd0`` / ``<stem>.dd1`` / ``<stem>.dd2`` / ...
+that one ``dds_mips`` list names. A set moves as a whole and keeps its
+file names; it is shared only when another folder (or the store) holds
+the same file names with byte-identical content for every member. The
+store folder is keyed by :func:`set_key` (first 8 hex): the SHA-1 of the
+file for a one-file set (so the phase-1 atlas entry ``54b48161`` keeps
+its path), the SHA-1 of the sorted ``name<TAB>sha1`` manifest otherwise.
+
+**Which sets move.** A set in a raw-DDS folder under one of
+:data:`SCOPE_ROOTS` moves into the store when
+
+* another in-scope folder holds a byte-identical set, or
+* the store already holds it, or
+* it is one file named in :data:`SHARED_TEXTURE_NAMES` (engine-global
+  textures; routed even with a single copy).
+
 How the producer gets there:
 
-* :func:`adopt_dir` runs after every toolkit export that dumped raw DDS
-  into a workspace directory (see :mod:`wows_model_export.toolkit.ship`).
-  It hashes each file whose name is in :data:`SHARED_TEXTURE_NAMES`,
-  makes sure the store holds that content, deletes the local copy and
-  records ``name -> store path`` in the directory's redirect file
-  :data:`REDIRECT_FILENAME`.
+* :func:`adopt_dirs` runs after every producer step that writes raw DDS
+  into a workspace folder (the toolkit wrappers in
+  :mod:`wows_model_export.toolkit.ship`, and the composers after their
+  own post-processing such as emissive synthesis). It routes the sets in
+  those folders through the store, together with every other folder's
+  copy of the same sets, rewrites the documents that named the moved
+  copies and records ``name -> store path`` in each folder's redirect
+  file :data:`REDIRECT_FILENAME` (see
+  :mod:`wows_model_export.compose.shared_texture_migration`).
 * :func:`dds_dir_entries` lists a raw-DDS directory for the sidecar and
   library resolvers. Redirected names come back with their store path, so
   every texture slot that would have pointed at the local copy points at
   the store instead, also when a sidecar is rebuilt later from disk
   without a new export.
-* :mod:`wows_model_export.compose.shared_textures` converts an existing
-  workspace (store copy, reference rewrite, removal of local copies).
+* :func:`dir_files` / :func:`dir_file` give producer code that READS a
+  raw-DDS folder (emissive synthesis, diffuse recovery) the file behind
+  each name, local or in the store.
+* ``wows-dedup-textures`` converts an existing workspace
+  (:func:`wows_model_export.compose.shared_texture_migration.migrate_shared_textures`).
 
-Only names in :data:`SHARED_TEXTURE_NAMES` are routed through the store.
-The store layout is generic: adding a name here routes that texture too.
+The redirect files and the hash cache (:data:`HASH_CACHE_REL`) are
+pipeline-internal and never published.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
 #: Workspace-relative root of the store (POSIX form, as written in
 #: sidecars). Shares its directory with the legacy hardlink canonicals of
 #: ``wows-dedup-textures --hardlink`` (flat ``<stem>.<sha256-8>.s<N><ext>``
-#: files); store entries are the ``<sha1-8>/<name>`` subdirectories.
+#: files); store entries are the ``<key-8>/<name>`` subdirectories.
 STORE_REL = "libraries/textures_shared"
 
 #: Prefix that marks a texture path as workspace-relative.
 WORKSPACE_PATH_PREFIX = "libraries/"
 
-#: File names (compared case-insensitively) routed into the store at
-#: export time. Each one is engine-global: bound unchanged by materials in
-#: many export folders.
+#: File names (compared case-insensitively) always routed into the store,
+#: even when only one folder holds a copy. Each one is engine-global:
+#: bound unchanged by materials in many export folders.
 SHARED_TEXTURE_NAMES: tuple[str, ...] = ("ship_atlas_detail.dds",)
 
-#: Redirect file written into a raw-DDS directory whose shared textures
-#: were moved to the store. Pipeline-internal: never published.
+#: Workspace-relative export trees whose raw-DDS folders the store serves
+#: (ship incl. exterior hulls and skin packs, accessory, projectile and
+#: building exports). Map exports and the camo / decal libraries are not
+#: part of it; neither is anything under ``.cache/``.
+SCOPE_ROOTS: tuple[str, ...] = (
+    "ships",
+    "libraries/accessories",
+    "libraries/projectiles",
+    "buildings",
+)
+
+#: Redirect file written into a raw-DDS directory whose textures were moved
+#: to the store. Pipeline-internal: never published.
 REDIRECT_FILENAME = "shared_textures.json"
 
 REDIRECT_SCHEMA_VERSION = 1
+
+#: Persistent SHA-1 cache of the in-scope texture files, keyed by
+#: workspace-relative path and validated by (size, mtime). Pipeline-internal.
+HASH_CACHE_REL = ".cache/shared_textures/hashes.json"
+
+HASH_CACHE_SCHEMA_VERSION = 1
 
 #: Length of the hex hash prefix that names a store subdirectory.
 HASH_PREFIX_LEN = 8
 
 _SHARED_LOWER = frozenset(n.lower() for n in SHARED_TEXTURE_NAMES)
+
+#: A texture-set member: ``<stem>.dds`` or ``<stem>.dd<N>``.
+_SET_MEMBER_RE = re.compile(r"^(?P<stem>.+)\.(?:dds|dd\d+)$", re.IGNORECASE)
 
 # Store files verified in this process: path -> (size, mtime_ns, sha1).
 _verified: dict[str, tuple[int, int, str]] = {}
@@ -96,19 +141,50 @@ class SharedTextureIncomplete(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+def _basename(name: str) -> str:
+    return name.replace("\\", "/").rsplit("/", 1)[-1]
+
+
 def is_shared_name(name: str) -> bool:
-    """Whether ``name`` (a file name or path) is routed through the store."""
-    base = name.replace("\\", "/").rsplit("/", 1)[-1]
-    return base.lower() in _SHARED_LOWER
+    """Whether ``name`` (a file name or path) is always routed through the store."""
+    return _basename(name).lower() in _SHARED_LOWER
 
 
 def canonical_name(name: str) -> str:
-    """The registered spelling of a shared texture name (store file name)."""
-    base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    """The registered spelling of an always-routed name (store file name)."""
+    base = _basename(name)
     for n in SHARED_TEXTURE_NAMES:
         if n.lower() == base.lower():
             return n
     return base
+
+
+def set_stem(name: str) -> str | None:
+    """The texture-set stem of a file name (``X_a.dd0`` -> ``X_a``), else None."""
+    m = _SET_MEMBER_RE.match(_basename(name))
+    return m.group("stem") if m else None
+
+
+def is_set_member(name: str) -> bool:
+    """Whether ``name`` is a split-mip DDS file (``.dds`` / ``.dd<N>``)."""
+    return set_stem(name) is not None
+
+
+def set_key(members: Mapping[str, str]) -> str:
+    """Store key of a texture set given ``{file name: sha1}`` of its members.
+
+    A one-file set is keyed by that file's SHA-1; a larger set by the SHA-1
+    of its manifest, the lines ``<name>\\t<sha1>\\n`` sorted by name.
+    """
+    if not members:
+        raise ValueError("empty texture set")
+    items = sorted((n, s.lower()) for n, s in members.items())
+    if len(items) == 1:
+        return items[0][1]
+    h = hashlib.sha1()
+    for name, sha in items:
+        h.update(f"{name}\t{sha}\n".encode("utf-8"))
+    return h.hexdigest()
 
 
 def is_workspace_path(path: str) -> bool:
@@ -147,6 +223,8 @@ def dds_is_complete(path: Path) -> bool:
     Checks the header and, for the 2D / cube formats whose layout is
     known, that the file holds every mip level of every face. A file of an
     unknown format (or a volume texture) passes on a valid header alone.
+    Split-mip files (``.dd0`` / ``.dd1`` / ...) carry their own DDS header
+    and are checked the same way.
     """
     try:
         with open(path, "rb") as f:
@@ -204,17 +282,21 @@ def file_sha1(path: Path, _buf: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
-def store_ref(name: str, sha1: str) -> str:
-    """Workspace-relative path of the store copy of ``name`` with ``sha1``."""
-    return f"{STORE_REL}/{sha1[:HASH_PREFIX_LEN].lower()}/{name}"
+def store_ref(name: str, key: str) -> str:
+    """Workspace-relative path of ``name`` in the store entry ``key``.
+
+    ``key`` is a set key (:func:`set_key`); for a one-file set it is the
+    file's SHA-1.
+    """
+    return f"{STORE_REL}/{key[:HASH_PREFIX_LEN].lower()}/{name}"
 
 
 def store_root(workspace: Path) -> Path:
     return Path(workspace).joinpath(*STORE_REL.split("/"))
 
 
-def store_path(workspace: Path, name: str, sha1: str) -> Path:
-    return Path(workspace).joinpath(*store_ref(name, sha1).split("/"))
+def store_path(workspace: Path, name: str, key: str) -> Path:
+    return Path(workspace).joinpath(*store_ref(name, key).split("/"))
 
 
 def resolve_ref(workspace: Path, ref: str) -> Path:
@@ -228,6 +310,16 @@ def is_inside(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def in_scope(path: Path, workspace: Path) -> bool:
+    """Whether ``path`` lies in one of the export trees the store serves
+    (:data:`SCOPE_ROOTS`) and outside the store itself."""
+    p = Path(path)
+    ws = Path(workspace)
+    if is_inside(p, store_root(ws)):
+        return False
+    return any(is_inside(p, ws.joinpath(*r.split("/"))) for r in SCOPE_ROOTS)
 
 
 # ---------------------------------------------------------------------------
@@ -258,30 +350,32 @@ def put(
     *,
     sha1: str | None = None,
     name: str | None = None,
+    key: str | None = None,
 ) -> str:
     """Make sure the store holds ``src``'s content; return its store path.
 
-    ``name`` is the file name in the store (default: ``src``'s name).
-    The store copy is written once (temp file + atomic rename, a fresh
-    file rather than a link to ``src``). A store file that already exists
-    is verified by full SHA-1; different content under the same 8-hex
-    prefix raises :class:`SharedTextureConflict`. A ``.dds`` source that
-    is cut short (:func:`dds_is_complete`) raises
-    :class:`SharedTextureIncomplete` and is not stored.
+    ``name`` is the file name in the store (default: ``src``'s name);
+    ``key`` the store entry (default: the file's SHA-1, i.e. a one-file
+    set). The store copy is written once (temp file + atomic rename, a
+    fresh file rather than a link to ``src``). A store file that already
+    exists is verified by full SHA-1; different content at the same path
+    raises :class:`SharedTextureConflict`. A DDS source that is cut short
+    (:func:`dds_is_complete`) raises :class:`SharedTextureIncomplete` and
+    is not stored.
     """
     src = Path(src)
     name = name or src.name
-    if src.suffix.lower() == ".dds" and not dds_is_complete(src):
+    if is_set_member(src.name) and not dds_is_complete(src):
         raise SharedTextureIncomplete(f"{src} is not a complete DDS file; not stored")
     sha = sha1 or file_sha1(src)
-    dst = store_path(workspace, name, sha)
+    dst = store_path(workspace, name, key or sha)
     existing = cached_sha1(dst) if dst.exists() else None
     if existing is not None:
         if existing != sha:
             raise SharedTextureConflict(
                 f"{dst} holds sha1 {existing}, not {sha} (from {src})"
             )
-        return store_ref(name, sha)
+        return store_ref(name, key or sha)
     dst.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{dst.name}.", suffix=".tmp", dir=str(dst.parent))
     os.close(fd)
@@ -304,7 +398,86 @@ def put(
             pass
     if cached_sha1(dst) != sha:
         raise SharedTextureConflict(f"{dst} does not hold sha1 {sha} after write")
-    return store_ref(name, sha)
+    return store_ref(name, key or sha)
+
+
+# ---------------------------------------------------------------------------
+# Persistent hash cache
+# ---------------------------------------------------------------------------
+
+
+class HashCache:
+    """SHA-1 of workspace files, keyed by workspace-relative path and
+    validated by (size, mtime_ns). Saved to :data:`HASH_CACHE_REL`.
+
+    Thread-safe for :meth:`sha1`; one instance per run. A lost update
+    (two processes saving at once) only costs a re-hash later.
+    """
+
+    def __init__(self, workspace: Path) -> None:
+        self.workspace = Path(workspace)
+        self.path = self.workspace.joinpath(*HASH_CACHE_REL.split("/"))
+        self._files: dict[str, list[Any]] = {}
+        self._dirty = False
+        self._lock = threading.Lock()
+        self.hits = 0
+        self.misses = 0
+        try:
+            doc = json.loads(self.path.read_text(encoding="utf-8"))
+            if doc.get("schema_version") == HASH_CACHE_SCHEMA_VERSION:
+                files = doc.get("files")
+                if isinstance(files, dict):
+                    self._files = files
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    def rel(self, path: Path) -> str:
+        r = os.path.relpath(str(path), str(self.workspace))
+        return os.path.normcase(r).replace("\\", "/")
+
+    def sha1(self, path: Path, size: int | None = None, mtime_ns: int | None = None) -> str:
+        if size is None or mtime_ns is None:
+            st = Path(path).stat()
+            size, mtime_ns = st.st_size, st.st_mtime_ns
+        k = self.rel(path)
+        with self._lock:
+            hit = self._files.get(k)
+        if hit and hit[0] == size and hit[1] == mtime_ns:
+            with self._lock:
+                self.hits += 1
+            return hit[2]
+        sha = file_sha1(Path(path))
+        with self._lock:
+            self._files[k] = [size, mtime_ns, sha]
+            self._dirty = True
+            self.misses += 1
+        return sha
+
+    def forget_missing(self, present: set[str]) -> None:
+        """Drop entries under the scanned trees whose files are gone.
+        ``present`` holds :meth:`rel` keys of every file seen by a full scan."""
+        with self._lock:
+            gone = [k for k in self._files if k not in present]
+            for k in gone:
+                del self._files[k]
+            if gone:
+                self._dirty = True
+
+    def save(self) -> None:
+        with self._lock:
+            if not self._dirty:
+                return
+            doc = {"schema_version": HASH_CACHE_SCHEMA_VERSION,
+                   "files": dict(sorted(self._files.items()))}
+            self._dirty = False
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".hashes.", suffix=".tmp", dir=str(self.path.parent))
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(doc, f, separators=(",", ":"))
+            os.replace(tmp, self.path)
+        except OSError as e:
+            print(f"[shared_textures] could not save hash cache: {e}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -331,18 +504,20 @@ def read_redirects(dds_dir: Path) -> dict[str, str]:
     return {name: rec["ref"] for name, rec in read_redirect_records(dds_dir).items()}
 
 
-def write_redirects(dds_dir: Path, records: dict[str, dict[str, Any]]) -> None:
-    """Merge ``records`` into ``dds_dir``'s redirect file (atomic write)."""
-    dds_dir = Path(dds_dir)
-    merged = read_redirect_records(dds_dir)
-    merged.update(records)
+def _write_redirect_doc(dds_dir: Path, records: dict[str, dict[str, Any]]) -> None:
+    target = Path(dds_dir) / REDIRECT_FILENAME
+    if not records:
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        return
     doc = {
         "schema_version": REDIRECT_SCHEMA_VERSION,
         "store": STORE_REL,
-        "textures": {k: merged[k] for k in sorted(merged)},
+        "textures": {k: records[k] for k in sorted(records)},
     }
     text = json.dumps(doc, indent=2) + "\n"
-    target = dds_dir / REDIRECT_FILENAME
     try:
         if target.read_text(encoding="utf-8") == text:
             return
@@ -361,92 +536,100 @@ def write_redirects(dds_dir: Path, records: dict[str, dict[str, Any]]) -> None:
         raise
 
 
+def write_redirects(dds_dir: Path, records: dict[str, dict[str, Any]]) -> None:
+    """Merge ``records`` into ``dds_dir``'s redirect file (atomic write)."""
+    merged = read_redirect_records(dds_dir)
+    merged.update(records)
+    _write_redirect_doc(Path(dds_dir), merged)
+
+
+def drop_redirects(dds_dir: Path, names: Iterable[str]) -> int:
+    """Remove the redirect records of ``names`` (a set that is local again).
+    Deletes the redirect file when nothing is left. Returns records removed."""
+    current = read_redirect_records(dds_dir)
+    lower = {n.lower() for n in names}
+    kept = {n: r for n, r in current.items() if n.lower() not in lower}
+    if len(kept) == len(current):
+        return 0
+    _write_redirect_doc(Path(dds_dir), kept)
+    return len(current) - len(kept)
+
+
 def redirect_record(ref: str, sha1: str, size: int) -> dict[str, Any]:
     return {"ref": ref, "sha1": sha1, "size": int(size)}
 
 
 # ---------------------------------------------------------------------------
-# Producer hook: move shared textures out of a fresh raw-DDS dump
+# Producer hook: route shared sets out of freshly written raw-DDS folders
 # ---------------------------------------------------------------------------
 
 
-def adopt_dir(dds_dir: Path, *, workspace: Path) -> dict[str, str]:
-    """Move every shared texture in ``dds_dir`` into the store.
+def adopt_dirs(
+    dirs: Iterable[Path | str | os.PathLike | None],
+    *,
+    workspace: Path,
+    reason: str = "export",
+) -> dict[Path, dict[str, str]]:
+    """Route the shared texture sets of freshly written raw-DDS folders
+    through the store.
 
-    For each file named in :data:`SHARED_TEXTURE_NAMES`: hash it, make sure
-    the store holds the content (:func:`put`), record ``name -> store
-    path`` in the directory's redirect file, then delete the local copy.
-    A file the store refuses as incomplete (an export interrupted while
-    writing it) stays where it is, unreferenced by any redirect; the next
-    export overwrites it. Idempotent; returns ``{name: store path}`` for
-    the files moved.
+    For each set in ``dirs`` that another in-scope folder or the store
+    also holds byte-for-byte (or that is an always-routed name), the store
+    takes one copy, every folder holding the set gets a redirect record,
+    the documents naming any of those copies are rewritten to the store
+    path and the copies are removed (see
+    :func:`wows_model_export.compose.shared_texture_migration.converge_dirs`).
+    Folders outside :data:`SCOPE_ROOTS` are left alone. Idempotent.
+
+    Never raises: a failure is reported on stderr and the folders keep
+    their copies, which still resolve through the owning-directory rule.
+    Returns ``{folder: {name: store path}}`` for the given folders' moved
+    files.
     """
-    dds_dir = Path(dds_dir)
-    if not dds_dir.is_dir():
-        return {}
-    moved: dict[str, str] = {}
-    records: dict[str, dict[str, Any]] = {}
-    for f in sorted(dds_dir.iterdir()):
-        if not f.is_file() or not is_shared_name(f.name):
-            continue
-        size = f.stat().st_size
-        sha = file_sha1(f)
-        try:
-            ref = put(workspace, f, sha1=sha, name=canonical_name(f.name))
-        except SharedTextureIncomplete as e:
-            print(f"[shared_textures] {e}; kept in place", file=sys.stderr)
-            continue
-        records[f.name] = redirect_record(ref, sha, size)
-        moved[f.name] = ref
-    if records:
-        # Redirect first: a crash between the two steps leaves a stale
-        # local copy (re-adopted next time), never a dangling reference.
-        write_redirects(dds_dir, records)
-        for name in records:
-            try:
-                (dds_dir / name).unlink()
-            except OSError as e:
-                print(
-                    f"[shared_textures] could not remove {dds_dir / name}: {e}",
-                    file=sys.stderr,
-                )
-    return moved
-
-
-def adopt_dirs(dirs: Iterable[Path | str | None], *, workspace: Path) -> dict[Path, dict[str, str]]:
-    """:func:`adopt_dir` over the given raw-DDS directories.
-
-    Directories outside ``workspace`` are left alone (their consumers
-    could not resolve a workspace-relative path). Never raises: a failure
-    is reported on stderr and that directory keeps its local copy, which
-    still resolves through the owning-directory rule.
-    """
-    out: dict[Path, dict[str, str]] = {}
-    seen: set[str] = set()
     ws = Path(workspace)
+    todo: list[Path] = []
+    seen: set[str] = set()
     for d in dirs:
         if not d:
             continue
         p = Path(d)
-        key = str(p.resolve()).lower()
+        key = os.path.normcase(os.path.abspath(str(p)))
         if key in seen:
             continue
         seen.add(key)
-        if not is_inside(p, ws):
-            continue
-        try:
-            moved = adopt_dir(p, workspace=ws)
-        except Exception as e:  # noqa: BLE001 - never fail an export over this
-            print(f"[shared_textures] adopt failed for {p}: {e}", file=sys.stderr)
-            continue
-        if moved:
-            out[p] = moved
-    return out
+        if p.is_dir() and in_scope(p, ws):
+            todo.append(p)
+    if not todo:
+        return {}
+    try:
+        from .compose.shared_texture_migration import converge_dirs
+        return converge_dirs(ws, todo, reason=reason)
+    except Exception as e:  # noqa: BLE001 - never fail an export over this
+        print(f"[shared_textures] adopt failed for {len(todo)} folder(s): {e}", file=sys.stderr)
+        return {}
+
+
+def adopt_dir(dds_dir: Path, *, workspace: Path) -> dict[str, str]:
+    """:func:`adopt_dirs` for one folder; returns ``{name: store path}``."""
+    out = adopt_dirs([dds_dir], workspace=workspace)
+    for d, moved in out.items():
+        return moved
+    return {}
 
 
 # ---------------------------------------------------------------------------
-# Resolver view of a raw-DDS directory
+# Resolver / reader view of a raw-DDS directory
 # ---------------------------------------------------------------------------
+
+
+def find_workspace(start: Path) -> Path | None:
+    """The workspace root above ``start``: the nearest ancestor that holds
+    the store directory."""
+    p = Path(start).resolve()
+    for anc in (p, *p.parents):
+        if anc.joinpath(*STORE_REL.split("/")).is_dir():
+            return anc
+    return None
 
 
 def dds_dir_entries(dds_dir: Path, *, dds_uri_prefix: str = "textures_dds/") -> list[tuple[str, str]]:
@@ -474,12 +657,71 @@ def dds_dir_entries(dds_dir: Path, *, dds_uri_prefix: str = "textures_dds/") -> 
     return [(p.name, entries[p]) for p in sorted(entries)]
 
 
+def dir_files(dds_dir: Path, *, workspace: Path | None = None) -> dict[str, Path]:
+    """``{file name: absolute path}`` for every file a raw-DDS folder holds,
+    locally or through its redirect file (the store copy).
+
+    For producer code that reads the textures of a folder (emissive
+    synthesis, diffuse recovery): a name moved to the store still counts
+    as present and its path points at the store file. A local file wins
+    over a redirect of the same name; a redirect whose store file is
+    missing is skipped. Excludes the redirect file itself.
+    """
+    d = Path(dds_dir)
+    if not d.is_dir():
+        return {}
+    out: dict[str, Path] = {}
+    local: set[str] = set()
+    for f in d.iterdir():
+        if f.is_file() and f.name != REDIRECT_FILENAME:
+            out[f.name] = f
+            local.add(f.name.lower())
+    redirects = read_redirects(d)
+    if redirects:
+        ws = Path(workspace) if workspace is not None else find_workspace(d)
+        if ws is not None:
+            for name, ref in redirects.items():
+                if name.lower() in local:
+                    continue
+                p = resolve_ref(ws, ref)
+                if p.is_file():
+                    out[name] = p
+    return out
+
+
+def dir_file(dds_dir: Path, name: str, *, workspace: Path | None = None) -> Path | None:
+    """The file behind ``name`` in a raw-DDS folder (local or store), else None."""
+    local = Path(dds_dir) / name
+    if local.is_file():
+        return local
+    rec = read_redirects(dds_dir)
+    ref = rec.get(name)
+    if ref is None:
+        low = name.lower()
+        ref = next((r for n, r in rec.items() if n.lower() == low), None)
+    if ref is None:
+        return None
+    ws = Path(workspace) if workspace is not None else find_workspace(Path(dds_dir))
+    if ws is None:
+        return None
+    p = resolve_ref(ws, ref)
+    return p if p.is_file() else None
+
+
+def dir_names(dds_dir: Path) -> list[str]:
+    """File names a raw-DDS folder holds, locally or through its redirect file."""
+    return [name for name, _uri in dds_dir_entries(Path(dds_dir))]
+
+
 __all__ = [
+    "HASH_CACHE_REL",
     "HASH_PREFIX_LEN",
     "REDIRECT_FILENAME",
+    "SCOPE_ROOTS",
     "SHARED_TEXTURE_NAMES",
     "STORE_REL",
     "WORKSPACE_PATH_PREFIX",
+    "HashCache",
     "SharedTextureConflict",
     "SharedTextureIncomplete",
     "adopt_dir",
@@ -488,8 +730,15 @@ __all__ = [
     "canonical_name",
     "dds_dir_entries",
     "dds_is_complete",
+    "dir_file",
+    "dir_files",
+    "dir_names",
+    "drop_redirects",
     "file_sha1",
+    "find_workspace",
+    "in_scope",
     "is_inside",
+    "is_set_member",
     "is_shared_name",
     "is_workspace_path",
     "put",
@@ -497,6 +746,8 @@ __all__ = [
     "read_redirects",
     "redirect_record",
     "resolve_ref",
+    "set_key",
+    "set_stem",
     "store_path",
     "store_ref",
     "store_root",

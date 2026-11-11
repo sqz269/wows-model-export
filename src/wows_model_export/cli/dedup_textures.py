@@ -1,11 +1,11 @@
 """CLI for de-duplicating textures written byte-for-byte into many folders.
 
-Default mode (store): moves every copy of the engine-global textures the
-toolkit dumps into each raw-DDS folder (``ship_atlas_detail.dds``) into
-the workspace's content-addressed store
-``libraries/textures_shared/<sha1-8>/<name>``, repoints the sidecar and
-library-index texture paths at it, and removes the per-folder copies
-whose content matches (see
+Default mode (store): routes every texture set that recurs byte-for-byte
+in two or more export folders (ship, exterior hull, skin pack, accessory,
+projectile and building raw-DDS folders) through the workspace's
+content-addressed store ``libraries/textures_shared/<key-8>/<name>``,
+repoints the sidecar and library-index texture paths at it, and removes
+the per-folder copies whose content matches (see
 :mod:`wows_model_export.compose.shared_texture_migration`). New exports
 already write this layout; the command converts older exports.
 
@@ -45,8 +45,10 @@ from ._args import (
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="wows-dedup-textures",
-        description="Move engine-global textures (" + ", ".join(SHARED_TEXTURE_NAMES)
-                    + ") into the workspace's shared texture store and repoint "
+        description="Route every texture set shared byte-for-byte by two or "
+                    "more export folders (and the always-routed "
+                    + ", ".join(SHARED_TEXTURE_NAMES)
+                    + ") through the workspace's shared texture store and repoint "
                     "sidecars at it; or, with --hardlink, hardlink byte-identical "
                     "copies in place.",
     )
@@ -67,8 +69,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--dry-run",
         action="store_true",
-        help="Report what would change without modifying any files "
-             "(store mode still writes its log under .cache/).",
+        help="Report what would change without modifying any export files "
+             "(store mode still writes its log and hash cache under .cache/).",
     )
     add_common_args(ap)
     return ap
@@ -92,8 +94,10 @@ def _summarize_hardlink(r: DedupResult) -> str:
 def _summarize_store(r: SharedTextureMigrationResult) -> str:
     lines = [
         ("DRY-RUN " if r.dry_run else "")
-        + f"copies={r.copies_found} contents={r.distinct_contents} "
-        f"store_written={r.store_files_written} store_present={r.store_files_present}",
+        + f"sets_scanned={r.sets_scanned} sets_shared={r.sets_shared} "
+        f"set_copies_moved={r.set_copies_moved} files_hashed={r.files_hashed}",
+        f"files_moved={r.copies_found} store_written={r.store_files_written} "
+        f"store_present={r.store_files_present} store_entries={r.store_entries}",
         f"redirect_files={r.redirect_files_written} "
         f"documents_rewritten={r.documents_rewritten} "
         f"references_rewritten={r.references_rewritten}",
@@ -102,8 +106,10 @@ def _summarize_store(r: SharedTextureMigrationResult) -> str:
         f"removed={r.bytes_removed / 1e9:.2f} GB (logical)  "
         f"freed={r.bytes_freed / 1e6:.1f} MB (on disk)",
     ]
-    for ref in r.store_refs:
+    for ref in r.store_refs[:10]:
         lines.append(f"store: {ref}")
+    if len(r.store_refs) > 10:
+        lines.append(f"store: ... +{len(r.store_refs) - 10} more (see the log)")
     if r.log_path is not None:
         lines.append(f"log: {r.log_path}")
     return "\n".join(lines)

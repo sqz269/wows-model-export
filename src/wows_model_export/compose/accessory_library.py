@@ -45,6 +45,7 @@ from ..errors import StepError, ToolkitError
 from ..read import sidecar as read_sidecar
 from ..resolve import sidecar as resolve_sidecar
 from ..resolve import synth_emission
+from .. import shared_textures
 from ..types import (
     AccessoryLibraryResult,
     AttachmentResolveStats,
@@ -823,24 +824,38 @@ def _build_assets_batch(
         "no_textures": mode in ("none", "dds"),
         "all_render_sets": True,
     }
+    dds_dirs: list[Path] = []
+    for entry in items:
+        textures_dds = Path(entry["output"]).parent / "textures_dds"
+        if textures_dds not in dds_dirs:
+            dds_dirs.append(textures_dds)
+
+    def _adopt_shared() -> None:
+        # Route the folders' shared texture sets through the workspace's
+        # store (after every writer of the folders has run, before the
+        # per-item manifests are read back from disk).
+        ws = (config or PipelineConfig.load()).workspace
+        if ws is not None:
+            shared_textures.adopt_dirs(dds_dirs, workspace=Path(ws))
+
     try:
+        # Shared-texture routing waits for the emissive synthesis below,
+        # which still writes into these folders.
         toolkit.batch_export_model(
             items,
             shared=shared,
             keep_going=True,
             config=config,
+            adopt_shared=False,
         )
     except ToolkitError as e:
-        # Re-raise so the composer wraps it in StepError.
+        # Keep what the failed batch finished, then re-raise so the
+        # composer wraps it in StepError.
+        _adopt_shared()
         raise e
 
     # Emissive synthesis pass.
-    synth_dirs: list[Path] = []
-    for entry in items:
-        out_dir = Path(entry["output"]).parent
-        textures_dds = out_dir / "textures_dds"
-        if textures_dds.is_dir() and textures_dds not in synth_dirs:
-            synth_dirs.append(textures_dds)
+    synth_dirs = [d for d in dds_dirs if d.is_dir()]
     if synth_dirs:
         try:
             synth_emission.synthesize_emissive_textures_batch(
@@ -850,6 +865,7 @@ def _build_assets_batch(
             )
         except Exception as e:
             warnings.append(f"batched emissive synth failed: {e}")
+    _adopt_shared()
 
     # Per-item finalisation.
     touched_recs: set[int] = set()

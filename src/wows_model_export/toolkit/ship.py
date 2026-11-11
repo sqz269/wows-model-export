@@ -17,11 +17,18 @@ with inverted triangle order, and downstream raycasters expect the
 WG/glTF convention. The flip is local to ship exports; `export_model`
 does not run it (single-asset GLBs don't carry armor / hitbox meshes).
 
-Every wrapper that passes ``--raw-dds-dir`` also moves the engine-global
-textures the toolkit dumps into each directory (``ship_atlas_detail.dds``)
-into the workspace's shared texture store afterwards, leaving a redirect
-file behind (see :mod:`wows_model_export.shared_textures`). Directories
-outside the workspace keep their local copy.
+Every wrapper that passes ``--raw-dds-dir`` also routes the texture sets
+the toolkit dumped into that directory through the workspace's shared
+texture store afterwards: each set that another export folder or the store
+already holds byte-for-byte (and the engine-global
+``ship_atlas_detail.dds``) is moved to the store and replaced by a
+redirect record, and the documents of the other folders holding it are
+repointed (see :mod:`wows_model_export.shared_textures`). Directories
+outside the workspace's export trees keep their files. A caller that still
+writes into the directory afterwards (emissive synthesis, diffuse
+recovery) passes ``adopt_shared=False`` and calls
+:func:`wows_model_export.shared_textures.adopt_dirs` itself once it is
+done.
 """
 
 from __future__ import annotations
@@ -57,6 +64,7 @@ def export_ship(
     textures_uri_prefix: str | None = None,
     raw_dds_dir: Path | str | os.PathLike | None = None,
     material_mappings_json: Path | str | os.PathLike | None = None,
+    adopt_shared: bool = True,
 ) -> ToolkitResult:
     """Export a full ship to a single GLB.
 
@@ -88,6 +96,10 @@ def export_ship(
 
     `ToolkitResult.output_paths` includes the GLB and any opt-in side
     files that were requested.
+
+    ``adopt_shared=False`` skips the shared-texture routing of
+    ``raw_dds_dir`` (for callers that write more files into it first and
+    adopt afterwards; see the module docstring).
     """
     if accessories not in ("embed", "main-only", "exclude"):
         raise ValueError(
@@ -145,7 +157,8 @@ def export_ship(
     try:
         result = run_toolkit(argv, config=cfg, expect_outputs=tuple(expected))
     finally:
-        _adopt_shared_textures([raw_dds_dir], cfg)
+        if adopt_shared:
+            _adopt_shared_textures([raw_dds_dir], cfg)
 
     # Post-export: flip winding on armor + hitbox cube meshes (see
     # module docstring for rationale). Re-pack timing into the returned
@@ -184,6 +197,7 @@ def ingest_ship_bundle(
     ammo_json: Path | str | os.PathLike | None = None,
     ammo_hull: str | None = None,
     vehicle: str | None = None,
+    adopt_shared: bool = True,
 ) -> ToolkitResult:
     """One-shot per-ship ingest: GLB + placements + skel_ext + material
     mappings + armor JSON + ammo JSON from a SINGLE ``wowsunpack`` process
@@ -279,7 +293,8 @@ def ingest_ship_bundle(
     try:
         result = run_toolkit(argv, config=cfg, expect_outputs=tuple(expected))
     finally:
-        _adopt_shared_textures([raw_dds_dir], cfg)
+        if adopt_shared:
+            _adopt_shared_textures([raw_dds_dir], cfg)
 
     # Same post-export armor/hitbox winding flip export_ship applies — the
     # combined GLB is produced by the identical toolkit code path.
@@ -335,6 +350,7 @@ def export_model(
     raw_dds_dir: Path | str | os.PathLike | None = None,
     material_mappings_json: Path | str | os.PathLike | None = None,
     skel_ext_candidates_json: Path | str | os.PathLike | None = None,
+    adopt_shared: bool = True,
 ) -> ToolkitResult:
     """Export a single accessory / sub-model to GLB.
 
@@ -397,7 +413,8 @@ def export_model(
     try:
         return run_toolkit(argv, config=cfg, expect_outputs=tuple(expected))
     finally:
-        _adopt_shared_textures([raw_dds_dir], cfg)
+        if adopt_shared:
+            _adopt_shared_textures([raw_dds_dir], cfg)
 
 
 def batch_export_model(
@@ -406,6 +423,7 @@ def batch_export_model(
     shared: dict | None = None,
     config: PipelineConfig | None = None,
     keep_going: bool = True,
+    adopt_shared: bool = True,
 ) -> ToolkitResult:
     """Export many sub-models in ONE wowsunpack invocation.
 
@@ -493,18 +511,19 @@ def batch_export_model(
             os.unlink(manifest_path)
         except OSError:
             pass
-        _adopt_shared_textures(
-            [it.get("raw_dds_dir") for it in normalized_items], cfg,
-        )
+        if adopt_shared:
+            _adopt_shared_textures(
+                [it.get("raw_dds_dir") for it in normalized_items], cfg,
+            )
 
 
 def _adopt_shared_textures(
     raw_dds_dirs: list[Path | str | os.PathLike | None],
     cfg: PipelineConfig,
 ) -> None:
-    """Move engine-global textures out of freshly dumped raw-DDS dirs into
+    """Route the shared texture sets of freshly dumped raw-DDS dirs through
     the workspace's shared store. Never raises (an export must not fail
-    over this; a directory it can't handle keeps its local copy). Runs
+    over this; a directory it can't handle keeps its local copies). Runs
     after failed toolkit runs too, so a batch keeps the items it finished;
     the store refuses a file the failed run left cut short."""
     if not any(raw_dds_dirs):

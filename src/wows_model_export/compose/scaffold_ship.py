@@ -65,6 +65,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import build_deps as _build_deps
+from .. import shared_textures as _shared_textures
 from ..config import PipelineConfig
 from ..errors import StepError
 from ..read import gameparams as _gp_read
@@ -490,6 +491,7 @@ def _export_exterior_hulls(
                     no_textures=True,
                     raw_dds_dir=textures_dds_dir,
                     config=cfg,
+                    adopt_shared=False,
                 )
                 exported += 1
             elif need_deco or need_effect_points:
@@ -531,6 +533,7 @@ def _export_exterior_hulls(
                     warnings,
                     f"exterior hull emissive synth skipped for {ext_id} ({e})",
                 )
+            _adopt_textures(textures_dds_dir, cfg)
 
             mats = sidecar.materials_from_glb(
                 glb_path,
@@ -1985,6 +1988,7 @@ def scaffold_ship(
                     no_textures=True,
                     raw_dds_dir=textures_dds_dir,
                     config=cfg,
+                    adopt_shared=False,
                 )
                 _pl_doc.setdefault("ship", {})["model_dir"] = variant_dir
                 _pl_doc["ship"]["variant_permoflage"] = exterior_id
@@ -2019,6 +2023,10 @@ def scaffold_ship(
             out["task_warnings"].append(
                 f"emissive synthesis skipped ({type(e).__name__}: {e})"
             )
+        # Every writer of textures_dds/ has run: route its shared texture
+        # sets through the workspace's store (the sidecar resolves them
+        # through the folder's redirect records).
+        _adopt_textures(textures_dds_dir, cfg)
 
     def _hull_task() -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -2040,6 +2048,7 @@ def scaffold_ship(
                 no_textures=True,
                 raw_dds_dir=textures_dds_dir,
                 config=cfg,
+                adopt_shared=False,
             )
             _variant_and_emissive(out)
         except StepError:
@@ -2170,6 +2179,7 @@ def scaffold_ship(
                 ammo_json=ballistics_json,
                 vehicle=vehicle_id,
                 config=cfg,
+                adopt_shared=False,
             )
             _variant_and_emissive(out)
         except Exception as e:
@@ -3026,15 +3036,23 @@ def _fold_variant_overlay_into_default(
 # ---------------------------------------------------------------------------
 
 
+def _adopt_textures(textures_dds_dir: Path, cfg: PipelineConfig) -> None:
+    """Route the shared texture sets of a ship's raw-DDS folder through the
+    workspace's shared texture store (never raises)."""
+    ws = getattr(cfg, "workspace", None)
+    if ws is not None:
+        _shared_textures.adopt_dirs([textures_dds_dir], workspace=Path(ws))
+
+
 def _check_camo_coverage_gap(textures_dds_dir: Path, doc: dict) -> str | None:
     """Return a warning string when camo DDS files extracted but no camo skin."""
     if not textures_dds_dir.is_dir():
         return None
+    # Names moved to the shared texture store (redirect records) count.
     camo_files = sorted(
-        f.name for f in textures_dds_dir.iterdir()
-        if (f.is_file()
-            and (f.name.endswith(".dd0") or f.name.endswith(".dds"))
-            and "_camo_" in f.name.lower())
+        name for name in _shared_textures.dir_names(textures_dds_dir)
+        if ((name.endswith(".dd0") or name.endswith(".dds"))
+            and "_camo_" in name.lower())
     )
     if not camo_files:
         return None

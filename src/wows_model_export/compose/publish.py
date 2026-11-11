@@ -39,11 +39,12 @@ What it copies (per domain):
                     workspace-relative URLs resolve against the published root.
                     Built with ``wows-build-environment-library``; absent ->
                     no-op.
-* ``shared_textures`` — the content-addressed store of textures shared
-                    byte-for-byte across folders
-                    (``libraries/textures_shared/<sha1-8>/<file>``, today
-                    the ship detail atlas) copied to
-                    ``textures_shared/<sha1-8>/<file>``. Sidecar and
+* ``shared_textures`` — the content-addressed store of texture sets
+                    shared byte-for-byte across export folders
+                    (``libraries/textures_shared/<key-8>/<file>``: the
+                    ship detail atlas and every other texture set two or
+                    more folders hold) copied to
+                    ``textures_shared/<key-8>/<file>``. Sidecar and
                     library-index texture paths that start with
                     ``libraries/`` name these files (workspace-relative;
                     the ``libraries/`` prefix maps to the target root like
