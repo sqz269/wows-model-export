@@ -558,11 +558,13 @@ def ingest_ship(
         hull
             Hull upgrade to render: a ``_Hull`` upgrade id
             (``PJUH432_Furutaka_1930``) or a hull component name
-            (``B_Hull``).  The toolkit's mount placements, and with
-            them the sidecar's top-level mounts, follow it; the hull
-            mesh stays the model of the lowest upgrade id.  ``None``
-            (default) renders the lowest upgrade id (normally stock).
-            See :func:`scaffold_ship`.
+            (``B_Hull``) of a ship found in GameParams; a ship or value
+            that cannot be resolved fails the scaffold step.  The
+            toolkit's mount placements, and with them the sidecar's
+            top-level mounts, follow it; the armor table and the hull
+            mesh stay the lowest upgrade id's.  ``None`` (default)
+            renders the lowest upgrade id (normally stock).  See
+            :func:`scaffold_ship`.
         on_event
             Optional progress callback.  Receives :class:`StepEvent`s
             at the canonical step boundaries listed in the module

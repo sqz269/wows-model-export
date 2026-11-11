@@ -1423,58 +1423,147 @@ def _enumerate_hull_names(ship_dict: dict) -> list[tuple[str, str]]:
     return out
 
 
+def _hull_component_model(ship_dict: dict, hull_name: str) -> str:
+    """Return the ``model`` path of the hull component ``hull_name`` ("" if none)."""
+    comp = ship_dict.get(hull_name)
+    model = comp.get("model") if isinstance(comp, dict) else None
+    return model if isinstance(model, str) else ""
+
+
+def _mesh_hull_name(pairs: list[tuple[str, str]]) -> str:
+    """Return the hull whose mesh the toolkit loads: the lowest upgrade id's."""
+    return min(pairs, key=lambda p: p[1])[0]
+
+
+def _find_hull_ship(name: str) -> dict:
+    """Return the GameParams Vehicle that the ship name ``name`` denotes.
+
+    ``name`` is read as a GameParams id or param index (``PJSC005``),
+    else as the model directory of the one Vehicle whose mesh hull (the
+    lowest upgrade id's, the model the toolkit loads) lives there. Raises
+    :class:`ValueError` when no Vehicle matches (a display name, an unknown
+    value) or when several share the model directory: the caller then names
+    the ship with ``--gameparams-ship-id``.
+    """
+    ship_dict = _gp_read.get_ship(name)
+    if isinstance(ship_dict, dict):
+        return ship_dict
+    matches: list[tuple[str, dict]] = []
+    for key, v in _gp_read.load_full().items():
+        if not isinstance(v, dict) or (v.get("typeinfo") or {}).get("type") != "Ship":
+            continue
+        pairs = _enumerate_hull_names(v)
+        if not pairs:
+            continue
+        parts = _hull_component_model(v, _mesh_hull_name(pairs)).replace("\\", "/").split("/")
+        if len(parts) >= 2 and parts[-2] == name:
+            matches.append((key, v))
+    if len(matches) == 1:
+        return matches[0][1]
+    if not matches:
+        raise ValueError(
+            f"ship {name!r} is neither a GameParams ship id nor the model "
+            f"directory of one; name the ship with --gameparams-ship-id"
+        )
+    listing = ", ".join(key for key, _ in matches)
+    raise ValueError(
+        f"{len(matches)} Vehicles use the model directory {name!r} ({listing}); "
+        f"name the ship with --gameparams-ship-id"
+    )
+
+
 def _resolve_hull_upgrade(
     hull: str,
-    ship_id: str | None,
+    gameparams_ship_id: str | None,
+    toolkit_name: str,
     *,
     config: PipelineConfig | None,
     warnings: list[str] | None = None,
-) -> str:
-    """Return the exact ``_Hull`` upgrade id that ``hull`` names.
+) -> tuple[str, str]:
+    """Return ``(upgrade_id, param_index)``: the exact ``_Hull`` upgrade id
+    that ``hull`` names and the param index of the ship it belongs to.
 
     ``hull`` is an upgrade id (``PJUH432_Furutaka_1930``) or a hull
-    component name (``B_Hull``) of the ship ``ship_id``. The toolkit's
-    ``--hull`` also matches a bare value as a substring of the upgrade
-    ids (``B`` matches ``PJUH706_Fubuki_1942``), so only the exact id is
-    passed on. When the ship is not in GameParams, ``hull`` is passed
-    through unchanged with a warning; when it is, a value that names none
-    of its hulls raises :class:`ValueError`.
+    component name (``B_Hull``). The ship is ``gameparams_ship_id`` when
+    given, else the toolkit name ``toolkit_name`` (:func:`_find_hull_ship`).
+    The toolkit's ``--hull`` matches a bare value as a substring of the
+    upgrade ids (``B`` matches ``PJUH706_Fubuki_1942``) and places no
+    mounts at all when nothing matches, so only the exact id of a ship
+    found in GameParams is passed on. Everything else raises
+    :class:`ValueError`: GameParams unavailable, a ship that cannot be
+    found, or a value that names none of its hulls.
 
     The toolkit always loads the mesh of the hull with the lowest upgrade
     id. A selected hull on another model (Pensacola's ``B_Hull``) would
     get its mounts placed on that mesh; this is reported as a warning.
     """
-    ship_dict = None
-    if ship_id:
-        try:
-            _ensure_gameparams_dump(config=config)
-            ship_dict = _gp_read.get_ship(ship_id)
-        except Exception as e:
-            _warn(warnings, f"hull {hull!r}: GameParams lookup failed ({e}); passed as given")
-            return hull
-    if not isinstance(ship_dict, dict):
-        _warn(warnings, f"hull {hull!r}: ship {ship_id!r} not in GameParams; passed as given")
-        return hull
+    _ensure_gameparams_dump(config=config)
+    if gameparams_ship_id:
+        ship_dict = _gp_read.get_ship(gameparams_ship_id)
+        if not isinstance(ship_dict, dict):
+            raise ValueError(
+                f"--gameparams-ship-id {gameparams_ship_id!r} is not a ship in GameParams"
+            )
+    else:
+        ship_dict = _find_hull_ship(toolkit_name)
+    param_index = str(ship_dict.get("index") or "")
+    if not param_index:
+        raise ValueError(
+            f"ship {gameparams_ship_id or toolkit_name!r} has no param index in GameParams"
+        )
     pairs = _enumerate_hull_names(ship_dict)
     for hull_name, module_id in pairs:
         if hull not in (module_id, hull_name):
             continue
-
-        def _model(name: str) -> str:
-            comp = ship_dict.get(name)
-            return (comp.get("model") or "") if isinstance(comp, dict) else ""
-
-        mesh_hull = min(pairs, key=lambda p: p[1])[0]
-        if _model(hull_name) != _model(mesh_hull):
+        mesh_hull = _mesh_hull_name(pairs)
+        model = _hull_component_model(ship_dict, hull_name)
+        mesh_model = _hull_component_model(ship_dict, mesh_hull)
+        if model != mesh_model:
             _warn(
                 warnings,
-                f"hull {module_id} ({hull_name}) uses {_model(hull_name) or 'no model'}, "
+                f"hull {module_id} ({hull_name}) uses {model or 'no model'}, "
                 f"but the toolkit loads the mesh of {mesh_hull} "
-                f"({_model(mesh_hull) or 'no model'}); its mounts are placed on that mesh",
+                f"({mesh_model or 'no model'}); its mounts are placed on that mesh",
             )
-        return module_id
+        return module_id, param_index
     choices = ", ".join(f"{mid} ({name})" for name, mid in pairs) or "none"
-    raise ValueError(f"hull {hull!r} is not a hull of {ship_id}; its hulls: {choices}")
+    raise ValueError(f"hull {hull!r} is not a hull of {param_index}; its hulls: {choices}")
+
+
+def _check_hull_export_vehicle(
+    placements_json: Path, hull_upgrade: str, param_index: str,
+) -> None:
+    """Fail when the export placed mounts from another Vehicle than the
+    one ``hull_upgrade`` belongs to.
+
+    The toolkit binds the Vehicle its placements name as
+    ``ship.param_index``; an upgrade id that is not one of that Vehicle's
+    hulls selects no mounts, and the export then carries none. Raises
+    :class:`StepError` (step ``export_hull``) on a mismatch or when the
+    placements cannot be read.
+    """
+    try:
+        with open(placements_json, "rb") as f:
+            doc = json.loads(f.read().decode("utf-8"))
+        bound = str(((doc.get("ship") or {}).get("param_index")) or "")
+    except Exception as e:
+        raise StepError(
+            step="export_hull",
+            underlying=e,
+            detail=f"hull {hull_upgrade}: placements unreadable, export not checked",
+        ) from e
+    if bound != param_index:
+        raise StepError(
+            step="export_hull",
+            underlying=ValueError(
+                f"the export bound Vehicle {bound or '(none)'!r}, but hull "
+                f"{hull_upgrade} belongs to {param_index}"
+            ),
+            detail=(
+                f"hull {hull_upgrade}: mounts placed from {bound or 'no Vehicle'}; "
+                f"pass --toolkit-ship {param_index} --gameparams-ship-id {param_index}"
+            ),
+        )
 
 
 def _load_placements_with_id_override(
@@ -2065,14 +2154,21 @@ def scaffold_ship(
 
     ``hull`` selects the hull upgrade the export renders: an upgrade id
     (``PJUH432_Furutaka_1930``) or a hull component name (``B_Hull``),
-    resolved to the exact upgrade id (:func:`_resolve_hull_upgrade`). The
-    toolkit's mount placements and the ammo ``ranges`` follow it; the hull
-    mesh stays the toolkit's (the lowest upgrade id's model), so the
-    option suits hulls that share one model. The sidecar's
-    top-level mounts then follow it through the rendered-hull detection
-    (:func:`_detect_rendered_hull`). ``None`` (default) renders the
-    toolkit's default, the lowest upgrade id (normally the stock hull).
-    Unused when the export, armor and ammo steps are all skipped.
+    resolved to the exact upgrade id of a ship found in GameParams before
+    any toolkit call (:func:`_resolve_hull_upgrade`). The ship is
+    ``gameparams_ship_id``, else the toolkit name read as a GameParams id,
+    a param index, or a model directory only one Vehicle uses; anything
+    else (a display name, a shared model directory, a value that names
+    none of its hulls) fails the step. The armor and ammo calls bind to
+    that ship, and an export whose placements name another Vehicle fails
+    (:func:`_check_hull_export_vehicle`). The toolkit's mount placements
+    and the ammo ``ranges`` follow the hull; the armor table and the hull
+    mesh stay the lowest upgrade id's, so the option suits hulls that
+    share one model. The sidecar's top-level mounts then follow it through
+    the rendered-hull detection (:func:`_detect_rendered_hull`). ``None``
+    (default) renders the toolkit's default, the lowest upgrade id
+    (normally the stock hull). Unused when the export, armor and ammo
+    steps are all skipped.
 
     ``on_event`` is an optional callback invoked at each step boundary
     with a :class:`StepEvent`.  Canonical step names:
@@ -2131,12 +2227,15 @@ def scaffold_ship(
             underlying=e,
             detail=f"failed to set up paths under {workspace!r}",
         ) from e
-    # The hull upgrade the export renders (None = the toolkit's default).
+    # The hull upgrade the export renders (None = the toolkit's default) and
+    # the param index of the ship it belongs to. Resolved before any toolkit
+    # call; armor + ammo bind to that ship, and the export is checked to.
     hull_upgrade: str | None = None
+    hull_param_index: str | None = None
     if hull and not (skip_export and skip_armor and skip_ammo):
         try:
-            hull_upgrade = _resolve_hull_upgrade(
-                hull, gameparams_ship_id or toolkit_name,
+            hull_upgrade, hull_param_index = _resolve_hull_upgrade(
+                hull, gameparams_ship_id, toolkit_name,
                 config=cfg, warnings=warnings,
             )
         except Exception as e:
@@ -2146,6 +2245,8 @@ def scaffold_ship(
                 underlying=e,
                 detail=f"hull {hull!r} not resolved",
             ) from e
+        if vehicle_id is None:
+            vehicle_id = hull_param_index
     timer.complete(detail=f"hull {hull_upgrade}" if hull_upgrade else "")
 
     variant_routed: bool = False
@@ -2291,6 +2392,10 @@ def scaffold_ship(
                 config=cfg,
                 adopt_shared=False,
             )
+            if hull_upgrade and hull_param_index:
+                _check_hull_export_vehicle(
+                    placements_json, hull_upgrade, hull_param_index,
+                )
             _variant_and_emissive(out)
         except StepError:
             step_ms = (time.perf_counter() - t0) * 1000.0
@@ -2430,6 +2535,10 @@ def scaffold_ship(
                 config=cfg,
                 adopt_shared=False,
             )
+            if hull_upgrade and hull_param_index:
+                _check_hull_export_vehicle(
+                    placements_json, hull_upgrade, hull_param_index,
+                )
             _variant_and_emissive(out)
         except Exception as e:
             step_ms = (time.perf_counter() - t0) * 1000.0

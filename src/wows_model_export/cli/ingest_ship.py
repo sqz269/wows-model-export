@@ -133,11 +133,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--hull",
         default=None,
         help="Hull upgrade to render: a _Hull upgrade id (e.g. "
-             "PJUH432_Furutaka_1930) or a hull component name (B_Hull). "
-             "The mount placements and the sidecar's top-level mounts "
-             "follow it; the hull mesh stays the model of the lowest "
-             "upgrade id. Default: the lowest upgrade id (normally the "
-             "stock hull).",
+             "PJUH432_Furutaka_1930) or a hull component name (B_Hull) "
+             "of the ship named by --gameparams-ship-id, or else by the "
+             "ship name as a GameParams id, a param index or a model_dir "
+             "only one Vehicle uses; any other ship name, or a value that "
+             "names none of its hulls, fails the ingest. The mount "
+             "placements and the sidecar's top-level mounts follow it; "
+             "the armor table and the hull mesh stay the lowest upgrade "
+             "id's. Default: the lowest upgrade id (normally the stock "
+             "hull).",
     )
     add_common_args(ap)
     return ap
