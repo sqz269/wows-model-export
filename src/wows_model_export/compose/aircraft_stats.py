@@ -384,13 +384,59 @@ def write_stats(
     return out
 
 
-def index_airframes(library_root: Path) -> dict[str, list[str]]:
-    """``{model folder: [GameParams keys]}`` from the library index."""
+#: ``source`` of the index entries and stats blocks this producer writes.
+#: An entry or block with another ``source`` was added by another producer
+#: (an airframe that is not a WoWS model folder); the builds keep it as it
+#: is and validate it by the same rules.
+NATIVE_SOURCE = "wows"
+
+
+def is_external(entry: dict) -> bool:
+    """True for an index entry or stats block another producer added."""
+    return (entry.get("source") or NATIVE_SOURCE) != NATIVE_SOURCE
+
+
+def _index_assets(library_root: Path) -> dict[str, dict]:
     idx = json.loads((Path(library_root) / "index.json").read_text(encoding="utf-8"))
+    return idx.get("assets") or {}
+
+
+def index_airframes(library_root: Path) -> dict[str, list[str]]:
+    """``{airframe: [stats keys]}`` from the library index: the GameParams
+    keys of a WoWS airframe, the ``stats_keys`` of another producer's."""
     return {
-        aid: [g["key"] for g in (a.get("gameparams") or []) if g.get("key")]
-        for aid, a in (idx.get("assets") or {}).items()
+        aid: (list(a.get("stats_keys") or []) if is_external(a)
+              else [g["key"] for g in (a.get("gameparams") or []) if g.get("key")])
+        for aid, a in _index_assets(library_root).items()
     }
+
+
+def external_airframes(library_root: Path) -> set[str]:
+    """The index's airframes another producer added."""
+    return {aid for aid, a in _index_assets(library_root).items() if is_external(a)}
+
+
+def external_blocks(
+    library_root: Path, airframes: dict[str, list[str]],
+) -> tuple[dict[str, dict], list[str]]:
+    """The blocks the current ``stats.json`` holds for other producers'
+    airframes (``{airframe: [stats keys]}``), kept across rebuilds, and
+    the keys it has no such block for."""
+    path = Path(library_root) / STATS_FILE
+    try:
+        prior = (json.loads(path.read_text(encoding="utf-8")).get("entries") or {}) if path.is_file() else {}
+    except (OSError, ValueError):
+        prior = {}
+    kept: dict[str, dict] = {}
+    missing: list[str] = []
+    for aid, keys in airframes.items():
+        for k in keys:
+            b = prior.get(k)
+            if isinstance(b, dict) and is_external(b) and b.get("airframe") == aid:
+                kept[k] = b
+            else:
+                missing.append(k)
+    return kept, sorted(missing)
 
 
 def validate_stats(library_root: Path) -> list[str]:
@@ -403,7 +449,8 @@ def validate_stats(library_root: Path) -> list[str]:
     per_drop``; a projectile and a positive count unless the kind is
     ``none``; the dispersion matches the kind (an ellipse for dropped and
     fired ordnance, a fan for torpedoes); heights, HP and endurance are
-    positive."""
+    positive. Another producer's airframe lists its index entry's
+    ``stats_keys``; its blocks follow the same rules."""
     root = Path(library_root)
     path = root / STATS_FILE
     if not path.is_file():
@@ -501,6 +548,7 @@ def build_aircraft_stats(
         if not (lib_root / "index.json").is_file():
             raise FileNotFoundError(f"{lib_root / 'index.json'} missing; build the library first")
         want = index_airframes(lib_root)
+        external = external_airframes(lib_root)
         gp = gameparams
         if gp is None:
             from ..read import gameparams as read_gameparams
@@ -509,7 +557,14 @@ def build_aircraft_stats(
         st.annotate(f"{len(want)} airframe(s) in the index")
     try:
         with runner.step("compute_stats") as st:
-            airframes, entries, problems = compute_stats(gp, want)
+            airframes, entries, problems = compute_stats(
+                gp, {aid: keys for aid, keys in want.items() if aid not in external})
+            # Other producers' airframes keep the blocks stats.json holds.
+            carried, ext_missing = external_blocks(lib_root, {aid: want[aid] for aid in external})
+            for aid in external:
+                airframes[aid] = sorted(k for k in want[aid] if k in carried)
+            entries.update(carried)
+            problems.extend(f"{k}: another producer's block is missing from {STATS_FILE}" for k in ext_missing)
             st.annotate(f"{len(entries)} entr(ies) over {len(airframes)} airframe(s); "
                         f"{len(problems)} problem(s)")
     finally:
@@ -536,13 +591,17 @@ def build_aircraft_stats(
 
 __all__ = [
     "BW_TO_M",
+    "NATIVE_SOURCE",
     "ORDNANCE_KIND",
     "STATS_FILE",
     "STATS_SCHEMA",
     "airframe_of",
     "build_aircraft_stats",
     "compute_stats",
+    "external_airframes",
+    "external_blocks",
     "index_airframes",
+    "is_external",
     "plane_stats",
     "validate_stats",
     "write_stats",

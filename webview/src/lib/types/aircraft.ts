@@ -30,8 +30,9 @@ export interface AircraftMesh {
 
 export interface AircraftLod {
   /** Camera distance beyond which this LOD stops drawing, in the visual's
-   *  own units (BW: × 15 for metres). */
-  extent: number;
+   *  own units (BW: × 15 for metres). Null on an entry another producer
+   *  added whose LOD rule is not a distance (`source` other than "wows"). */
+  extent: number | null;
   casts_shadow: boolean;
   meshes: string[];
 }
@@ -58,9 +59,16 @@ export interface AircraftGameParamsEntry {
 }
 
 export interface AircraftAsset {
+  /** "wows" when absent; another value marks an entry another producer
+   *  added (no VFS model, no GameParams entries). */
+  source?: string;
+  /** "glb": the GLB's own materials carry embedded textures (no DDS). */
+  textures?: string;
+  /** Stats sidecar keys of an entry another producer added. */
+  stats_keys?: string[];
   nation: string;
   category: string;
-  geometry_vfs: string;
+  geometry_vfs: string | null;
   visual_vfs?: string | null;
   /** Path relative to `<workspace>/libraries/aircraft/`. */
   glb: string;

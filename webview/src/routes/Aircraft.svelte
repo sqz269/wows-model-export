@@ -240,7 +240,7 @@
                 class="h-6 rounded border border-border bg-popover px-1.5 text-foreground"
               >
                 {#each asset.lods as l, i (i)}
-                  <option value={i}>LOD {i} ({l.extent})</option>
+                  <option value={i}>LOD {i} ({l.extent ?? '–'})</option>
                 {/each}
               </select>
             </label>
@@ -302,7 +302,8 @@
             <ul class="text-muted-foreground mb-3">
               {#each asset.lods as l, i (i)}
                 <li>
-                  LOD {i}: extent {l.extent}{l.casts_shadow ? '' : ', no shadow'}, {l.meshes.length} meshes
+                  LOD {i}: extent {l.extent ?? '–'}{l.casts_shadow ? '' : ', no shadow'}, {l.meshes
+                    .length} meshes
                 </li>
               {/each}
             </ul>

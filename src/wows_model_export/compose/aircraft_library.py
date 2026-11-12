@@ -793,6 +793,12 @@ def write_index(
         entry["toolkit"] = rec.toolkit if rec.built_now else (prior.get(aid) or {}).get("toolkit")
         shared_textures.repair_refs(entry, p["dir"])
         assets[aid] = entry
+    # Entries another producer added (``source`` other than "wows") have no
+    # model folder in the VFS; they stay as that producer wrote them.
+    for aid, e in prior.items():
+        if aid not in assets and isinstance(e, dict) and aircraft_stats.is_external(e):
+            assets[aid] = e
+    assets = {aid: assets[aid] for aid in sorted(assets)}
     doc = {
         "schema": INDEX_SCHEMA,
         "version": time.strftime("%Y-%m-%d", time.gmtime()),
@@ -805,14 +811,57 @@ def write_index(
     return out
 
 
+#: glTF material field of each `glb_textures` slot of an entry whose
+#: textures are the GLB's own (`"textures": "glb"`).
+_GLB_TEXTURE_SLOTS: dict[str, tuple[str, ...]] = {
+    "baseColor": ("pbrMetallicRoughness", "baseColorTexture"),
+    "metallicRoughness": ("pbrMetallicRoughness", "metallicRoughnessTexture"),
+    "normal": ("normalTexture",),
+    "occlusion": ("occlusionTexture",),
+    "emissive": ("emissiveTexture",),
+}
+
+
+def _glb_texture_problems(gltf: dict, materials: list[dict]) -> list[str]:
+    """Each listed material is a GLB material whose `glb_textures` slots
+    point at a texture with an embedded or present image source; an
+    opaque or transparent material binds a base colour."""
+    problems: list[str] = []
+    by_name = {m.get("name"): m for m in gltf.get("materials") or []}
+    textures = gltf.get("textures") or []
+    images = gltf.get("images") or []
+    for mat in materials:
+        mid = mat.get("material_id")
+        gm = by_name.get(mid)
+        if gm is None:
+            problems.append(f"material {mid} is not a GLB material")
+            continue
+        slots = mat.get("glb_textures") or []
+        if mat.get("shader_intent") in ("opaque_pbr", "cutout", "transparent") and "baseColor" not in slots:
+            problems.append(f"material {mid} binds no base colour")
+        for slot in slots:
+            path = _GLB_TEXTURE_SLOTS.get(slot)
+            ref: Any = gm
+            for k in path or ():
+                ref = (ref or {}).get(k) if isinstance(ref, dict) else None
+            ti = ref.get("index") if isinstance(ref, dict) else None
+            src = textures[ti].get("source") if isinstance(ti, int) and 0 <= ti < len(textures) else None
+            img = images[src] if isinstance(src, int) and 0 <= src < len(images) else None
+            if path is None or img is None or ("bufferView" not in img and not img.get("uri")):
+                problems.append(f"material {mid} slot {slot} has no texture image in the GLB")
+    return problems
+
+
 def validate_index(library_root: Path, *, workspace: Path | None = None) -> list[str]:
     """Check an aircraft library index against the files beside it.
 
     Every entry's GLB, visual JSON and texture files exist; every GLB mesh
     is described and sits in a LOD; every LOD, part, rack and propeller
     names existing meshes or render sets; every hardpoint and moving-part
-    pivot is a node of the GLB. Returns the problems found (empty when the
-    index is valid)."""
+    pivot is a node of the GLB. An entry another producer added (``source``
+    other than "wows") needs no visual JSON; one with ``"textures": "glb"``
+    binds the GLB's own embedded textures instead of DDS files. Returns the
+    problems found (empty when the index is valid)."""
     problems: list[str] = []
     idx_path = library_root / "index.json"
     try:
@@ -833,13 +882,14 @@ def validate_index(library_root: Path, *, workspace: Path | None = None) -> list
 
     for aid, e in sorted(assets.items()):
         tag = f"{aid}:"
+        external = aircraft_stats.is_external(e)
         glb = library_root.joinpath(*(e.get("glb") or "").split("/"))
         if not glb.is_file():
             problems.append(f"{tag} GLB missing ({e.get('glb')})")
             continue
         base = glb.parent
         vj = library_root.joinpath(*(e.get("visual_json") or "").split("/"))
-        if not vj.is_file():
+        if not external and not vj.is_file():
             problems.append(f"{tag} visual JSON missing")
         gltf = _read_glb_json(glb)
         glb_meshes = {m.get("name") for m in gltf.get("meshes", [])}
@@ -903,7 +953,13 @@ def validate_index(library_root: Path, *, workspace: Path | None = None) -> list
                     problems.append(f"{tag} hardpoint {kind}/{n} not in the GLB")
         if not e.get("materials"):
             problems.append(f"{tag} no materials")
+        if e.get("textures") == "glb":
+            # The GLB's own materials carry the textures (embedded images);
+            # each material lists the slots it binds in `glb_textures`.
+            problems.extend(f"{tag} {x}" for x in _glb_texture_problems(gltf, e.get("materials") or []))
         for mat in e.get("materials") or []:
+            if e.get("textures") == "glb":
+                break
             mid = mat.get("material_id")
             main = (mat.get("texture_sets") or {}).get("main") or {}
             if mat.get("shader_intent") in ("opaque_pbr", "cutout", "transparent") and not main:
@@ -1135,9 +1191,14 @@ def build_aircraft_library(
     if stats_entries is not None:
         with runner.step("write_stats") as st:
             want = aircraft_stats.index_airframes(lib_root)
-            entries = {k: stats_entries[k] for keys in want.values() for k in keys if k in stats_entries}
-            missing = sorted({k for keys in want.values() for k in keys} - set(entries))
+            external = aircraft_stats.external_airframes(lib_root)
+            entries = {k: stats_entries[k] for aid, keys in want.items() if aid not in external
+                       for k in keys if k in stats_entries}
+            carried, ext_missing = aircraft_stats.external_blocks(lib_root, {a: want[a] for a in external})
+            entries.update(carried)
+            missing = sorted({k for keys in want.values() for k in keys} - set(entries) - set(ext_missing))
             warnings.extend(f"stats: {k} has no stats block" for k in missing)
+            warnings.extend(f"stats: {k} (another producer's airframe) has no block to keep" for k in ext_missing)
             from ..toolkit import build as _build
             path = aircraft_stats.write_stats(
                 lib_root, want, entries, game_build=_build.current_build(cfg),
