@@ -12,9 +12,9 @@ import type { RunResponse } from './extract';
 /** Fetch the list of registered consumers. Discovery is cached on the
  *  server for the process lifetime; this client does NOT cache because
  *  list shape is small and the cost of an extra round-trip is trivial. */
-export async function fetchConsumers(): Promise<Consumer[]> {
+export async function fetchConsumers(): Promise<{ consumers: Consumer[]; pinnedBuild: number | null }> {
   const body = await fetchJson<ConsumersResponse>('/api/consumers');
-  return body.consumers ?? [];
+  return { consumers: body.consumers ?? [], pinnedBuild: body.pinned_build ?? null };
 }
 
 /** Kick off a consumer action. Returns the spawn-job envelope; the

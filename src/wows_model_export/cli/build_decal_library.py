@@ -1,7 +1,9 @@
 """CLI wrapper for :func:`wows_model_export.compose.decal_library.build_decal_library`.
 
 Mirror WG's ``dyndecals/`` into ``<library_root>/`` with a manifest.
-Argv shape::
+It reads a loose ``res_unpack/dyndecals`` copy, not a game build, so it
+takes no ``--build`` and ignores ``WOWS_BUILD`` (a pinned run would label
+the current loose files as an older build's). Argv shape::
 
     wows-build-decal-library
         [--library-root P]
@@ -61,7 +63,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Copy every file regardless of mtime/size compare.",
     )
-    add_common_args(ap)
+    add_common_args(ap, build_option=False)
     return ap
 
 
@@ -83,7 +85,7 @@ def _summarize(result: DecalLibraryResult) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        cfg = resolve_config(args)
+        cfg = resolve_config(args, pin_build=False)
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return EXIT_CONFIG_ERROR

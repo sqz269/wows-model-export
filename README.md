@@ -257,7 +257,16 @@ command. The per-build manifests that `wows-builds diff` compares stay in
 the main workspace's `.cache/builds/`, and `wows-builds snapshot --build
 <build>` can fingerprint any archived build. `wows-build-decal-library`
 reads a loose `res_unpack/dyndecals` copy, not a build, so it takes no
-`--build`.
+`--build` and ignores `WOWS_BUILD`.
+
+**Publishing stays on the current build.** A consumer target holds the
+current build, and an older build's files (its accessory index, ship
+sidecars, GLBs) would overwrite those of the same names. So `wows-publish`
+takes no `--build` and ignores `WOWS_BUILD`; publishing refuses a pinned
+config or a `<workspace>/builds/<build>/` workspace (`wows-publish
+--workspace <ws>/builds/<build> --allow-build-workspace --target <a folder
+of its own>` overrides that on purpose); and `wows-ingest-ship --build N
+--and-publish` stops before the ingest.
 
 **In the webview** the topnav's **Game build** picker lists every build
 the install or the archive holds. Picking an older build shows that
@@ -267,7 +276,14 @@ and writes into its workspace. The choice is a cookie (`wows_build`), so
 it holds for every tab of that browser; the backend serves each `/api` and
 `/repo` request from the chosen build and marks the response with
 `X-Wows-Build`. The Updates page shows the archive's state, its scheduled
-task, and an **Archive now** button.
+task, and an **Archive now** button. The Consumers page lists its actions
+in an archived build's view but refuses to run them (they publish the
+current build only; see above). The first visit to a build's view runs
+toolkit calls that fill that build's cache (`builds/<build>/.cache`: the
+Extract page's ship snapshot, the VFS metadata dump, the map list), a
+minute or two; `wows-snapshot --build <build> --output
+<workspace>/builds/<build>/.cache/snapshot.json` fills most of it ahead
+of time.
 
 ## Configuration
 

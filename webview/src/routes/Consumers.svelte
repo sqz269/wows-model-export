@@ -28,6 +28,9 @@
   const { active: _active }: Props = $props();
 
   let consumers = $state<Consumer[]>([]);
+  /** Viewing an older game build: actions would publish its files over the
+   *  target's current-build ones, so the backend refuses them. */
+  let pinnedBuild = $state<number | null>(null);
   let extractedShips = $state<ExtractedShip[]>([]);
   let loading = $state(true);
   let loadError = $state<string | null>(null);
@@ -41,7 +44,8 @@
           fetchConsumers(),
           fetchExtractedShips().catch(() => [] as ExtractedShip[]),
         ]);
-        consumers = cs;
+        consumers = cs.consumers;
+        pinnedBuild = cs.pinnedBuild;
         extractedShips = ships;
       } catch (err) {
         loadError = err instanceof Error ? err.message : String(err);
@@ -181,6 +185,17 @@
   {:else}
     <div class="flex-1 overflow-auto">
       <div class="space-y-4 p-4">
+        {#if pinnedBuild !== null}
+          <div
+            class="rounded border border-amber-500/60 bg-amber-500/10 p-3 text-xs text-amber-400"
+            data-testid="consumers-pinned-notice"
+          >
+            Viewing archived game build {pinnedBuild}. Consumer actions publish the
+            install's current build only: this build's files would overwrite the
+            target's current ones. Switch the game-build picker to the current build
+            to run them.
+          </div>
+        {/if}
         {#each consumers as c (c.id)}
           <div class="border-border bg-card/40 rounded border p-4">
             <div class="mb-3 flex items-baseline gap-3">
@@ -195,7 +210,7 @@
                 <ConsumerActionForm
                   action={a}
                   {extractedShips}
-                  disabled={activeJob?.state === 'running'}
+                  disabled={pinnedBuild !== null || activeJob?.state === 'running'}
                   onSubmit={(body) => runAction(c, a.id, body)}
                 />
               {/each}

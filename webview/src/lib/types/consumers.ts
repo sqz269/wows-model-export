@@ -33,4 +33,7 @@ export interface Consumer {
 
 export interface ConsumersResponse {
   consumers: Consumer[];
+  /** The older game build this browser views (null: the current build).
+   *  Consumer actions are refused (409) while it is set. */
+  pinned_build?: number | null;
 }

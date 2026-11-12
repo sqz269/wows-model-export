@@ -29,6 +29,7 @@ Exit codes are codified in :data:`EXIT_OK` / :data:`EXIT_STEP_ERROR` /
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -51,7 +52,9 @@ def add_common_args(parser: argparse.ArgumentParser, *, build_option: bool = Tru
     """Add the universal ``--workspace`` / ``--game-dir`` / ``--toolkit-bin``
     / ``--archive-dir`` / ``--build`` / ``--json-events`` / ``--quiet``
     flags to ``parser``. ``build_option=False`` leaves ``--build`` out, for a
-    parser that gives it its own meaning.
+    parser that gives it its own meaning or a command that works on the
+    current build only (pair it with ``resolve_config(args,
+    pin_build=False)`` so ``WOWS_BUILD`` is ignored too).
     """
     g = parser.add_argument_group("config overrides")
     g.add_argument(
@@ -131,7 +134,7 @@ def add_build_args(parser: argparse.ArgumentParser) -> None:
 # ----- Config + printer plumbing --------------------------------------------
 
 
-def resolve_config(args: argparse.Namespace) -> PipelineConfig:
+def resolve_config(args: argparse.Namespace, *, pin_build: bool = True) -> PipelineConfig:
     """Build a :class:`PipelineConfig` honoring the CLI overrides.
 
     Loads defaults from env via :meth:`PipelineConfig.load`, then
@@ -143,8 +146,14 @@ def resolve_config(args: argparse.Namespace) -> PipelineConfig:
     build (:meth:`PipelineConfig.for_build`), the build is checked to be
     readable, and the pinned config becomes the process default, so every
     ``PipelineConfig.load()`` in this process returns it.
+
+    ``pin_build=False`` is for commands that only work on the install's
+    current build (publishing, the loose-file decal mirror): ``--build``
+    is not read and ``WOWS_BUILD`` is ignored with a note, the unpinned
+    config becoming the process default so no fallback reads it either.
     """
     cfg = PipelineConfig.load()
+    env_build = cfg.build
     overrides: dict = {}
     workspace = getattr(args, "workspace", None)
     if workspace is not None:
@@ -160,12 +169,19 @@ def resolve_config(args: argparse.Namespace) -> PipelineConfig:
     archive_dir = getattr(args, "archive_dir", None)
     if archive_dir is not None:
         overrides["archive_dir"] = Path(archive_dir).expanduser().resolve()
-    build = getattr(args, "build", None)
-    if build is None:
-        build = cfg.build  # WOWS_BUILD
+    if pin_build:
+        build = getattr(args, "build", None)
+        if build is None:
+            build = cfg.build  # WOWS_BUILD
+    else:
+        build = None
     if overrides:
         cfg = replace(cfg.for_build(None), **overrides)
     cfg = cfg.for_build(build)
+    if not pin_build and env_build is not None:
+        print(f"note: WOWS_BUILD={env_build} ignored: this command works on the "
+              "install's current build only", file=sys.stderr)
+        set_process_default(cfg)
     if cfg.build is not None:
         from ..toolkit import build as _build
 

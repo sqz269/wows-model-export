@@ -622,6 +622,21 @@ def ingest_ship(
             ),
             detail="publish_target is unset",
         )
+    # An older build's workspace is never published into a consumer target
+    # (publish refuses it); say so before the ingest, not after it.
+    pinned_build = _publish_mod.build_workspace_build(cfg, workspace)
+    if and_publish and pinned_build is not None:
+        raise StepError(
+            step="publish",
+            underlying=ValueError(
+                f"publishing game build {pinned_build}'s workspace is refused"
+            ),
+            detail=(
+                f"--build {pinned_build} exports are not published: they would "
+                "overwrite the target's current-build files. Ingest without "
+                "publishing, or publish from the current build."
+            ),
+        )
 
     timer = StepRunner(on_event, cancel=cancel)
     warnings: list[str] = []

@@ -15,6 +15,12 @@ Job lifecycle is shared with the extract route: poll
 ``/api/extract/jobs/{id}`` and cancel via the same path. (The prefix
 predates the multi-kind job runner; renaming to ``/api/jobs/*`` is a
 follow-up that doesn't block this work.)
+
+In the view of an older game build (the build picker; the app's config is
+pinned) actions are refused with 409: a consumer publishes into its own
+fixed target, which holds the current build, and the older build's files
+would overwrite those of the same names. The listing still works and
+carries ``pinned_build`` so the page can say why.
 """
 from __future__ import annotations
 
@@ -72,7 +78,10 @@ def make_router(config: PipelineConfig) -> APIRouter:
     @router.get("/consumers")
     def list_consumers() -> JSONResponse:
         return JSONResponse(
-            content={"consumers": [_describe(d) for d in consumers]},
+            content={
+                "consumers": [_describe(d) for d in consumers],
+                "pinned_build": config.build,
+            },
             headers={"Cache-Control": "no-cache"},
         )
 
@@ -86,6 +95,21 @@ def make_router(config: PipelineConfig) -> APIRouter:
             raise HTTPException(
                 status_code=400,
                 detail={"ok": False, "error": "invalid consumer/action id"},
+            )
+        if config.build is not None:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "error": (
+                        f"viewing archived game build {config.build}: consumer "
+                        "actions publish the install's current build only, and "
+                        "this build's files would overwrite the target's current "
+                        "ones. Switch the game-build picker to the current build "
+                        "to run them."
+                    ),
+                    "pinned_build": config.build,
+                },
             )
         d = by_id.get(consumer_id)
         if d is None:

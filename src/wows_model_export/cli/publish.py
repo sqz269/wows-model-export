@@ -6,7 +6,14 @@ Copy pipeline artifacts to a downstream consumer target. Argv shape::
         [--only <ship> ...]
         [--domains ships,library,projectiles,decals]
         [--force]
+        [--allow-build-workspace]
         [common flags ...]
+
+It publishes the install's current build: it takes no ``--build`` and
+ignores ``WOWS_BUILD``. A per-build workspace (``--workspace
+<ws>/builds/<build>``) is refused unless ``--allow-build-workspace`` is
+given, since it would overwrite a target's current-build files of the
+same names.
 """
 
 from __future__ import annotations
@@ -72,7 +79,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Copy every file regardless of mtime/size compare.",
     )
-    add_common_args(ap)
+    ap.add_argument(
+        "--allow-build-workspace",
+        action="store_true",
+        help="Allow --workspace to name an older game build's workspace "
+             "(<workspace>/builds/<build>/). Give it a --target of its own: "
+             "its files would overwrite a current-build target's files of "
+             "the same names.",
+    )
+    add_common_args(ap, build_option=False)
     return ap
 
 
@@ -95,7 +110,7 @@ def _summarize(result: PublishResult) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        cfg = resolve_config(args)
+        cfg = resolve_config(args, pin_build=False)
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return EXIT_CONFIG_ERROR
@@ -117,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
             only_maps=tuple(args.maps) if args.maps else None,
             force=args.force,
             on_event=printer,
+            allow_build_workspace=args.allow_build_workspace,
         )
     except StepError as e:
         print(f"\nerror: step {e.step!r} failed: {e.detail or e}", file=sys.stderr)

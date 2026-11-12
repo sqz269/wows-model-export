@@ -87,7 +87,8 @@ import threading
 from pathlib import Path
 
 from .. import shared_textures
-from ..config import PipelineConfig
+from ..config import BUILD_WORKSPACES_DIR, PipelineConfig
+from ..errors import ConfigError
 from ..read import sidecar as read_sidecar
 from ..types import OnEvent, PublishCounts, PublishResult
 from ._step_runner import StepRunner
@@ -402,6 +403,20 @@ def _combine_counts(*counts: PublishCounts) -> PublishCounts:
 # ---------------------------------------------------------------------------
 
 
+def build_workspace_build(cfg: PipelineConfig, workspace: Path) -> int | None:
+    """The older game build whose workspace ``workspace`` is, or ``None``.
+
+    True for a config pinned to a build (``--build``, the webview's
+    build view) publishing its own workspace, and for any
+    ``<workspace>/builds/<build>/`` folder named directly."""
+    ws = Path(workspace).resolve()
+    if cfg.build is not None and ws == Path(cfg.workspace).resolve():
+        return cfg.build
+    if ws.parent.name == BUILD_WORKSPACES_DIR and ws.name.isdigit():
+        return int(ws.name)
+    return None
+
+
 def publish(
     *,
     target_dir: Path,
@@ -415,6 +430,7 @@ def publish(
     force: bool = False,
     on_event: OnEvent | None = None,
     cancel: threading.Event | None = None,
+    allow_build_workspace: bool = False,
 ) -> PublishResult:
     """Copy pipeline artifacts to a consumer target.
 
@@ -449,6 +465,14 @@ def publish(
         cancel       Optional :class:`threading.Event` for cooperative
                      cancel; when set, the next step boundary raises
                      :class:`wows_model_export.errors.CancelledError`.
+        allow_build_workspace
+                     Publish an older game build's workspace
+                     (a pinned config, or ``<workspace>/builds/<build>/``).
+                     Refused by default with :class:`ConfigError`: a
+                     consumer target holds the current build, and the
+                     older build's files would overwrite those of the same
+                     names (its accessory index, ship sidecars, GLBs).
+                     Pass it only with a target of its own.
 
     Returns a :class:`PublishResult` with per-domain
     :class:`PublishCounts` (``copied`` / ``skipped`` / ``deleted``).
@@ -460,6 +484,17 @@ def publish(
         workspace = cfg.workspace
     workspace = Path(workspace)
     target_dir = Path(target_dir)
+
+    pinned = build_workspace_build(cfg, workspace)
+    if pinned is not None and not allow_build_workspace:
+        raise ConfigError(
+            f"publish: {workspace} is the workspace of game build {pinned}, not "
+            "the install's current build. Publishing it would overwrite the "
+            f"target's current-build files of the same names in {target_dir}. "
+            "Publish from the current build (no --build / WOWS_BUILD; in the "
+            "webview, switch the game-build picker to the current build), or "
+            "opt in with allow_build_workspace and a target of its own."
+        )
 
     unknown = [d for d in domains if d not in _DOMAIN_STEPS]
     if unknown:
@@ -781,4 +816,4 @@ def publish(
     )
 
 
-__all__ = ["publish"]
+__all__ = ["build_workspace_build", "publish"]
