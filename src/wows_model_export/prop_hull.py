@@ -1120,13 +1120,43 @@ def _texture_paths(node: Any) -> Iterable[str]:
             yield from _texture_paths(v)
 
 
+_COMPONENT_BYTES = {5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4}
+_TYPE_COMPONENTS = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT2": 4, "MAT3": 9, "MAT4": 16}
+
+
+def accessor_bounds_problems(gltf: dict[str, Any], bin_length: int) -> list[str]:
+    """Accessors that read past their buffer view, and buffer views past the
+    binary chunk. A glTF loader builds a typed array per accessor and refuses
+    the whole file on such an accessor (three.js: "Invalid typed array
+    length"), so a hull GLB with one does not load at all. A source model can
+    carry one (a one-component texcoord stream declared VEC2), and the
+    builder copies buffer views as they are."""
+    out: list[str] = []
+    views = gltf.get("bufferViews") or []
+    for i, view in enumerate(views):
+        if view.get("byteOffset", 0) + view.get("byteLength", 0) > bin_length:
+            out.append(f"bufferView {i} ends past the binary chunk")
+    for i, a in enumerate(gltf.get("accessors") or []):
+        if "bufferView" not in a or not a.get("count"):
+            continue
+        view = views[a["bufferView"]]
+        elem = _COMPONENT_BYTES.get(a.get("componentType"), 4) * _TYPE_COMPONENTS.get(a.get("type"), 1)
+        stride = view.get("byteStride") or elem
+        need = a.get("byteOffset", 0) + (a["count"] - 1) * stride + elem
+        if need > view.get("byteLength", 0):
+            out.append(f"accessor {i} ({a.get('type')} x{a['count']}) needs {need} bytes, its buffer view "
+                       f"{a['bufferView']} holds {view.get('byteLength', 0)}")
+    return out
+
+
 def validate_prop_hull(folder: Path, *, config: PipelineConfig | None = None) -> list[str]:
     """Problems with one prop hull folder (empty list: valid).
 
     Checks the layout, the sidecar's sections against the spec (section 17
     of METADATA_SPEC), that the hull GLB has a ``Hull`` group with render
     triangles, a ``Hitboxes`` group holding exactly the boxes the sidecar
-    names and no ``Armor`` group, that the hull lies along Z (the frame's
+    names and no ``Armor`` group, that every accessor fits its buffer view
+    (else no glTF loader reads the file), that the hull lies along Z (the frame's
     bow is -Z, so a hull longer along X is refused), that ``geometry`` and
     ``prop_hull.buoyancy`` equal a fresh measurement of the GLB, that every
     material a ``Hull`` mesh uses is listed, and that every texture path
@@ -1177,6 +1207,7 @@ def validate_prop_hull(folder: Path, *, config: PipelineConfig | None = None) ->
         except (OSError, ValueError) as err:
             p.append(f"{pid}: {acc.name} unreadable: {err}")
     gltf, bin_data = parse_glb(glb.read_bytes())
+    p += [f"{pid}: {err}" for err in accessor_bounds_problems(gltf, len(bin_data))]
     nodes = gltf.get("nodes") or []
     roots = {nodes[r].get("name"): r for r in gltf["scenes"][gltf.get("scene", 0)]["nodes"]}
     if "Hull" not in roots:
