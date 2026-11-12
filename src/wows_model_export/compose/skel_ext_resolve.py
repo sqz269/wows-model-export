@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import struct
 import sys
 import threading
@@ -48,10 +49,12 @@ from ..types import OnEvent
 from ._step_runner import StepRunner
 
 # VFS manifest path resolution lives in :mod:`wows_model_export.toolkit.vfs`.
-# The composer entry resolves a path via :func:`toolkit.default_manifest_path`
-# (override: ``WOWS_VFS_MANIFEST`` env var). Hash-mode is read-only over the
-# manifest, so the file is not built on demand here -- a missing manifest
-# degrades into a warning rather than triggering an extract pass.
+# Without an explicit path the composer entry takes the build-stamped cache
+# manifest through :func:`toolkit.ensure_manifest`, which builds it when it is
+# missing (a fresh workspace, such as an archived build's) or from another
+# game build (one ``metadata`` call, a few seconds; cached afterwards).
+# ``WOWS_VFS_MANIFEST`` names a manifest used verbatim. A manifest that
+# cannot be had still degrades into a warning, not a failure.
 
 # Position-dedup tolerance for "same physical placement" between a
 # candidate and an HP_-bound mount -- catches peculiarityModels swap
@@ -221,6 +224,18 @@ def _stamp_dead_asset_id_in_place(placements: dict, dead_stems: set) -> int:
     return n_with_dead
 
 
+def _current_manifest(config: PipelineConfig, warnings: list[str]) -> Path:
+    """The VFS manifest of the build ``config`` reads, built if needed
+    (``WOWS_VFS_MANIFEST`` is taken as given)."""
+    if os.environ.get("WOWS_VFS_MANIFEST"):
+        return toolkit.default_manifest_path(config)
+    try:
+        return toolkit.ensure_manifest(config=config)
+    except Exception as e:  # noqa: BLE001 - degrade like a missing manifest
+        warnings.append(f"VFS manifest could not be built ({e})")
+        return toolkit.default_manifest_path(config)
+
+
 def build_vfs_name_index(
     manifest_path: Path,
 ) -> tuple[dict[str, tuple[str, str]], set[str]]:
@@ -374,7 +389,7 @@ def _resolve_hash_mode(
     if warnings is None:
         warnings = []
     if manifest_path is None:
-        manifest_path = toolkit.default_manifest_path(config)
+        manifest_path = _current_manifest(config, warnings)
 
     # ── Step: load_inputs ─────────────────────────────────────────────
     with runner.step("load_inputs", detail=str(placements_json.name)) as st:
@@ -743,7 +758,7 @@ def resolve_decorative_placements(
 
     runner = StepRunner(on_event, cancel=cancel)
     warnings: list[str] = []
-    manifest = manifest_path or toolkit.default_manifest_path(cfg)
+    manifest = manifest_path or _current_manifest(cfg, warnings)
 
     try:
         _resolve_hash_mode(
