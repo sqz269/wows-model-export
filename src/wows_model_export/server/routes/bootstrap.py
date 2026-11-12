@@ -315,7 +315,7 @@ def make_router(config: PipelineConfig) -> APIRouter:
         # the rmtree and leave the workspace in a half-built state.
         label = f"bootstrap:{body.target}"
         for j in list_jobs():
-            if j.label == label and j.state == "running":
+            if j.label == label and j.build == config.build and j.state == "running":
                 raise HTTPException(
                     status_code=409,
                     detail={

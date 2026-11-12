@@ -10,6 +10,19 @@
 * ``POST /api/builds/snapshot``    job: save the current build's manifest.
 * ``POST /api/builds/reexport``    job: re-run stale (or named) exports with
                                    their original arguments.
+* ``GET  /api/builds/sources``     every game build the pipeline can read (the
+                                   install's and the build archive's), which
+                                   one this browser views (cookie
+                                   ``wows_build``) and each build's workspace.
+                                   Feeds the build picker.
+* ``GET  /api/builds/archive``     the build archive against the install
+                                   (what is not archived yet) and the
+                                   scheduled archive task.
+* ``POST /api/builds/archive``     job: copy what the archive lacks
+                                   (``wows-builds archive``).
+
+In an archived build's view (see :mod:`..build_view`) the status, diff,
+snapshot and re-export routes work on that build's workspace.
 
 See :mod:`wows_model_export.compose.build_tracking` for the model.
 """
@@ -21,15 +34,17 @@ import threading
 from collections import Counter
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from ...compose import build_archive as ba
 from ...compose import build_manifest as bm
 from ...compose import build_tracking as bt
 from ...compose._step_runner import StepRunner
 from ...config import PipelineConfig
 from ...toolkit import build as tb
 from ...types import OnEvent
+from ..build_view import COOKIE, cookie_build, resolve_view
 from ..jobs import JobLockedError, spawn_job
 
 _CACHE_FILES = (
@@ -46,6 +61,12 @@ _JOB_LABEL = "builds:run"
 class SnapshotBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     refresh: bool = False
+
+
+class ArchiveBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Copy even if the install changed in the last 30 min.
+    force: bool = False
 
 
 class ReexportBody(BaseModel):
@@ -124,12 +145,90 @@ def _reexport_job(
     return report
 
 
+def _archive_job(
+    *, config: PipelineConfig, force: bool,
+    on_event: OnEvent | None = None, cancel: threading.Event | None = None,
+) -> dict[str, Any]:
+    runner = StepRunner(on_event, cancel=cancel)
+    with runner.step("archive", detail=str(config.archive_dir)) as ctx:
+        res = ba.run(config, settle_s=0.0 if force else ba.DEFAULT_SETTLE_S,
+                     log=lambda msg: runner.emit("archive", "progress", detail=msg))
+        ctx.annotate(f"{res.status}" + (f" in {res.elapsed_s:.0f}s" if res.copier else ""))
+    if not res.ok:
+        raise RuntimeError("; ".join(res.messages[-2:]) or res.status)
+    return res.as_dict()
+
+
+def _count_dirs(path) -> int:
+    try:
+        return sum(1 for p in path.iterdir() if p.is_dir() and not p.name.startswith((".", "_")))
+    except OSError:
+        return 0
+
+
 def make_router(config: PipelineConfig) -> APIRouter:
     router = APIRouter()
 
+    def _sources(cookie: int | None) -> dict[str, Any]:
+        base = config.for_build(None)
+        current = tb.install_current_build(base)
+        install = set(tb.available_builds(base))
+        archived = set(tb.archived_builds(base))
+        selected_cfg = resolve_view(base, cookie)
+        selected = selected_cfg.build if selected_cfg.build is not None else current
+        builds = []
+        for b in sorted(install | archived | ({current} if current else set()), reverse=True):
+            cfg = base.for_build(b)
+            src = tb.find_source(b, base)
+            ws = cfg.workspace
+            builds.append({
+                "build": b,
+                "current": b == current,
+                "in_install": b in install,
+                "in_archive": b in archived,
+                # Where a view of this build reads its game data.
+                "reads": ("install" if b == current else (src.origin if src else None)),
+                "workspace": str(ws),
+                "workspace_exists": ws.is_dir(),
+                "exports": {"ships": _count_dirs(ws / "ships"), "maps": _count_dirs(ws / "maps")},
+            })
+        return {
+            "current_build": current,
+            "selected": selected,
+            "cookie": COOKIE,
+            "requested": cookie,
+            "archive": {
+                "dir": str(base.archive_dir) if base.archive_dir else None,
+                "builds": sorted(archived),
+            },
+            "builds": builds,
+        }
+
+    @router.get("/builds/sources")
+    async def get_sources(request: Request) -> dict[str, Any]:
+        cookie = cookie_build(request.scope.get("headers"))
+        return await asyncio.to_thread(_sources, cookie)
+
+    @router.get("/builds/archive")
+    async def get_archive() -> dict[str, Any]:
+        def run() -> dict[str, Any]:
+            base = config.for_build(None)
+            doc: dict[str, Any] = {"configured": base.archive_dir is not None,
+                                   "dir": str(base.archive_dir) if base.archive_dir else None}
+            if base.archive_dir is None:
+                return doc
+            try:
+                doc["plan"] = ba.plan(base).as_dict(limit=20)
+            except Exception as err:  # noqa: BLE001 - shown on the page
+                doc["error"] = f"{type(err).__name__}: {err}"
+            doc["schedule"] = ba.schedule_status()
+            return doc
+
+        return await asyncio.to_thread(run)
+
     def _status() -> dict[str, Any]:
         builds = tb.available_builds(config)
-        current = builds[-1] if builds else None
+        current = tb.current_build(config)
         stored = bm.stored_builds(config)
         cache = config.require_cache_dir()
         caches = []
@@ -234,6 +333,24 @@ def make_router(config: PipelineConfig) -> APIRouter:
             {"config": config, "refresh": body.refresh},
             ["wows-builds", "snapshot", *(["--refresh"] if body.refresh else [])],
         )
+
+    @router.post("/builds/archive")
+    def post_archive(body: ArchiveBody) -> dict[str, Any]:
+        base = config.for_build(None)
+        if base.archive_dir is None:
+            raise HTTPException(status_code=409, detail={
+                "ok": False, "error": "no build archive configured (Settings, archive directory)",
+            })
+        try:
+            job = spawn_job(kind="builds", label="builds:archive", target=_archive_job,
+                            kwargs={"config": base, "force": body.force},
+                            cmd_display=["wows-builds", "archive",
+                                         *(["--settle-minutes", "0"] if body.force else [])])
+        except JobLockedError as err:
+            raise HTTPException(status_code=409, detail={
+                "ok": False, "error": str(err), "existing_job_id": err.existing_id,
+            }) from None
+        return {"ok": True, "job_id": job.id, "cmd": job.cmd}
 
     @router.post("/builds/reexport")
     def post_reexport(body: ReexportBody) -> dict[str, Any]:

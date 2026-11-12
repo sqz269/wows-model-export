@@ -22,6 +22,7 @@ from fastapi import FastAPI
 
 from ..config import PipelineConfig
 from . import queue as _queue
+from .build_view import BuildViewMiddleware
 from .routes import (
     aircraft,
     bootstrap,
@@ -58,12 +59,19 @@ def _app_for_reload() -> FastAPI:
     return create_app(PipelineConfig.load())
 
 
-def create_app(config: PipelineConfig) -> FastAPI:
+def create_app(config: PipelineConfig, *, build_view: bool = False) -> FastAPI:
     """Build a FastAPI app bound to the given pipeline config.
 
     The config carries the workspace + cache_dir paths every route
     handler needs. Routers are built fresh per call so unit tests
     can spin up multiple apps without state bleed.
+
+    The main app also serves archived game builds: its
+    :class:`~.build_view.BuildViewMiddleware` hands requests whose
+    ``wows_build`` cookie names another build to an app made with
+    ``build_view=True`` for ``config.for_build(<build>)``. Such an app has
+    only the ``/api`` and ``/repo`` routers: no SPA, and it leaves the
+    extract queue's worker (which runs every build's items) alone.
     """
     app = FastAPI(
         title="wows-model-export webview backend",
@@ -78,7 +86,10 @@ def create_app(config: PipelineConfig) -> FastAPI:
         openapi_url="/api/openapi.json",
     )
 
-    logger.info("workspace: %s", config.workspace)
+    if build_view:
+        logger.info("build %s view: workspace %s", config.build, config.workspace)
+    else:
+        logger.info("workspace: %s", config.workspace)
 
     # /api/* routers
     app.include_router(library.make_router(config), prefix="/api")
@@ -101,6 +112,16 @@ def create_app(config: PipelineConfig) -> FastAPI:
     # /repo/* static workspace file service. Mounted at /repo so the
     # path parameter captures the remainder.
     app.include_router(repo.make_router(config), prefix="/repo")
+
+    if build_view:
+        return app
+
+    # Requests for an archived build's workspace (cookie `wows_build`).
+    app.add_middleware(
+        BuildViewMiddleware,
+        base_config=config,
+        factory=lambda cfg: create_app(cfg, build_view=True),
+    )
 
     # Svelte SPA at /. MUST be registered after the API + /repo routers
     # so those keep precedence — see static.mount_webview docstring for

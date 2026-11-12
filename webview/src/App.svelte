@@ -30,6 +30,7 @@
   import Maps from '$routes/Maps.svelte';
   import Updates from '$routes/Updates.svelte';
   import HelpDialog from '$components/HelpDialog.svelte';
+  import BuildPicker from '$components/BuildPicker.svelte';
 
   let route = $state<RouteState>(readRoute());
   let helpOpen = $state(false);
@@ -157,10 +158,12 @@
       </a>
     {/each}
   </nav>
+  <div class="ml-auto">
+    <BuildPicker />
+  </div>
   <Button
     variant="ghost"
     size="icon-sm"
-    class="ml-auto"
     onclick={() => (helpOpen = true)}
     title="Keyboard shortcuts (?)"
     aria-label="Open keyboard shortcuts help"

@@ -111,6 +111,11 @@ toolchain required to use it.
 │           ├── <Ship>_hull.glb
 │           ├── <Ship>_accessories.json
 │           └── textures_dds/      ← per-ship DDS mip chains
+├── builds/
+│   └── <build>/                   ← a workspace of its own (ships/, maps/,
+│                                    libraries/, .cache/) for exports made
+│                                    with `--build <build>` from an older
+│                                    game build; see "Game builds" below
 └── libraries/
     ├── accessories/
     │   ├── index.json             ← fleet-wide accessory index
@@ -164,10 +169,91 @@ also available if you'd rather script extractions.
 | `wows-dedup-textures` | Move every texture set shared by two or more export folders into `libraries/textures_shared/` and repoint sidecars + library indexes (older exports). |
 | `wows-export-building` | Export GameParams Building entries (shore structures) into `buildings/`. |
 | `wows-compose-building` | Compose buildings from an old-format base model and GameParams gun mounts, from a spec you supply (`reference/schemas/BUILDING_SIDECAR.md`). |
+| `wows-builds status \| snapshot \| diff \| stale \| reexport` | What a game update changed (`diff`), which exports it made stale (`stale`), and re-running those with their original arguments (`reexport`). Per-build manifests live in `.cache/builds/<build>/`. |
+| `wows-builds archive` | Copy every install build and package the build archive lacks into it (append-only; see "Game builds"). `--dry-run` reports only; `--install-schedule` runs it at logon and daily. |
 | `wows-build-prop-hull` | Wrap a static prop (a WoWS map / port prop by id or model path, or any static `.glb` / `.gltf`) in a minimal ship sidecar under `ships/<id>/`: hull, one armour-less hit box, no mounts, buoyancy dimensions. `--spec` builds several, `--validate` checks them (`reference/schemas/METADATA_SPEC.md` §17). |
 
 Each accepts `--help` for the full argument list. Run `wows-` then Tab
-in a modern shell to discover the rest.
+in a modern shell to discover the rest. Every command that reads the game
+also takes `--build <build>` and `--archive-dir <dir>` (next section).
+
+## Game builds and the build archive
+
+The game install keeps only the newest two builds' index files
+(`bin/<build>/idx`); the launcher deletes the older one with the next
+update, and an update can replace packages. A **build archive** keeps
+every build readable:
+
+```
+<archive>/
+├── bin/<build>/      ← the install's bin/<build>/ folder, per build
+├── res_packages/     ← every .pkg the install has had (never deleted)
+└── logs/             ← one log per copy (`scheduled.log` for timed runs)
+```
+
+Point the pipeline at it with the Settings page's **Build archive
+directory**, `WOWS_ARCHIVE_DIR`, or `--archive-dir`.
+
+**Filling it.** `wows-builds archive` compares the install with the
+archive (every file of each `bin/<build>/` that has idx files, and every
+package; the client's runtime `*.log` files are skipped) and copies what
+is missing or newer. It only reads the install and never deletes. When the
+archive has its own `snapshot.ps1` it runs that (robocopy `/E /XO`),
+otherwise a built-in copier that writes each file under a temporary name
+and renames it into place. It does nothing when the archive is up to
+date, waits while any file it would copy changed in the last 30 minutes
+(a game update may still be writing; `--settle-minutes`), and lets one run
+at a time hold `logs/.archive.lock`.
+
+```bash
+wows-builds archive --dry-run            # what is not archived yet
+wows-builds archive                      # copy it
+wows-builds archive --install-schedule   # Windows: at logon (+15 min) and daily at 05:00
+wows-builds archive --schedule-status    # last and next run
+wows-builds archive --remove-schedule
+```
+
+The scheduled task (per user, "wows-model-export build archive") runs
+`pythonw -m wows_model_export.cli.builds archive` with the game and
+archive paths it was registered with, below normal priority and without a
+window, and appends to `<archive>/logs/scheduled.log`. A new build is
+archived on the first run after the update has settled; an up-to-date
+check takes about two seconds. Elsewhere, run the command from cron or a
+systemd timer.
+
+**Exporting an older build.** `--build <build>` on any export command
+(`wows-ingest-ship`, `wows-export-map`, the library builders,
+`wows-build-prop-hull`, ...) reads that build instead of the install's
+current one, from the archive when it is there and else from the install
+while it still has the build's idx files (toolkit flags
+`--idx-files <root>/bin/<build>/idx --pkg-dir <root>/res_packages`). Its
+output goes to `<workspace>/builds/<build>/`, a workspace of its own with
+its own caches, accessory library and texture store, so an older build's
+exports never overwrite the current ones:
+
+```bash
+wows-ingest-ship Montana --build 13357625 --build-library
+wows-export-map e02_Halloween_2017 --build 13357625   # a map later builds removed
+wows-builds status --build 13357625                   # that workspace's caches and exports
+```
+
+The build the install runs now is the plain workspace: `--build` with it
+changes nothing. `WOWS_BUILD=<build>` does the same as `--build` for every
+command. The per-build manifests that `wows-builds diff` compares stay in
+the main workspace's `.cache/builds/`, and `wows-builds snapshot --build
+<build>` can fingerprint any archived build. `wows-build-decal-library`
+reads a loose `res_unpack/dyndecals` copy, not a build, so it takes no
+`--build`.
+
+**In the webview** the topnav's **Game build** picker lists every build
+the install or the archive holds. Picking an older build shows that
+build's workspace on every page (Ships, Maps, Library, Extract,
+Updates, ...), and an Extract or map export from there reads that build
+and writes into its workspace. The choice is a cookie (`wows_build`), so
+it holds for every tab of that browser; the backend serves each `/api` and
+`/repo` request from the chosen build and marks the response with
+`X-Wows-Build`. The Updates page shows the archive's state, its scheduled
+task, and an **Archive now** button.
 
 ## Configuration
 
@@ -180,9 +266,12 @@ Settings persist to a JSON file the backend reads at startup:
 
 Precedence (highest first):
 
-1. CLI flag on `wows-webview-serve` (only `--workspace` today).
+1. CLI flag (`--workspace`, `--game-dir`, `--toolkit-bin`,
+   `--archive-dir`, `--build`; `wows-webview-serve` takes only
+   `--workspace`).
 2. Environment variable — `WOWS_GAME_DIR`, `WOWS_TOOLKIT_BIN`,
-   `WOWS_WORKSPACE`, `WOWS_TOOLKIT_TIMEOUT`.
+   `WOWS_WORKSPACE`, `WOWS_TOOLKIT_TIMEOUT`, `WOWS_ARCHIVE_DIR`,
+   `WOWS_BUILD`.
 3. The persisted config file (the Settings page writes here).
 4. Auto-discovery (`wowsunpack` on `PATH`) / sensible defaults.
 

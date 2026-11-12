@@ -33,6 +33,8 @@ export interface SettingsResponse {
     toolkit_bin: SettingsField<string>;
     workspace: SettingsField<string>;
     toolkit_timeout_s: SettingsField<number>;
+    /** Append-only archive of game builds (the build picker's source). */
+    archive_dir: SettingsField<string>;
   };
 }
 
@@ -42,6 +44,7 @@ export interface SettingsPatch {
   toolkit_bin?: string | null;
   workspace?: string | null;
   toolkit_timeout_s?: number | null;
+  archive_dir?: string | null;
 }
 
 export interface SettingsPutResponse {

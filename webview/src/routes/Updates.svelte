@@ -10,11 +10,14 @@
 
   import { Button } from '$lib/components/ui/button';
   import {
+    fetchArchiveStatus,
     fetchBuildDiff,
     fetchBuildsStatus,
+    runArchive,
     runBuildSnapshot,
     runReexport,
     waitForJob,
+    type ArchiveStatus,
     type BuildDiff,
     type BuildsStatus,
     type ExportState,
@@ -26,6 +29,8 @@
   let { active }: { active: boolean } = $props();
 
   let status = $state<BuildsStatus | null>(null);
+  /** The build archive against the install (loaded beside `status`). */
+  let archive = $state<ArchiveStatus | null>(null);
   let diff = $state<BuildDiff | null>(null);
   let loadError = $state<string | null>(null);
   let diffError = $state<string | null>(null);
@@ -80,7 +85,15 @@
     loading = true;
     loadError = null;
     try {
+      const archiveReq = fetchArchiveStatus().catch(
+        (err): ArchiveStatus => ({
+          configured: true,
+          dir: null,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
       status = await fetchBuildsStatus();
+      archive = await archiveReq;
       loaded = true;
       const stored = status.stored_manifests;
       if (diffTo === null && stored.length >= 2) {
@@ -152,6 +165,14 @@
       selected = {};
       await load();
     }
+  }
+
+  function archiveNow(force = false) {
+    void runJob(force ? 'Archive build (now)' : 'Archive build', () => runArchive(force));
+  }
+
+  function gb(bytes: number): string {
+    return `${(bytes / 1e9).toFixed(2)} GB`;
   }
 
   function snapshot(refresh = false) {
@@ -296,6 +317,78 @@
           </p>
         {/if}
       </section>
+
+      <!-- ── Build archive ───────────────────────────────────────── -->
+      {#if archive}
+        <section class="flex flex-col gap-2" data-testid="build-archive">
+          <div class={labelCls}>Build archive</div>
+          {#if !archive.configured}
+            <p class="text-muted-foreground text-xs m-0">
+              No build archive configured. Set an archive directory on the Settings page (a folder
+              laid out like the install: <code>bin/&lt;build&gt;/idx</code> and
+              <code>res_packages/</code>) to keep every build readable after the launcher deletes it.
+            </p>
+          {:else if archive.error}
+            <div class="text-destructive text-xs">
+              <strong>Archive status failed:</strong> <code>{archive.error}</code>
+            </div>
+          {:else if archive.plan}
+            {@const plan = archive.plan}
+            <dl
+              class="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs [&_dt]:text-muted-foreground [&_dd]:m-0"
+            >
+              <dt>Archive</dt>
+              <dd class="font-mono">{plan.archive_dir}</dd>
+              <dt>Archived builds</dt>
+              <dd class="font-mono">{plan.archived_builds.join(', ') || '—'}</dd>
+              <dt>State</dt>
+              <dd>
+                {#if plan.up_to_date}
+                  <span class="text-emerald-400"
+                    >up to date: every install build and its {plan.packages.install} packages are archived</span
+                  >
+                {:else}
+                  <span class="text-amber-400">
+                    not archived yet: builds {plan.unarchived_builds.join(', ') || '—'},
+                    {plan.packages.to_copy} package(s), {gb(plan.bytes_to_copy)}
+                  </span>
+                {/if}
+              </dd>
+              <dt>Scheduled</dt>
+              <dd>
+                {#if archive.schedule}
+                  <span title={archive.schedule.command}>
+                    {archive.schedule.state}; last run {archive.schedule.last_run ?? 'never'}
+                    {archive.schedule.last_result !== null && archive.schedule.last_run
+                      ? `(result ${archive.schedule.last_result})`
+                      : ''}; next {archive.schedule.next_run ?? '—'}
+                  </span>
+                {:else}
+                  <span class="text-muted-foreground"
+                    >not scheduled (<code>wows-builds archive --install-schedule</code>)</span
+                  >
+                {/if}
+              </dd>
+            </dl>
+            {#if !plan.up_to_date}
+              <div class="flex items-center gap-2">
+                <Button size="sm" disabled={jobRunning !== null} onclick={() => archiveNow()}>
+                  Archive now
+                </Button>
+                <span class="text-muted-foreground text-[11px]">
+                  Copies only what the archive lacks and never deletes. Waits while the install changed
+                  in the last 30 min (an update may still be writing);
+                  <button
+                    class="underline hover:text-foreground disabled:opacity-50"
+                    disabled={jobRunning !== null}
+                    onclick={() => archiveNow(true)}>copy anyway</button
+                  >.
+                </span>
+              </div>
+            {/if}
+          {/if}
+        </section>
+      {/if}
 
       <!-- ── Diff ────────────────────────────────────────────────── -->
       <section class="flex flex-col gap-3 border-t border-border pt-5">

@@ -56,6 +56,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from ..config import PipelineConfig, activated
 from ..errors import CancelledError
 from ..types import StepEvent
 
@@ -144,6 +145,12 @@ class Job:
     cancel_event: threading.Event = field(
         default_factory=threading.Event, repr=False
     )
+    # Game build the job runs for (its ``config`` is pinned to it), or
+    # None for the install's current build. Jobs for different builds
+    # write different workspaces, so the label lock is per build:
+    # ``lock_key`` is ``<label>@<build>`` for a pinned job.
+    build: int | None = None
+    lock_key: str = field(default="", repr=False)
 
 
 # Module-level state. The lock guards both maps because they have to
@@ -259,8 +266,9 @@ def gc_jobs() -> None:
                 _jobs_by_future.pop(job.future, None)
             # Only drop the lock if it still points at this job — a
             # newer run on the same label may have already overwritten.
-            if _job_locks.get(job.label) == jid:
-                _job_locks.pop(job.label, None)
+            key = job.lock_key or job.label
+            if _job_locks.get(key) == jid:
+                _job_locks.pop(key, None)
 
 
 def _on_job_done(future: Future[Any]) -> None:
@@ -352,8 +360,9 @@ def _on_job_done(future: Future[Any]) -> None:
         # can start. Only release if it still names this job — a
         # cancelled job that took a moment to actually exit might find
         # the label already re-claimed.
-        if _job_locks.get(job.label) == job.id:
-            _job_locks.pop(job.label, None)
+        key = job.lock_key or job.label
+        if _job_locks.get(key) == job.id:
+            _job_locks.pop(key, None)
 
 
 def spawn_job(
@@ -390,11 +399,18 @@ def spawn_job(
     """
     gc_jobs()
 
+    # A job whose config is pinned to a game build runs with that config
+    # active (so a ``PipelineConfig.load()`` fallback inside reads the same
+    # build) and locks its label per build.
+    cfg = kwargs.get("config")
+    build = cfg.build if isinstance(cfg, PipelineConfig) else None
+    lock_key = label if build is None else f"{label}@{build}"
+
     # Cheap label-collision check before we burn an id. Same dance as
     # the subprocess-based runner — keeps the ``running`` check inside
     # the lock so a concurrent re-spawn can't slip through.
     with _lock:
-        existing = _job_locks.get(label)
+        existing = _job_locks.get(lock_key)
         if existing:
             ex = _jobs.get(existing)
             if ex and ex.state == "running":
@@ -424,6 +440,8 @@ def spawn_job(
         events=[],
         result=None,
         error=None,
+        build=build,
+        lock_key=lock_key,
     )
 
     # Per-job event listener. Two responsibilities:
@@ -449,18 +467,26 @@ def spawn_job(
 
     with _lock:
         _jobs[job_id] = job
-        _job_locks[label] = job_id
+        _job_locks[lock_key] = job_id
+
+    run_target = target
+    if build is not None:
+        pinned = cfg
+
+        def run_target(**kw: Any) -> Any:
+            with activated(pinned):
+                return target(**kw)
 
     # ``submit`` may raise (e.g. executor shutdown after gc_jobs); roll
     # back our bookkeeping so a panic-restart doesn't leave a phantom
     # ``running`` entry the gc never collects.
     try:
-        future = _executor.submit(target, **full_kwargs)
+        future = _executor.submit(run_target, **full_kwargs)
     except Exception:
         with _lock:
             _jobs.pop(job_id, None)
-            if _job_locks.get(label) == job_id:
-                _job_locks.pop(label, None)
+            if _job_locks.get(lock_key) == job_id:
+                _job_locks.pop(lock_key, None)
         raise
 
     job.future = future
@@ -609,6 +635,7 @@ def job_to_dict(job: Job) -> dict[str, Any]:
         ],
         "result": _jsonify(job.result),
         "error":  job.error,
+        "build":  job.build,
     }
 
 
@@ -626,6 +653,7 @@ def job_to_summary(job: Job) -> dict[str, Any]:
         "started_at":  job.started_at,
         "finished_at": job.finished_at,
         "exit_code":   job.exit_code,
+        "build":       job.build,
     }
 
 

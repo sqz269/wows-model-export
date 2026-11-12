@@ -169,6 +169,8 @@ def make_router(config: PipelineConfig) -> APIRouter:
             toolkit_ship=      model_dir,
             gameparams_ship_id=top_key_full,
             exterior_hulls=    bool(body.get("exterior_hulls", False)),
+            # The game build this router serves (None: the current one).
+            build=             config.build,
         )
         return JSONResponse(content={"ok": True, "queue_id": item.queue_id})
 

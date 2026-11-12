@@ -156,3 +156,111 @@ export function runReexport(body: ReexportBody): Promise<BuildsJobResponse> {
     body: JSON.stringify(body),
   });
 }
+
+// ── Build picker + build archive ────────────────────────────────────────
+//
+//   GET  /api/builds/sources   every readable game build (install + archive)
+//                              and which one this browser views
+//   GET  /api/builds/archive   archive vs install + the scheduled task
+//   POST /api/builds/archive   job: copy what the archive lacks
+//
+// The viewed build is the `wows_build` cookie: the backend serves every
+// /api and /repo request carrying it from that build's workspace
+// (`<workspace>/builds/<build>/`). No cookie = the install's current build.
+
+export interface BuildSource {
+  build: number;
+  /** The build the install runs now (its workspace is the plain one). */
+  current: boolean;
+  in_install: boolean;
+  in_archive: boolean;
+  /** Where a view of this build reads its game data (null: unreadable). */
+  reads: 'install' | 'archive' | null;
+  workspace: string;
+  workspace_exists: boolean;
+  exports: { ships: number; maps: number };
+}
+
+export interface BuildSources {
+  current_build: number | null;
+  /** The build this browser views (the current build without a cookie). */
+  selected: number | null;
+  cookie: string;
+  /** The cookie's build, even when it can't be served. */
+  requested: number | null;
+  archive: { dir: string | null; builds: number[] };
+  /** Newest first. */
+  builds: BuildSource[];
+}
+
+export function fetchBuildSources(): Promise<BuildSources> {
+  return fetchJson<BuildSources>('/api/builds/sources');
+}
+
+export const BUILD_COOKIE = 'wows_build';
+
+/** View `build` in this browser (`null`: the current build). The caller
+ *  reloads the page so every tab refetches from that build's workspace. */
+export function setViewedBuild(build: number | null): void {
+  if (build === null) {
+    document.cookie = `${BUILD_COOKIE}=; path=/; max-age=0; SameSite=Lax`;
+  } else {
+    document.cookie = `${BUILD_COOKIE}=${build}; path=/; max-age=31536000; SameSite=Lax`;
+  }
+}
+
+export interface ArchiveFileDelta {
+  path: string;
+  size: number;
+  reason: 'missing' | 'size' | 'newer';
+}
+
+export interface ArchivePlan {
+  game_dir: string;
+  archive_dir: string;
+  install_builds: number[];
+  archived_builds: number[];
+  up_to_date: boolean;
+  unarchived_builds: number[];
+  builds: {
+    build: number;
+    files: number;
+    in_archive: boolean;
+    archived: boolean;
+    to_copy: number;
+    bytes_to_copy: number;
+    deltas: ArchiveFileDelta[];
+  }[];
+  packages: { install: number; to_copy: number; bytes_to_copy: number; deltas: ArchiveFileDelta[] };
+  bytes_to_copy: number;
+  newest_change_age_s: number | null;
+}
+
+export interface ArchiveStatus {
+  configured: boolean;
+  dir: string | null;
+  plan?: ArchivePlan;
+  error?: string;
+  /** The scheduled archive task (null: not registered). */
+  schedule?: {
+    task: string;
+    state: string;
+    last_run: string | null;
+    last_result: number | null;
+    next_run: string | null;
+    command: string;
+  } | null;
+}
+
+export function fetchArchiveStatus(): Promise<ArchiveStatus> {
+  return fetchJson<ArchiveStatus>('/api/builds/archive');
+}
+
+/** `force`: copy even if the install changed in the last 30 minutes. */
+export function runArchive(force = false): Promise<BuildsJobResponse> {
+  return fetchJson<BuildsJobResponse>('/api/builds/archive', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ force }),
+  });
+}

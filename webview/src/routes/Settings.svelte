@@ -73,19 +73,22 @@
     toolkit_bin: '',
     workspace: '',
     toolkit_timeout_s: '',
+    archive_dir: '',
   });
   let initial = $state({
     game_dir: '',
     toolkit_bin: '',
     workspace: '',
     toolkit_timeout_s: '',
+    archive_dir: '',
   });
 
   const dirty = $derived(
     form.game_dir !== initial.game_dir ||
       form.toolkit_bin !== initial.toolkit_bin ||
       form.workspace !== initial.workspace ||
-      form.toolkit_timeout_s !== initial.toolkit_timeout_s,
+      form.toolkit_timeout_s !== initial.toolkit_timeout_s ||
+      form.archive_dir !== initial.archive_dir,
   );
 
   /** True when the persisted (or env-overridden) workspace diverges
@@ -118,6 +121,7 @@
           res.fields.toolkit_timeout_s.value !== null
             ? String(res.fields.toolkit_timeout_s.value)
             : '',
+        archive_dir: res.fields.archive_dir?.value ?? '',
       };
       form = { ...next };
       initial = { ...next };
@@ -149,6 +153,7 @@
     patch.game_dir = form.game_dir.trim() || null;
     patch.toolkit_bin = form.toolkit_bin.trim() || null;
     patch.workspace = form.workspace.trim() || null;
+    patch.archive_dir = form.archive_dir.trim() || null;
     if (form.toolkit_timeout_s.trim() === '') {
       patch.toolkit_timeout_s = null;
     } else {
@@ -549,6 +554,28 @@
             Directory containing <code>WorldOfWarships.exe</code>. Read by the
             toolkit when extracting. Env override:
             <code>${data.fields.game_dir.env_var}</code>.
+          </span>
+        </label>
+
+        <label class={labelCls}>
+          <span class={labelTopCls}>
+            <span class="text-foreground">Build archive directory</span>
+            <span class={sourceColor(data.fields.archive_dir.source)}>
+              {sourceLabel(data.fields.archive_dir.source)}
+            </span>
+          </span>
+          <input
+            type="text"
+            placeholder="D:\WoWS_Archive"
+            bind:value={form.archive_dir}
+            class={inputCls}
+          />
+          <span class="text-muted-foreground text-[11px]">
+            Optional append-only archive of game builds, laid out like the install
+            (<code>bin/&lt;build&gt;/idx</code>, <code>res_packages/</code>) and filled by
+            <code>wows-builds archive</code>. The topnav's build picker lists its builds, so an
+            older build can still be viewed and exported after the launcher deletes it. Env
+            override: <code>${data.fields.archive_dir.env_var}</code>.
           </span>
         </label>
 

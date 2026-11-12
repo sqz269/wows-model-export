@@ -149,6 +149,9 @@ class QueueItem:
     # variant hulls during the scaffold. Base ingests only — the composer
     # ignores it on variant-routed scaffolds.
     exterior_hulls:  bool = False
+    # Game build to ingest from (an archived build; the ship lands in
+    # that build's workspace), or None for the install's current build.
+    build:           int | None = None
 
 
 def _item_to_dict(item: QueueItem) -> dict[str, Any]:
@@ -187,6 +190,7 @@ def _item_from_dict(d: dict[str, Any]) -> QueueItem | None:
                 d.get("library_built", d.get("status") == "done")
             ),
             exterior_hulls=    bool(d.get("exterior_hulls", False)),
+            build=             (None if d.get("build") is None else int(d["build"])),
         )
     except (KeyError, ValueError, TypeError):
         return None
@@ -385,7 +389,7 @@ def _spawn_for_item(item: QueueItem) -> tuple[str, list[str]] | None:
     """
     kwargs: dict[str, Any] = {
         "ship_input":            item.toolkit_ship,
-        "config":                _config,
+        "config":                _config_for(item.build),
         "forced_label":          item.label,
         "toolkit_ship_override": item.toolkit_ship,
         "gameparams_ship_id":    item.gameparams_ship_id,
@@ -416,6 +420,8 @@ def _spawn_for_item(item: QueueItem) -> tuple[str, list[str]] | None:
         cmd_display.append("--exterior-hulls")
     if item.build_library:
         cmd_display.append("--build-library")
+    if item.build is not None:
+        cmd_display += ["--build", str(item.build)]
 
     try:
         job = spawn_job(
@@ -430,13 +436,23 @@ def _spawn_for_item(item: QueueItem) -> tuple[str, list[str]] | None:
     return job.id, list(job.cmd)
 
 
+def _config_for(build: int | None) -> PipelineConfig | None:
+    """The worker's config pinned to ``build`` (``None``: as configured)."""
+    if _config is None or build is None:
+        return _config
+    return _config.for_build(build)
+
+
 def _owed_library_items() -> list[QueueItem]:
     """Done items that wanted a library build but haven't been covered by
-    a drain build yet. Caller holds the lock."""
-    return [
+    a drain build yet, all of one game build (each build has its own
+    workspace and library; the next drain takes the next build). Caller
+    holds the lock."""
+    owed = [
         it for it in _items
         if it.status == "done" and it.build_library and not it.library_built
     ]
+    return [it for it in owed if it.build == owed[0].build] if owed else []
 
 
 def _spawn_library_drain(owed: list[QueueItem]) -> str | None:
@@ -444,7 +460,8 @@ def _spawn_library_drain(owed: list[QueueItem]) -> str | None:
     sidecar refresh covering the ``owed`` items. Returns the job id, or
     ``None`` when ``_config`` is unset or the synthetic label is locked.
     Caller holds the lock."""
-    if _config is None:
+    cfg = _config_for(owed[0].build if owed else None)
+    if cfg is None:
         return None
     refresh_specs = [
         {
@@ -461,13 +478,14 @@ def _spawn_library_drain(owed: list[QueueItem]) -> str | None:
             label=_LIBRARY_JOB_LABEL,
             target=compose.build_library_and_refresh,
             kwargs={
-                "workspace":     _config.workspace,
-                "config":        _config,
+                "workspace":     cfg.workspace,
+                "config":        cfg,
                 "refresh_specs": refresh_specs,
             },
             cmd_display=[
                 "compose.build_library_and_refresh",
                 f"{len(owed)} ship(s)",
+                *(["--build", str(cfg.build)] if cfg.build is not None else []),
             ],
         )
     except JobLockedError:
@@ -677,8 +695,10 @@ def enqueue(
     toolkit_ship:   str,
     gameparams_ship_id: str,
     exterior_hulls: bool = False,
+    build:          int | None = None,
 ) -> QueueItem:
-    """Append a new pending item to the queue. Returns the created item."""
+    """Append a new pending item to the queue. Returns the created item.
+    ``build`` pins it to an archived game build (see ``QueueItem.build``)."""
     item = QueueItem(
         queue_id=          _new_queue_id(),
         vehicle=           vehicle,
@@ -691,6 +711,7 @@ def enqueue(
         job_id=            None,
         enqueued_at=       _now_ms(),
         exterior_hulls=    exterior_hulls,
+        build=             build,
     )
     with _cond:
         _items.append(item)

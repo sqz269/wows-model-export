@@ -55,6 +55,7 @@ class SettingsPatch(BaseModel):
     toolkit_bin: str | None = None
     workspace: str | None = None
     toolkit_timeout_s: float | None = None
+    archive_dir: str | None = None
 
 
 # Per-field validation. Returns ``None`` on success or a human-readable
@@ -64,7 +65,7 @@ class SettingsPatch(BaseModel):
 def _validate(key: str, raw: Any) -> tuple[Any, str | None]:
     if raw is None or raw == "":
         return (None, None)
-    if key in ("game_dir", "toolkit_bin", "workspace"):
+    if key in ("game_dir", "toolkit_bin", "workspace", "archive_dir"):
         if not isinstance(raw, str):
             return (None, f"{key} must be a string path")
         p = Path(raw).expanduser()
@@ -72,7 +73,7 @@ def _validate(key: str, raw: Any) -> tuple[Any, str | None]:
             return (None, f"{key}: path does not exist: {p}")
         if key == "toolkit_bin" and p.is_dir():
             return (None, f"{key}: expected an executable file, got a directory")
-        if key in ("game_dir", "workspace") and not p.is_dir():
+        if key in ("game_dir", "workspace", "archive_dir") and not p.is_dir():
             return (None, f"{key}: expected a directory, got a file")
         return (str(p), None)
     if key == "toolkit_timeout_s":
@@ -173,6 +174,13 @@ def make_router(config: PipelineConfig) -> APIRouter:
                         file_settings.get("toolkit_timeout_s"),
                     ),
                     "env_var": "WOWS_TOOLKIT_TIMEOUT",
+                },
+                # Append-only archive of game builds (`wows-builds archive`);
+                # the build picker reads archived builds from here.
+                "archive_dir": {
+                    "value": str(live.archive_dir) if live.archive_dir else None,
+                    "source": _field_source("WOWS_ARCHIVE_DIR", file_settings.get("archive_dir")),
+                    "env_var": "WOWS_ARCHIVE_DIR",
                 },
             },
         }
