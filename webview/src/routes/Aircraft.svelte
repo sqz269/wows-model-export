@@ -68,13 +68,18 @@
   let spinProps = $state(false);
   let animDoc = $state<AnimationDocument | null>(null);
   let animDocFor = $state<string | null>(null);
+  // The airframe the clip selection belongs to. Tracked apart from animDocFor, which moves only when a clip is
+  // played: keyed on that, visiting an airframe without playing left its clip selected on the next one.
+  let clipFor = $state<string | null>(null);
   let animError = $state<string | null>(null);
   let animPlaying = $state<string | null>(null);
   const clipKeys = $derived<string[]>(asset?.animation ? Object.keys(asset.animation.clips) : []);
   $effect(() => {
     // New airframe: default to its bomb-bay opening clip (else the first); drop the old document.
-    if (activeId !== animDocFor) {
+    if (activeId !== clipFor) {
+      clipFor = activeId;
       animDoc = null;
+      animDocFor = null;
       animError = null;
       animPlaying = null;
       clipKey = asset?.animation?.bomb_bay?.open ?? clipKeys[0] ?? '';

@@ -130,7 +130,7 @@ export interface AircraftAsset {
   glb_bytes: number;
   built_at?: number | null;
   textures_dds?: string | null;
-  visual_json?: string;
+  visual_json?: string | null;
   material_mappings?: string | null;
   skinned: boolean;
   bounds_m: { min: [number, number, number]; max: [number, number, number] } | null;
