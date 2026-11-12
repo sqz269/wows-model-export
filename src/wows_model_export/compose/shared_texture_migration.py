@@ -559,10 +559,47 @@ def _rewrite_document(
         if doc_path.read_bytes() != raw:
             raise RuntimeError("document changed on disk while it was being rewritten")
         bom = raw[:3] if raw.startswith(b"\xef\xbb\xbf") else b""
-        tmp = doc_path.with_name(f".{doc_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_bytes(bom + new_text.encode("utf-8"))
-        os.replace(tmp, doc_path)
+        _write_replace(doc_path, bom + new_text.encode("utf-8"), expect=raw)
     return n_refs
+
+
+# Waits between the attempts of a refused rename (about 2 s in all).
+_REPLACE_RETRY_S = (0.05, 0.1, 0.25, 0.5, 1.0)
+
+
+def _write_replace(dest: Path, data: bytes, *, expect: bytes | None = None) -> None:
+    """Write ``data`` to a temp sibling and rename it over ``dest``.
+
+    On Windows the rename fails with ``PermissionError`` (WinError 5 or 32)
+    while another process or thread holds ``dest`` open without delete
+    sharing or replaces it at the same moment (a library build writing its
+    index). It is retried for about two seconds; with ``expect`` each
+    attempt first checks that ``dest`` still holds those bytes, so a
+    document somebody else rewrote in the meantime is never overwritten
+    with a stale rewrite (that raises ``RuntimeError``). The temp file is
+    removed whenever the rename does not happen.
+    """
+    tmp = dest.with_name(f".{dest.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_bytes(data)
+        for delay in (*_REPLACE_RETRY_S, None):
+            try:
+                if expect is not None and dest.read_bytes() != expect:
+                    raise RuntimeError(
+                        "document changed on disk while it was being rewritten"
+                    )
+                os.replace(tmp, dest)
+                return
+            except PermissionError:
+                if delay is None:
+                    raise
+                time.sleep(delay)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _under(path: Path, roots: dict[str, str]) -> str | None:
@@ -668,9 +705,7 @@ def _write_pending(ws: Path, folders: dict[str, dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     doc = {"schema_version": _PENDING_SCHEMA_VERSION,
            "folders": {k: folders[k] for k in sorted(folders)}}
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    _write_replace(path, (json.dumps(doc, indent=2) + "\n").encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
