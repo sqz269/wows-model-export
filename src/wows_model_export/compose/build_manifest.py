@@ -18,7 +18,8 @@ for one game build:
   ``colorScheme:<name>``, ``shipgroup:<name>``). The file itself changes
   every build; its entries mostly don't.
 
-Manifests are cached at ``<cache_dir>/builds/<build>/manifest.json.gz``.
+Manifests are cached at ``<cache_dir>/builds/<build>/manifest.json.gz`` of
+the root workspace (shared by its per-build workspaces).
 The launcher deletes a build's idx files one update later, so the pipeline
 snapshots the current build's manifest whenever it is first needed; diffs
 against older builds read those snapshots.
@@ -71,7 +72,11 @@ PARTICLE_TYPES = ("effect", "effect_metadata")
 
 
 def builds_dir(config: PipelineConfig) -> Path:
-    return config.require_cache_dir() / "builds"
+    """Per-build manifests. They live in the root workspace's cache, which
+    every build workspace of it shares (``PipelineConfig.root_cache_dir``)."""
+    root = config.root_cache_dir
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "builds"
 
 
 def manifest_path(config: PipelineConfig, build: int) -> Path:

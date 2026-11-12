@@ -398,8 +398,7 @@ def display_name_for_camo_entry(
 
     try:
         cfg = config or PipelineConfig.load()
-        game_dir = cfg.game_dir
-        db = _loc.load(game_dir=game_dir, lang=lang)
+        db = _loc.load(bin_dir=_build.res_bin_dir(cfg), lang=lang)
     except Exception as exc:
         print(f"[wg_camo] localization load failed: {exc}", file=sys.stderr)
         return fallback
@@ -431,8 +430,7 @@ def display_name_for_exterior(
         return None
     try:
         cfg = config or PipelineConfig.load()
-        game_dir = cfg.game_dir
-        db = _loc.load(game_dir=game_dir, lang=lang)
+        db = _loc.load(bin_dir=_build.res_bin_dir(cfg), lang=lang)
     except Exception:
         return _loc.humanize_exterior_name(exterior_name) if humanize_fallback else None
     name = db.exterior_display_name(exterior_name)

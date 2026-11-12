@@ -23,6 +23,7 @@ from pathlib import Path
 from ..config import PipelineConfig
 from ..errors import ToolkitError
 from ..types import ToolkitResult
+from . import build as _build
 from ._subprocess import run_toolkit
 
 
@@ -92,7 +93,7 @@ def export_map(
         collision_out.parent.mkdir(parents=True, exist_ok=True)
 
     argv: list[str] = [
-        "--game-dir", str(cfg.require_game_dir()),
+        *_build.source_args(cfg),
         "export-map", space_dir,
         "--output", str(out),
         "--lod", str(lod),
@@ -143,7 +144,7 @@ def export_decal_textures(
     out.mkdir(parents=True, exist_ok=True)
 
     argv: list[str] = [
-        "--game-dir", str(cfg.require_game_dir()),
+        *_build.source_args(cfg),
         "export-decals", space_dir,
         "--out-dir", str(out),
     ]
@@ -183,11 +184,10 @@ def list_spaces(config: PipelineConfig | None = None) -> list[str]:
     one-off manual unpack that misses spaces later updates add and still
     lists the ones they remove.
     """
-    from . import build as _build
     from .vfs import ensure_manifest
 
     cfg = config or PipelineConfig.load()
-    cfg.require_game_dir()
+    _build.source_args(cfg)  # fail early when the build is not readable
     cache_dir = cfg.cache_dir or (cfg.workspace / ".cache")
     cache = cache_dir / _SPACES_LIST_FILENAME
     if not _build.cache_is_current(cache, cfg):

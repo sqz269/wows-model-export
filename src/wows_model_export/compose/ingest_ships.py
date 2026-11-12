@@ -49,7 +49,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..config import PipelineConfig
+from ..config import PipelineConfig, bind_active
 from ..errors import CancelledError, StepError
 from ..types import OnEvent
 from . import build_tracking as _build_tracking
@@ -268,7 +268,8 @@ def ingest_ships(
                 run_one(i, spec)
         else:
             with ThreadPoolExecutor(max_workers=jobs, thread_name_prefix="ingest") as pool:
-                pending = {pool.submit(run_one, i, spec) for i, spec in enumerate(specs)}
+                pending = {pool.submit(bind_active(run_one), i, spec)
+                           for i, spec in enumerate(specs)}
                 try:
                     while pending:
                         # A timeout keeps the wait interruptible (Ctrl+C).

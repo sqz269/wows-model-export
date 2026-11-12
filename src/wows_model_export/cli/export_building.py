@@ -15,8 +15,8 @@ import argparse
 import sys
 
 from ..building_export import run_export
-from ..config import PipelineConfig
-from ..errors import ToolkitError
+from ..errors import ConfigError, ToolkitError
+from ._args import add_build_args, resolve_config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="reuse GLBs already on disk; only recompose sidecars",
     )
+    add_build_args(parser)
     args = parser.parse_args(argv)
 
     if not (args.index or args.species or args.all_buildings):
@@ -44,9 +45,9 @@ def main(argv: list[str] | None = None) -> int:
             species=args.species,
             all_buildings=args.all_buildings,
             skip_glb=args.skip_glb,
-            config=PipelineConfig.load(),
+            config=resolve_config(args),
         )
-    except (ToolkitError, FileNotFoundError, ValueError) as e:
+    except (ToolkitError, ConfigError, FileNotFoundError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 

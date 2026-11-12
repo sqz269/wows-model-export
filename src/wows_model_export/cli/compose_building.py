@@ -16,8 +16,8 @@ import sys
 from pathlib import Path
 
 from ..building_compose import run_compose
-from ..config import PipelineConfig
-from ..errors import ToolkitError
+from ..errors import ConfigError, ToolkitError
+from ._args import add_build_args, resolve_config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -29,6 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--id", nargs="+", dest="ids", metavar="CMBC001", help="compose only these spec ids")
     parser.add_argument("--skip-glb", action="store_true", help="reuse GLBs already on disk; only recompose sidecars")
     parser.add_argument("--refresh-guns", action="store_true", help="re-export gun GLBs already in the gun library")
+    add_build_args(parser)
     args = parser.parse_args(argv)
 
     try:
@@ -37,9 +38,9 @@ def main(argv: list[str] | None = None) -> int:
             ids=args.ids,
             skip_glb=args.skip_glb,
             refresh_guns=args.refresh_guns,
-            config=PipelineConfig.load(),
+            config=resolve_config(args),
         )
-    except (ToolkitError, FileNotFoundError, ValueError) as e:
+    except (ToolkitError, ConfigError, FileNotFoundError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 

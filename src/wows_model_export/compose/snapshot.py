@@ -75,6 +75,7 @@ from ..read import gameparams as _gp
 from ..read import localization as _localization
 from ..resolve import camo as wg_camo
 from ..resolve import gameparams_autofill as _gp_autofill
+from ..toolkit import build as _build
 from ..toolkit.gameparams import ensure_dump as _ensure_gameparams_dump
 from ..toolkit.vfs import metadata_json as _vfs_metadata_json
 from ..types import OnEvent, SnapshotResult
@@ -594,7 +595,7 @@ def _build_snapshot(
 
     loc_db: _localization.LocalizationDb | None = None
     try:
-        loc_db = _localization.load(game_dir=config.require_game_dir())
+        loc_db = _localization.load(bin_dir=_build.res_bin_dir(config))
     except Exception as exc:
         print(f"[snapshot] localization load failed: {exc}", file=sys.stderr)
 

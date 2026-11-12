@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from ..build_deps import DepsCollector, norm_path
-from ..config import PipelineConfig
+from ..config import PipelineConfig, bind_active
 from ..toolkit import build as _build
 from . import build_manifest as _bm
 
@@ -999,7 +999,7 @@ def reexport_exports(
     else:
         cancelled: CancelledError | None = None
         with ThreadPoolExecutor(max_workers=jobs, thread_name_prefix="reexport") as pool:
-            futures = [pool.submit(run_one, st) for st in statuses]
+            futures = [pool.submit(bind_active(run_one), st) for st in statuses]
             for fut in futures:
                 try:
                     fut.result()

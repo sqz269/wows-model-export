@@ -21,6 +21,7 @@ from pathlib import Path
 
 from ..config import PipelineConfig
 from ..types import ToolkitResult
+from . import build as _build
 from ._subprocess import run_toolkit
 
 
@@ -49,7 +50,7 @@ def ammo_json(
 
     out = Path(out_path).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
-    argv = ["--game-dir", str(cfg.require_game_dir()), "ammo", ship, "--json", str(out)]
+    argv = [*_build.source_args(cfg), "ammo", ship, "--json", str(out)]
     if vehicle is not None:
         argv += ["--vehicle", vehicle]
     if hull is not None:

@@ -8,6 +8,17 @@
     wows-builds stale [--kind ship|map|prop_hull] [--all] [--json]
     wows-builds reexport [NAME ...] [--kind ship|map|prop_hull] [--include-untracked]
                          [--dry-run] [--no-skins] [--no-library]
+    wows-builds archive [--dry-run] [--json] [--settle-minutes N] [--copier auto|script|builtin]
+                        [--log FILE]
+    wows-builds archive --install-schedule [--at HH:MM] | --remove-schedule | --schedule-status
+
+``archive`` copies every install build (``bin/<build>/`` with idx files) and
+package the build archive lacks into it (``--archive-dir`` /
+``WOWS_ARCHIVE_DIR``; see :mod:`wows_model_export.compose.build_archive`).
+It only reads the install, never deletes, and does nothing when the archive
+is up to date, so ``--install-schedule`` can run it at logon and once a day.
+``status``, ``stale`` and ``reexport`` take ``--build N`` to look at the
+workspace of an archived build (``<workspace>/builds/<N>/``).
 
 ``snapshot`` saves the current build's manifest (fingerprint of every game
 file, ``assets.bin`` record, GameParams entity and ``camouflages.xml``
@@ -31,8 +42,11 @@ import json
 import sys
 import traceback
 from collections import Counter
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+from ..compose import build_archive as ba
 from ..compose import build_manifest as bm
 from ..compose import build_tracking as bt
 from ..errors import ConfigError
@@ -70,9 +84,24 @@ def _dump_json(doc: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _archive_summary(cfg) -> dict[str, Any] | None:
+    """Archive state for ``status`` (``None`` without an archive)."""
+    if cfg.archive_dir is None:
+        return None
+    doc: dict[str, Any] = {"dir": str(cfg.archive_dir), "builds": tb.archived_builds(cfg)}
+    try:
+        p = ba.plan(cfg)
+        doc["up_to_date"] = p.up_to_date
+        doc["unarchived_builds"] = [b.build for b in p.builds if not b.archived]
+        doc["packages_to_copy"] = len(p.package_deltas)
+    except ConfigError as err:
+        doc["error"] = str(err)
+    return doc
+
+
 def _cmd_status(args: argparse.Namespace, cfg) -> int:
     builds = tb.available_builds(cfg)
-    current = builds[-1] if builds else None
+    current = tb.current_build(cfg)
     stored = bm.stored_builds(cfg)
     cache = cfg.require_cache_dir()
     caches = {}
@@ -88,9 +117,15 @@ def _cmd_status(args: argparse.Namespace, cfg) -> int:
         _, statuses = bt.workspace_status(config=cfg)
         for st in statuses:
             exports.setdefault(st.kind, Counter())[st.state] += 1
+    archive = _archive_summary(cfg)
+    source = tb.config_source(cfg)
     doc = {
         "current_build": current,
+        "pinned": cfg.build is not None,
+        "workspace": str(cfg.workspace),
+        "source": source.as_dict() if source else None,
         "builds_with_idx": builds,
+        "archive": archive,
         "stored_manifests": stored,
         "caches": caches,
         "exports": {k: dict(v) for k, v in exports.items()},
@@ -99,8 +134,23 @@ def _cmd_status(args: argparse.Namespace, cfg) -> int:
         _dump_json(doc)
         return EXIT_OK
 
-    _out(f"current build     {current}")
+    if cfg.build is not None:
+        _out(f"pinned build      {current}  (read from the {source.origin if source else '?'}: "
+             f"{source.root if source else '?'})")
+        _out(f"workspace         {cfg.workspace}")
+    else:
+        _out(f"current build     {current}")
     _out(f"builds with idx   {', '.join(map(str, builds)) or '-'}")
+    if archive is not None:
+        line = f"archive           {archive['dir']}: {', '.join(map(str, archive['builds'])) or '-'}"
+        if archive.get("error"):
+            line += f"  ({archive['error']})"
+        elif archive.get("up_to_date"):
+            line += "  (every install build and package is archived)"
+        else:
+            line += (f"  (not yet archived: builds {archive['unarchived_builds'] or '[]'}, "
+                     f"{archive['packages_to_copy']} package(s); run `wows-builds archive`)")
+        _out(line)
     _out(f"saved manifests   {', '.join(map(str, stored)) or '-'}")
     if current is not None and current not in stored:
         _out("                  (no manifest for the current build yet: run `wows-builds snapshot`)")
@@ -131,8 +181,8 @@ def _cmd_status(args: argparse.Namespace, cfg) -> int:
 
 
 def _cmd_snapshot(args: argparse.Namespace, cfg) -> int:
-    path = bm.ensure_manifest(args.build, config=cfg, refresh=args.refresh)
-    m = bm.load_manifest(args.build, config=cfg, create=False)
+    path = bm.ensure_manifest(args.snapshot_build, config=cfg, refresh=args.refresh)
+    m = bm.load_manifest(args.snapshot_build, config=cfg, create=False)
     _out(f"build {m.build}: {path}")
     _out(f"  {len(m.files)} files, {len(m.records)} records, "
          f"{len(m.gameparams)} GameParams entities, {len(m.camouflages)} camouflage entries")
@@ -157,7 +207,7 @@ def _pick_builds(args: argparse.Namespace, cfg) -> tuple[int, int]:
         raise ConfigError("no game build with idx files found")
     if args.from_:
         return args.from_, to_build
-    candidates = sorted(set(bm.stored_builds(cfg)) | set(tb.available_builds(cfg)))
+    candidates = sorted(set(bm.stored_builds(cfg)) | set(tb.known_builds(cfg)))
     older = [b for b in candidates if b < to_build]
     if not older:
         raise ConfigError(
@@ -411,6 +461,81 @@ def _cmd_reexport(args: argparse.Namespace, cfg) -> int:
 
 
 # ---------------------------------------------------------------------------
+# archive
+# ---------------------------------------------------------------------------
+
+
+def _cmd_archive(args: argparse.Namespace, cfg) -> int:
+    if args.schedule_status:
+        st = ba.schedule_status()
+        if args.json:
+            _dump_json(st)
+        elif st is None:
+            _out(f"no scheduled task '{ba.TASK_NAME}'")
+        else:
+            for k, v in st.items():
+                _out(f"{k:<12} {v}")
+        return EXIT_OK
+    if args.remove_schedule:
+        removed = ba.remove_schedule()
+        _out(f"removed the scheduled task '{ba.TASK_NAME}'" if removed
+             else f"no scheduled task '{ba.TASK_NAME}' to remove")
+        return EXIT_OK
+    if args.install_schedule:
+        info = ba.install_schedule(cfg, daily_at=args.at)
+        if args.json:
+            _dump_json(info)
+        else:
+            _out(f"scheduled task '{info['task']}' ({info['state']}): at logon (+15 min) "
+                 f"and daily at {info['daily_at']}")
+            _out(f"  runs: {info['program']} {info['arguments']}")
+        return EXIT_OK
+
+    res = ba.run(
+        cfg,
+        dry_run=args.dry_run,
+        settle_s=max(0.0, args.settle_minutes) * 60.0,
+        copier=args.copier,
+        log=None if args.json else _out,
+    )
+    if args.json:
+        _dump_json(res.as_dict(limit=None if args.full else 20))
+    elif args.dry_run:
+        for b in res.before.builds:
+            state = ("archived" if b.archived else
+                     f"{len(b.deltas)} of {b.files} file(s) to copy" if b.in_archive else "not archived")
+            _out(f"  bin/{b.build:<10} {state}")
+        _out(f"  res_packages    {len(res.before.package_deltas)} of {res.before.packages} "
+             "package(s) to copy")
+    return EXIT_OK if res.ok else EXIT_STEP_ERROR
+
+
+class _Tee:
+    """Write to the original stream (when there is one) and a log file."""
+
+    def __init__(self, stream, log):
+        self._stream = stream
+        self._log = log
+
+    def write(self, s: str) -> int:
+        if self._stream is not None:
+            try:
+                self._stream.write(s)
+            except (OSError, ValueError):
+                pass
+        self._log.write(s)
+        self._log.flush()
+        return len(s)
+
+    def flush(self) -> None:
+        if self._stream is not None:
+            try:
+                self._stream.flush()
+            except (OSError, ValueError):
+                pass
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -427,9 +552,10 @@ def _build_parser() -> argparse.ArgumentParser:
     add_common_args(p)
 
     p = sub.add_parser("snapshot", help="Save a build's manifest (default: current build).")
-    p.add_argument("--build", type=int, default=None)
+    p.add_argument("--build", dest="snapshot_build", type=int, default=None,
+                   help="Build to fingerprint: the install's, or an archived one.")
     p.add_argument("--refresh", action="store_true", help="Rebuild even if saved.")
-    add_common_args(p)
+    add_common_args(p, build_option=False)
 
     p = sub.add_parser("diff", help="What changed between two builds.")
     p.add_argument("--from", dest="from_", type=int, default=None,
@@ -437,7 +563,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--to", type=int, default=None, help="Newer build (default: current).")
     p.add_argument("--json", action="store_true", help="Full wows.build_diff/v1 document.")
     p.add_argument("--limit", type=int, default=40, help="Max names per list (0 = all).")
-    add_common_args(p)
+    add_common_args(p, build_option=False)
 
     p = sub.add_parser("stale", help="Exports whose game inputs changed since they were made.")
     p.add_argument("--kind", choices=("ship", "map", "prop_hull"), default=None)
@@ -459,6 +585,36 @@ def _build_parser() -> argparse.ArgumentParser:
                    help=f"Exports to run at once (default {bt.DEFAULT_REEXPORT_JOBS}).")
     p.add_argument("--json", action="store_true")
     add_common_args(p)
+
+    p = sub.add_parser(
+        "archive",
+        help="Copy new install builds and packages into the build archive (append-only).",
+        description="Copy every install build (bin/<build>/ with idx files) and package "
+                    "the archive lacks into it. Reads the install only and never deletes; "
+                    "a no-op when the archive is up to date.",
+    )
+    p.add_argument("--dry-run", action="store_true",
+                   help="Only report what is not archived yet.")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--full", action="store_true", help="With --json: list every file to copy.")
+    p.add_argument("--settle-minutes", type=float, default=ba.DEFAULT_SETTLE_S / 60.0,
+                   help="Copy only once no file to copy has changed for this long "
+                        "(default %(default).0f; a game update may still be writing).")
+    p.add_argument("--copier", choices=("auto", "script", "builtin"), default="auto",
+                   help="auto: the archive's snapshot.ps1 when it has one (Windows), "
+                        "else the built-in copier.")
+    p.add_argument("--log", type=Path, default=None,
+                   help="Also append the output to this file (for scheduled runs).")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--install-schedule", action="store_true",
+                   help="Register a Windows scheduled task that runs this at logon "
+                        "(+15 min) and daily.")
+    g.add_argument("--remove-schedule", action="store_true",
+                   help="Unregister that scheduled task.")
+    g.add_argument("--schedule-status", action="store_true",
+                   help="Show the scheduled task's state and last run.")
+    p.add_argument("--at", default="05:00", help="Daily start time for --install-schedule.")
+    add_common_args(p, build_option=False)
     return ap
 
 
@@ -468,11 +624,30 @@ _COMMANDS = {
     "diff": _cmd_diff,
     "stale": _cmd_stale,
     "reexport": _cmd_reexport,
+    "archive": _cmd_archive,
 }
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    log_path = getattr(args, "log", None)
+    if log_path is None:
+        return _run(args)
+    # Scheduled runs go through pythonw, which has no stdout or stderr.
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    out, err = sys.stdout, sys.stderr
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write(f"\n== {datetime.now():%Y-%m-%d %H:%M:%S} wows-builds {args.cmd}\n")
+        sys.stdout, sys.stderr = _Tee(out, log), _Tee(err, log)
+        try:
+            rc = _run(args)
+            log.write(f"== exit {rc}\n")
+            return rc
+        finally:
+            sys.stdout, sys.stderr = out, err
+
+
+def _run(args: argparse.Namespace) -> int:
     try:
         cfg = resolve_config(args)
         return _COMMANDS[args.cmd](args, cfg)

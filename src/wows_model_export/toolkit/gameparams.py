@@ -53,7 +53,7 @@ def dump_gameparams(
     out.parent.mkdir(parents=True, exist_ok=True)
 
     argv: list[str] = [
-        "--game-dir", str(cfg.require_game_dir()),
+        *_build.source_args(cfg),
         "game-params",
     ]
     if full:

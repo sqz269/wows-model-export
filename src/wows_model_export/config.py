@@ -7,6 +7,19 @@
     workspace    — per-ship working dirs + libraries/ + cache live under here
     cache_dir    — defaults to `workspace / ".cache"`; holds GameParams dump
 
+Two optional fields select a game build other than the install's:
+
+    archive_dir  — an append-only archive of game builds laid out like the
+                   install (`bin/<build>/idx`, `res_packages/`); see
+                   `compose.build_archive`
+    build        — the pinned game build (`None` = the build the install
+                   runs now). A pinned config reads that build (from the
+                   archive, else from the install while its idx files are
+                   still there) and writes into its own workspace,
+                   `<workspace>/builds/<build>/`, so an older build's
+                   exports never overwrite the current ones. Made with
+                   `PipelineConfig.for_build`.
+
 Resolution order, picked at `PipelineConfig.load()` time:
 
     game_dir     ← WOWS_GAME_DIR env var
@@ -20,6 +33,11 @@ Resolution order, picked at `PipelineConfig.load()` time:
                 ← user-config file
                 ← cwd (so a checkout used as the workspace "just works")
     cache_dir    ← (not configurable directly — derived from workspace)
+    archive_dir  ← WOWS_ARCHIVE_DIR env var
+                ← user-config file
+                ← (no default — no archive)
+    build        ← WOWS_BUILD env var (a CLI's `--build` wins)
+                ← (default: the install's current build)
 
 The user-config file (`%APPDATA%/wows-model-export/config.json` on
 Windows, `~/.config/wows-model-export/config.json` elsewhere) lets the
@@ -45,10 +63,13 @@ import os
 import shutil
 import sys
 import tempfile
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+import threading
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from .errors import ConfigError
 
@@ -63,7 +84,17 @@ _USER_SETTINGS_KEYS: tuple[str, ...] = (
     "toolkit_bin",
     "workspace",
     "toolkit_timeout_s",
+    "archive_dir",
 )
+
+# Folder under a workspace that holds the per-build workspaces of pinned
+# configs: ``<workspace>/builds/<build>/``.
+BUILD_WORKSPACES_DIR = "builds"
+
+
+def build_workspace(base: Path, build: int) -> Path:
+    """The workspace a config pinned to ``build`` writes into."""
+    return Path(base) / BUILD_WORKSPACES_DIR / str(int(build))
 
 # Sentinel for "not yet resolved". We use `None` rather than a class-level
 # sentinel so dataclass equality + hashing stay predictable.
@@ -85,6 +116,12 @@ class PipelineConfig:
     cache_dir:   Path | None = None
     # User-overridable settings carried alongside paths.
     toolkit_timeout_s: float | None = None
+    # Game-build selection (see the module docstring). ``base_workspace``
+    # is the workspace a pinned config was derived from; ``None`` when
+    # the config is not pinned.
+    archive_dir: Path | None = None
+    build: int | None = None
+    base_workspace: Path | None = None
 
     @classmethod
     def load(cls, *, env: dict[str, str] | None = None) -> PipelineConfig:
@@ -97,7 +134,16 @@ class PipelineConfig:
         Precedence (highest wins): env var → user-config file →
         platform default. The user-config file is the persisted output
         of the webview Settings page; see :func:`user_config_path`.
+
+        Inside :func:`activated` (and in a CLI process given ``--build``,
+        see :func:`set_process_default`) this returns that config
+        instead, so a call deep in the pipeline that falls back to
+        ``PipelineConfig.load()`` keeps reading the pinned build.
         """
+        if env is None:
+            active = active_config()
+            if active is not None:
+                return active
         e = env if env is not None else os.environ
         user_settings = load_user_settings()
 
@@ -126,12 +172,64 @@ class PipelineConfig:
             if isinstance(raw, int | float):
                 toolkit_timeout_s = float(raw)
 
-        return cls(
+        archive_dir = _path_from_env(e, "WOWS_ARCHIVE_DIR") or _path_from_dict(
+            user_settings, "archive_dir"
+        )
+
+        cfg = cls(
             game_dir=game_dir,
             toolkit_bin=toolkit_bin,
             workspace=workspace,
             cache_dir=cache_dir,
             toolkit_timeout_s=toolkit_timeout_s,
+            archive_dir=archive_dir,
+        )
+        build = _int_from_env(e, "WOWS_BUILD")
+        return cfg.for_build(build) if build is not None else cfg
+
+    # ----- game build selection ---------------------------------------------
+
+    @property
+    def root_workspace(self) -> Path:
+        """The workspace this config belongs to: itself, or the one a
+        pinned config's build workspace lives in."""
+        return self.base_workspace or self.workspace
+
+    @property
+    def root_cache_dir(self) -> Path:
+        """Cache shared by every build workspace of the root workspace
+        (the per-build manifests live here, so a diff sees every build)."""
+        if self.base_workspace is not None:
+            return self.base_workspace / ".cache"
+        return self.cache_dir or (self.workspace / ".cache")
+
+    def for_build(self, build: int | None) -> PipelineConfig:
+        """This config pinned to game ``build``.
+
+        ``None``, or the build the install runs now, gives the unpinned
+        config of the root workspace (it follows the install). Any other
+        build gives a config that reads that build and writes into
+        ``<workspace>/builds/<build>/``. Whether the build can be read
+        (archived, or still in the install) is checked when a toolkit
+        call needs it; :func:`toolkit.build.require_source` checks it
+        up front.
+        """
+        root = self.root_workspace
+        unpinned = replace(
+            self, build=None, base_workspace=None, workspace=root,
+            cache_dir=root / ".cache",
+        )
+        if build is None:
+            return unpinned
+        build = int(build)
+        from .toolkit import build as _build  # late: toolkit imports config
+
+        if _build.install_current_build(unpinned) == build:
+            return unpinned
+        ws = build_workspace(root, build)
+        return replace(
+            self, build=build, base_workspace=root, workspace=ws,
+            cache_dir=ws / ".cache",
         )
 
     # ----- accessors that raise on missing values ----------------------------
@@ -160,6 +258,20 @@ class PipelineConfig:
             raise ConfigError("cache_dir is unset (workspace was not resolved).")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         return self.cache_dir
+
+    def require_archive_dir(self) -> Path:
+        if self.archive_dir is None:
+            raise ConfigError(
+                "no build archive configured; set WOWS_ARCHIVE_DIR or the "
+                "Settings page's archive directory (a folder laid out like "
+                "the game install: bin/<build>/idx and res_packages/)."
+            )
+        return self.archive_dir
+
+
+def _int_from_env(env: Mapping[str, str], key: str) -> int | None:
+    raw = (env.get(key) or "").strip()
+    return int(raw) if raw.isdigit() else None
 
 
 def _path_from_env(env: Mapping[str, str], key: str) -> Path | None:
@@ -276,8 +388,71 @@ def save_user_settings(settings: dict[str, Any], path: Path | None = None) -> Pa
     return p
 
 
+# ---------------------------------------------------------------------------
+# Active config: what PipelineConfig.load() returns inside a pinned run
+# ---------------------------------------------------------------------------
+
+# Per-context override (a server job running for one build) and a
+# process-wide one (a CLI given --build). Most of the pipeline threads its
+# config through explicitly; these make the remaining
+# ``config or PipelineConfig.load()`` fallbacks read the same build.
+T = TypeVar("T")
+
+_ACTIVE: ContextVar[PipelineConfig | None] = ContextVar("wows_active_config", default=None)
+_PROCESS_DEFAULT: PipelineConfig | None = None
+_PROCESS_LOCK = threading.Lock()
+
+
+def active_config() -> PipelineConfig | None:
+    """The config :meth:`PipelineConfig.load` returns instead of resolving
+    one, or ``None``."""
+    return _ACTIVE.get() or _PROCESS_DEFAULT
+
+
+@contextmanager
+def activated(config: PipelineConfig) -> Iterator[PipelineConfig]:
+    """Make ``config`` what ``PipelineConfig.load()`` returns in this
+    context. Worker threads started inside need the context passed on
+    (``build_deps.bind``)."""
+    token = _ACTIVE.set(config)
+    try:
+        yield config
+    finally:
+        _ACTIVE.reset(token)
+
+
+def bind_active(fn: Callable[..., T]) -> Callable[..., T]:
+    """Wrap ``fn`` so a worker thread runs it under the caller's active
+    config (``activated``). Returns ``fn`` itself when none is active."""
+    cfg = _ACTIVE.get()
+    if cfg is None:
+        return fn
+
+    def run(*args: Any, **kwargs: Any) -> T:
+        with activated(cfg):
+            return fn(*args, **kwargs)
+
+    return run
+
+
+def set_process_default(config: PipelineConfig | None) -> None:
+    """Make ``config`` what ``PipelineConfig.load()`` returns in every
+    thread of this process (``None`` clears it). For one-build processes
+    such as a CLI run with ``--build``; never for the webview server,
+    which serves several builds."""
+    global _PROCESS_DEFAULT
+    with _PROCESS_LOCK:
+        _PROCESS_DEFAULT = config
+
+
 __all__ = [
+    "BUILD_WORKSPACES_DIR",
     "PipelineConfig",
+    "activated",
+    "active_config",
+    "bind_active",
+    "build_workspace",
+    "set_process_default",
     "user_config_path",
     "load_user_settings",
     "save_user_settings",

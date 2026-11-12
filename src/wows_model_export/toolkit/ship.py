@@ -45,6 +45,7 @@ from .._glb import flip_winding, parse_glb, write_glb
 from ..config import PipelineConfig
 from ..errors import ToolkitError
 from ..types import ToolkitResult
+from . import build as _build
 from ._subprocess import run_toolkit
 
 
@@ -112,7 +113,7 @@ def export_ship(
     out = Path(out_path).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     argv = [
-        "--game-dir", str(cfg.require_game_dir()),
+        *_build.source_args(cfg),
         "export-ship", ship,
         "--output", str(out),
         "--lod", str(lod),
@@ -236,7 +237,7 @@ def ingest_ship_bundle(
     out = Path(out_path).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     argv = [
-        "--game-dir", str(cfg.require_game_dir()),
+        *_build.source_args(cfg),
         "ingest-ship", ship,
         "--output", str(out),
         "--lod", str(lod),
@@ -373,7 +374,7 @@ def export_model(
     out = Path(out_path).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     argv = [
-        "--game-dir", str(cfg.require_game_dir()),
+        *_build.source_args(cfg),
         "export-model", geometry_vfs_path,
         "--output", str(out),
         "--lod", str(lod),
@@ -507,7 +508,7 @@ def batch_export_model(
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False)
         argv = [
-            "--game-dir", str(cfg.require_game_dir()),
+            *_build.source_args(cfg),
             "batch-export-model", manifest_path,
         ]
         if not keep_going:

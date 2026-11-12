@@ -5,6 +5,11 @@ Every CLI accepts the same set of universal flags:
 * ``--workspace PATH``      -- overrides ``WOWS_WORKSPACE``
 * ``--game-dir PATH``       -- overrides ``WOWS_GAME_DIR``
 * ``--toolkit-bin PATH``    -- overrides ``WOWS_TOOLKIT_BIN``
+* ``--archive-dir PATH``    -- overrides ``WOWS_ARCHIVE_DIR`` (the build archive)
+* ``--build N``             -- read game build ``N`` (from the archive, else
+                               the install) and write into the workspace's
+                               ``builds/<N>/``; the install's current build
+                               is the plain workspace
 * ``--json-events``         -- switch the event printer to one JSON
                                 object per line on stdout
 * ``--quiet``               -- suppress the human-readable text printer
@@ -27,7 +32,7 @@ import argparse
 from dataclasses import replace
 from pathlib import Path
 
-from ..config import PipelineConfig
+from ..config import PipelineConfig, set_process_default
 from ..types import OnEvent
 from ._emit import make_json_printer, make_text_printer
 
@@ -42,9 +47,11 @@ EXIT_UNEXPECTED: int = 3
 # ----- Argument declarations -------------------------------------------------
 
 
-def add_common_args(parser: argparse.ArgumentParser) -> None:
+def add_common_args(parser: argparse.ArgumentParser, *, build_option: bool = True) -> None:
     """Add the universal ``--workspace`` / ``--game-dir`` / ``--toolkit-bin``
-    / ``--json-events`` / ``--quiet`` flags to ``parser``.
+    / ``--archive-dir`` / ``--build`` / ``--json-events`` / ``--quiet``
+    flags to ``parser``. ``build_option=False`` leaves ``--build`` out, for a
+    parser that gives it its own meaning.
     """
     g = parser.add_argument_group("config overrides")
     g.add_argument(
@@ -65,6 +72,25 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Override WOWS_TOOLKIT_BIN (path to wowsunpack executable).",
     )
+    g.add_argument(
+        "--archive-dir",
+        type=Path,
+        default=None,
+        help="Override WOWS_ARCHIVE_DIR (the append-only build archive, laid "
+             "out like the install: bin/<build>/idx + res_packages/).",
+    )
+    if build_option:
+        g.add_argument(
+            "--build",
+            type=int,
+            default=None,
+            metavar="BUILD",
+            help="Read this game build instead of the install's current one: "
+                 "from the archive, else from the install while it still has "
+                 "the build's idx files. Output goes to <workspace>/builds/"
+                 "<BUILD>/ (a workspace of its own). The current build is the "
+                 "plain workspace.",
+        )
 
     o = parser.add_argument_group("output")
     o.add_argument(
@@ -82,6 +108,26 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_build_args(parser: argparse.ArgumentParser) -> None:
+    """Only the game-build flags (``--archive-dir``, ``--build``), for a CLI
+    that has its own argument set; :func:`resolve_config` reads them."""
+    g = parser.add_argument_group("game build")
+    g.add_argument(
+        "--archive-dir",
+        type=Path,
+        default=None,
+        help="Override WOWS_ARCHIVE_DIR (the append-only build archive).",
+    )
+    g.add_argument(
+        "--build",
+        type=int,
+        default=None,
+        metavar="BUILD",
+        help="Read this game build (archive, else install) and write into "
+             "<workspace>/builds/<BUILD>/; the current build is the plain workspace.",
+    )
+
+
 # ----- Config + printer plumbing --------------------------------------------
 
 
@@ -92,6 +138,11 @@ def resolve_config(args: argparse.Namespace) -> PipelineConfig:
     overlays any explicit ``--workspace`` / ``--game-dir`` /
     ``--toolkit-bin`` values. Returns a fresh frozen config -- safe to
     hand to a composer.
+
+    With ``--build`` (or ``WOWS_BUILD``) the config is pinned to that
+    build (:meth:`PipelineConfig.for_build`), the build is checked to be
+    readable, and the pinned config becomes the process default, so every
+    ``PipelineConfig.load()`` in this process returns it.
     """
     cfg = PipelineConfig.load()
     overrides: dict = {}
@@ -106,9 +157,21 @@ def resolve_config(args: argparse.Namespace) -> PipelineConfig:
     toolkit_bin = getattr(args, "toolkit_bin", None)
     if toolkit_bin is not None:
         overrides["toolkit_bin"] = Path(toolkit_bin).expanduser().resolve()
-    if not overrides:
-        return cfg
-    return replace(cfg, **overrides)
+    archive_dir = getattr(args, "archive_dir", None)
+    if archive_dir is not None:
+        overrides["archive_dir"] = Path(archive_dir).expanduser().resolve()
+    build = getattr(args, "build", None)
+    if build is None:
+        build = cfg.build  # WOWS_BUILD
+    if overrides:
+        cfg = replace(cfg.for_build(None), **overrides)
+    cfg = cfg.for_build(build)
+    if cfg.build is not None:
+        from ..toolkit import build as _build
+
+        _build.require_source(cfg.build, cfg)
+        set_process_default(cfg)
+    return cfg
 
 
 def build_printer(args: argparse.Namespace) -> OnEvent | None:
@@ -119,6 +182,7 @@ def build_printer(args: argparse.Namespace) -> OnEvent | None:
 
 
 __all__ = [
+    "add_build_args",
     "add_common_args",
     "resolve_config",
     "build_printer",

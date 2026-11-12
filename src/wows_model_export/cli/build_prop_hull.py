@@ -19,9 +19,9 @@ import json
 import sys
 from pathlib import Path
 
-from ..config import PipelineConfig
 from ..errors import ConfigError, ToolkitError
 from ..prop_hull import PropHullError, build_prop_hull, run_spec, validate_workspace
+from ._args import add_build_args, resolve_config
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -49,13 +49,18 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--skip-export", action="store_true",
                     help="keep the hull GLB on disk; only recompose the sidecar and placements doc")
     ap.add_argument("--json", action="store_true", help="print the report as JSON")
+    add_build_args(ap)
     return ap
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     args.id = list(args.id) + list(args.more_ids)
-    cfg = PipelineConfig.load()
+    try:
+        cfg = resolve_config(args)
+    except ConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     try:
         if args.validate:
             result = validate_workspace(config=cfg, ids=args.id or None)

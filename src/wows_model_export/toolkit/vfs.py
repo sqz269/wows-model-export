@@ -91,7 +91,7 @@ def extract(
     out.mkdir(parents=True, exist_ok=True)
 
     argv = [
-        "--game-dir", str(cfg.require_game_dir()),
+        *_build.source_args(cfg),
         "extract", "--out-dir", str(out),
     ]
     if flatten:
@@ -140,7 +140,7 @@ def metadata_json(
     out.parent.mkdir(parents=True, exist_ok=True)
 
     argv = [
-        "--game-dir", str(cfg.require_game_dir()),
+        *_build.source_args(cfg),
         "metadata", "--format", "json", str(out),
     ]
     return run_toolkit(argv, config=cfg, expect_outputs=(out,), record_deps=False)

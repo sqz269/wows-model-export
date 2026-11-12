@@ -29,6 +29,7 @@ from pathlib import Path
 
 from ..config import PipelineConfig
 from ..types import ToolkitResult
+from . import build as _build
 from ._subprocess import run_toolkit
 
 
@@ -49,7 +50,7 @@ def dump_bones(
     out = Path(out_path).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     argv = [
-        "--game-dir", str(cfg.require_game_dir()),
+        *_build.source_args(cfg),
         "dump-bones", geometry_vfs_path,
         "--json", str(out),
     ]
