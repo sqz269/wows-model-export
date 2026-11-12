@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -316,6 +317,20 @@ def write_document(doc: dict[str, Any], path: Path) -> bool:
     return True
 
 
+def document_inputs(doc: dict[str, Any], state_machines: Iterable[str] = ()) -> set[str]:
+    """The game files a document was built from: the state machines asked
+    for (``state_machines``; the document lists only those the client
+    ships), the sequences its nodes play and every clip's ``.anim``."""
+    inputs = set(state_machines)
+    inputs.update(m["vfs"] for m in doc.get("state_machines") or [] if m.get("vfs"))
+    for m in doc.get("state_machines") or []:
+        for n in m.get("nodes") or []:
+            if n.get("type") == "sequence" and n.get("resource"):
+                inputs.add(n["resource"])
+    inputs.update(c["source_vfs"] for c in (doc.get("clips") or {}).values() if c.get("source_vfs"))
+    return inputs
+
+
 def _node_clips(node: dict[str, Any]) -> list[str]:
     """The clip keys a state machine node plays: an ``animation`` node's
     ``clip``, a ``sequence`` node's ``clips``."""
@@ -443,6 +458,7 @@ __all__ = [
     "build_document",
     "cache_root",
     "clip_summary",
+    "document_inputs",
     "fetch_vfs",
     "prefetch",
     "rest_pose",

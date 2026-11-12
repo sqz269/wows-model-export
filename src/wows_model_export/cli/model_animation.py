@@ -74,8 +74,9 @@ def main(argv: list[str] | None = None) -> int:
             for w in warnings:
                 print(f"  {label}: {w}", file=sys.stderr)
             print(f"{label}: {r['hulls']} hull GLB(s) with animation, {r['clips']} clip(s), "
-                  f"{r['missing_node_clips']} on nodes the GLB lacks; sidecar "
-                  f"{'written' if r['written'] else 'unchanged'}")
+                  f"{r['missing_node_clips']} on nodes the GLB lacks"
+                  + (f", {r['kept']} failed block(s) kept from the last run" if r["kept"] else "")
+                  + f"; sidecar {'written' if r['written'] else 'unchanged'}")
         return EXIT_STEP_ERROR if failed else EXIT_OK
     from ..read import model_prototypes
     from ..toolkit import assets_bin

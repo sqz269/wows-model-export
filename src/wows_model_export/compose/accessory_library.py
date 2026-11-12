@@ -966,12 +966,17 @@ def _animate_assets(
     *,
     config: PipelineConfig,
     warnings: list[str],
+    staleness: _build_tracking.LibraryStaleness | None = None,
 ) -> dict[str, int]:
     """Write ``<asset_id>.animation.json`` beside the GLB of every asset
     whose model loads an animation state machine (the ``wows_animation/v1``
     document of :mod:`.model_animation`), delete a stale one, and set each
     record's index ``animation`` block. A record whose block could not be
-    built keeps its previous index block."""
+    built keeps its previous index block.
+
+    With ``staleness``, each document's game inputs (state machines,
+    sequences, clips) are added to its asset's ``build_deps.json``, so a
+    game update that changes only a clip marks the asset stale."""
     from ..read import model_prototypes
     from ..toolkit import assets_bin as _assets_bin
     from . import model_animation
@@ -983,7 +988,7 @@ def _animate_assets(
     )
     root = model_animation.cache_root(config)
     model_animation.prefetch(sorted({s for v in machines.values() for s in v}), root, config)
-    stats = {"documents": 0, "clips": 0, "missing_node_clips": 0}
+    stats = {"documents": 0, "clips": 0, "missing_node_clips": 0, "deps_updated": 0}
     for rec in sorted(built, key=lambda r: r.key.asset_id):
         model = models[rec.key]
         glb = library_root / rec.glb_rel_path
@@ -1009,6 +1014,18 @@ def _animate_assets(
                 stats["missing_node_clips"] += sum(
                     1 for c in doc["clips"].values() if c["missing_nodes"]
                 )
+                if staleness is not None:
+                    try:
+                        if staleness.add_files(
+                            output_dir_for(library_root, rec.key),
+                            model_animation.document_inputs(doc, sms),
+                        ) is not None:
+                            stats["deps_updated"] += 1
+                    except Exception as e:  # noqa: BLE001 - tracking never fails the step
+                        warnings.append(
+                            f"{rec.key.asset_id}: animation inputs not recorded in "
+                            f"build_deps.json: {e}"
+                        )
             rec.animation_done = True
             warnings.extend(
                 f"{rec.key.asset_id}: animation: {p}"
@@ -1507,7 +1524,9 @@ def build_accessory_library(
     # previous blocks.
     with runner.step("animate_assets") as st:
         try:
-            anim = _animate_assets(records, lib_root, config=cfg, warnings=warnings)
+            anim = _animate_assets(
+                records, lib_root, config=cfg, warnings=warnings, staleness=staleness,
+            )
             st.annotate(
                 f"{anim['documents']} asset(s) with animation state machines, "
                 f"{anim['clips']} clip(s); {anim['missing_node_clips']} clip(s) "

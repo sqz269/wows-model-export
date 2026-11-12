@@ -968,6 +968,8 @@ def ingest_ship(
                     f"{anim['hulls']} hull GLB(s) with animation, {anim['clips']} clip(s)"
                     + (f", {anim['missing_node_clips']} on nodes the GLB lacks"
                        if anim["missing_node_clips"] else "")
+                    + (f", {anim['kept']} failed block(s) kept from the last run"
+                       if anim["kept"] else "")
                 ),
             )
         except CancelledError:

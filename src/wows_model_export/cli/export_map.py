@@ -173,7 +173,14 @@ def main(argv: "list[str] | None" = None) -> int:
             k.removesuffix("_error") for k in meta if k.endswith("_error")
         )
         sky = meta.get("sky_manifest") or {}
-        sky_errors = _sky_weather_errors(_read_sky_manifest(config, name))
+        # Per-weather errors come from the sky_manifest.json this run wrote.
+        # When the sky step failed as a whole, the file on disk is an earlier
+        # export's, so none are reported (soft_errors names the step).
+        sky_errors = (
+            _sky_weather_errors(_read_sky_manifest(config, name))
+            if sky and not meta.get("sky_manifest_error")
+            else None
+        )
         if json_events:
             print(json.dumps({
                 "name": name,
@@ -186,7 +193,7 @@ def main(argv: "list[str] | None" = None) -> int:
                 "sky_errors": sky_errors,
             }))
             continue
-        for err in sky_errors:
+        for err in sky_errors or ():
             print(f"{name}: sky weather {err['weather']}: {err['error']}", file=sys.stderr)
         if not quiet:
             mi = meta.get("model_instance_manifest") or {}

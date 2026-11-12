@@ -141,13 +141,7 @@ def build_hull_document(
         return None, stats
     # The document's game inputs, read from the pipeline cache when an
     # earlier run extracted them: record them for the export's build deps.
-    inputs = set(loaded_by)
-    for m in doc["state_machines"]:
-        for n in m["nodes"]:
-            if n["type"] == "sequence" and n.get("resource"):
-                inputs.add(n["resource"])
-    inputs.update(c["source_vfs"] for c in doc["clips"].values())
-    for path in sorted(inputs):
+    for path in sorted(model_animation.document_inputs(doc, loaded_by)):
         _build_deps.record_file(path)
     for m in doc["state_machines"]:
         m["models"] = loaded_by.get(m["vfs"], [])
@@ -160,8 +154,24 @@ def _hull_block(doc: dict[str, Any], doc_path: Path, glb_rel: str, ship_dir: Pat
     block = model_animation.animation_block(doc, doc_path.relative_to(ship_dir).as_posix())
     block["glb"] = glb_rel
     block["models"] = sorted({m for sm in doc["state_machines"] for m in sm.get("models") or []})
-    block["nodes_in_glb"] = all(not c["missing_nodes"] for c in doc["clips"].values())
+    # A document with no clips (its sequences show other models only) has
+    # nothing to play, so it does not claim the GLB holds its nodes.
+    clips = doc["clips"].values()
+    block["nodes_in_glb"] = bool(clips) and all(not c["missing_nodes"] for c in clips)
     return block
+
+
+def _prior_block(section: Any, ext_id: str | None) -> dict[str, Any] | None:
+    """The block a target had in the sidecar's previous ``animation``
+    section, or None."""
+    if not isinstance(section, dict):
+        return None
+    if ext_id is None:
+        block = section.get("hull")
+    else:
+        exteriors = section.get("exteriors")
+        block = exteriors.get(ext_id) if isinstance(exteriors, dict) else None
+    return block if isinstance(block, dict) else None
 
 
 def animate_ship(
@@ -174,8 +184,11 @@ def animate_ship(
     sidecar's ``animation`` section (removed when no hull GLB animates).
 
     Returns ``{"hulls": n documents, "clips": n, "missing_node_clips": n,
-    "written": bool}``. Raises on an unreadable sidecar; a hull GLB that
-    fails adds a warning and gets no block.
+    "kept": n, "written": bool}``. Raises on an unreadable sidecar. A hull
+    GLB that fails adds a warning and keeps its previous block (and its
+    document on disk), counted in ``kept``, as the accessory library keeps
+    an asset's previous index block; only a hull read whole whose models
+    load no state machine loses its block.
     """
     from ..toolkit import assets_bin as _assets_bin
 
@@ -193,7 +206,14 @@ def animate_ship(
             targets.append((ext["exterior_id"], rel))
     assets_bin = _assets_bin.ensure_dump(config=cfg)
     section: dict[str, Any] = {}
-    totals = {"hulls": 0, "clips": 0, "missing_node_clips": 0, "written": False}
+    totals = {"hulls": 0, "clips": 0, "missing_node_clips": 0, "kept": 0, "written": False}
+
+    def put(ext_id: str | None, block: dict[str, Any]) -> None:
+        if ext_id is None:
+            section["hull"] = block
+        else:
+            section.setdefault("exteriors", {})[ext_id] = block
+
     for ext_id, rel in targets:
         glb = ship_dir / rel
         doc_path = glb.with_name(f"{glb.stem}.animation.json")
@@ -202,17 +222,20 @@ def animate_ship(
         try:
             adoc, stats = build_hull_document(glb, config=cfg, assets_bin=assets_bin, warnings=warn)
         except Exception as e:  # noqa: BLE001 - one hull's failure keeps the others
-            warn.append(f"{rel}: animation failed: {e}")
+            prior = _prior_block(doc.get(SECTION), ext_id)
+            if prior is not None:
+                put(ext_id, prior)
+                totals["kept"] += 1
+            warn.append(
+                f"{rel}: animation failed: {e}"
+                + ("; its previous block is kept" if prior is not None else "")
+            )
             continue
         if adoc is None:
             doc_path.unlink(missing_ok=True)
             continue
         model_animation.write_document(adoc, doc_path)
-        block = _hull_block(adoc, doc_path, rel, ship_dir)
-        if ext_id is None:
-            section["hull"] = block
-        else:
-            section.setdefault("exteriors", {})[ext_id] = block
+        put(ext_id, _hull_block(adoc, doc_path, rel, ship_dir))
         totals["hulls"] += 1
         totals["clips"] += stats["clips"]
         totals["missing_node_clips"] += stats["missing_node_clips"]

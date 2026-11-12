@@ -430,6 +430,41 @@ class LibraryStaleness:
         os.replace(tmp, out)
         return out
 
+    def add_files(self, out_dir: Path, paths: Iterable[str]) -> Path | None:
+        """Add game files that an asset's other outputs read (its animation
+        document's state machines, sequences and clips, which live outside
+        the asset's folder) to its ``build_deps.json``, so a change to them
+        marks the asset stale. As a merge in :func:`write_export_deps`, an
+        input already listed keeps the fingerprint it was recorded with and
+        the record keeps its ``build``. An asset with no readable record is
+        left alone (it is exported again anyway, and :meth:`write` starts
+        its record afresh). Returns the file when it changed."""
+        out = Path(out_dir) / DEPS_FILENAME
+        try:
+            doc = json.loads(out.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(doc, dict):
+            return None
+        inputs = doc.setdefault("inputs", {})
+        listed = inputs.setdefault("files", {})
+        new = {
+            p: self.manifest.file_fp(p)
+            for p in sorted({norm_path(p) for p in paths})
+            if p not in listed and is_tracked_file(p)
+        }
+        new = {p: fp for p, fp in new.items() if fp is not None}
+        if not new:
+            return None
+        listed.update(new)
+        inputs["files"] = dict(sorted(listed.items()))
+        doc["counts"] = {k: len(v) for k, v in inputs.items()}
+        doc["updated_at"] = _now()
+        tmp = out.with_name(f"{DEPS_FILENAME}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(doc, indent=1) + "\n", encoding="utf-8")
+        os.replace(tmp, out)
+        return out
+
 
 def library_deps_files(config: PipelineConfig) -> Iterator[Path]:
     """``build_deps.json`` of every accessory-library asset."""
