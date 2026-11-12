@@ -54,8 +54,9 @@ from ..errors import CancelledError, StepError
 from ..types import OnEvent
 from . import build_tracking as _build_tracking
 
-#: Most ingests one group runs at once. Each ingest already runs several
-#: toolkit processes side by side (hull, armor and ammo exports).
+#: Most ingests one group runs at once. Each one adds a toolkit export's CPU
+#: load and its own working memory to the process (GameParams is parsed once
+#: and shared): three small ships peaked near 17 GB, one alone near 13 GB.
 MAX_INGEST_JOBS = 3
 
 
