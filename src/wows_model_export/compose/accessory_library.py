@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 import threading
 import time
 from collections import defaultdict
@@ -438,7 +439,14 @@ def output_dir_for(library_root: Path, key: AssetKey) -> Path:
 # ---------------------------------------------------------------------------
 
 
-_manifest_paths: set[str] | None = None
+# VFS file paths per manifest file, keyed by its path and stamped with its
+# (mtime, size). Each game build has its own manifest
+# (``<cache_dir>/wows_manifest.json``), and one process (the webview
+# server's jobs) can build libraries for several builds, so one
+# process-wide set would answer every later build from the first build's
+# listing. A rebuilt manifest is re-read.
+_manifest_paths: dict[str, tuple[tuple[float, int] | None, set[str]]] = {}
+_manifest_paths_lock = threading.Lock()
 
 
 def _resolve_manifest_path(manifest_path: Path | None) -> Path:
@@ -449,18 +457,27 @@ def _resolve_manifest_path(manifest_path: Path | None) -> Path:
 
 
 def _load_manifest_paths(manifest_path: Path | None) -> set[str]:
-    """Load all VFS file paths (without leading '/') into a set, cached."""
-    global _manifest_paths
-    if _manifest_paths is not None:
-        return _manifest_paths
+    """Load all VFS file paths (without leading '/') into a set, cached
+    per manifest file (``None``: the active config's manifest)."""
     resolved = _resolve_manifest_path(manifest_path)
-    if not resolved.is_file():
-        _manifest_paths = set()
-        return _manifest_paths
-    with open(resolved, encoding="utf-8") as f:
-        entries = json.load(f)
-    _manifest_paths = {e["path"].lstrip("/") for e in entries if "path" in e}
-    return _manifest_paths
+    key = os.path.normcase(os.path.abspath(resolved))
+    try:
+        st = resolved.stat()
+        stamp: tuple[float, int] | None = (st.st_mtime, st.st_size)
+    except OSError:
+        stamp = None
+    with _manifest_paths_lock:
+        hit = _manifest_paths.get(key)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    paths: set[str] = set()
+    if stamp is not None:
+        with open(resolved, encoding="utf-8") as f:
+            entries = json.load(f)
+        paths = {e["path"].lstrip("/") for e in entries if "path" in e}
+    with _manifest_paths_lock:
+        _manifest_paths[key] = (stamp, paths)
+    return paths
 
 
 def has_dead_variant(

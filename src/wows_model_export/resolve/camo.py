@@ -43,6 +43,7 @@ uniform + per-channel mix.  See the user's memory
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import xml.etree.ElementTree as ET
@@ -324,15 +325,31 @@ def _exterior_pref_rank(exterior_name: str) -> int:
     return len(_EXT_PREFIX_PREFERENCE)
 
 
-# Cache: gameparams_path → {camouflage_name: [exterior_id, ...]} reverse
+# Cache: GameParams dump → {camouflage_name: [exterior_id, ...]} reverse
 # index, sorted by preference + id. Built lazily on first display-name
-# lookup, reused across the process. Invalidated implicitly when the
-# underlying ``gameparams.load_full`` cache is invalidated.
-_camo_to_exteriors_cache: dict[str, list[str]] | None = None
+# lookup. Keyed by the dump's path and stamped with its (mtime, size): one
+# process can resolve several game builds (each has its own
+# ``<cache_dir>/gameparams.json``), and a re-dump after a game update
+# rebuilds the index. A failed build is cached as ``{}`` until the dump
+# changes.
+_camo_to_exteriors_cache: dict[str, tuple[tuple[float, int] | None, dict[str, list[str]]]] = {}
+_camo_to_exteriors_lock = threading.Lock()
+
+
+def _file_stamp(path: Path) -> tuple[float, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime, st.st_size)
+
+
+def _path_key(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(path))
 
 
 def _build_camo_to_exteriors_index(
-    *, gameparams_path: Path | None = None,
+    *, gameparams_path: Path | None = None, config: PipelineConfig | None = None,
 ) -> dict[str, list[str]]:
     """Walk every Exterior in GameParams and bucket them by their
     referenced camouflage entry name.
@@ -340,7 +357,8 @@ def _build_camo_to_exteriors_index(
     Returns ``{camouflage_name: [exterior_id, ...]}`` with each list
     sorted by preference (most user-facing first).
     """
-    flat = _gp.load_full(path=gameparams_path) if gameparams_path else _gp.load_full()
+    flat = (_gp.load_full(path=gameparams_path) if gameparams_path
+            else _gp.load_full(config=config))
     out: dict[str, list[str]] = {}
     for k, v in flat.items():
         if not isinstance(v, dict):
@@ -355,6 +373,35 @@ def _build_camo_to_exteriors_index(
     for lst in out.values():
         lst.sort(key=lambda eid: (_exterior_pref_rank(eid), eid))
     return out
+
+
+def _camo_to_exteriors(
+    gameparams_path: Path | None, config: PipelineConfig | None,
+) -> dict[str, list[str]]:
+    """The reverse index for ``gameparams_path`` (default: the dump of
+    ``config``'s build), built on first use per dump."""
+    try:
+        cfg = config or PipelineConfig.load()
+        source = Path(gameparams_path) if gameparams_path else (
+            cfg.require_cache_dir() / "gameparams.json")
+    except Exception as exc:
+        print(f"[wg_camo] display-name index unavailable: {exc}", file=sys.stderr)
+        return {}
+    key = _path_key(source)
+    stamp = _file_stamp(source)
+    with _camo_to_exteriors_lock:
+        hit = _camo_to_exteriors_cache.get(key)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    try:
+        index = _build_camo_to_exteriors_index(gameparams_path=gameparams_path, config=cfg)
+    except Exception as exc:
+        print(f"[wg_camo] display-name index build failed: {exc}", file=sys.stderr)
+        index = {}
+    # Stamp after the build: a missing dump is made by load_full.
+    with _camo_to_exteriors_lock:
+        _camo_to_exteriors_cache[key] = (_file_stamp(source), index)
+    return index
 
 
 def display_name_for_camo_entry(
@@ -377,22 +424,10 @@ def display_name_for_camo_entry(
     silent — missing GameParams cache, missing ``.mo`` file, or
     Exterior-with-no-IDS-key all degrade gracefully.
     """
-    global _camo_to_exteriors_cache
     if not camo_entry_name:
         return fallback
 
-    # Lazy-build the reverse index on first call.
-    if _camo_to_exteriors_cache is None:
-        try:
-            _camo_to_exteriors_cache = _build_camo_to_exteriors_index(
-                gameparams_path=gameparams_path,
-            )
-        except Exception as exc:
-            print(f"[wg_camo] display-name index build failed: {exc}",
-                  file=sys.stderr)
-            _camo_to_exteriors_cache = {}
-
-    exterior_ids = _camo_to_exteriors_cache.get(camo_entry_name) or []
+    exterior_ids = _camo_to_exteriors(gameparams_path, config).get(camo_entry_name) or []
     if not exterior_ids:
         return fallback
 
@@ -1384,6 +1419,31 @@ class CamouflageDb:
         return out
 
 
+# Parsed camouflages.xml per extracted file, keyed by its path and stamped
+# with its (mtime, size). Each game build has its own
+# ``<cache_dir>/camouflages.xml``, and one process (the webview server's
+# jobs) can scaffold several builds, so a single process-wide DB would
+# resolve every later build's skins against whichever XML loaded first.
+_DB_CACHE: dict[str, tuple[tuple[float, int] | None, CamouflageDb]] = {}
+_DB_CACHE_LOCK = threading.Lock()
+
+
+def load_db_cached(config: PipelineConfig | None = None) -> CamouflageDb:
+    """:meth:`CamouflageDb.load` for ``config``'s build, parsed once per
+    extracted ``camouflages.xml`` (re-parsed when the file changes)."""
+    xml_path = ensure_camouflages_xml(config=config)
+    key = _path_key(xml_path)
+    stamp = _file_stamp(xml_path)
+    with _DB_CACHE_LOCK:
+        hit = _DB_CACHE.get(key)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    db = CamouflageDb.parse(xml_path)
+    with _DB_CACHE_LOCK:
+        _DB_CACHE[key] = (stamp, db)
+    return db
+
+
 # ---------------------------------------------------------------------------
 # Sidecar adapter
 # ---------------------------------------------------------------------------
@@ -1912,6 +1972,7 @@ __all__ = [
     "CamoEntry",
     # Parser
     "CamouflageDb",
+    "load_db_cached",
     # Cache + GameParams discovery
     "ensure_camouflages_xml",
     "read_vehicle_permoflages",

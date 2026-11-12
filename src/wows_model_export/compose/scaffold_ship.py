@@ -90,10 +90,9 @@ from ._step_runner import StepRunner
 # Module-local caches + constants (lifted verbatim)
 # ---------------------------------------------------------------------------
 
-# Cached camouflages.xml DB shared across multiple scaffold calls in a
-# single Python session (e.g. when ingest_ship runs scaffold + sidecar
-# refresh sequentially). XML parse is ~1s and the lookup is read-only.
-_CAMO_DB_CACHE: wg_camo.CamouflageDb | None = None
+# The camouflages.xml DB is parsed once per extracted file and shared
+# across scaffold calls (wg_camo.load_db_cached keys it by the file, so
+# each game build gets its own; XML parse is ~1s, the lookup read-only).
 
 # Cached accessory-library index.json per library root, keyed on the
 # resolved absolute path string. The index lists every built asset and
@@ -783,15 +782,11 @@ def _build_palette_resolver(
     Returns ``None`` on camo-DB extraction failure — sidecar emission
     then falls back to mask-only skins.
     """
-    global _CAMO_DB_CACHE
-    if _CAMO_DB_CACHE is None:
-        try:
-            _CAMO_DB_CACHE = wg_camo.CamouflageDb.load(config=config)
-        except Exception as e:
-            _warn(warnings, f"wg_camo unavailable: {e}")
-            return None
-
-    db = _CAMO_DB_CACHE
+    try:
+        db = wg_camo.load_db_cached(config)
+    except Exception as e:
+        _warn(warnings, f"wg_camo unavailable: {e}")
+        return None
 
     def resolver(scheme_key: str, mask_paths: list[str]):
         entry, palettes = wg_camo.palette_for_mask_paths(
@@ -1197,15 +1192,12 @@ def _ensure_camo_db(
     log_label: str,
     warnings: list[str] | None = None,
 ) -> wg_camo.CamouflageDb | None:
-    """Lazily load + cache the camouflages.xml DB."""
-    global _CAMO_DB_CACHE
-    if _CAMO_DB_CACHE is None:
-        try:
-            _CAMO_DB_CACHE = wg_camo.CamouflageDb.load(config=config)
-        except Exception as e:
-            _warn(warnings, f"{log_label} skip: wg_camo unavailable ({e})")
-            return None
-    return _CAMO_DB_CACHE
+    """The camouflages.xml DB of ``config``'s build (parsed once per file)."""
+    try:
+        return wg_camo.load_db_cached(config)
+    except Exception as e:
+        _warn(warnings, f"{log_label} skip: wg_camo unavailable ({e})")
+        return None
 
 
 def _discover_permoflage_skins(
