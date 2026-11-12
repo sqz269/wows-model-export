@@ -144,6 +144,26 @@ export class AccessoryViewer {
   private boneRestQuats = new Map<string, THREE.Quaternion>();
   private boneMarker: THREE.Mesh | null = null;
 
+  // ── Animation playback ────────────────────────────────────────────────
+  // One mixer per loaded root; clips are built from a `wows_animation/v1`
+  // document (node-local TRS channels addressed by GLB node name).
+  private clock = new THREE.Clock();
+  private mixer: THREE.AnimationMixer | null = null;
+  private action: THREE.AnimationAction | null = null;
+  // Procedural propeller spin: pivots turned about a local axis.
+  private spin: Array<{
+    node: THREE.Object3D;
+    axis: THREE.Vector3;
+    sign: number;
+    rest: THREE.Quaternion;
+  }> = [];
+  private spinRate = 0;
+  // Rest transforms of the nodes a clip has driven, restored on stop.
+  private animRest = new Map<
+    THREE.Object3D,
+    { p: THREE.Vector3; q: THREE.Quaternion; s: THREE.Vector3 }
+  >();
+
   constructor(container: HTMLElement) {
     // Default container bg is a touch lighter than ShipViewer so single
     // accessories pop against the page panel.
@@ -186,6 +206,11 @@ export class AccessoryViewer {
     this.env.scene.add(this.rigOverlay.group);
 
     this.stopLoop = startRenderLoop(() => {
+      const dt = Math.min(this.clock.getDelta(), 0.1);
+      this.mixer?.update(dt);
+      if (this.spin.length) {
+        for (const s of this.spin) s.node.rotateOnAxis(s.axis, s.sign * this.spinRate * dt);
+      }
       this.env.controls.update();
       // Go through env.render() (the composer + GT tonemap pass), not
       // renderer.render directly — Three's built-in tonemapper is disabled.
@@ -273,6 +298,106 @@ export class AccessoryViewer {
       bounds: this.bounds.clone(),
       meshes: this.tracked.map((t) => t.info),
     };
+  }
+
+  /**
+   * Play one clip of a `wows_animation/v1` document on the loaded model.
+   * Each channel drives the named GLB node's local position / quaternion /
+   * scale (linear keys; spherical for rotations). A one-shot clip holds its
+   * last pose. Returns the names of channel nodes the model lacks.
+   */
+  playAnimationClip(
+    name: string,
+    clip: {
+      duration_s: number;
+      channels: Array<{ node: string; path: string; times: number[]; values: number[][] }>;
+    },
+    opts: { loop?: boolean; timeScale?: number } = {},
+  ): string[] {
+    if (!this.root) return [];
+    this.stopAnimation(false);
+    const missing: string[] = [];
+    const tracks: THREE.KeyframeTrack[] = [];
+    for (const ch of clip.channels) {
+      const obj =
+        this.boneNodes.get(ch.node) ??
+        this.boneNodes.get(THREE.PropertyBinding.sanitizeNodeName(ch.node));
+      if (!obj) {
+        missing.push(ch.node);
+        continue;
+      }
+      if (!this.animRest.has(obj)) {
+        this.animRest.set(obj, {
+          p: obj.position.clone(),
+          q: obj.quaternion.clone(),
+          s: obj.scale.clone(),
+        });
+      }
+      const values = ch.values.flat();
+      const times = ch.times;
+      if (ch.path === 'rotation')
+        tracks.push(new THREE.QuaternionKeyframeTrack(`${obj.uuid}.quaternion`, times, values));
+      else if (ch.path === 'translation')
+        tracks.push(new THREE.VectorKeyframeTrack(`${obj.uuid}.position`, times, values));
+      else if (ch.path === 'scale')
+        tracks.push(new THREE.VectorKeyframeTrack(`${obj.uuid}.scale`, times, values));
+    }
+    if (!tracks.length) return missing;
+    this.mixer ??= new THREE.AnimationMixer(this.root);
+    const anim = new THREE.AnimationClip(name, clip.duration_s, tracks);
+    const action = this.mixer.clipAction(anim);
+    action.setLoop(opts.loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
+    action.clampWhenFinished = true;
+    action.timeScale = opts.timeScale ?? 1;
+    action.reset().play();
+    this.action = action;
+    return missing;
+  }
+
+  /** Stop the playing clip; with `restore`, put its nodes back at rest. */
+  stopAnimation(restore = true): void {
+    if (this.mixer) {
+      this.mixer.stopAllAction();
+      if (this.action) this.mixer.uncacheClip(this.action.getClip());
+    }
+    this.action = null;
+    if (restore) {
+      for (const [obj, r] of this.animRest) {
+        obj.position.copy(r.p);
+        obj.quaternion.copy(r.q);
+        obj.scale.copy(r.s);
+      }
+    }
+  }
+
+  /** The playing clip's time and duration (null when nothing plays). */
+  animationTime(): { time: number; duration: number } | null {
+    if (!this.action) return null;
+    return { time: this.action.time, duration: this.action.getClip().duration };
+  }
+
+  /**
+   * Spin propeller pivots about their local axis at `radPerSec` (0 stops
+   * and restores the rest pose). `opposite` pivots turn the other way.
+   */
+  setPropellerSpin(
+    spec: { axis: [number, number, number]; direct: string[]; opposite: string[] } | null,
+    radPerSec: number,
+  ): void {
+    for (const s of this.spin) s.node.quaternion.copy(s.rest);
+    this.spin = [];
+    this.spinRate = radPerSec;
+    if (!spec || !radPerSec) return;
+    const axis = new THREE.Vector3(...spec.axis).normalize();
+    for (const [names, sign] of [
+      [spec.direct, 1],
+      [spec.opposite, -1],
+    ] as const) {
+      for (const n of names) {
+        const node = this.boneNodes.get(n);
+        if (node) this.spin.push({ node, axis, sign, rest: node.quaternion.clone() });
+      }
+    }
   }
 
   /** Re-fit the camera to the current model's bounds. Idempotent. */
@@ -610,6 +735,11 @@ export class AccessoryViewer {
       return;
     }
     if (!this.root) return;
+    this.mixer?.stopAllAction();
+    this.mixer = null;
+    this.action = null;
+    this.animRest.clear();
+    this.spin = [];
     this.env.scene.remove(this.root);
     this.root.traverse((obj) => {
       const m = obj as THREE.Mesh;

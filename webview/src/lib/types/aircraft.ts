@@ -50,6 +50,61 @@ export interface AircraftPropeller {
   render_sets: string[];
 }
 
+/** One clip of a model's animation document, as the index summarises it
+ *  (the channels stay in the document). */
+export interface AnimationClipSummary {
+  source_vfs: string;
+  take: string | null;
+  fps: number;
+  frame_count: number;
+  duration_s: number;
+  loop: boolean;
+  nodes: string[];
+  missing_nodes: string[];
+  starts_at_rest: boolean;
+  ends_at_rest: boolean;
+  /** State machine triggers whose transitions enter the clip. */
+  triggers: string[];
+  role: 'bomb_bay_open' | 'bomb_bay_close' | 'gear_down' | 'gear_up' | null;
+}
+
+/** The index `animation` block of a WoWS airframe. */
+export interface AircraftAnimation {
+  /** The `wows_animation/v1` document, relative to the library root; null
+   *  when the model loads no state machine. */
+  file: string | null;
+  state_machines: string[];
+  clips: Record<string, AnimationClipSummary>;
+  bomb_bay: { open: string | null; close: string | null } | null;
+  gear: {
+    mode: 'switch' | 'clip';
+    down?: string | null;
+    up?: string | null;
+    down_render_sets: string[];
+    up_render_sets: string[];
+  };
+  /** Pivots that spin about their local `axis`; `opposite` turns the other
+   *  way from `direct`. */
+  propeller_spin: { axis: [number, number, number]; direct: string[]; opposite: string[] };
+}
+
+/** One channel of a `wows_animation/v1` clip: a GLB node's local
+ *  translation, rotation (quaternion x, y, z, w) or scale over time. */
+export interface AnimationChannel {
+  node: string;
+  path: 'translation' | 'rotation' | 'scale';
+  times: number[];
+  values: number[][];
+}
+
+export interface AnimationDocument {
+  schema: string;
+  model_vfs: string;
+  glb: string | null;
+  state_machines: Array<{ vfs: string; entry: string | null; [key: string]: unknown }>;
+  clips: Record<string, AnimationClipSummary & { channels: AnimationChannel[] }>;
+}
+
 export interface AircraftGameParamsEntry {
   key: string;
   species: string | null;
@@ -98,6 +153,9 @@ export interface AircraftAsset {
   }>;
   texture_sets?: Record<string, TextureSet>;
   gameparams: AircraftGameParamsEntry[];
+  /** Clips, gear rule and propeller spin; absent on entries another
+   *  producer added. */
+  animation?: AircraftAnimation;
 }
 
 export interface AircraftIndex {

@@ -3,7 +3,7 @@
 // `fetchProjectiles`.
 
 import { fetchJson } from './client';
-import type { AircraftPayload } from '$lib/types/aircraft';
+import type { AircraftPayload, AnimationDocument } from '$lib/types/aircraft';
 
 let cached: Promise<AircraftPayload> | null = null;
 
@@ -22,4 +22,11 @@ export function fetchAircraft(): Promise<AircraftPayload> {
 /** Drop the cached index so the next read picks up a rebuilt library. */
 export function invalidateAircraft(): void {
   cached = null;
+}
+
+/** Fetch an airframe's animation document (`animation.file`, relative to
+ *  the library root), served from the workspace like the GLB. */
+export function fetchAircraftAnimation(file: string): Promise<AnimationDocument> {
+  const url = `/repo/libraries/aircraft/${file.split(/[\\/]/).map(encodeURIComponent).join('/')}`;
+  return fetchJson<AnimationDocument>(url);
 }

@@ -120,7 +120,8 @@ toolchain required to use it.
     │   │                            hardpoints, GameParams entries)
     │   ├── stats.json             ← per-plane stats and loadouts (HP,
     │   │                            speeds, heights, ordnance, dispersion)
-    │   └── <nation>/<category>/<ID>/  ← GLB + visual JSON + DDS per airframe
+    │   └── <nation>/<category>/<ID>/  ← GLB + visual JSON + DDS per airframe,
+    │                                    and its clips (<ID>.animation.json)
     └── textures_shared/
         └── <key-8>/<file>         ← one copy of each texture set shared
                                      byte-for-byte across export folders

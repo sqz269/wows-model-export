@@ -53,8 +53,14 @@ GameParams entry that flies an indexed airframe.
 The composer emits these canonical :class:`StepEvent` names::
 
     "discover_aircraft"  "plan_batch"  "batch_export"
-    "populate_materials"  "describe_airframes"  "write_index"
-    "write_stats"
+    "populate_materials"  "describe_airframes"  "animate_airframes"
+    "write_index"  "write_stats"
+
+``animate_airframes`` writes ``<asset_id>.animation.json`` beside the GLB
+of each airframe whose model loads an animation state machine (the
+``wows_animation/v1`` document of :mod:`.model_animation`) and gives every
+entry an ``animation`` block: the clips with their roles, the gear rule
+and the propeller spin rule.
 """
 
 from __future__ import annotations
@@ -78,7 +84,7 @@ from ..errors import StepError, ToolkitError
 from ..resolve import sidecar as resolve_sidecar
 from ..toolkit._subprocess import toolkit_capabilities, toolkit_supports
 from ..types import AircraftLibraryResult, OnEvent
-from . import aircraft_stats
+from . import aircraft_stats, model_animation
 from ._step_runner import StepRunner
 
 #: Index schema identifier (bump on a breaking change).
@@ -718,6 +724,69 @@ def parent_static_render_sets(glb_path: Path, visual: dict) -> int:
     return moved
 
 
+# ── Animation ────────────────────────────────────────────────────────────
+# Clip roles by the state machine trigger that plays the clip. The plane
+# state machines name the bomb-bay triggers `bombbay_on` (the clip runs from
+# the rest pose, doors closed, to doors open) and `bombbay_off` (back to
+# rest); `chassis_on` / `chassis_off` follow the gear render sets
+# (`chassis_on_BlendBone` is the extended gear).
+_TRIGGER_ROLES: dict[str, str] = {
+    "bombbay_on": "bomb_bay_open",
+    "bombbay_off": "bomb_bay_close",
+    "chassis_on": "gear_down",
+    "chassis_off": "gear_up",
+}
+
+
+def airframe_animation_block(desc: dict, doc: dict | None, rel_file: str | None) -> tuple[dict, list[str]]:
+    """The index ``animation`` block of one airframe.
+
+    ``clips`` summarises the document's clips (no channels) with each
+    clip's ``role``; ``bomb_bay`` and ``gear`` name the clips a consumer
+    plays (``gear`` is a render-set switch when the model has no gear
+    clips); ``propeller_spin`` lists the pivots that spin about their local
+    Z axis, by sense. Returns ``(block, problems)``."""
+    problems: list[str] = []
+    clips = model_animation.clip_summary(doc) if doc else {}
+    roles: dict[str, str] = {}
+    for key, c in clips.items():
+        role = next((_TRIGGER_ROLES[t] for t in c.get("triggers") or [] if t in _TRIGGER_ROLES), None)
+        c["role"] = role
+        if role:
+            if role in roles:
+                problems.append(f"clips {roles[role]} and {key} both play {role}")
+            else:
+                roles[role] = key
+        if role == "bomb_bay_open" and not c.get("starts_at_rest"):
+            problems.append(f"bomb-bay opening clip {key} does not start at the rest pose")
+        if role == "bomb_bay_close" and not c.get("ends_at_rest"):
+            problems.append(f"bomb-bay closing clip {key} does not end at the rest pose")
+    bomb_bay = ({"open": roles.get("bomb_bay_open"), "close": roles.get("bomb_bay_close")}
+                if "bomb_bay_open" in roles or "bomb_bay_close" in roles else None)
+    parts = desc.get("parts") or {}
+    if "gear_down" in roles or "gear_up" in roles:
+        gear: dict[str, Any] = {"mode": "clip", "down": roles.get("gear_down"), "up": roles.get("gear_up")}
+    else:
+        gear = {"mode": "switch"}
+    gear["down_render_sets"] = list(parts.get("gear_down") or [])
+    gear["up_render_sets"] = list(parts.get("gear_up") or [])
+    props = desc.get("propellers") or []
+    spin = {
+        "axis": [0.0, 0.0, 1.0],
+        "direct": [p["node"] for p in props if p.get("spin") == "direct"],
+        "opposite": [p["node"] for p in props if p.get("spin") == "opposite"],
+    }
+    block = {
+        "file": rel_file,
+        "state_machines": [m["vfs"] for m in (doc or {}).get("state_machines") or []],
+        "clips": clips,
+        "bomb_bay": bomb_bay,
+        "gear": gear,
+        "propeller_spin": spin,
+    }
+    return block, problems
+
+
 def _classify_plane_materials(materials: list[dict]) -> None:
     """The propeller blur disc (``PROPELLERMAT_*``) samples a DXT5
     ``*_alpha_a`` disc texture and blends over the airframe; the toolkit's
@@ -782,6 +851,8 @@ def write_index(
             "material_mappings": _rel(p["mm"], library_root) if p["mm"].is_file() else None,
         }
         entry.update(rec.description)
+        if "animation" not in entry and isinstance((prior.get(aid) or {}).get("animation"), dict):
+            entry["animation"] = prior[aid]["animation"]
         entry["materials"] = rec.materials
         entry["texture_sets"] = rec.texture_sets
         entry["gameparams"] = (
@@ -849,6 +920,43 @@ def _glb_texture_problems(gltf: dict, materials: list[dict]) -> list[str]:
             img = images[src] if isinstance(src, int) and 0 <= src < len(images) else None
             if path is None or img is None or ("bufferView" not in img and not img.get("uri")):
                 problems.append(f"material {mid} slot {slot} has no texture image in the GLB")
+    return problems
+
+
+def _animation_problems(library_root: Path, e: dict, gltf: dict, glb_nodes: set) -> list[str]:
+    """An entry's ``animation`` block against its document and GLB (none
+    when the entry has no block: entries from other producers)."""
+    a = e.get("animation")
+    if a is None:
+        return []
+    if not isinstance(a, dict):
+        return ["animation block is not an object"]
+    problems: list[str] = []
+    clips = a.get("clips") or {}
+    if a.get("file"):
+        f = library_root.joinpath(*a["file"].split("/"))
+        if not f.is_file():
+            return [f"animation file missing ({a['file']})"]
+        try:
+            doc = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as err:
+            return [f"animation file unreadable: {err}"]
+        problems.extend(f"animation: {x}" for x in model_animation.validate_document(doc, gltf))
+        if set(clips) != set(doc.get("clips") or {}):
+            problems.append("animation: the block's clips differ from the document's")
+        if [m.get("vfs") for m in doc.get("state_machines") or []] != a.get("state_machines"):
+            problems.append("animation: the block's state machines differ from the document's")
+    elif clips or a.get("state_machines"):
+        problems.append("animation: clips or state machines listed without a file")
+    for group in ("bomb_bay", "gear"):
+        for k in ("open", "close", "down", "up"):
+            key = (a.get(group) or {}).get(k)
+            if isinstance(key, str) and key not in clips:
+                problems.append(f"animation: {group}.{k} names missing clip {key}")
+    for sense in ("direct", "opposite"):
+        for n in (a.get("propeller_spin") or {}).get(sense) or []:
+            if n not in glb_nodes:
+                problems.append(f"animation: propeller pivot {n} not in the GLB")
     return problems
 
 
@@ -951,6 +1059,7 @@ def validate_index(library_root: Path, *, workspace: Path | None = None) -> list
             for n in ns:
                 if n not in glb_nodes:
                     problems.append(f"{tag} hardpoint {kind}/{n} not in the GLB")
+        problems.extend(f"{tag} {x}" for x in _animation_problems(library_root, e, gltf, glb_nodes))
         if not e.get("materials"):
             problems.append(f"{tag} no materials")
         if e.get("textures") == "glb":
@@ -1170,6 +1279,47 @@ def build_aircraft_library(
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"{aid}: description failed: {e}")
         st.annotate(f"{len(on_disk)} airframe(s) described")
+
+    # ── animate_airframes ─────────────────────────────────────────────
+    # The state machines each model loads (its assets.bin record), their
+    # clips in the GLB frame, written beside the GLB; the index block.
+    with runner.step("animate_airframes") as st:
+        described = [a for a in on_disk if records[a].description]
+        models = {a: records[a].geometry_vfs.rsplit(".", 1)[0] + ".model" for a in described}
+        machines: dict[str, list[str]] | None
+        try:
+            from ..read import model_prototypes
+            from ..toolkit import assets_bin as _assets_bin
+            machines = model_prototypes.model_state_machines(
+                _assets_bin.ensure_dump(config=cfg), models.values())
+        except Exception as e:  # noqa: BLE001
+            machines = None
+            warnings.append(f"animation: model records not read ({e}); index keeps the previous blocks")
+        n_docs = 0
+        if machines is not None:
+            root = model_animation.cache_root(cfg)
+            model_animation.prefetch(sorted({s for v in machines.values() for s in v}), root, cfg)
+            for aid in described:
+                rec = records[aid]
+                p = _paths(lib_root, rec.key)
+                doc_path = p["dir"] / f"{aid}.animation.json"
+                try:
+                    gltf_json = _read_glb_json(p["glb"])
+                    doc, problems = model_animation.build_document(
+                        models[aid], machines.get(models[aid].lstrip("/"), []),
+                        gltf=gltf_json, root=root, config=cfg, glb_name=p["glb"].name)
+                    if doc is not None:
+                        model_animation.write_document(doc, doc_path)
+                        n_docs += 1
+                    else:
+                        doc_path.unlink(missing_ok=True)
+                    block, more = airframe_animation_block(
+                        rec.description, doc, _rel(doc_path, lib_root) if doc is not None else None)
+                    rec.description["animation"] = block
+                    warnings.extend(f"{aid}: animation: {x}" for x in problems + more)
+                except Exception as e:  # noqa: BLE001
+                    warnings.append(f"{aid}: animation failed: {e}")
+        st.annotate(f"{n_docs} airframe(s) with animation clips", data={"documents": n_docs})
 
     # ── write_index ───────────────────────────────────────────────────
     try:

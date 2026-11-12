@@ -9,19 +9,25 @@
   // blades or blur disc), and one ordnance rack can be shown. Hardpoint
   // markers show each HP_* node's frame (X red, Y green, Z blue).
   //
+  // Animation: the airframe's `wows_animation/v1` document (the clips its
+  // state machines play, e.g. the bomb-bay doors) is fetched on demand and
+  // played on the loaded GLB; the propellers can spin about their pivots'
+  // local axis (the index's `animation.propeller_spin`).
+  //
   // Hash routing: `#/aircraft` shows the picker; `#/aircraft/<id>` opens
   // that airframe.
 
   import { onMount } from 'svelte';
   import { navigate } from '$lib/router';
   import { navState } from '$lib/nav_state.svelte';
-  import { fetchAircraft, invalidateAircraft } from '$lib/api';
+  import { fetchAircraft, fetchAircraftAnimation, invalidateAircraft } from '$lib/api';
   import type { LibraryAsset } from '$lib/types';
   import {
     AIRCRAFT_PRESET_PARTS,
     type AircraftAsset,
     type AircraftIndex,
     type AircraftPreset,
+    type AnimationDocument,
   } from '$lib/types/aircraft';
   import type { AccessoryViewer as AccessoryViewerClass, LibraryContext } from '$lib/accessory';
   import AccessoryViewer from '$components/AccessoryViewer.svelte';
@@ -55,6 +61,57 @@
   let showTextures = $state(true);
   let viewer = $state<AccessoryViewerClass | null>(null);
   let loadedFor = $state<string | null>(null);
+
+  // Animation state (per airframe).
+  let clipKey = $state<string>('');
+  let clipLoop = $state(false);
+  let spinProps = $state(false);
+  let animDoc = $state<AnimationDocument | null>(null);
+  let animDocFor = $state<string | null>(null);
+  let animError = $state<string | null>(null);
+  let animPlaying = $state<string | null>(null);
+  const clipKeys = $derived<string[]>(asset?.animation ? Object.keys(asset.animation.clips) : []);
+  $effect(() => {
+    // New airframe: default to its bomb-bay opening clip (else the first); drop the old document.
+    if (activeId !== animDocFor) {
+      animDoc = null;
+      animError = null;
+      animPlaying = null;
+      clipKey = asset?.animation?.bomb_bay?.open ?? clipKeys[0] ?? '';
+    }
+  });
+
+  async function playClip() {
+    if (!viewer || !asset?.animation?.file || !clipKey || !activeId) return;
+    try {
+      if (!animDoc || animDocFor !== activeId) {
+        animDoc = await fetchAircraftAnimation(asset.animation.file);
+        animDocFor = activeId;
+      }
+      const clip = animDoc.clips[clipKey];
+      if (!clip) throw new Error(`clip ${clipKey} not in the document`);
+      const missing = viewer.playAnimationClip(clipKey, clip, { loop: clipLoop });
+      animError = missing.length ? `nodes not in the model: ${missing.join(', ')}` : null;
+      animPlaying = clipKey;
+    } catch (err) {
+      animError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  function stopClip() {
+    viewer?.stopAnimation(true);
+    animPlaying = null;
+  }
+
+  $effect(() => {
+    if (!viewer || !asset || loadedFor !== activeId) return;
+    // Two turns per second: the blur disc reads the same at any rate (the
+    // client's propellerRPM is not decoded).
+    viewer.setPropellerSpin(
+      spinProps ? (asset.animation?.propeller_spin ?? null) : null,
+      4 * Math.PI,
+    );
+  });
 
   onMount(async () => {
     try {
@@ -270,6 +327,39 @@
                 </select>
               </label>
             {/if}
+            {#if clipKeys.length > 0}
+              <label class="flex items-center gap-1.5">
+                Clip
+                <select
+                  bind:value={clipKey}
+                  data-testid="aircraft-clip"
+                  class="h-6 rounded border border-border bg-popover px-1.5 text-foreground"
+                >
+                  {#each clipKeys as k (k)}
+                    <option value={k}>{asset.animation?.clips[k]?.role ?? k}</option>
+                  {/each}
+                </select>
+              </label>
+              <button
+                type="button"
+                data-testid="aircraft-clip-play"
+                onclick={() => void playClip()}
+                class="border border-border hover:bg-popover/60 h-6 rounded px-2">Play</button
+              >
+              <button
+                type="button"
+                onclick={stopClip}
+                class="border border-border hover:bg-popover/60 h-6 rounded px-2">Rest</button
+              >
+              <label class="flex items-center gap-1"
+                ><input type="checkbox" bind:checked={clipLoop} /> Loop</label
+              >
+            {/if}
+            {#if asset.animation?.propeller_spin && asset.propellers.length > 0}
+              <label class="flex items-center gap-1"
+                ><input type="checkbox" bind:checked={spinProps} data-testid="aircraft-spin" /> Spin propellers</label
+              >
+            {/if}
             <label class="flex items-center gap-1"
               ><input type="checkbox" bind:checked={showHardpoints} /> Hardpoints</label
             >
@@ -319,6 +409,31 @@
                 {#each asset.propellers as p (p.node)}
                   <li>{p.node} ({p.spin}): {p.render_sets.join(', ')}</li>
                 {/each}
+              </ul>
+            {/if}
+            {#if asset.animation}
+              <h3 class="text-foreground mb-1 text-xs font-semibold">Animation</h3>
+              <ul class="text-muted-foreground mb-3" data-testid="aircraft-animation">
+                {#each Object.entries(asset.animation.clips) as [k, c] (k)}
+                  <li>
+                    <span class="text-foreground">{c.role ?? 'clip'}</span>: {k} ({c.duration_s.toFixed(
+                      2,
+                    )} s{c.loop ? ', loop' : ''}; {c.nodes.join(', ')})
+                  </li>
+                {/each}
+                <li>
+                  gear: {asset.animation.gear.mode === 'clip'
+                    ? `clips ${asset.animation.gear.down ?? '–'} / ${asset.animation.gear.up ?? '–'}`
+                    : 'render-set switch'}
+                </li>
+                <li>
+                  propellers spin about local {asset.animation.propeller_spin.axis.join(', ')}: {[
+                    ...asset.animation.propeller_spin.direct,
+                    ...asset.animation.propeller_spin.opposite.map((n) => n + ' (opposite)'),
+                  ].join(', ') || '–'}
+                </li>
+                {#if animPlaying}<li>playing {animPlaying}</li>{/if}
+                {#if animError}<li class="text-destructive">{animError}</li>{/if}
               </ul>
             {/if}
             <h3 class="text-foreground mb-1 text-xs font-semibold">Hardpoints</h3>
