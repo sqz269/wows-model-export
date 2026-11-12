@@ -41,6 +41,9 @@ Stepwise the composer is:
                                    post-library scaffold refresh so the
                                    variant-swap bone-mismatch correction
                                    sees the freshly-built variant GLBs.
+                                   The library build's game inputs go to
+                                   the library assets' own
+                                   ``build_deps.json``, not the ship's.
   5b. ``animate_hulls``         -- invoke
                                    :func:`wows_model_export.compose.ship_animation.animate_ship`:
                                    the animation documents of the hull
@@ -335,7 +338,8 @@ def build_library_and_refresh(
     the last build — optionally with ``class_override``,
     ``ship_key_suffix`` and ``export_exterior_hulls``: the arguments the
     ingest ran with, which a single ingest's own post-library refresh
-    passes too (``compose.ingest_ships`` sets them). Ships whose
+    passes too (``compose.ingest_ships``, ``build_tracking.reexport_exports``
+    and the extract queue's drain set them). Ships whose
     ``<label>_skel_ext.json`` candidates file is absent are skipped (the
     post-library refresh is a no-op for them).
     Per-ship refresh failures are collected as warnings rather than
@@ -880,14 +884,23 @@ def ingest_ship(
             "build_library",
             detail=("rebuild" if rebuild_library else "additive"),
         )
+        # The library build records its game inputs in a scope of its own,
+        # not in this ship's: every library asset tracks its sources in its
+        # own build_deps.json (build_tracking.LibraryStaleness). So the
+        # ship's build_deps.json lists what the ingest itself read, the same
+        # whether the library is built here, after a group
+        # (compose.ingest_ships), after a re-export or when the extract
+        # queue drains.
+        library_deps = _build_deps.DepsCollector()
         try:
-            _accessory_library_mod.build_accessory_library(
-                workspace=workspace,
-                config=cfg,
-                rebuild=rebuild_library,
-                on_event=on_event,
-                cancel=cancel,
-            )
+            with _build_deps.recording(library_deps):
+                _accessory_library_mod.build_accessory_library(
+                    workspace=workspace,
+                    config=cfg,
+                    rebuild=rebuild_library,
+                    on_event=on_event,
+                    cancel=cancel,
+                )
             library_refreshed = True
             timer.complete()
         except StepError as e:
@@ -904,6 +917,10 @@ def ingest_ship(
                 underlying=e,
                 detail="build_accessory_library failed",
             ) from e
+        finally:
+            # recording() closes only an outermost collector; this one sat
+            # inside the ingest's, so remove its toolkit deps folder here.
+            library_deps.close()
 
         # Post-library scaffold refresh -- closes the bone-mismatch race
         # for mesh-swap permoflages (variant accessory GLBs only exist

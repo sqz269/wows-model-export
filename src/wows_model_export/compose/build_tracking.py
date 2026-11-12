@@ -794,12 +794,21 @@ def reexport_plan(status: ExportStatus, config: PipelineConfig | None = None) ->
 def library_refresh_spec(status: ExportStatus, config: PipelineConfig) -> dict[str, Any]:
     """The post-library sidecar refresh spec for a ship export (see
     :func:`~.ingest_ship.build_library_and_refresh`)."""
-    kwargs = reexport_plan(status, config).get("ingest_ship") or {}
+    return _refresh_spec(status.name, reexport_plan(status, config).get("ingest_ship") or {})
+
+
+def _refresh_spec(label: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The post-library refresh spec of a ship ingested (or to be re-ingested)
+    with the ``ingest_ship`` arguments ``kwargs``: what that ingest's own
+    post-library refresh passes."""
     return {
-        "label": status.name,
+        "label": label,
         "toolkit_ship": kwargs.get("toolkit_ship_override") or kwargs.get("ship_input"),
         "gameparams_ship_id": kwargs.get("gameparams_ship_id"),
         "permoflage": kwargs.get("variant_permoflage") or "auto",
+        "class_override": kwargs.get("class_override"),
+        "ship_key_suffix": kwargs.get("ship_key_suffix"),
+        "export_exterior_hulls": bool(kwargs.get("export_exterior_hulls")),
     }
 
 
@@ -936,12 +945,7 @@ def reexport_exports(
                 )
                 record("reexported", {"kind": "ship", "name": st.name, "plan": source})
                 if wants_library:
-                    record_spec = {
-                        "label": result.label,
-                        "toolkit_ship": kwargs.get("toolkit_ship_override") or ship_input,
-                        "gameparams_ship_id": kwargs.get("gameparams_ship_id"),
-                        "permoflage": kwargs.get("variant_permoflage") or "auto",
-                    }
+                    record_spec = _refresh_spec(result.label, {**kwargs, "ship_input": ship_input})
                     with lock:
                         library_specs.append(record_spec)
                 if replay_skins:

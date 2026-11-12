@@ -28,13 +28,11 @@ differences: it never prompts (an ambiguous ship name fails that ship),
 and the library build moves to the end of the group. The sidecar's
 ``provenance.extract_args.build_library`` and the ``build_deps.json``
 replay block still record the library intent, so a replay
-(``wows-builds reexport``, clean and re-extract) builds it again. One
-output differs on purpose: a single ingest with ``build_library`` runs the
-library build inside its own build-input recording, so the ship's
-``build_deps.json`` also lists the game files of the library assets that
-build exported (which depends on what the library already held). Here
-those files are recorded only in the library assets' own
-``build_deps.json``, as in a re-export or an extract-queue drain. (Which
+(``wows-builds reexport``, clean and re-extract) builds it again. A ship's
+``build_deps.json`` is the one a single ingest writes: in both, the library
+build's game inputs are recorded only in the library assets' own
+``build_deps.json`` (a single ingest builds the library in a recording
+scope of its own), as in a re-export or an extract-queue drain. (Which
 ship's file lists a camouflage texture several ships share depends on
 which ingest extracted it first, in a group as across single ingests.)
 """

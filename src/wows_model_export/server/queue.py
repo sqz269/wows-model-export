@@ -463,12 +463,16 @@ def _spawn_library_drain(owed: list[QueueItem]) -> str | None:
     cfg = _config_for(owed[0].build if owed else None)
     if cfg is None:
         return None
+    # What each item's own post-library refresh would have passed had it
+    # built the library itself (_spawn_for_item's arguments). The queue
+    # takes no class override or ship-key suffix, so neither is passed.
     refresh_specs = [
         {
-            "label":              it.label,
-            "toolkit_ship":       it.toolkit_ship,
-            "gameparams_ship_id": it.gameparams_ship_id,
-            "permoflage":         it.permoflage or "auto",
+            "label":                 it.label,
+            "toolkit_ship":          it.toolkit_ship,
+            "gameparams_ship_id":    it.gameparams_ship_id,
+            "permoflage":            it.permoflage or "auto",
+            "export_exterior_hulls": it.exterior_hulls,
         }
         for it in owed
     ]
