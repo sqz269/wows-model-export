@@ -188,6 +188,7 @@ every build readable:
 <archive>/
 ├── bin/<build>/      ← the install's bin/<build>/ folder, per build
 ├── res_packages/     ← every .pkg the install has had (never deleted)
+├── superseded_packages/<build>/  ← packages an update rewrote (normally empty)
 └── logs/             ← one log per copy (`scheduled.log` for timed runs)
 ```
 
@@ -203,7 +204,20 @@ otherwise a built-in copier that writes each file under a temporary name
 and renames it into place. It does nothing when the archive is up to
 date, waits while any file it would copy changed in the last 30 minutes
 (a game update may still be writing; `--settle-minutes`), and lets one run
-at a time hold `logs/.archive.lock`.
+at a time hold `logs/.archive.lock`. Packages are copied before a build's
+idx files, so an interrupted copy never leaves a build that looks archived
+but points into missing packages.
+
+The archive keeps one copy per package name, and a changed install
+package replaces it. Older builds stay readable because game updates
+append to packages: their idx files point into the unchanged front part.
+Before copying, `wows-builds archive` checks that each archived package it
+would replace is the start of the install's copy (a sampled compare). A
+package an update rewrote instead is moved to
+`superseded_packages/<newest archived build>/` first and reported as a
+warning in the run's log: its bytes are kept, but the builds up to that
+build read it only once it is put back in place of the new one (for
+example in a copy of `res_packages/` given as their package folder).
 
 ```bash
 wows-builds archive --dry-run            # what is not archived yet

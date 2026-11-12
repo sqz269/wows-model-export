@@ -10,6 +10,9 @@ in the pipeline, ``--build <build>``)::
     <archive>/bin/<build>/     the install's bin/<build>/ folder, for every
                                build that had idx files when it was copied
     <archive>/res_packages/    every .pkg the install has had; never deleted
+    <archive>/superseded_packages/<build>/
+                               archived packages an update rewrote instead
+                               of appending to (see below); normally empty
     <archive>/logs/            one log per copy
 
 :func:`plan` compares the install with the archive: the files of each
@@ -20,6 +23,16 @@ what the plan lists. It uses the archive's own ``snapshot.ps1`` when it has
 one (robocopy ``/E /XO``, which only adds and updates), else a built-in
 copier that writes each new or changed file under a temporary name and
 renames it into place. Neither ever deletes a file or writes to the install.
+
+A package keeps one copy per name, which a changed install package
+replaces. That keeps every archived build readable only because game
+updates append to packages (the older builds' idx files point into the
+unchanged front part). Before a copy, :func:`run` checks each archived
+package it would replace: the install copy must start with the archived
+bytes (a sampled compare). One that does not is moved, before the copy,
+to ``superseded_packages/<newest archived build>/`` and reported: its
+bytes stay where the older builds' idx files can be pointed at them again,
+and nothing is overwritten.
 
 A run is a no-op when the plan is empty, so it can run on a timer. It waits
 while the install is still changing (any file it would copy written in the
@@ -63,6 +76,11 @@ _MTIME_SLACK_S = 2.0
 _VOLATILE_SUFFIXES = (".log",)
 
 TASK_NAME = "wows-model-export build archive"
+SUPERSEDED_DIR = "superseded_packages"
+# Sampled append-only check of an archived package the copy would replace:
+# this many chunks of this size, spread over the archived length.
+_APPEND_SAMPLES = 16
+_APPEND_CHUNK = 64 * 1024
 
 Reason = Literal["missing", "size", "newer"]
 
@@ -119,9 +137,19 @@ class ArchivePlan:
 
     @property
     def deltas(self) -> Iterator[FileDelta]:
-        for b in self.builds:
-            yield from b.deltas
+        """Every file to copy, in a safe copy order: the packages first, then
+        each build's other files, then its idx files last. A build counts
+        as archived once ``bin/<build>/idx`` holds idx files
+        (``toolkit.build.find_source``), so its idx must not land before
+        the packages and loose files it points into, or a copy that is
+        still running or was interrupted would pair the new idx with old
+        or missing packages. (``snapshot.ps1`` also copies the packages
+        first.)"""
         yield from self.package_deltas
+        for b in self.builds:
+            idx_prefix = f"bin/{b.build}/idx/"
+            yield from (d for d in b.deltas if not d.rel.startswith(idx_prefix))
+            yield from (d for d in b.deltas if d.rel.startswith(idx_prefix))
 
     @property
     def up_to_date(self) -> bool:
@@ -294,6 +322,60 @@ def _copy_with_script(script: Path, game: Path, archive: Path, log: Callable[[st
     return proc.returncode
 
 
+def appends_to(old: Path, new: Path) -> bool:
+    """True when ``new`` starts with ``old``'s bytes (sampled: the first and
+    last chunk of ``old``'s length and evenly spaced chunks between).
+
+    A package entry is its compressed data and a short id; there is no
+    directory at the end of the file, so an update that only adds entries
+    leaves every old byte in place."""
+    old_size = old.stat().st_size
+    if new.stat().st_size < old_size:
+        return False
+    if old_size == 0:
+        return True
+    chunk = min(_APPEND_CHUNK, old_size)
+    span = old_size - chunk
+    offsets = sorted({span * i // (_APPEND_SAMPLES - 1) for i in range(_APPEND_SAMPLES)})
+    with open(old, "rb") as a, open(new, "rb") as b:
+        for off in offsets:
+            a.seek(off)
+            b.seek(off)
+            if a.read(chunk) != b.read(chunk):
+                return False
+    return True
+
+
+def _preserve_rewritten(p: ArchivePlan, log: Callable[[str], None]) -> list[str]:
+    """Move each archived package the copy would replace with a copy that
+    does not append to it into ``superseded_packages/<build>/`` (the
+    newest archived build that reads it). Returns the moved paths."""
+    moved: list[str] = []
+    keeper = max(p.archived_builds) if p.archived_builds else 0
+    for d in p.package_deltas:
+        if d.reason == "missing":
+            continue
+        old = p.archive_dir / d.rel
+        new = p.game_dir / d.rel
+        try:
+            if appends_to(old, new):
+                continue
+        except FileNotFoundError:
+            continue
+        dest_dir = p.archive_dir / SUPERSEDED_DIR / str(keeper)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / old.name
+        if dest.exists():
+            dest = dest_dir / f"{old.stem}.{datetime.now():%Y%m%d_%H%M%S}{old.suffix}"
+        os.replace(old, dest)
+        rel = dest.relative_to(p.archive_dir).as_posix()
+        moved.append(rel)
+        log(f"WARNING: the install's {d.rel} does not start with the archived copy "
+            f"(rewritten, not appended to); kept the archived one as {rel} for "
+            f"builds up to {keeper}")
+    return moved
+
+
 def _copy_builtin(p: ArchivePlan, log: Callable[[str], None]) -> int:
     """Copy every delta: to ``<name>.archive-tmp``, then rename into place.
     Never deletes anything but its own temp files."""
@@ -325,6 +407,8 @@ class RunResult:
     elapsed_s: float = 0.0
     log_path: Path | None = None
     messages: list[str] = field(default_factory=list)
+    # Archived packages moved to superseded_packages/ before the copy.
+    superseded: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -338,6 +422,7 @@ class RunResult:
             "copier_exit": self.copier_exit,
             "elapsed_s": round(self.elapsed_s, 1),
             "log": str(self.log_path) if self.log_path else None,
+            "superseded": self.superseded,
             "before": self.before.as_dict(limit),
             "after": self.after.as_dict(limit) if self.after else None,
             "messages": self.messages,
@@ -392,6 +477,7 @@ def run(
             res.status = "busy"
             res.elapsed_s = time.perf_counter() - t0
             return res
+        res.superseded = _preserve_rewritten(before, note)
         script = archive / SNAPSHOT_SCRIPT
         use_script = copier == "script" or (copier == "auto" and script.is_file()
                                             and sys.platform == "win32")
@@ -528,6 +614,8 @@ def remove_schedule() -> bool:
 
 
 __all__ = [
+    "SUPERSEDED_DIR",
+    "appends_to",
     "ArchivePlan",
     "BuildPlan",
     "FileDelta",
