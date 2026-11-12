@@ -10,12 +10,19 @@ backend. Argv shape::
         [--vegetation-density M] [--max-texture-size N]
         [--no-terrain] [--no-water] [--no-vegetation] [--no-textures]
         [--collision-manifest]
-        [--skip-glb] [--skip-decal-textures]
+        [--skip-glb] [--skip-decal-textures] [--sky-only]
         [common flags ...]
 
 ``--skip-glb`` re-runs only the sidecar post-pass over an
 already-exported GLB (supersedes the scratchpad
 ``postprocess_ops_maps.py`` driver from the 2026-07-04 ops round).
+
+``--sky-only`` re-runs only the sky step over an exported space: the
+per-weather ``sky/<weather>/env_cube.hdr``, ``sky_manifest.json`` and the
+``sky_manifest`` block of ``export.json``, with the probes read from the
+build the space was exported from. Every other file stays as it is, so a
+sky that failed per weather (for example a BC6H probe exported without
+``imagecodecs``) is redone without a re-export.
 
 Spaces may be given bare (``40_Okinawa``) or VFS-form
 (``spaces/40_Okinawa``). Failures are per-space: a hard GLB-export
@@ -33,7 +40,7 @@ import sys
 import traceback
 
 from ..errors import ConfigError, ToolkitError
-from ..maps_export import run_export
+from ..maps_export import run_export, run_sky_export, space_cache_dir
 from ._args import (
     EXIT_CONFIG_ERROR,
     EXIT_OK,
@@ -95,13 +102,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "--skip-decal-textures", action="store_true",
         help="Skip the decal texture payload export.",
     )
+    pp.add_argument(
+        "--sky-only", action="store_true",
+        help="Re-run only the sky step (per-weather env_cube.hdr, "
+             "sky_manifest.json and export.json's sky_manifest block) over "
+             "the already-exported GLB, reading the probes from the build "
+             "the space was exported from. Toolkit flags are ignored.",
+    )
 
     add_common_args(ap)
     return ap
 
 
 def main(argv: "list[str] | None" = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.sky_only and (args.skip_glb or args.skip_decal_textures or args.collision_manifest):
+        parser.error(
+            "--sky-only cannot be combined with --skip-glb, "
+            "--skip-decal-textures or --collision-manifest"
+        )
     quiet = bool(getattr(args, "quiet", False))
     json_events = bool(getattr(args, "json_events", False))
 
@@ -122,6 +142,9 @@ def main(argv: "list[str] | None" = None) -> int:
     for key in ("no_terrain", "no_water", "no_vegetation", "no_textures"):
         if getattr(args, key):
             flags[key] = True
+
+    if args.sky_only:
+        return _run_sky_only(args.spaces, config, quiet=quiet, json_events=json_events)
 
     hard_failures: list[str] = []
     for raw in args.spaces:
@@ -149,6 +172,8 @@ def main(argv: "list[str] | None" = None) -> int:
         soft_errors = sorted(
             k.removesuffix("_error") for k in meta if k.endswith("_error")
         )
+        sky = meta.get("sky_manifest") or {}
+        sky_errors = _sky_weather_errors(_read_sky_manifest(config, name))
         if json_events:
             print(json.dumps({
                 "name": name,
@@ -156,8 +181,14 @@ def main(argv: "list[str] | None" = None) -> int:
                 "glb_size": meta.get("glb_size"),
                 "elapsed_ms": meta.get("elapsed_ms"),
                 "soft_errors": soft_errors,
+                "sky_weathers": sky.get("weather_count"),
+                "sky_extracted": sky.get("extracted_count"),
+                "sky_errors": sky_errors,
             }))
-        elif not quiet:
+            continue
+        for err in sky_errors:
+            print(f"{name}: sky weather {err['weather']}: {err['error']}", file=sys.stderr)
+        if not quiet:
             mi = meta.get("model_instance_manifest") or {}
             sd = meta.get("static_decal_manifest") or {}
             pl = meta.get("point_light_manifest") or {}
@@ -168,7 +199,76 @@ def main(argv: "list[str] | None" = None) -> int:
                 f"decals={sd.get('decal_count')} "
                 f"decal_textures={dt.get('texture_count')} "
                 f"lights={pl.get('light_count')} "
+                f"sky={sky.get('extracted_count')}/{sky.get('weather_count')} "
                 f"soft_errors={soft_errors or 'none'}"
+            )
+
+    if hard_failures:
+        if not json_events:
+            print(
+                f"{len(hard_failures)} space(s) failed: {', '.join(hard_failures)}",
+                file=sys.stderr,
+            )
+        return EXIT_STEP_ERROR
+    return EXIT_OK
+
+
+def _read_sky_manifest(config, name: str) -> "dict | None":
+    try:
+        return json.loads(
+            (space_cache_dir(config, name) / "sky_manifest.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+
+
+def _sky_weather_errors(doc: "dict | None") -> "list[dict]":
+    """Each weather whose sky failed. The export's ``soft_errors`` name
+    whole steps only, so a sky with no weather extracted reads as clean
+    there."""
+    return [
+        {"weather": w.get("name"), "error": w.get("error")}
+        for w in (doc or {}).get("weathers") or []
+        if isinstance(w, dict) and w.get("error")
+    ]
+
+
+def _run_sky_only(spaces, config, *, quiet: bool, json_events: bool) -> int:
+    hard_failures: list[str] = []
+    for raw in spaces:
+        name = raw.removeprefix("spaces/")
+        try:
+            doc = run_sky_export(name, config=config)
+        except (ToolkitError, FileNotFoundError, ValueError) as err:
+            hard_failures.append(name)
+            if json_events:
+                print(json.dumps({"name": name, "ok": False, "error": str(err)}))
+            else:
+                print(f"{name}: FAILED — {err}", file=sys.stderr)
+            continue
+        except ConfigError as err:
+            print(f"config error: {err}", file=sys.stderr)
+            return EXIT_CONFIG_ERROR
+
+        sky_errors = _sky_weather_errors(doc)
+        if json_events:
+            print(json.dumps({
+                "name": name,
+                "ok": True,
+                "source_build": doc.get("source_build"),
+                "sky_weathers": doc.get("weather_count"),
+                "sky_extracted": doc.get("extracted_count"),
+                "sky_errors": sky_errors,
+                "meta_updated": doc.get("meta_updated"),
+            }))
+            continue
+        for err in sky_errors:
+            print(f"{name}: sky weather {err['weather']}: {err['error']}", file=sys.stderr)
+        if not quiet:
+            print(
+                f"{name}: sky={doc.get('extracted_count')}/{doc.get('weather_count')} "
+                f"build={doc.get('source_build')} "
+                f"export.json={'updated' if doc.get('meta_updated') else 'missing'}"
             )
 
     if hard_failures:

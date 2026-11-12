@@ -1103,15 +1103,7 @@ def _run_export(
         if decal_textures_doc
         else None
     )
-    meta_doc["sky_manifest"] = (
-        {
-            "schema": sky_doc.get("schema"),
-            "weather_count": sky_doc.get("weather_count"),
-            "extracted_count": sky_doc.get("extracted_count"),
-        }
-        if sky_doc
-        else None
-    )
+    meta_doc["sky_manifest"] = _sky_summary(sky_doc)
     if collision_manifest:
         meta_doc["flags"]["collision_manifest"] = True
     for key, msg in errors.items():
@@ -1122,6 +1114,93 @@ def _run_export(
         encoding="utf-8",
     )
     return meta_doc
+
+
+def _sky_summary(sky_doc: "dict[str, Any] | None") -> "dict[str, Any] | None":
+    """The ``sky_manifest`` block of ``export.json``."""
+    if not sky_doc:
+        return None
+    return {
+        "schema": sky_doc.get("schema"),
+        "weather_count": sky_doc.get("weather_count"),
+        "extracted_count": sky_doc.get("extracted_count"),
+    }
+
+
+def export_build(cache_dir: Path) -> "int | None":
+    """The game build an exported space was read from (its
+    ``build_deps.json``), or ``None`` when the export has no record."""
+    try:
+        doc = json.loads((cache_dir / "build_deps.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    build = doc.get("build") if isinstance(doc, dict) else None
+    return int(build) if isinstance(build, int) else None
+
+
+def run_sky_export(
+    name: str,
+    *,
+    config: "PipelineConfig | None" = None,
+) -> "dict[str, Any]":
+    """Re-run only the sky step over an exported space.
+
+    Reads the weathers from the exported GLB's scene extras, writes
+    ``sky/<weather>/env_cube.hdr`` and ``sky_manifest.json`` as a full
+    export does, and updates the ``sky_manifest`` block of
+    ``export.json``. No other file is touched, so a sky that failed (a
+    missing decoder, a probe the toolkit could not read) can be redone
+    without re-exporting the space.
+
+    The probes are read from the build the space was exported from
+    (``build_deps.json``), so the sky matches the GLB even after a game
+    update; a space without that record reads ``config``'s build.
+
+    Returns the sky manifest with ``source_build`` (the build read) and
+    ``meta_updated`` (whether ``export.json`` existed and was updated).
+    Raises ``FileNotFoundError`` when the space has no GLB and
+    ``ValueError`` for an invalid name or an unreadable GLB.
+    """
+    if not SPACE_NAME.match(name):
+        raise ValueError(f"invalid space name: {name!r}")
+    cfg = config or PipelineConfig.load()
+    cache_dir = space_cache_dir(cfg, name)
+    glb_out = glb_path(cfg, name)
+    if not glb_out.is_file():
+        raise FileNotFoundError(f"{glb_out} missing - export the space first")
+
+    scene_extras = primary_scene_extras(read_glb_json(glb_out))
+    build = export_build(cache_dir)
+    read_cfg = cfg.for_build(build) if build is not None else cfg
+    sky_doc = extract_sky_assets_from_vfs(scene_extras, cache_dir, config=read_cfg)
+    (cache_dir / "sky_manifest.json").write_text(
+        json.dumps(sky_doc, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    meta_file = meta_path(cfg, name)
+    meta_updated = False
+    if meta_file.is_file():
+        meta_doc = json.loads(meta_file.read_text(encoding="utf-8"))
+        meta_doc["sky_manifest"] = _sky_summary(sky_doc)
+        # The step succeeded: clear an earlier failure. The webview route
+        # always writes the key (null when the sky ran), the CLI only on
+        # failure, so keep the key where it is and null it.
+        if "sky_manifest_error" in meta_doc:
+            meta_doc["sky_manifest_error"] = None
+        meta_file.write_text(
+            json.dumps(meta_doc, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        meta_updated = True
+
+    from .toolkit import build as _build  # late, like PipelineConfig.for_build
+
+    return {
+        **sky_doc,
+        "source_build": build if build is not None else _build.current_build(cfg),
+        "meta_updated": meta_updated,
+    }
 
 
 # Defensive: surface ToolkitError for callers that catch it by identity.
