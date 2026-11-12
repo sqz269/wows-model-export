@@ -133,7 +133,9 @@ def ingest_ships(
             Build the accessory library once after the group (additive,
             or a full regenerate with ``rebuild_library``), then refresh
             the sidecar of every ship that was ingested. Skipped when no
-            ship was ingested or the group was cancelled.
+            ship was ingested or the group was cancelled. A ship's
+            refresh warnings (or its refresh failure, a warning as in a
+            single ingest) are added to that ship's report entry.
         on_event
             Step events of every ingest and of the library build. With
             ``jobs`` > 1 each ingest's events carry its folder label in
@@ -152,13 +154,19 @@ def ingest_ships(
 
         {"jobs": 3, "cancelled": False,
          "ships": [{"index", "ship", "label", "ok", "error", "step",
-                    "warnings", "step_timings_ms", "wall_s"}, ...],
+                    "warnings", "library_warnings", "step_timings_ms",
+                    "wall_s"}, ...],
          "library": None | {"rebuild", "ships", "ok", "error",
                             "warnings", "wall_s"} | {"skipped": reason},
          "wall_s": {"ingests", "library", "total"}}
 
     ``ships`` is in input order. A ship that failed has ``ok`` False and
-    the error (and, for a step failure, the step) that stopped it.
+    the error (and, for a step failure, the step) that stopped it. A
+    ship's ``warnings`` are those its single ingest would report: its
+    ingest's, then those of its post-library refresh, which
+    ``library_warnings`` also lists (present when the refresh raised
+    any; ``on_done`` has already seen the entry without them). The
+    library's own ``warnings`` are the drain's, not any ship's.
     """
     from .ingest_ship import build_library_and_refresh, ingest_ship
 
@@ -314,6 +322,7 @@ def ingest_ships(
                 for e in ingested
             ]
             library = {"rebuild": bool(rebuild_library), "ships": len(refresh_specs)}
+            ship_warnings: dict[str, list[str]] = {}
             t_lib = time.perf_counter()
             try:
                 drained = build_library_and_refresh(
@@ -321,6 +330,7 @@ def ingest_ships(
                     config=cfg,
                     refresh_specs=refresh_specs,
                     rebuild_library=rebuild_library,
+                    ship_warnings=ship_warnings,
                     on_event=on_event,
                     cancel=cancel,
                 )
@@ -335,6 +345,11 @@ def ingest_ships(
                 library.update(ok=False, error=f"{type(err).__name__}: {detail}")
             library_s = time.perf_counter() - t_lib
             library["wall_s"] = round(library_s, 1)
+            for e in ingested:
+                extra = ship_warnings.get(e["label"])
+                if extra:
+                    e["warnings"] = [*e["warnings"], *extra]
+                    e["library_warnings"] = list(extra)
 
     return {
         "jobs": jobs,

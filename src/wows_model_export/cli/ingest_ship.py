@@ -214,7 +214,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help=f"Ingests to run at once in list mode, 1 to {MAX_INGEST_JOBS} "
-             "(default 1). Each is a thread of this process.",
+             "(default 1). Each is a thread of this process. A single "
+             "ship is one ingest whatever the value.",
     )
     g.add_argument(
         "--report",
@@ -330,11 +331,11 @@ def _list_specs(args: argparse.Namespace) -> list[ShipIngestSpec]:
     ]
     if one_ship:
         raise ValueError(
-            f"{', '.join(one_ship)} name one ship; in list mode put them on "
-            f"that ship's --ships-file line"
+            f"{', '.join(one_ship)} "
+            f"{'names' if len(one_ship) == 1 else 'name'} one ship; in list "
+            f"mode put {'it' if len(one_ship) == 1 else 'them'} on that "
+            f"ship's --ships-file line"
         )
-    if not 1 <= args.jobs <= MAX_INGEST_JOBS:
-        raise ValueError(f"--jobs must be 1 to {MAX_INGEST_JOBS}, not {args.jobs}")
     specs = [_spec(args, ship) for ship in args.ship]
     if args.ships_file is not None:
         specs += _read_ships_file(args.ships_file, args)
@@ -406,6 +407,9 @@ def _run_list(args: argparse.Namespace, cfg) -> int:
     print("", file=sys.stderr)
     for entry in ships:
         print(_ship_line(entry), file=sys.stderr)
+        # The ship's ingest warnings were printed as it ended; these came later.
+        for warn in entry.get("library_warnings") or ():
+            print(f"  warn (post-library refresh): {warn}", file=sys.stderr)
     lib = report["library"]
     lib_failed = False
     if lib is not None:
@@ -449,6 +453,8 @@ def main(argv: list[str] | None = None) -> int:
     list_mode = args.ships_file is not None or len(args.ship) > 1
     if not list_mode and args.report is not None:
         ap.error("--report is for list mode (several ships or --ships-file)")
+    if not 1 <= args.jobs <= MAX_INGEST_JOBS:
+        ap.error(f"--jobs must be 1 to {MAX_INGEST_JOBS}, not {args.jobs}")
     try:
         cfg = resolve_config(args)
     except ConfigError as e:

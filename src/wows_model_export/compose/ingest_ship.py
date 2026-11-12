@@ -310,6 +310,7 @@ def build_library_and_refresh(
     config: PipelineConfig | None = None,
     refresh_specs: list[dict] | None = None,
     rebuild_library: bool = False,
+    ship_warnings: dict[str, list[str]] | None = None,
     on_event: OnEvent | None = None,
     cancel: threading.Event | None = None,
 ) -> IngestResult:
@@ -333,12 +334,25 @@ def build_library_and_refresh(
     post-library refresh is a no-op for them).
     Per-ship refresh failures are collected as warnings rather than
     aborting the whole drain (matching ``ingest_ship``'s post-library
-    soft-fail).
+    soft-fail), and so are the warnings each refresh returns, which a
+    single ingest adds to its own result.
+
+    Without ``ship_warnings`` a ship's refresh warnings go into the
+    result's ``warnings``, each prefixed with the ship's label. With it
+    they go into ``ship_warnings[label]`` instead (one list per ship that
+    raised any), so a caller can report them with the ship they belong
+    to; the result's ``warnings`` then holds only the drain's own.
     """
     cfg = config or PipelineConfig.load()
     workspace = Path(workspace).resolve()
     timer = StepRunner(on_event, cancel=cancel)
     warnings: list[str] = []
+
+    def ship_warning(label: str, text: str) -> None:
+        if ship_warnings is None:
+            warnings.append(f"{label}: {text}")
+        else:
+            ship_warnings.setdefault(label, []).append(text)
 
     timer.start("build_library", detail=("rebuild" if rebuild_library else "additive"))
     try:
@@ -374,7 +388,7 @@ def build_library_and_refresh(
         if toolkit_ship == label:
             toolkit_ship = None
         try:
-            refresh_ship_sidecar(
+            refreshed = refresh_ship_sidecar(
                 label,
                 workspace=workspace,
                 config=cfg,
@@ -388,15 +402,19 @@ def build_library_and_refresh(
                 cancel=cancel,
             )
         except StepError as e:
-            warnings.append(
-                f"post-library refresh failed for {label!r} at "
-                f"step {e.step!r}: {e.detail or e}"
+            ship_warning(
+                label,
+                f"post-library refresh failed at step {e.step!r}: "
+                f"{e.detail or e}",
             )
         except Exception as e:
-            warnings.append(
-                f"post-library refresh failed for {label!r}: "
-                f"{type(e).__name__}: {e}"
+            ship_warning(
+                label,
+                f"post-library refresh failed: {type(e).__name__}: {e}",
             )
+        else:
+            for text in refreshed.warnings:
+                ship_warning(label, text)
 
     return IngestResult(
         ship_id="",
