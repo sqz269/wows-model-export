@@ -1,4 +1,4 @@
-"""WoWS animation clips (``.anim``) and animation state machines (``.ssm``).
+"""WoWS animation clips (``.anim``), state machines (``.ssm``) and sequences (``.seq``).
 
 Layer 1 reader: bytes / text in, plain data out. No VFS access.
 
@@ -8,7 +8,10 @@ random-float parameters, then nodes (``sleep``, ``animation`` and
 ``sequence``) joined by transitions with conditions. An ``animation`` node
 names its clip as ``content/animation/.../<stem>.fbx`` (the authoring
 file); the game ships the clip as ``<stem>.anim`` beside that path, and an
-optional ``clipName`` selects one named take of it.
+optional ``clipName`` selects one named take of it. A ``sequence`` node
+plays a ``.seq``, an XML timeline whose objects include the model itself;
+that object's ``animation`` frames name clips the same way, with a speed
+and an optional part of the clip (:func:`parse_sequence`).
 
 ``.anim`` layout (little-endian; strings are ``u32 length`` + bytes, no
 terminator)::
@@ -333,12 +336,17 @@ def _constant(values: list[list[float]], eps: float = 1e-6) -> bool:
 
 
 def gltf_channels(clip: AnimClip, *, take: str | None = None,
+                  window: tuple[float | None, float | None] | None = None, speed: float = 1.0,
                   scale: float = NATIVE_TO_METRES, digits: int = 6) -> tuple[list[dict[str, Any]], float]:
     """The clip's tracks as channels in the GLB frame, and the duration in seconds.
 
     Each channel is ``{"node", "path", "times", "values"}``; a constant
     track has one key at time 0. ``take`` cuts the clip to that named frame
     range, with keys interpolated at its ends and times starting at 0.
+    ``window`` (``(start, end)`` seconds from the start of the take, or of
+    the clip; None for either end keeps it) cuts it further, and ``speed``
+    plays it at that rate: times are divided by it, so a clip at speed 0.5
+    lasts twice as long (a sequence frame's ``speed``, :func:`parse_sequence`).
     Rotations are kept on one hemisphere (each key's dot product with the
     previous key is >= 0), so a linear or spherical interpolation between
     two keys takes the short way. Raw (codec 0) tracks whose value never
@@ -350,6 +358,14 @@ def gltf_channels(clip: AnimClip, *, take: str | None = None,
         if tk is None:
             raise KeyError(f"take {take!r} not in the clip ({[t.name for t in clip.takes]})")
         t0, t1 = tk.start_frame / clip.fps, tk.end_frame / clip.fps
+    if window is not None:
+        base, end = t0, t1
+        if window[0] is not None:
+            t0 = min(max(base + window[0], base), end)
+        if window[1] is not None:
+            t1 = min(max(base + window[1], t0), end)
+    if not speed > 0:
+        raise ValueError(f"speed {speed} is not positive")
     out: list[dict[str, Any]] = []
     for tr in clip.tracks:
         times, vals = _window(tr, t0, t1)
@@ -360,13 +376,15 @@ def gltf_channels(clip: AnimClip, *, take: str | None = None,
                     conv[i] = [-x for x in conv[i]]
         if times is not None and len(conv) > 1 and _constant(conv):
             times, conv = None, conv[:1]
+        if times is not None and speed != 1.0:
+            times = [t / speed for t in times]
         out.append({
             "node": tr.bone,
             "path": tr.path,
             "times": [round(t, digits) for t in (times if times is not None else [0.0])],
             "values": [[round(x, digits) for x in v] for v in conv],
         })
-    return out, round(t1 - t0, digits)
+    return out, round((t1 - t0) / speed, digits)
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +485,70 @@ def parse_state_machine(text: str) -> dict[str, Any]:
     return {"params": params, "entry": nodes[0]["name"] if nodes else None, "nodes": nodes}
 
 
+# ---------------------------------------------------------------------------
+# Sequences (.seq)
+# ---------------------------------------------------------------------------
+
+
+def parse_sequence(text: str) -> dict[str, Any]:
+    """A ``.seq`` (the resource of a state machine's ``sequence`` node).
+
+    Returns ``{"duration_s", "objects", "self_clips"}``. A sequence is a
+    timeline of objects: ``model`` (with a ``resource``: another model the
+    sequence shows; without one: the model that plays the sequence, named
+    ``Root`` on every sequence of build 13533378), ``particle`` and
+    ``sound``. Each object has tracks; a track has a ``type``
+    (``animation``, ``vector3``, ``vector4``, ``float``, ``attach``,
+    ``sound``) and timed frames.
+
+    ``objects`` lists every object as ``{"name", "type", "resource",
+    "tracks": [{"name", "type"}]}`` (``resource`` None for the model
+    itself). ``self_clips`` lists the frames of the model's own
+    ``animation`` tracks, the clips the sequence plays on the model that
+    loads it: ``{"resource"`` (the ``.fbx`` as authored), ``"clip_vfs"``
+    (the shipped ``.anim``), ``"take"`` (``clipName`` or None),
+    ``"start_s"``, ``"duration_s"`` (the frame's place on the sequence
+    timeline), ``"speed"``, ``"clip_start_s"``, ``"clip_end_s"`` (the
+    part of the clip played, None when not authored: all of it),
+    ``"layer"``, ``"blend_in"``, ``"blend_in_s"``, ``"blend_out"``,
+    ``"blend_out_s"}``. Other tracks (positions, rotations and material
+    parameters of objects, particles, sounds) are listed, not decoded.
+    """
+    root = ET.fromstring(text)
+    objects: list[dict[str, Any]] = []
+    self_clips: list[dict[str, Any]] = []
+    for o in root.findall("sequenceObject"):
+        res = _text(o, "resource") or None
+        tracks = []
+        for t in o.findall("track"):
+            ttype = _text(t, "type")
+            tracks.append({"name": _text(t, "name"), "type": ttype})
+            if _text(o, "type") != "model" or res is not None or ttype != "animation":
+                continue
+            for fr in t.findall("frame"):
+                rid = _text(fr, "resourceID") or ""
+                if not rid:
+                    continue
+                layer = _text(fr, "layer")
+                self_clips.append({
+                    "resource": rid,
+                    "clip_vfs": clip_path_for(rid),
+                    "take": _text(fr, "clipName") or None,
+                    "start_s": _float(_text(fr, "startTime")) or 0.0,
+                    "duration_s": _float(_text(fr, "duration")),
+                    "speed": _float(_text(fr, "speed")) or 1.0,
+                    "clip_start_s": _float(_text(fr, "clipStartTime")),
+                    "clip_end_s": _float(_text(fr, "clipEndTime")),
+                    "layer": int(layer) if layer and layer.lstrip("-").isdigit() else layer,
+                    "blend_in": _text(fr, "blendIn"),
+                    "blend_in_s": _float(_text(fr, "blendInTime")),
+                    "blend_out": _text(fr, "blendOut"),
+                    "blend_out_s": _float(_text(fr, "blendOutTime")),
+                })
+        objects.append({"name": _text(o, "name"), "type": _text(o, "type"), "resource": res, "tracks": tracks})
+    return {"duration_s": _float(_text(root, "duration")), "objects": objects, "self_clips": self_clips}
+
+
 __all__ = [
     "KIND_PATHS",
     "NATIVE_TO_METRES",
@@ -478,6 +560,7 @@ __all__ = [
     "clip_path_for",
     "gltf_channels",
     "parse_anim",
+    "parse_sequence",
     "parse_state_machine",
     "sample_track",
     "to_gltf_value",

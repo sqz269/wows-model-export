@@ -41,6 +41,12 @@ Stepwise the composer is:
                                    post-library scaffold refresh so the
                                    variant-swap bone-mismatch correction
                                    sees the freshly-built variant GLBs.
+  5b. ``animate_hulls``         -- invoke
+                                   :func:`wows_model_export.compose.ship_animation.animate_ship`:
+                                   the animation documents of the hull
+                                   GLBs whose models load a state machine,
+                                   and the sidecar's ``animation`` section.
+                                   Soft-fail (a warning).
   6. ``publish``                -- invoke
                                    :func:`wows_model_export.compose.publish.publish`
                                    when ``and_publish=True``.  Generic
@@ -83,7 +89,7 @@ from typing import Any
 from .. import build_deps as _build_deps
 from .. import shared_textures as _shared_textures
 from ..config import PipelineConfig
-from ..errors import StepError, ToolkitError
+from ..errors import CancelledError, StepError, ToolkitError
 from ..resolve import sidecar as _sidecar
 from ..toolkit import armor_json as _toolkit_armor_json
 from ..types import IngestResult, OnEvent, ScaffoldResult
@@ -922,6 +928,36 @@ def ingest_ship(
                     f"post-library scaffold refresh failed: "
                     f"{type(e).__name__}: {e}"
                 )
+
+    # ------------------------------------------------------------------
+    # Step: animate_hulls
+    # ------------------------------------------------------------------
+    # The animation state machines the hull GLBs' models load (carrier
+    # masts, submarine hatches and periscopes, event idle loops): one
+    # document beside each hull GLB that has them and the sidecar's
+    # ``animation`` section. Runs after every sidecar refresh, which keeps
+    # the section as it is. Soft-fail, like the provenance stamp below.
+    if scaffold_result.sidecar_path is None or not scaffold_result.sidecar_path.is_file():
+        timer.skip("animate_hulls", detail="sidecar missing")
+    else:
+        timer.start("animate_hulls")
+        try:
+            from . import ship_animation as _ship_animation
+            anim = _ship_animation.animate_ship(
+                scaffold_result.sidecar_path.parent, config=cfg, warnings=warnings,
+            )
+            timer.complete(
+                detail=(
+                    f"{anim['hulls']} hull GLB(s) with animation, {anim['clips']} clip(s)"
+                    + (f", {anim['missing_node_clips']} on nodes the GLB lacks"
+                       if anim["missing_node_clips"] else "")
+                ),
+            )
+        except CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            timer.fail("animate_hulls", detail=f"{type(e).__name__}: {e}")
+            warnings.append(f"hull animation failed ({type(e).__name__}: {e})")
 
     # ------------------------------------------------------------------
     # Step: stamp_provenance

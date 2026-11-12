@@ -1,17 +1,19 @@
 """Model animation documents (``wows_animation/v1``).
 
-Layer 4 helper shared by the libraries: the state machines a WoWS model
-loads (its ``.model`` record in ``assets.bin``), parsed from their
-``.ssm`` files, and every clip their ``animation`` nodes play, decoded
-from the ``.anim`` files and converted to the frame of the model's GLB
-(metres, right-handed, Z negated from BigWorld). Each channel targets a
-GLB node by name and holds that node's local translation, rotation or
-scale, so a consumer can build a clip for any scene that keeps the GLB's
-node names and rest transforms.
+Layer 4 helper shared by the libraries and the ship export: the state
+machines a WoWS model loads (its ``.model`` record in ``assets.bin``),
+parsed from their ``.ssm`` files, and every clip their ``animation``
+nodes and ``sequence`` nodes play on the model, decoded from the ``.anim``
+files and converted to the frame of the model's GLB (metres,
+right-handed, Z negated from BigWorld). Each channel targets a GLB node
+by name and holds that node's local translation, rotation or scale, so a
+consumer can build a clip for any scene that keeps the GLB's node names
+and rest transforms.
 
 The document is written beside the model's GLB as
-``<asset_id>.animation.json``; the library index carries a summary of it.
-Specified in ``reference/schemas/METADATA_SPEC.md`` §18.
+``<asset_id>.animation.json``; the library index (or the ship sidecar)
+carries a summary of it, :func:`animation_block`. Specified in
+``reference/schemas/METADATA_SPEC.md`` §18.
 """
 
 from __future__ import annotations
@@ -60,10 +62,12 @@ def fetch_vfs(paths: list[str], root: Path, config: PipelineConfig | None) -> di
 
 
 def prefetch(state_machines: list[str], root: Path, config: PipelineConfig | None) -> None:
-    """Extract the state machines and every clip they play in two toolkit
-    calls, so the documents of many models build from the cache."""
+    """Extract the state machines, their sequences and every clip they play
+    in three toolkit calls, so the documents of many models build from the
+    cache."""
     files = fetch_vfs(state_machines, root, config)
     clips: list[str] = []
+    seqs: list[str] = []
     for f in files.values():
         if f is None:
             continue
@@ -72,6 +76,15 @@ def prefetch(state_machines: list[str], root: Path, config: PipelineConfig | Non
         except Exception:  # noqa: BLE001 - reported by build_document
             continue
         clips.extend(n["clip_vfs"] for n in graph["nodes"] if n["type"] == "animation" and n.get("clip_vfs"))
+        seqs.extend(n["resource"] for n in graph["nodes"] if n["type"] == "sequence" and n.get("resource"))
+    for f in fetch_vfs(seqs, root, config).values() if seqs else ():
+        if f is None:
+            continue
+        try:
+            seq = bw_animation.parse_sequence(f.read_text(encoding="utf-8", errors="replace"))
+        except Exception:  # noqa: BLE001 - reported by build_document
+            continue
+        clips.extend(c["clip_vfs"] for c in seq["self_clips"])
     if clips:
         fetch_vfs(clips, root, config)
 
@@ -151,9 +164,15 @@ def build_document(
     glb_name: str | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     """The animation document of one model, or None when it loads no state
-    machine. Returns ``(document, problems)``; a problem is a state machine
-    or clip that could not be read, or a channel whose node the GLB lacks
-    (kept, and listed in the clip's ``missing_nodes``)."""
+    machine. Returns ``(document, problems)``; a problem is a state machine,
+    sequence or clip that could not be read, or a channel whose node the
+    GLB lacks (kept, and listed in the clip's ``missing_nodes``).
+
+    Clips come from ``animation`` nodes and from ``sequence`` nodes: a
+    sequence's frames on the model itself (``bw_animation.parse_sequence``)
+    are clips of the model, cut to the frame's part of the clip and
+    played at its speed. The other objects of a sequence (other models,
+    particles, sounds) are listed on the node, not decoded."""
     problems: list[str] = []
     if not state_machines:
         return None, problems
@@ -174,47 +193,104 @@ def build_document(
             continue
         machines.append({"vfs": rel, **graph})
         for node in graph["nodes"]:
-            if node["type"] == "animation" and node.get("clip_vfs"):
+            if (node["type"] == "animation" and node.get("clip_vfs")) or node["type"] == "sequence":
                 pending.append((machines[-1], node, rel))
-    clip_files = fetch_vfs([n["clip_vfs"] for _, n, _ in pending], root, config)
-    rest = rest_pose(gltf)
-    for machine, node, ssm_rel in pending:
-        key = node["name"]
-        if key in clips:
-            key = f"{Path(ssm_rel).stem}/{node['name']}"
-        node["clip"] = key
-        src = node["clip_vfs"]
-        f = clip_files.get(src)
+    # Sequences: read each once, then gather every clip they play on the model.
+    seq_paths = sorted({n["resource"].replace("\\", "/").lstrip("/")
+                        for _, n, _ in pending if n["type"] == "sequence" and n.get("resource")})
+    seq_files = fetch_vfs(seq_paths, root, config) if seq_paths else {}
+    seqs: dict[str, dict[str, Any] | str] = {}
+    for p in seq_paths:
+        f = seq_files.get(p)
         if f is None:
-            problems.append(f"{machine['vfs']}: clip {src} is not in the VFS")
-            node["clip"] = None
+            seqs[p] = "is not in the VFS"
             continue
         try:
-            clip = bw_animation.parse_anim(f.read_bytes())
-            channels, duration = bw_animation.gltf_channels(clip, take=node.get("take"))
-        except (bw_animation.AnimFormatError, KeyError) as e:
-            problems.append(f"{machine['vfs']}: clip {src}: {e}")
-            node["clip"] = None
-            continue
+            seqs[p] = bw_animation.parse_sequence(f.read_text(encoding="utf-8", errors="replace"))
+        except Exception as e:  # noqa: BLE001
+            seqs[p] = f"could not be read: {e}"
+    clip_paths = [n["clip_vfs"] for _, n, _ in pending if n["type"] == "animation"]
+    clip_paths += [c["clip_vfs"] for s in seqs.values() if isinstance(s, dict) for c in s["self_clips"]]
+    clip_files = fetch_vfs(clip_paths, root, config)
+    rest = rest_pose(gltf)
+    decoded: dict[str, bw_animation.AnimClip | str] = {}
+
+    def add_clip(key: str, src: str, take: str | None, where: str, *, loop: bool,
+                 window: tuple[float | None, float | None] | None = None, speed: float = 1.0,
+                 extra: dict[str, Any] | None = None) -> bool:
+        f = clip_files.get(src)
+        if f is None:
+            problems.append(f"{where}: clip {src} is not in the VFS")
+            return False
+        try:
+            clip = decoded.get(src)
+            if clip is None:
+                clip = decoded[src] = bw_animation.parse_anim(f.read_bytes())
+            if isinstance(clip, str):
+                raise bw_animation.AnimFormatError(clip)
+            channels, duration = bw_animation.gltf_channels(clip, take=take, window=window, speed=speed)
+        except (bw_animation.AnimFormatError, KeyError, ValueError) as e:
+            decoded.setdefault(src, str(e))
+            problems.append(f"{where}: clip {src}: {e}")
+            return False
         missing = sorted({c["node"] for c in channels if c["node"] not in rest})
         if missing:
             problems.append(f"clip {key}: nodes not in the GLB: {missing}")
         known = [c for c in channels if c["node"] in rest]
         starts = all(_near_rest(c["path"], c["values"][0], rest[c["node"]]) for c in known)
         ends = all(_near_rest(c["path"], c["values"][-1], rest[c["node"]]) for c in known)
-        clips[key] = {
+        entry: dict[str, Any] = {
             "source_vfs": src,
-            "take": node.get("take"),
+            "take": take,
             "fps": clip.fps,
             "frame_count": clip.frame_count,
             "duration_s": duration,
-            "loop": bool(node.get("loop")),
+            "loop": loop,
             "nodes": sorted({c["node"] for c in channels}),
             "missing_nodes": missing,
             "starts_at_rest": bool(known) and starts,
             "ends_at_rest": bool(known) and ends,
-            "channels": channels,
         }
+        if extra is not None:
+            entry["sequence"] = extra
+        entry["channels"] = channels
+        clips[key] = entry
+        return True
+
+    for machine, node, ssm_rel in pending:
+        if node["type"] == "animation":
+            key = node["name"]
+            if key in clips:
+                key = f"{Path(ssm_rel).stem}/{node['name']}"
+            node["clip"] = key
+            if not add_clip(key, node["clip_vfs"], node.get("take"), machine["vfs"], loop=bool(node.get("loop"))):
+                node["clip"] = None
+            continue
+        # A sequence node: its timeline, the objects it drives, and the
+        # clips it plays on the model itself.
+        res = (node.get("resource") or "").replace("\\", "/").lstrip("/")
+        seq = seqs.get(res) if res else "names no sequence"
+        node["clips"] = []
+        if not isinstance(seq, dict):
+            problems.append(f"{machine['vfs']}: sequence {res or node['name']} {seq}")
+            node["duration_s"] = None
+            node["objects"] = []
+            continue
+        node["duration_s"] = seq["duration_s"]
+        node["objects"] = seq["objects"]
+        many = len(seq["self_clips"]) > 1
+        for i, fr in enumerate(seq["self_clips"]):
+            key = f"{node['name']}/{i}" if many else node["name"]
+            if key in clips:
+                key = f"{Path(ssm_rel).stem}/{key}"
+            window = ((fr["clip_start_s"], fr["clip_end_s"])
+                      if fr["clip_start_s"] is not None or fr["clip_end_s"] is not None else None)
+            extra = {"node": node["name"], "vfs": res,
+                     **{k: fr[k] for k in ("start_s", "duration_s", "speed", "clip_start_s", "clip_end_s",
+                                           "layer", "blend_in", "blend_in_s", "blend_out", "blend_out_s")}}
+            if add_clip(key, fr["clip_vfs"], fr["take"], f"{machine['vfs']}: sequence {res}",
+                        loop=bool(node.get("loop")), window=window, speed=fr["speed"], extra=extra):
+                node["clips"].append(key)
     if not machines:
         return None, problems
     doc = {
@@ -240,27 +316,72 @@ def write_document(doc: dict[str, Any], path: Path) -> bool:
     return True
 
 
+def _node_clips(node: dict[str, Any]) -> list[str]:
+    """The clip keys a state machine node plays: an ``animation`` node's
+    ``clip``, a ``sequence`` node's ``clips``."""
+    if node.get("type") == "sequence":
+        return [k for k in node.get("clips") or [] if k]
+    return [node["clip"]] if node.get("clip") else []
+
+
 def clip_summary(doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """The index summary of each clip: everything but the channels, and the
-    state machine trigger(s) whose transitions enter it."""
+    state machine trigger(s) whose transitions enter the node that plays it."""
     triggers: dict[str, list[str]] = {}
     for m in doc.get("state_machines") or []:
         by_node = {n["name"]: n for n in m["nodes"]}
         for n in m["nodes"]:
             for tr in n["transitions"]:
-                target = by_node.get(tr["to"]) or {}
-                key = target.get("clip")
-                if not key:
-                    continue
-                for c in tr["conditions"]:
-                    if c.get("type") == "trigger" and c.get("name") not in triggers.setdefault(key, []):
-                        triggers[key].append(c["name"])
+                for key in _node_clips(by_node.get(tr["to"]) or {}):
+                    for c in tr["conditions"]:
+                        if c.get("type") == "trigger" and c.get("name") not in triggers.setdefault(key, []):
+                            triggers[key].append(c["name"])
     out: dict[str, dict[str, Any]] = {}
     for key, c in (doc.get("clips") or {}).items():
         s = {k: v for k, v in c.items() if k != "channels"}
         s["triggers"] = triggers.get(key, [])
         out[key] = s
     return out
+
+
+def animation_block(doc: dict[str, Any] | None, rel_file: str | None) -> dict[str, Any]:
+    """The ``animation`` block an index entry or sidecar carries for one
+    GLB: ``file`` (the document, relative to the index or sidecar),
+    ``state_machines`` (their ``.ssm`` paths) and ``clips``
+    (:func:`clip_summary`). A library adds its own keys (the aircraft
+    library: clip roles, gear, propellers)."""
+    return {
+        "file": rel_file,
+        "state_machines": [m["vfs"] for m in (doc or {}).get("state_machines") or []],
+        "clips": clip_summary(doc) if doc else {},
+    }
+
+
+def block_problems(block: Any, doc: Any, gltf: dict) -> list[str]:
+    """An ``animation`` block against its document (None when the block
+    names no file) and the GLB: the document's own problems
+    (:func:`validate_document`), and the block's clips and state machines
+    the document's."""
+    if not isinstance(block, dict):
+        return ["animation block is not an object"]
+    problems: list[str] = []
+    clips = block.get("clips") or {}
+    if block.get("file"):
+        if doc is None:
+            return [f"animation file missing ({block['file']})"]
+        problems.extend(validate_document(doc, gltf))
+        if set(clips) != set(doc.get("clips") or {}):
+            problems.append("the block's clips differ from the document's")
+        if [m.get("vfs") for m in doc.get("state_machines") or []] != block.get("state_machines"):
+            problems.append("the block's state machines differ from the document's")
+        summary = clip_summary(doc)
+        for key, c in clips.items():
+            s = summary.get(key)
+            if s is not None and any(c.get(k) != v for k, v in s.items()):
+                problems.append(f"clip {key}: the block's summary differs from the document's")
+    elif clips or block.get("state_machines"):
+        problems.append("clips or state machines listed without a file")
+    return problems
 
 
 def validate_document(doc: Any, gltf: dict) -> list[str]:
@@ -280,6 +401,12 @@ def validate_document(doc: Any, gltf: dict) -> list[str]:
         for n in m.get("nodes") or []:
             if n.get("type") == "animation" and n.get("clip") not in clips:
                 problems.append(f"{m.get('vfs')}: node {n.get('name')} plays missing clip {n.get('clip')!r}")
+            if n.get("type") == "sequence":
+                for key in n.get("clips") or []:
+                    if key not in clips:
+                        problems.append(f"{m.get('vfs')}: sequence {n.get('name')} plays missing clip {key!r}")
+                    elif (clips[key].get("sequence") or {}).get("node") != n.get("name"):
+                        problems.append(f"clip {key}: not marked as played by sequence {n.get('name')}")
             for tr in n.get("transitions") or []:
                 if tr.get("to") not in names:
                     problems.append(f"{m.get('vfs')}: transition to unknown node {tr.get('to')!r}")
@@ -311,6 +438,8 @@ __all__ = [
     "ANIMATION_SCHEMA",
     "CACHE_DIR",
     "REST_TOLERANCE",
+    "animation_block",
+    "block_problems",
     "build_document",
     "cache_root",
     "clip_summary",

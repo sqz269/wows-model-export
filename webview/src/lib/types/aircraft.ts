@@ -65,16 +65,34 @@ export interface AnimationClipSummary {
   ends_at_rest: boolean;
   /** State machine triggers whose transitions enter the clip. */
   triggers: string[];
-  role: 'bomb_bay_open' | 'bomb_bay_close' | 'gear_down' | 'gear_up' | null;
+  /** Aircraft library only: what the clip does. */
+  role?: 'bomb_bay_open' | 'bomb_bay_close' | 'gear_down' | 'gear_up' | null;
+  /** Only on a clip a sequence plays: the sequence node and the frame's
+   *  timing (the clip itself is baked at that speed). */
+  sequence?: {
+    node: string;
+    vfs: string;
+    start_s: number;
+    duration_s: number | null;
+    speed: number;
+    clip_start_s: number | null;
+    clip_end_s: number | null;
+    [key: string]: unknown;
+  };
 }
 
-/** The index `animation` block of a WoWS airframe. */
-export interface AircraftAnimation {
-  /** The `wows_animation/v1` document, relative to the library root; null
+/** The `animation` block an index entry (or ship sidecar) carries for one
+ *  GLB: its `wows_animation/v1` document and a summary of each clip. */
+export interface ModelAnimation {
+  /** The document, relative to the library root (or ship folder); null
    *  when the model loads no state machine. */
   file: string | null;
   state_machines: string[];
   clips: Record<string, AnimationClipSummary>;
+}
+
+/** The index `animation` block of a WoWS airframe. */
+export interface AircraftAnimation extends ModelAnimation {
   bomb_bay: { open: string | null; close: string | null } | null;
   gear: {
     mode: 'switch' | 'clip';

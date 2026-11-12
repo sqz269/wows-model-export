@@ -12,6 +12,9 @@ MODEL is the model's VFS path (``content/.../X.model``; a ``.geometry`` or
 against GLB's nodes and rest pose; ``--out`` defaults to
 ``<GLB stem>.animation.json`` beside the GLB. ``--census`` prints, instead,
 how many models of the game files load a state machine, by top folder.
+``--ship LABEL`` (re)writes the documents of a workspace ship's hull GLBs
+and its sidecar's ``animation`` section, as an ingest does
+(:mod:`wows_model_export.compose.ship_animation`).
 Specified in ``reference/schemas/METADATA_SPEC.md`` §18.
 """
 
@@ -39,6 +42,9 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--out", type=Path, default=None, help="Output JSON (default: beside the GLB).")
     ap.add_argument("--census", action="store_true",
                     help="Count the models that load a state machine, by top folder, and exit.")
+    ap.add_argument("--ship", metavar="LABEL", action="append",
+                    help="Write the hull animation documents and sidecar section of "
+                         "<workspace>/ships/LABEL (repeatable), and exit.")
     add_common_args(ap)
     return ap
 
@@ -50,6 +56,27 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return EXIT_CONFIG_ERROR
+    if args.ship:
+        from ..compose import ship_animation
+        if cfg.workspace is None:
+            print("config error: no workspace configured", file=sys.stderr)
+            return EXIT_CONFIG_ERROR
+        failed = 0
+        for label in args.ship:
+            warnings: list[str] = []
+            try:
+                r = ship_animation.animate_ship(Path(cfg.workspace) / "ships" / label, config=cfg,
+                                                warnings=warnings)
+            except Exception as e:  # noqa: BLE001
+                failed += 1
+                print(f"{label}: failed: {type(e).__name__}: {e}", file=sys.stderr)
+                continue
+            for w in warnings:
+                print(f"  {label}: {w}", file=sys.stderr)
+            print(f"{label}: {r['hulls']} hull GLB(s) with animation, {r['clips']} clip(s), "
+                  f"{r['missing_node_clips']} on nodes the GLB lacks; sidecar "
+                  f"{'written' if r['written'] else 'unchanged'}")
+        return EXIT_STEP_ERROR if failed else EXIT_OK
     from ..read import model_prototypes
     from ..toolkit import assets_bin
     ab = assets_bin.ensure_dump(config=cfg)

@@ -109,6 +109,7 @@ toolchain required to use it.
 │       ├── <Ship>.meta.json       ← sidecar (typed schema)
 │       └── models/
 │           ├── <Ship>_hull.glb
+│           ├── <Ship>_hull.animation.json  ← only when a hull model animates
 │           ├── <Ship>_accessories.json
 │           └── textures_dds/      ← per-ship DDS mip chains
 ├── builds/
@@ -119,7 +120,9 @@ toolchain required to use it.
 └── libraries/
     ├── accessories/
     │   ├── index.json             ← fleet-wide accessory index
-    │   └── <asset_id>/            ← GLB + DDS per shared accessory
+    │   └── <asset_id>/            ← GLB + DDS per shared accessory, and its
+    │                                clips (<asset_id>.animation.json) when
+    │                                its model animates (radars, propellers)
     ├── aircraft/
     │   ├── index.json             ← airframe index (LODs, parts, racks,
     │   │                            hardpoints, GameParams entries)

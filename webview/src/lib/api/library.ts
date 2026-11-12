@@ -16,6 +16,7 @@ import type {
   RigOverridesDoc,
   RigPivots,
 } from '$lib/types';
+import type { AnimationDocument } from '$lib/types/aircraft';
 
 let cached: Promise<LibraryIndex> | null = null;
 
@@ -52,6 +53,12 @@ export async function fetchRigPivots(relGlb: string): Promise<RigPivots | null> 
   } catch {
     return null;
   }
+}
+
+/** An accessory's `wows_animation/v1` document (`animation.file`, relative
+ *  to the library root). */
+export function fetchAccessoryAnimation(file: string): Promise<AnimationDocument> {
+  return fetchJson<AnimationDocument>(repoUrl(`libraries/accessories/${file}`));
 }
 
 /** URL for the asset's `.rig.debug.glb`. The viewer's `loadDebugSceneGlb`

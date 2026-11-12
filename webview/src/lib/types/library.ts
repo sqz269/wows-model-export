@@ -5,6 +5,8 @@
 // The library is fleet-wide: one GLB + DDS mip chain per `asset_id`,
 // shared across every ship that places the asset.
 
+import type { ModelAnimation } from './aircraft';
+
 export interface LibraryIndex {
   version: number;
   asset_count: number;
@@ -77,6 +79,13 @@ export interface LibraryAsset {
   attached_accessories?: string;
   attachments_live_count?: number;
   attachments_dead_count?: number;
+  /**
+   * Present when the asset's model loads an animation state machine
+   * (radars, propellers, animated misc parts): the `wows_animation/v1`
+   * document beside the GLB and a summary of its clips
+   * (`METADATA_SPEC.md` §18.6).
+   */
+  animation?: ModelAnimation;
 }
 
 /**

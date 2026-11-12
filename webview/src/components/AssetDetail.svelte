@@ -4,7 +4,9 @@
   // panel → resizable tabbed inspector at the bottom.
   //
   // Owns the AccessoryViewer handle so the controls + the bottom panel's
-  // rig editor can wire directly to it. Re-renders on `asset` change; the
+  // rig editor can wire directly to it. An asset whose model animates
+  // (index `animation` block: radars, propellers) can play its clips from
+  // the `wows_animation/v1` document beside the GLB. Re-renders on `asset` change; the
   // viewer instance is kept alive across asset swaps for a smoother feel
   // (Library.svelte deliberately doesn't {#key activeId} this component).
 
@@ -12,7 +14,8 @@
   import DetailBottomPanel from './DetailBottomPanel.svelte';
   import type { AccessoryViewer, LoadResult, MeshInfo, SideMode } from '$lib/accessory';
   import type { LibraryAsset, RigPivots } from '$lib/types';
-  import { fetchRigPivots, repoUrl } from '$lib/api';
+  import type { AnimationDocument } from '$lib/types/aircraft';
+  import { fetchAccessoryAnimation, fetchRigPivots, repoUrl } from '$lib/api';
   import { rowCls, labelCls, inputBoxCls } from '$lib/ui/controls';
 
   interface Props {
@@ -48,6 +51,17 @@
   // the picker is wired up. Closing reloads the regular GLB.
   let rigEditorOpen = $state(false);
 
+  // Animation (per asset): the clip picked from the index block, the
+  // document fetched on the first Play, and what is playing.
+  let clipKey = $state('');
+  let clipLoop = $state(true);
+  let animDoc = $state<AnimationDocument | null>(null);
+  let animDocFor = $state<string | null>(null);
+  let animError = $state<string | null>(null);
+  let animPlaying = $state<string | null>(null);
+  const clipKeys = $derived<string[]>(asset.animation ? Object.keys(asset.animation.clips) : []);
+  const clipInfo = $derived(clipKey ? (asset.animation?.clips[clipKey] ?? null) : null);
+
   // Library context for the TextureManager. Same `asset` object the
   // page already has — passing it makes the viewer apply the DDS texture
   // pipeline on load. `variant` mirrors `showingDead` so the manager
@@ -82,7 +96,39 @@
     result = null;
     pivots = null;
     rigEditorOpen = false;
+    animDoc = null;
+    animDocFor = null;
+    animError = null;
+    animPlaying = null;
+    const first = asset.animation ? Object.keys(asset.animation.clips)[0] : undefined;
+    clipKey = first ?? '';
+    clipLoop = first ? (asset.animation?.clips[first]?.loop ?? true) : true;
   });
+
+  async function playClip() {
+    if (!viewer || !asset.animation?.file || !clipKey) return;
+    try {
+      if (!animDoc || animDocFor !== id) {
+        animDoc = await fetchAccessoryAnimation(asset.animation.file);
+        animDocFor = id;
+      }
+      const clip = animDoc.clips[clipKey];
+      if (!clip) throw new Error(`clip ${clipKey} not in the document`);
+      const missing = viewer.playAnimationClip(clipKey, clip, { loop: clipLoop });
+      animError = missing.length
+        ? `nodes not in the model: ${[...new Set(missing)].join(', ')}`
+        : null;
+      // Nothing moves when the GLB has none of the clip's nodes.
+      animPlaying = clip.channels.some((ch) => !missing.includes(ch.node)) ? clipKey : null;
+    } catch (err) {
+      animError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  function stopClip() {
+    viewer?.stopAnimation(true);
+    animPlaying = null;
+  }
 
   // Clamp the sticky LOD filter once the new asset's meshes have
   // arrived. If the persisted choice (e.g. "LOD 2 only") doesn't
@@ -152,6 +198,8 @@
     result = res;
     meshVisibility = res.meshes.map(() => true);
     loadError = null;
+    // A reload (dead variant, rig editor) replaces the model the clip drove.
+    animPlaying = null;
     // Fire-and-forget pivot fetch. Pivots apply even when the toggle
     // is off so flipping it on is instant — the JSON parse cost is
     // amortised here rather than on toggle.
@@ -499,6 +547,68 @@
           {/if}
         {/if}
       </div>
+
+      {#if clipKeys.length > 0}
+        <div class="flex flex-col gap-1.5" data-testid="asset-animation">
+          <div class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold">
+            animation
+          </div>
+          <label class={labelCls}>
+            Clip
+            <select
+              bind:value={clipKey}
+              onchange={(e) =>
+                (clipLoop = asset.animation?.clips[e.currentTarget.value]?.loop ?? clipLoop)}
+              data-testid="asset-clip"
+              class={inputBoxCls}
+            >
+              {#each clipKeys as k (k)}
+                <option value={k}>{k}</option>
+              {/each}
+            </select>
+          </label>
+          <div class="flex items-center gap-1.5 text-[11px]">
+            <button
+              type="button"
+              data-testid="asset-clip-play"
+              disabled={!result || showingDead}
+              onclick={() => void playClip()}
+              class="border-border hover:bg-accent rounded border px-2 py-0.5 disabled:opacity-50"
+              >Play</button
+            >
+            <button
+              type="button"
+              onclick={stopClip}
+              class="border-border hover:bg-accent rounded border px-2 py-0.5">Rest</button
+            >
+            <label class={rowCls}><input type="checkbox" bind:checked={clipLoop} /> Loop</label>
+          </div>
+          {#if clipInfo}
+            <div
+              class="text-muted-foreground text-[10px] leading-tight"
+              data-testid="asset-clip-info"
+            >
+              {clipInfo.duration_s.toFixed(2)} s{clipInfo.loop ? ', loops' : ''}
+              {#if clipInfo.triggers.length}· on <code>{clipInfo.triggers.join(', ')}</code>{/if}
+              {#if clipInfo.sequence}· sequence at ×{clipInfo.sequence.speed}{/if}
+              · drives <code>{clipInfo.nodes.join(', ')}</code>
+              {#if clipInfo.missing_nodes.length}
+                <span class="text-amber-300">
+                  · not in the GLB: <code>{clipInfo.missing_nodes.join(', ')}</code></span
+                >
+              {/if}
+            </div>
+          {/if}
+          {#if animPlaying}
+            <div class="text-[10px] text-emerald-300" data-testid="asset-clip-playing">
+              playing {animPlaying}
+            </div>
+          {/if}
+          {#if animError}
+            <div class="text-destructive text-[10px] leading-tight">{animError}</div>
+          {/if}
+        </div>
+      {/if}
 
       <div class="flex flex-1 min-h-0 flex-col gap-1">
         <div class="text-muted-foreground text-[11px] uppercase tracking-wider font-semibold">

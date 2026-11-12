@@ -11,18 +11,24 @@ asset_id)`` tuple across the fleet's sidecars and calls the toolkit's
 
     <library_root>/<scope>/<cat>[/<sub>]/<asset_id>/
       ├── <asset_id>.glb                (external-URI, references siblings)
+      ├── <asset_id>.animation.json     (only when the model loads an
+      │                                  animation state machine)
       ├── textures/                     (optional PNGs)
       └── textures_dds/                 (raw WG DDS, all mip levels)
 
 Plus one ``index.json`` mapping each asset_id to its on-disk paths,
-category metadata, and which ships reference it.
+category metadata, and which ships reference it. An entry whose model
+loads an animation state machine (radars, propellers, anemometers and
+other animated misc parts) carries an ``animation`` block: the document
+beside its GLB, its state machines and a summary of each clip
+(:func:`.model_animation.animation_block`; ``METADATA_SPEC.md`` §18).
 
 The composer emits the following canonical :class:`StepEvent` names so
 consumers can branch reliably (see ``migration/PIPELINE_API.md``):
 
     "discover_assets"   "plan_batch"   "batch_export"
     "swizzle_textures"  "build_rigs"   "resolve_attachments"
-    "dead_variant_audit" "write_index"
+    "dead_variant_audit" "animate_assets" "write_index"
 
 Each step emits ``started`` / ``completed`` (or ``skipped`` /
 ``failed``). Per-step failures are wrapped in :class:`StepError` with
@@ -120,6 +126,11 @@ class AssetRecord:
     attached_accessories_rel_path: str | None = None
     attachments_live_count: int = 0
     attachments_dead_count: int = 0
+    # The index ``animation`` block (None: the model loads no state
+    # machine) once the animate_assets step has run for this record;
+    # until then the index keeps the previous entry's block.
+    animation: dict | None = None
+    animation_done: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -937,6 +948,78 @@ def _build_assets_batch(
 
 
 # ---------------------------------------------------------------------------
+# Animation documents
+# ---------------------------------------------------------------------------
+
+
+def _is_missing_node_note(problem: str) -> bool:
+    """A document "problem" that only says a clip drives nodes its GLB
+    lacks: listed in the clip's ``missing_nodes`` and counted, not warned
+    (the toolkit writes a node tree only for skinned render sets, so a
+    rigidly bound part such as a propeller has no node to drive)."""
+    return problem.startswith("clip ") and ": nodes not in the GLB: " in problem
+
+
+def _animate_assets(
+    records: dict[AssetKey, AssetRecord],
+    library_root: Path,
+    *,
+    config: PipelineConfig,
+    warnings: list[str],
+) -> dict[str, int]:
+    """Write ``<asset_id>.animation.json`` beside the GLB of every asset
+    whose model loads an animation state machine (the ``wows_animation/v1``
+    document of :mod:`.model_animation`), delete a stale one, and set each
+    record's index ``animation`` block. A record whose block could not be
+    built keeps its previous index block."""
+    from ..read import model_prototypes
+    from ..toolkit import assets_bin as _assets_bin
+    from . import model_animation
+
+    built = [r for r in records.values() if r.glb_rel_path is not None]
+    models = {r.key: vfs_geometry_path(r.key).rsplit(".", 1)[0] + ".model" for r in built}
+    machines = model_prototypes.model_state_machines(
+        _assets_bin.ensure_dump(config=config), models.values(),
+    )
+    root = model_animation.cache_root(config)
+    model_animation.prefetch(sorted({s for v in machines.values() for s in v}), root, config)
+    stats = {"documents": 0, "clips": 0, "missing_node_clips": 0}
+    for rec in sorted(built, key=lambda r: r.key.asset_id):
+        model = models[rec.key]
+        glb = library_root / rec.glb_rel_path
+        doc_path = glb.with_name(f"{rec.key.asset_id}.animation.json")
+        try:
+            sms = machines.get(model, [])
+            doc, problems = None, []
+            if sms:
+                gltf, _bin = _glb.parse_glb(glb.read_bytes())
+                doc, problems = model_animation.build_document(
+                    model, sms, gltf=gltf, root=root, config=config, glb_name=glb.name,
+                )
+            if doc is None:
+                doc_path.unlink(missing_ok=True)
+                rec.animation = None
+            else:
+                model_animation.write_document(doc, doc_path)
+                rec.animation = model_animation.animation_block(
+                    doc, str(doc_path.relative_to(library_root)).replace("\\", "/"),
+                )
+                stats["documents"] += 1
+                stats["clips"] += len(doc["clips"])
+                stats["missing_node_clips"] += sum(
+                    1 for c in doc["clips"].values() if c["missing_nodes"]
+                )
+            rec.animation_done = True
+            warnings.extend(
+                f"{rec.key.asset_id}: animation: {p}"
+                for p in problems if not _is_missing_node_note(p)
+            )
+        except Exception as e:  # noqa: BLE001 - the asset keeps its previous block
+            warnings.append(f"{rec.key.asset_id}: animation failed: {e}")
+    return stats
+
+
+# ---------------------------------------------------------------------------
 # Index writer
 # ---------------------------------------------------------------------------
 
@@ -974,6 +1057,7 @@ def _write_index(
     """
     prior_built_at: dict[str, int] = {}
     prior_assets: dict[str, dict] = {}
+    prior_animation: dict[str, dict] = {}
     out = library_root / "index.json"
     if out.is_file():
         try:
@@ -984,6 +1068,8 @@ def _write_index(
                 ts = entry.get("built_at")
                 if isinstance(ts, (int, float)):
                     prior_built_at[aid] = int(ts)
+                if isinstance(entry.get("animation"), dict):
+                    prior_animation[aid] = entry["animation"]
                 if merge_prior:
                     prior_assets[aid] = entry
         except (OSError, ValueError, json.JSONDecodeError):
@@ -1027,6 +1113,11 @@ def _write_index(
             entry["attached_accessories"] = rec.attached_accessories_rel_path
             entry["attachments_live_count"] = rec.attachments_live_count
             entry["attachments_dead_count"] = rec.attachments_dead_count
+        if rec.animation_done:
+            if rec.animation is not None:
+                entry["animation"] = rec.animation
+        elif isinstance(prior_animation.get(rec.key.asset_id), dict):
+            entry["animation"] = prior_animation[rec.key.asset_id]
         assets[rec.key.asset_id] = entry
 
     # Records resolved before a shared-texture adoption in this build may
@@ -1408,6 +1499,26 @@ def build_accessory_library(
         raise
     except Exception as e:
         warnings.append(f"resolve_attachments failed: {e}")
+
+    # ── Step: animate_assets ──────────────────────────────────────────
+    # The animation state machines each asset's model loads (its
+    # assets.bin record), their clips in the GLB frame, written beside the
+    # GLB; the index block. Best-effort: on failure the index keeps the
+    # previous blocks.
+    with runner.step("animate_assets") as st:
+        try:
+            anim = _animate_assets(records, lib_root, config=cfg, warnings=warnings)
+            st.annotate(
+                f"{anim['documents']} asset(s) with animation state machines, "
+                f"{anim['clips']} clip(s); {anim['missing_node_clips']} clip(s) "
+                f"drive nodes their GLB lacks",
+                data=anim,
+            )
+        except Exception as e:  # noqa: BLE001
+            warnings.append(
+                f"animation: model records not read ({e}); index keeps the previous blocks"
+            )
+            st.annotate("model records not read; previous blocks kept")
 
     # ── Step: write_index (second pass, with attachments + dead audit) ─
     try:
