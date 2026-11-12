@@ -9,7 +9,8 @@ of the same name win the package binding (function takes the name; the
 submodule remains reachable via full-path `from .. import ...` imports).
 
     from wows_model_export.compose import (
-        ingest_ship, scaffold_ship, build_accessory_library, ingest_skin_pack,
+        ingest_ship, ingest_ships, scaffold_ship, build_accessory_library,
+        ingest_skin_pack,
         autorig_asset, resolve_decorative_placements,
         find_ship_variants, publish, snapshot, teardown_ship,
         build_projectile_library, build_decal_library, build_ammo_profiles,
@@ -69,6 +70,7 @@ from .ingest_ship import (
     refresh_ship_sidecar,
     resolve_ship_identity,
 )
+from .ingest_ships import ShipIngestSpec, ingest_ships
 from .projectile_library import build_projectile_library
 from .publish import publish
 from .scaffold_ship import scaffold_ship
@@ -86,6 +88,8 @@ __all__ = [
     "sidecar",
     # Per-ship composer functions (shadow same-named submodules)
     "ingest_ship",
+    "ingest_ships",
+    "ShipIngestSpec",
     "build_library_and_refresh",
     "refresh_ship_sidecar",
     "scaffold_ship",

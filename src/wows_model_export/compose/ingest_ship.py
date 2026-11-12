@@ -325,8 +325,12 @@ def build_library_and_refresh(
 
     ``refresh_specs`` is a list of ``{label, toolkit_ship,
     gameparams_ship_id, permoflage}`` dicts — one per ship ingested since
-    the last build. Ships whose ``<label>_skel_ext.json`` candidates file
-    is absent are skipped (the post-library refresh is a no-op for them).
+    the last build — optionally with ``class_override``,
+    ``ship_key_suffix`` and ``export_exterior_hulls``: the arguments the
+    ingest ran with, which a single ingest's own post-library refresh
+    passes too (``compose.ingest_ships`` sets them). Ships whose
+    ``<label>_skel_ext.json`` candidates file is absent are skipped (the
+    post-library refresh is a no-op for them).
     Per-ship refresh failures are collected as warnings rather than
     aborting the whole drain (matching ``ingest_ship``'s post-library
     soft-fail).
@@ -377,6 +381,9 @@ def build_library_and_refresh(
                 toolkit_ship=toolkit_ship,
                 gameparams_ship_id=spec.get("gameparams_ship_id") or None,
                 variant_permoflage=spec.get("permoflage") or "auto",
+                class_override=spec.get("class_override") or None,
+                ship_key_suffix=spec.get("ship_key_suffix") or None,
+                export_exterior_hulls=bool(spec.get("export_exterior_hulls")),
                 on_event=on_event,
                 cancel=cancel,
             )
