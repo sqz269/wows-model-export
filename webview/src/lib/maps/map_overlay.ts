@@ -15,10 +15,12 @@
 //
 // Drawing. Everything is drawn after the map and without the depth test, so
 // a marker hidden behind an island at an orbit angle still reads.
-//   - Points: one THREE.Points per layer; the marker, its dark outline and
-//     the heading arrow are drawn in the fragment shader at a constant
-//     screen size. The arrow points along the heading as projected on the
-//     screen, so it reads from straight above and at any orbit angle.
+//   - Points: two THREE.Points per layer over one geometry, drawn in the
+//     fragment shader at a constant screen size, each with a dark outline.
+//     Every heading arrow is drawn first and every marker after it, so in a
+//     tight formation one ship's arrow never covers the marker ahead. The
+//     arrow points along the heading as projected on the screen, so it
+//     reads from straight above and at any orbit angle.
 //   - Lines: LineSegments2 (screen-space width), subdivided and laid on the
 //     surface.
 //   - Labels: HTML elements over the canvas (CSS2DRenderer).
@@ -128,7 +130,9 @@ const DEFAULT_COLOR = '#ffffff';
 const DEFAULT_SIZE = 12;
 const DEFAULT_WIDTH = 2;
 const LINE_RENDER_ORDER = 1000;
-const POINT_RENDER_ORDER = 1001;
+/** Heading arrows of every layer, under every marker. */
+const ARROW_RENDER_ORDER = 1001;
+const MARKER_RENDER_ORDER = 1002;
 /** Marker quad side / marker size: room for the heading arrow. */
 const QUAD_SCALE = 3.4;
 /** Most vertices one draped segment is split into. */
@@ -156,6 +160,7 @@ void main() {
   vHollow = aStyle.z;
   vArrow = 0.0;
   vAngle = 0.0;
+#ifdef ARROW_PASS
   if (aStyle.w > 0.5 && gl_Position.w > 0.0) {
     vec3 d = (modelViewMatrix * vec4(aDir, 0.0)).xyz;
     float len = length(d);
@@ -171,6 +176,9 @@ void main() {
       }
     }
   }
+  // No arrow: the fragment stage discards the point.
+  if (vArrow < 0.5) gl_PointSize = 1.0;
+#endif
 }
 `;
 
@@ -245,18 +253,20 @@ void main() {
   float px = 2.0 / vQuad;        // one drawing-buffer pixel
   float cpx = px * uPixelRatio;  // one CSS pixel
   float r = 1.0 / ${QUAD_SCALE.toFixed(2)};
+#ifdef ARROW_PASS
+  if (vArrow < 0.5) discard;
+  float c = cos(vAngle);
+  float s = sin(vAngle);
+  vec2 q = vec2(c * p.x + s * p.y, -s * p.x + c * p.y);
+  float tip = 1.0 - 2.0 * cpx;
+  float head = 6.5 * cpx;
+  float shaft = sdSegment(q, vec2(r * 1.1, 0.0), vec2(tip - head * 0.7, 0.0)) - 1.0 * cpx;
+  float arrow = sdTriangle(q, vec2(tip, 0.0), vec2(tip - head, 4.0 * cpx), vec2(tip - head, -4.0 * cpx));
+  float d = min(shaft, arrow);
+#else
   float d = symbolSdf(vSymbol, p, r);
   if (vHollow > 0.5) d = max(d, -(d + 2.4 * cpx));
-  if (vArrow > 0.5) {
-    float c = cos(vAngle);
-    float s = sin(vAngle);
-    vec2 q = vec2(c * p.x + s * p.y, -s * p.x + c * p.y);
-    float tip = 1.0 - 2.0 * cpx;
-    float head = 6.5 * cpx;
-    float shaft = sdSegment(q, vec2(r * 1.1, 0.0), vec2(tip - head * 0.7, 0.0)) - 1.0 * cpx;
-    float arrow = sdTriangle(q, vec2(tip, 0.0), vec2(tip - head, 4.0 * cpx), vec2(tip - head, -4.0 * cpx));
-    d = min(d, min(shaft, arrow));
-  }
+#endif
   float fill = 1.0 - smoothstep(-0.5 * px, 0.5 * px, d);
   float edge = 1.0 - smoothstep(1.3 * cpx - 0.5 * px, 1.3 * cpx + 0.5 * px, d);
   float outline = 0.85 * edge * (1.0 - fill);
@@ -334,7 +344,9 @@ export class MapOverlayRenderer {
   private readonly opts: MapOverlayOptions;
   private readonly labelRenderer = new CSS2DRenderer();
   private readonly overlays = new Map<string, OverlayEntry>();
-  private readonly pointMaterial: THREE.ShaderMaterial;
+  /** Marker pass and heading-arrow pass; they share one uniforms object. */
+  private readonly markerMaterial: THREE.ShaderMaterial;
+  private readonly arrowMaterial: THREE.ShaderMaterial;
   private readonly lineMaterials = new Map<string, LineMaterial>();
   private readonly geometries: THREE.BufferGeometry[] = [];
   private labelsVisible = true;
@@ -357,19 +369,24 @@ export class MapOverlayRenderer {
     el.style.pointerEvents = 'none';
     opts.labelHost.appendChild(el);
 
-    this.pointMaterial = new THREE.ShaderMaterial({
-      name: 'MapOverlayPoints',
-      uniforms: {
-        uViewport: { value: new THREE.Vector2(1, 1) },
-        uPixelRatio: { value: 1 },
-      },
-      vertexShader: POINT_VERTEX,
-      fragmentShader: POINT_FRAGMENT,
-      transparent: true,
-      depthTest: false,
-      depthWrite: false,
-      toneMapped: false,
-    });
+    const uniforms = {
+      uViewport: { value: new THREE.Vector2(1, 1) },
+      uPixelRatio: { value: 1 },
+    };
+    const pointMaterial = (name: string, defines: Record<string, number>) =>
+      new THREE.ShaderMaterial({
+        name,
+        uniforms,
+        defines,
+        vertexShader: POINT_VERTEX,
+        fragmentShader: POINT_FRAGMENT,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false,
+      });
+    this.markerMaterial = pointMaterial('MapOverlayMarkers', {});
+    this.arrowMaterial = pointMaterial('MapOverlayArrows', { ARROW_PASS: 1 });
   }
 
   has(key: string): boolean {
@@ -404,15 +421,19 @@ export class MapOverlayRenderer {
     const entry = this.overlays.get(key);
     if (!entry) return;
     this.root.remove(entry.group);
+    // The marker and arrow passes share a geometry: dispose each once.
+    const geoms = new Set<THREE.BufferGeometry>();
     entry.group.traverse((o) => {
       if (o instanceof CSS2DObject) o.element.remove();
       if (o instanceof THREE.Points || o instanceof LineSegments2) {
-        const g = o.geometry as THREE.BufferGeometry;
-        g.dispose();
-        const i = this.geometries.indexOf(g);
-        if (i >= 0) this.geometries.splice(i, 1);
+        geoms.add(o.geometry as THREE.BufferGeometry);
       }
     });
+    for (const g of geoms) {
+      g.dispose();
+      const i = this.geometries.indexOf(g);
+      if (i >= 0) this.geometries.splice(i, 1);
+    }
     this.overlays.delete(key);
   }
 
@@ -441,7 +462,7 @@ export class MapOverlayRenderer {
   /** Per frame, after the map is drawn: screen-space sizes and the labels. */
   update(renderer: THREE.WebGLRenderer, camera: THREE.Camera): void {
     renderer.getSize(this.viewport);
-    const u = this.pointMaterial.uniforms;
+    const u = this.markerMaterial.uniforms;
     (u.uViewport.value as THREE.Vector2).copy(this.viewport);
     u.uPixelRatio.value = renderer.getPixelRatio();
     for (const m of this.lineMaterials.values()) m.resolution.copy(this.viewport);
@@ -489,7 +510,8 @@ export class MapOverlayRenderer {
     for (const key of [...this.overlays.keys()]) this.remove(key);
     for (const g of this.geometries) g.dispose();
     this.geometries.length = 0;
-    this.pointMaterial.dispose();
+    this.markerMaterial.dispose();
+    this.arrowMaterial.dispose();
     for (const m of this.lineMaterials.values()) m.dispose();
     this.lineMaterials.clear();
     this.opts.scene.remove(this.root);
@@ -581,6 +603,7 @@ export class MapOverlayRenderer {
       const style = new Float32Array(n * 4);
       const dir = new Float32Array(n * 3);
       const local = new THREE.Vector3();
+      let headings = 0;
       for (let i = 0; i < n; i++) {
         const p = pts[i];
         const [x, z] = xz(p.pos)!;
@@ -595,7 +618,10 @@ export class MapOverlayRenderer {
           [symbolIndex(p.symbol ?? layer.symbol), size, hollow ? 1 : 0, heading == null ? 0 : 1],
           i * 4,
         );
-        if (heading != null) dir.set([Math.sin(heading), 0, -Math.cos(heading)], i * 3);
+        if (heading != null) {
+          dir.set([Math.sin(heading), 0, -Math.cos(heading)], i * 3);
+          headings++;
+        }
         const label = str(p.label);
         entry.points.push({
           world: local.set(x, y, z).clone().applyMatrix4(this.root.matrixWorld),
@@ -611,11 +637,18 @@ export class MapOverlayRenderer {
       geom.setAttribute('aStyle', new THREE.BufferAttribute(style, 4));
       geom.setAttribute('aDir', new THREE.BufferAttribute(dir, 3));
       this.geometries.push(geom);
-      const points = new THREE.Points(geom, this.pointMaterial);
-      points.name = 'points';
-      points.renderOrder = POINT_RENDER_ORDER;
-      points.frustumCulled = false;
-      group.add(points);
+      const markers = new THREE.Points(geom, this.markerMaterial);
+      markers.name = 'markers';
+      markers.renderOrder = MARKER_RENDER_ORDER;
+      markers.frustumCulled = false;
+      group.add(markers);
+      if (headings > 0) {
+        const arrows = new THREE.Points(geom, this.arrowMaterial);
+        arrows.name = 'arrows';
+        arrows.renderOrder = ARROW_RENDER_ORDER;
+        arrows.frustumCulled = false;
+        group.add(arrows);
+      }
     }
     return entry;
   }

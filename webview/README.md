@@ -246,9 +246,11 @@ polygons in the map's scene frame (+X east, -Z north, export units).
   default). A ticked overlay opens a panel over the canvas with a `Labels`
   toggle and one checkbox per layer.
 - `src/lib/maps/map_overlay.ts` draws it after the map, without the depth
-  test: markers (one `THREE.Points` per layer, symbol, outline and heading
-  arrow drawn in the fragment shader at a constant screen size; the arrow
-  follows the heading as projected on screen), outlines as
+  test: markers (two `THREE.Points` per layer over one geometry, drawn in
+  the fragment shader at a constant screen size with a dark outline: every
+  heading arrow first, then every symbol, so an arrow never covers a
+  neighbour's marker; the arrow follows the heading as projected on
+  screen), outlines as
   `LineSegments2` laid on the surface (height field or sea, whichever is
   higher), and labels as HTML over the canvas (`CSS2DRenderer`). Hovering
   a marker shows its label and `info`.
