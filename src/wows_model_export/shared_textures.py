@@ -122,6 +122,14 @@ SCOPE_ROOTS: tuple[str, ...] = (
     "buildings",
 )
 
+#: Scope roots that no publish domain carries (the map-dressing libraries).
+#: A store entry that only their folders name is not published with the
+#: store (:func:`store_entries_only_for`).
+UNPUBLISHED_SCOPE_ROOTS: tuple[str, ...] = (
+    "libraries/vegetation",
+    "libraries/map_models",
+)
+
 #: Redirect file written into a raw-DDS directory whose textures were moved
 #: to the store. Pipeline-internal: never published.
 REDIRECT_FILENAME = "shared_textures.json"
@@ -529,6 +537,31 @@ def read_redirect_records(dds_dir: Path) -> dict[str, dict[str, Any]]:
         if isinstance(rec, dict) and isinstance(rec.get("ref"), str):
             out[name] = rec
     return out
+
+
+def store_entry_users(workspace: Path) -> dict[str, set[str]]:
+    """``{store entry folder (<key-8>): {scope root, ...}}``: which scope roots
+    (:data:`SCOPE_ROOTS`) hold a redirect file naming a file of that entry."""
+    ws = Path(workspace)
+    users: dict[str, set[str]] = {}
+    prefix = STORE_REL + "/"
+    for root in SCOPE_ROOTS:
+        base = ws.joinpath(*root.split("/"))
+        if not base.is_dir():
+            continue
+        for red in base.rglob(REDIRECT_FILENAME):
+            for rec in read_redirect_records(red.parent).values():
+                ref = rec["ref"].replace("\\", "/")
+                if ref.startswith(prefix):
+                    users.setdefault(ref[len(prefix):].split("/", 1)[0].lower(), set()).add(root)
+    return users
+
+
+def store_entries_only_for(workspace: Path, roots: Iterable[str] = UNPUBLISHED_SCOPE_ROOTS) -> set[str]:
+    """Store entry folders (``<key-8>``) whose every referencing redirect lies
+    under ``roots``. An entry no redirect names is not in the set."""
+    only = set(roots)
+    return {key for key, users in store_entry_users(workspace).items() if users and users <= only}
 
 
 def read_redirects(dds_dir: Path) -> dict[str, str]:

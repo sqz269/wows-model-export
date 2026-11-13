@@ -56,7 +56,10 @@ What it copies (per domain):
                     ``ships``, ``library`` or ``projectiles`` is, since
                     their texture paths point into it. Flat files at the
                     store root (hardlink canonicals of
-                    ``wows-dedup-textures --hardlink``) are not published.
+                    ``wows-dedup-textures --hardlink``) are not published,
+                    nor are entries that only the map-dressing libraries
+                    (``libraries/vegetation``, ``libraries/map_models``;
+                    no publish domain carries them) name.
 * ``maps``        — cached map/space exports ``maps/<Map>/``: the map GLB +
                     the sidecar manifests (``export.json`` + ``*_manifest``
                     JSONs) + the non-GLB sidecars the map contract carries —
@@ -361,11 +364,13 @@ def _publish_shared_store(
     dst_root: Path,
     *,
     force: bool,
+    exclude: frozenset[str] | set[str] = frozenset(),
 ) -> PublishCounts:
     """Mirror the shared texture store's ``<hash>/<file>`` entries.
 
     Only the content-addressed subdirectories are copied; flat files at
-    the store root (legacy hardlink canonicals) are skipped.
+    the store root (legacy hardlink canonicals) are skipped, and so are the
+    entry folders named in ``exclude`` (lower-case ``<key-8>``).
     """
     if not src_root.is_dir():
         return PublishCounts()
@@ -378,6 +383,8 @@ def _publish_shared_store(
         if len(name) != shared_textures.HASH_PREFIX_LEN or any(
             c not in "0123456789abcdef" for c in name
         ):
+            continue
+        if name in exclude:
             continue
         for src in sorted(sub.iterdir()):
             if not src.is_file() or src.suffix.lower() not in _DDS_EXTENSIONS:
@@ -638,19 +645,25 @@ def publish(
     # ── Step: copy_shared_textures ────────────────────────────────────
     # Ship / library / projectile texture paths that start with
     # `libraries/` name the shared store, so it publishes with them.
+    # Entries only the map-dressing libraries name stay behind: no domain
+    # publishes those libraries.
     shared_counts = PublishCounts()
     if "shared_textures" in domain_set or domain_set & _STORE_USING_DOMAINS:
         with runner.step("copy_shared_textures") as ctx:
+            unpublished = shared_textures.store_entries_only_for(workspace)
             shared_counts = _publish_shared_store(
                 shared_textures.store_root(workspace),
                 target_dir / shared_textures.STORE_REL.split("/", 1)[1],
                 force=force,
+                exclude=unpublished,
             )
             ctx.annotate(
-                f"copied={shared_counts.copied} skipped={shared_counts.skipped}",
+                f"copied={shared_counts.copied} skipped={shared_counts.skipped} "
+                f"left_out={len(unpublished)} (map-dressing libraries only)",
                 data={
                     "copied":  shared_counts.copied,
                     "skipped": shared_counts.skipped,
+                    "left_out_entries": len(unpublished),
                 },
             )
     else:

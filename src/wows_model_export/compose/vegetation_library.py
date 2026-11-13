@@ -25,9 +25,10 @@ writes each species once, whatever the number of maps that plant it:
   camera's distance to each tree's bounding sphere with those numbers in map
   units: the authored mesh is drawn closer than ``meshEnd``, an impostor
   (billboard) from ``imposterStart`` to ``imposterEnd``, dithered out from
-  ``fadeStart``. The library keeps the authored mesh's range for LOD0 and
-  lets the generated levels stand in for the impostor range, which they
-  split geometrically (:func:`lod_ranges`; the one producer choice here).
+  ``fadeStart``. The library has no impostor: the authored mesh stands in
+  for it over the near part of the impostor range and the generated levels
+  over the rest (:func:`lod_ranges`, :data:`AUTHORED_LOD_SHARE`; the one
+  producer choice here).
 * **Textures.** The species' albedo (``<name>_spt_a``) and SpeedTree normal
   (``<name>_spt_n``) DDS sets, copied raw into ``<id>/textures_dds/`` and
   routed through the shared texture store. The GLB embeds the albedo's top
@@ -77,6 +78,20 @@ LOD_PROFILE_PATH = LOD_PROFILE_VFS.lstrip("/")
 #: Quality preset whose profile sets the library's switch distances when the
 #: scheme names no default.
 FALLBACK_QUALITY = "HIGH"
+#: How far LOD0 (the authored mesh) is drawn, as a share of the client's
+#: impostor range ``[meshEnd, imposterEnd]`` on a log scale: LOD0 ends at
+#: ``meshEnd * (imposterEnd / meshEnd) ** AUTHORED_LOD_SHARE``. 0 ends it
+#: where the client stops drawing the mesh (``meshEnd``, 45 m on ``HIGH``);
+#: 0.5, the default, at the geometric middle of the impostor range (604 m
+#: on ``HIGH``). Why not 0: from ``meshEnd`` on the client draws an impostor
+#: of the authored tree, which looks as full as the tree, while the
+#: generated levels are a mesh simplification that drops foliage cards
+#: (about 1/3 and 1/9 of the triangles) and look visibly thinner from a few
+#: hundred metres. With 0.5 a map view from 300 m differs from an all-LOD0
+#: view in under 0.5 % of its pixels (0 gave 5-10 %), at about twice the
+#: triangles of the 0 rule in such views. ``wows-build-vegetation-library
+#: --authored-share`` overrides it; a change is a re-run with ``--force``.
+AUTHORED_LOD_SHARE = 0.5
 TEXTURE_SLOTS = (("baseColor", "_spt_a"), ("speedtreeNormal", "_spt_n"))
 FOREST_LAYERS = ("Primary", "PrimaryRare", "Underwater", "UnderwaterRare")
 _GLB_MAGIC, _JSON, _BIN = 0x46546C67, 0x4E4F534A, 0x004E4942
@@ -170,14 +185,18 @@ def read_lod_profiles(xml_bytes: bytes) -> dict[str, Any]:
     return {"default": default, "presets": presets}
 
 
-def lod_ranges(profile: dict[str, float], levels: int) -> list[tuple[float, float]]:
+def lod_ranges(profile: dict[str, float], levels: int,
+               authored_share: float = AUTHORED_LOD_SHARE) -> list[tuple[float, float]]:
     """Switch distances, in map units, for ``levels`` LODs (LOD0 = authored).
 
-    LOD0 keeps the client's mesh range ``[0, meshEnd]``. The generated levels
-    replace the client's impostor and share ``[meshEnd, imposterEnd]``: level
-    ``i`` of ``k = levels - 1`` ends at ``meshEnd * (imposterEnd /
-    meshEnd) ** (i / k)`` (a geometric split; the client draws no mesh there,
-    so no client number decides it). A single level runs to ``imposterEnd``.
+    The client draws the authored mesh to ``meshEnd`` and an impostor from
+    there to ``imposterEnd``; the library has no impostor. LOD0 runs to
+    ``e0 = meshEnd * (imposterEnd / meshEnd) ** authored_share`` (the
+    client's ``meshEnd`` for a share of 0). The generated levels share
+    ``[e0, imposterEnd]``: level ``i`` of ``k = levels - 1`` ends at ``e0 *
+    (imposterEnd / e0) ** (i / k)`` (a geometric split; the client draws no
+    mesh there, so no client number decides it). A single level runs to
+    ``imposterEnd``.
     """
     mesh_end = float(profile.get("meshEnd", 0.0))
     far = float(profile.get("imposterEnd", 0.0))
@@ -185,11 +204,13 @@ def lod_ranges(profile: dict[str, float], levels: int) -> list[tuple[float, floa
         return []
     if levels == 1 or mesh_end <= 0 or far <= mesh_end:
         return [(0.0, max(far, mesh_end))] + [(far, far)] * (levels - 1)
-    out = [(0.0, mesh_end)]
+    share = min(max(float(authored_share), 0.0), 1.0)
+    e0 = mesh_end * (far / mesh_end) ** share
+    out = [(0.0, e0)]
     k = levels - 1
     for i in range(1, levels):
         a = out[-1][1]
-        b = mesh_end * (far / mesh_end) ** (i / k)
+        b = e0 * (far / e0) ** (i / k)
         out.append((a, b))
     return out
 
@@ -396,12 +417,17 @@ def build_vegetation_library(
     spaces: Iterable[str] | None = None,
     force: bool = False,
     quality: str | None = None,
+    authored_share: float | None = None,
     log: Any = print,
 ) -> VegetationLibraryResult:
     """Export every species of the exported client maps (or of ``spaces``)
     into ``libraries/vegetation/``. Species already in the index with the
-    same geometry hash, profile and source build are kept unless ``force``.
+    same geometry hash, profile, LOD rule and source build are kept unless
+    ``force``. ``authored_share`` overrides :data:`AUTHORED_LOD_SHARE`.
     Maps the index lists from an earlier run stay listed."""
+    share = AUTHORED_LOD_SHARE if authored_share is None else float(authored_share)
+    if not 0.0 <= share <= 1.0:
+        raise VegetationLibraryError(f"authored share {share} is outside 0..1")
     cfg = config or PipelineConfig.load()
     ws = cfg.root_workspace
     lib = ws.joinpath(*LIB_REL.split("/"))
@@ -488,7 +514,10 @@ def build_vegetation_library(
                 si = int(e["index"])
                 path = s.paths[si]
                 counts = stsdk_counts(stsdk_bytes[(s.build, path)])
-                if counts is not None and counts != (int(e["vertex_count"]), int(e["index_count"])):
+                if counts is None:
+                    warnings.append(f"{s.space}: species {si} ({path}) has no SpeedTreeSDK___ draw table: "
+                                    "its join to the export is not checked")
+                elif counts != (int(e["vertex_count"]), int(e["index_count"])):
                     raise VegetationLibraryError(
                         f"{s.space}: species {si} has {e['vertex_count']} vertices / {e['index_count']} indices "
                         f"in the export but {counts[0]} / {counts[1]} in {path}: the species order does not join")
@@ -511,6 +540,7 @@ def build_vegetation_library(
                 ids[path] = sid
                 taken[sid] = path
                 use = {"build": s.build, "species_index": si, "geometry_sha1": sha,
+                       "join_checked": counts is not None,
                        "instances": {ln: s.counts[ln][si] for ln in FOREST_LAYERS if s.counts[ln][si]}}
                 sp = species.get(sid)
                 if sp is None:
@@ -536,13 +566,13 @@ def build_vegetation_library(
                 kind = "underwater" if "/underwater/" in path else "land"
                 prof = preset["underwater" if kind == "underwater" else "primary"]
                 levels = len(sp["geo"]["lods"])
-                ranges = lod_ranges(prof, levels)
+                ranges = lod_ranges(prof, levels, share)
                 fade = prof.get("fadeStart"), prof.get("imposterEnd")
                 prev = old_assets.get(sid) or {}
                 glb_rel = f"{sid}/{sid}.glb"
                 glb = lib / glb_rel
                 stamp = {"geometry_sha1": sp["sha"], "build": src.build, "quality": qname,
-                         "profile": prof}
+                         "profile": prof, "authored_share": share}
                 if (not force and glb.is_file() and prev.get("stamp") == stamp):
                     skipped.append(sid)
                     entry = dict(prev)
@@ -649,8 +679,10 @@ def build_vegetation_library(
                 "units": "map units (the culling shader compares them with the camera's distance to a tree's "
                          "bounding sphere in map coordinates)",
                 "presets": profiles["presets"],
-                "rule": "LOD0 (authored mesh) to meshEnd; the generated LODs split meshEnd..imposterEnd "
-                        "geometrically (the client draws an impostor there); fade_m = fadeStart..imposterEnd",
+                "authored_share": share,
+                "rule": "LOD0 (authored mesh) to e0 = meshEnd * (imposterEnd / meshEnd) ** authored_share; the "
+                        "generated LODs split e0..imposterEnd geometrically (the client draws an impostor from "
+                        "meshEnd on; the library has none); fade_m = fadeStart..imposterEnd",
             },
             "assets": {k: new_assets[k] for k in sorted(new_assets)},
             "spaces": {k: space_map[k] for k in sorted(space_map)},

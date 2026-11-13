@@ -5,7 +5,8 @@ Export every SpeedTree species of the exported client maps once into
 Each map is read from the game build it was exported from (its
 ``build_deps.json``), so the command takes no ``--build``. Argv shape::
 
-    wows-build-vegetation-library [SPACE ...] [--force] [--quality PRESET] [common flags ...]
+    wows-build-vegetation-library [SPACE ...] [--force] [--quality PRESET] [--authored-share F]
+                                  [common flags ...]
 """
 
 from __future__ import annotations
@@ -39,6 +40,9 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--force", action="store_true", help="Rewrite species whose index entry is current.")
     ap.add_argument("--quality", default=None, help="Forest quality preset whose LOD profile sets the switch "
                                                      "distances (default: the client's default preset).")
+    ap.add_argument("--authored-share", type=float, default=None,
+                    help="How far LOD0 (the authored mesh) is drawn, as a share of the client's impostor range on a "
+                         "log scale: 0 = the client's meshEnd, 1 = imposterEnd (default: AUTHORED_LOD_SHARE, 0.5).")
     add_common_args(ap, build_option=False)
     return ap
 
@@ -58,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         res = build_vegetation_library(config=cfg, spaces=args.spaces or None, force=args.force,
-                                       quality=args.quality, log=log)
+                                       quality=args.quality, authored_share=args.authored_share, log=log)
     except (VegetationLibraryError, StepError, ToolkitError) as e:
         print(f"error: {e}", file=sys.stderr)
         return EXIT_STEP_ERROR
