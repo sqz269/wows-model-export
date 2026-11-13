@@ -108,14 +108,17 @@ WORKSPACE_PATH_PREFIX = "libraries/"
 SHARED_TEXTURE_NAMES: tuple[str, ...] = ("ship_atlas_detail.dds",)
 
 #: Workspace-relative export trees whose raw-DDS folders the store serves
-#: (ship incl. exterior hulls and skin packs, accessory, projectile and
-#: building exports). Map exports and the camo / decal libraries are not
-#: part of it; neither is anything under ``.cache/``.
+#: (ship incl. exterior hulls and skin packs, accessory, projectile,
+#: aircraft, vegetation, map-model and building exports). Map exports and
+#: the camo / decal libraries are not part of it; neither is anything under
+#: ``.cache/``.
 SCOPE_ROOTS: tuple[str, ...] = (
     "ships",
     "libraries/accessories",
     "libraries/projectiles",
     "libraries/aircraft",
+    "libraries/vegetation",
+    "libraries/map_models",
     "buildings",
 )
 

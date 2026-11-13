@@ -130,6 +130,16 @@ toolchain required to use it.
     │   │                            speeds, heights, ordnance, dispersion)
     │   └── <nation>/<category>/<ID>/  ← GLB + visual JSON + DDS per airframe,
     │                                    and its clips (<ID>.animation.json)
+    ├── vegetation/
+    │   ├── index.json             ← every SpeedTree species of the exported
+    │   │                            client maps, named from forest.bin, with
+    │   │                            LODs and switch distances
+    │   └── <species>/             ← GLB (LOD0..LODn, metres) + raw DDS
+    ├── map_models/
+    │   ├── index.json             ← map models exported by model, with LODs
+    │   │                            and switch distances
+    │   └── <stem>/                ← GLB (LOD0..LODn, metres) + visual JSON
+    │                                + raw DDS
     └── textures_shared/
         └── <key-8>/<file>         ← one copy of each texture set shared
                                      byte-for-byte across export folders
@@ -171,6 +181,8 @@ also available if you'd rather script extractions.
 | `wows-find-ship-variants` | Enumerate ship variants from GameParams. |
 | `wows-dedup-textures` | Move every texture set shared by two or more export folders into `libraries/textures_shared/` and repoint sidecars + library indexes (older exports). |
 | `wows-export-map SPACE [SPACE ...]` | Export spaces (battle maps, docks, operations) into `maps/<name>/`: the GLB, every sidecar manifest, the decal textures, the per-weather skies (`sky/<weather>/env_cube.hdr` + `sky_manifest.json`) and `export.json`. `--skip-glb` re-runs the sidecar post-pass over an exported GLB. `--sky-only` re-runs only the sky step (the skies and `export.json`'s `sky_manifest` block) and touches no other file; it reads the probes from the build the space was exported from. Probes stored as BC6H need `imagecodecs`; a weather whose sky failed is named on stderr and in the `sky_errors` of `--json-events` (`null` when the sky step failed as a whole: `soft_errors` then names `sky_manifest`, and the earlier export's `sky_manifest.json` is not read). |
+| `wows-build-vegetation-library [SPACE ...]` | Export every SpeedTree species of the exported client maps (or of the maps named) once into `libraries/vegetation/`: one GLB per species with every LOD (the authored mesh and the map export's generated levels) and its switch distances from the client's forest LOD profile, the species name read from the space's `forest.bin`, textures through the shared texture store. Each map is read from the build it was exported from; `--quality` picks the forest preset, `--force` rewrites current entries (`reference/schemas/VEGETATION_LIBRARY.md`). |
+| `wows-build-map-model-library MODEL [MODEL ...]` | Export map models (buildings, props, rocks, coast pieces; by file stem or model path, or `--models-file`) into `libraries/map_models/<stem>/` with `batch-export-model`: GLB with every authored LOD, the `.visual` LOD table, raw DDS through the shared texture store, and an `index.json` with bounds, triangles and LOD switch distances (`reference/schemas/MAP_MODEL_LIBRARY.md`). |
 | `wows-export-building` | Export GameParams Building entries (shore structures) into `buildings/`. |
 | `wows-compose-building` | Compose buildings from an old-format base model and GameParams gun mounts, from a spec you supply (`reference/schemas/BUILDING_SIDECAR.md`). |
 | `wows-builds status \| snapshot \| diff \| stale \| reexport` | What a game update changed (`diff`), which exports it made stale (`stale`), and re-running those with their original arguments (`reexport`). Per-build manifests live in `.cache/builds/<build>/`. |

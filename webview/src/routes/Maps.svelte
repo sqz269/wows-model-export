@@ -25,7 +25,7 @@
   import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
   import * as THREE from 'three';
 
-  import { fetchJson } from '$lib/api';
+  import { fetchJson, repoUrl } from '$lib/api';
   import {
     listMaps,
     exportMap,
@@ -710,8 +710,9 @@
       const r = dressingRenderer;
       const raw = await fetchJson<unknown>(mapFileUrl(sn, file));
       if (token !== dressingLoadToken || r !== dressingRenderer) return;
-      await r.add(file, parseMapDressing(raw), (rel) => mapFileUrl(sn, rel));
+      await r.add(file, parseMapDressing(raw), (rel) => mapFileUrl(sn, rel), repoUrl);
       if (token !== dressingLoadToken || r !== dressingRenderer) return;
+      if (activeEnv) r.update(activeEnv.camera.position, true);
       applyDressingState();
     } catch (err) {
       if (token === dressingLoadToken) {
@@ -2219,6 +2220,11 @@
           if (lodInstances.length > 0) {
             updateLodVisibility(env.camera.position);
           }
+          // Dressing assets with LODs: re-sort their instances by camera
+          // distance when the camera moved; refresh the panel's counts.
+          if (dressingRenderer?.update(env.camera.position)) {
+            dressingStats = dressingRenderer.stats();
+          }
           syncMapParticleSunLighting(env);
           mapParticleScene?.tick();
           env.render();
@@ -3349,6 +3355,13 @@
                   shown: {dressingStats.instances.toLocaleString()} instances ·
                   {(dressingStats.triangles / 1e6).toFixed(1)} M triangles
                 </div>
+                {#if dressingStats.lodInstances.length > 0}
+                  <div class="text-muted-foreground/80 text-[10px]" data-testid="dressing-lods">
+                    LOD by distance: {dressingStats.lodInstances
+                      .map((n, i) => `L${i} ${n.toLocaleString()}`)
+                      .join(' · ')}
+                  </div>
+                {/if}
               {/if}
               {#each dressingItems.filter((d) => dressingOn[d.file] === true && d.layers) as dr (dr.file)}
                 <div
