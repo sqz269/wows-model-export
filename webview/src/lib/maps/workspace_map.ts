@@ -78,6 +78,10 @@ export type HeightSampler = (x: number, z: number) => number | null;
 /** Height-field mesh resolution cap, in quads per side. */
 export const WORKSPACE_TERRAIN_MAX_SEGMENTS = 1024;
 
+/** Depth offset (factor and units) of the height field when the folder
+ *  places models on it; 1 otherwise. */
+const TERRAIN_BEHIND_MODELS_OFFSET = 12;
+
 interface BuildOptions {
   terrain: TerrainHeightmapBlock;
   scene: MapSceneDoc | null;
@@ -135,6 +139,15 @@ export async function buildWorkspaceMapScene(opts: BuildOptions): Promise<Worksp
     } else {
       modelErrors.push(`${models[i].file}: ${String(r.reason)}`);
     }
+  }
+  // The placed models are the render surface of the ground the height field
+  // samples more coarsely (a decimated grid of the export's cells), so the
+  // two cross wherever the grid cuts a corner of the mesh. Push the height
+  // field further back so the models' own materials show there.
+  if (modelCount > 0) {
+    const mat = terrainMesh.material as THREE.MeshStandardMaterial;
+    mat.polygonOffsetFactor = TERRAIN_BEHIND_MODELS_OFFSET;
+    mat.polygonOffsetUnits = TERRAIN_BEHIND_MODELS_OFFSET;
   }
   return {
     root,

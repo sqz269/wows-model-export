@@ -225,6 +225,11 @@ picking):
     the 16-number column-major matrix that places it in the scene frame.
   - The scene frame is the map GLB's: right-handed, +Y up, in the
     export's units (1 unit = 15 m).
+  - A model draws with its own glTF materials (textures resolve next to
+    the glTF, through the files route). Where models are placed, the
+    `Terrain` mesh is pushed back in depth (polygon offset 12 instead of
+    1), so a model that covers the same ground shows its material where
+    the coarser height-field grid crosses it.
 - **Sky and light**: with no weathers and no fog of its own, the map
   gets the environment library's default sky cube and sun, the ones the
   ship viewer opens with. The camera frames the height field's bounds.
