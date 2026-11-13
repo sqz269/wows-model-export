@@ -167,6 +167,35 @@ def _dispersion(entry: dict, kind: str) -> dict | None:
     }
 
 
+#: A torpedo's GameParams ``depth`` (native) to the ship model's metres: the
+#: ship sidecar's ``running_depth_m`` law (``depth * 15``).
+TORPEDO_DEPTH_TO_MODEL_M = 15.0
+
+
+def _torpedo(proj: dict) -> dict[str, Any]:
+    """A dropped torpedo's running stats, in the shape of a ship sidecar's
+    ``ballistics.torpedoes`` entry, so a consumer builds the air torpedo the
+    way it builds a ship's: ``speed_kts`` (GameParams knots), ``max_range_m``
+    (``maxDist`` BW x 30, displayed metres), ``alpha_damage``,
+    ``arming_time_s`` (``armingTime``), ``running_depth_m`` (``depth`` x 15,
+    ship-model metres), ``caliber_mm`` (``bulletDiametr`` x 1000),
+    ``is_deep_water``, ``visibility_factor`` and ``flood_capable``."""
+    depth = _num(proj.get("depth"))
+    dist = _num(proj.get("maxDist"))
+    cal = _num(proj.get("bulletDiametr"))
+    return {
+        "speed_kts": _num(proj.get("speed")),
+        "max_range_m": _r(dist * BW_TO_M) if dist is not None else None,
+        "alpha_damage": _num(proj.get("alphaDamage")),
+        "arming_time_s": _num(proj.get("armingTime")),
+        "running_depth_m": _r(depth * TORPEDO_DEPTH_TO_MODEL_M) if depth is not None else None,
+        "caliber_mm": _r(cal * 1000.0) if cal is not None else None,
+        "is_deep_water": bool(proj.get("isDeepWater", False)),
+        "visibility_factor": _num(proj.get("visibilityFactor")),
+        "flood_capable": bool(proj.get("floodGeneration", False)),
+    }
+
+
 def _custom_rack(entry: dict, projectile: str | None) -> str | None:
     """The rack render set ``customProjRenderSets`` names for the entry's own
     projectile (most entries list only ``stub`` placeholders)."""
@@ -235,6 +264,8 @@ def plane_stats(key: str, entry: dict, gp: dict[str, Any]) -> tuple[dict, list[s
         "fall_time_s": _num(entry.get("bombFallingTime")),
         "dispersion": _dispersion(entry, kind) if proj is not None else None,
     }
+    if kind == "torpedo" and proj is not None:
+        ordnance["torpedo"] = _torpedo(proj)
 
     block: dict[str, Any] = {
         "airframe": airframe_of(entry),
@@ -518,6 +549,12 @@ def validate_stats(library_root: Path) -> list[str]:
             problems.append(f"{k}: kind {kind} without a projectile or a count")
         if o.get("projectile_id") is None or not o.get("ammo_type"):
             problems.append(f"{k}: projectile id or ammo type missing")
+        torp = o.get("torpedo")
+        if kind == "torpedo":
+            if not isinstance(torp, dict) or not (torp.get("speed_kts") or 0) > 0 or not (torp.get("max_range_m") or 0) > 0:
+                problems.append(f"{k}: kind torpedo without a torpedo block (speed and range)")
+        elif torp is not None:
+            problems.append(f"{k}: a torpedo block with kind {kind}")
         disp = o.get("dispersion")
         want_model = "torpedo_fan" if kind == "torpedo" else "ellipse"
         if not disp or disp.get("model") != want_model:
