@@ -143,6 +143,8 @@ webview/
 │       │   ├── ballistics.ts   ← ShellEntry / BallisticsSection
 │       │   ├── categories.ts   ← classify* (pure functions)
 │       │   └── index.ts        ← barrel
+│       ├── maps/
+│       │   └── workspace_map.ts ← scene for a map folder with no GLB
 │       └── util/
 │           ├── html.ts         ← escapeHtml / fmtBytes / rgbHex
 │           └── colors.ts       ← lightenTowardWhite
@@ -178,6 +180,54 @@ their binding key on load; sidecar schemes bind to the same key on
 parse; whichever arrives first stashes a "pending" record the other
 side resolves. See `migration/SHIP_TS_INVENTORY.md` C.10 for the legacy
 implementation.
+
+## Maps page
+
+`#/maps` lists the spaces of the selected game build by category
+(battle, dock, ops, other), each marked when it has been exported, and
+`#/maps/<name>` renders an exported space from `maps/<name>/<name>.glb`
+with its sidecars (fog, weathers and skies, vegetation, lights,
+particles, collision, dyes). **Top view** looks straight down with
+scene -Z (north) at the top and +X (east) to the right.
+
+### The `workspace` category
+
+Map folders under `<workspace>/maps/` that hold an `export.json` but
+have no space in the current game build exist only in the export
+workspace: a space a later build removed, or a map another tool wrote
+into the workspace. `GET /api/maps` lists them after the client spaces
+with `category: "workspace"`, `vfs_path: null`, `exported: true` and
+`workspace: {glb, map_scene}`. `GET /api/maps/<name>/files/<path>`
+serves any file inside a map folder (`.gltf`, `.glb`, `.bin`, `.json`,
+`.r16`, `.png`, `.jpg`, `.hdr`; the path may not leave the folder). The
+page never re-exports or deletes them: `POST /api/maps/<name>/export`
+and `DELETE /api/maps/<name>` answer 409 `workspace_only_map`.
+
+A workspace map with a `<name>.glb` renders like any exported map. One
+without is built by `src/lib/maps/workspace_map.ts` and then goes
+through the same viewer path (water modes, terrain toggle, fog, framing,
+picking):
+
+- **Terrain**: the `export.json` `terrain_heightmap` block, the same
+  block a client map export carries (`file` with `width` x `height`
+  u16le samples, `bounds`, `min_height` / `max_height`, `row0`,
+  `sea_level`), as a mesh named `Terrain` (at most 1024 quads a side)
+  coloured by height above sea level.
+- **Water**: a flat quad named `Water` over the bounds at `sea_level`;
+  the default FFT ocean replaces it. The map is shifted so its sea level
+  sits on the ocean surface (y = 0).
+- **Models**: the optional `map_scene.json` (`schema: "map_scene/v1"`):
+  - `terrain_heightmap_z`: the sign from the height field's file z to
+    scene z. The default, -1, is a client map export's (its file frame
+    is the engine's left-handed one); +1 says the file frame already is
+    the scene frame.
+  - `models[]`: `{name, file, matrix}`, a glTF or GLB in the folder and
+    the 16-number column-major matrix that places it in the scene frame.
+  - The scene frame is the map GLB's: right-handed, +Y up, in the
+    export's units (1 unit = 15 m).
+- **Sky and light**: with no weathers and no fog of its own, the map
+  gets the environment library's default sky cube and sun, the ones the
+  ship viewer opens with. The camera frames the height field's bounds.
 
 ## Adding a new feature
 

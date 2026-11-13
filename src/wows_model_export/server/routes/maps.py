@@ -58,6 +58,8 @@ from ...maps_export import (
     maps_root as _maps_root,
     collision_manifest_path as _collision_manifest_path,
     glb_path as _glb_path,
+    map_folder_file as _map_folder_file,
+    map_scene_path as _map_scene_path,
     meta_path as _meta_path,
     model_instance_manifest_path as _model_instance_manifest_path,
     now_iso as _now_iso,
@@ -76,6 +78,7 @@ from ...maps_export import (
     write_static_decal_manifest_from_glb as _write_static_decal_manifest_from_glb,
     write_user_object_manifest_from_glb as _write_user_object_manifest_from_glb,
     write_map_build_deps as _write_map_build_deps,
+    workspace_only_maps as _workspace_only_maps,
 )
 
 _MAP_EXPORT_BODY = Body(default={})
@@ -84,6 +87,30 @@ def make_router(config: PipelineConfig) -> APIRouter:
     """Build the maps router bound to ``config.workspace`` + game_dir."""
     router = APIRouter()
     maps_root = _maps_root(config)
+
+    def _is_workspace_only(name: str) -> bool:
+        """True for a map folder with an export.json whose name is not a
+        space of the current game build (unknown build: False)."""
+        if not _meta_path(config, name).is_file():
+            return False
+        try:
+            spaces = list_spaces(config)
+        except Exception:  # noqa: BLE001 - the export itself reports it
+            return False
+        return bool(spaces) and f"spaces/{name}" not in spaces
+
+    def _workspace_only_refusal(name: str) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "error": "workspace_only_map",
+                "hint": (
+                    f"{name} exists only in the export workspace (no space "
+                    "in this game build); it is not exported or deleted here."
+                ),
+            },
+        )
 
     # ── GET /api/maps ──────────────────────────────────────────────────
     # Lists every space in the current game build (list_spaces() reads the
@@ -116,9 +143,7 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 },
             )
 
-        items: list[dict[str, Any]] = []
-        for vfs_path in vfs_paths:
-            name = vfs_path.split("/", 1)[1]  # strip "spaces/"
+        def map_entry(name: str, vfs_path: str | None, category: str) -> dict[str, Any]:
             glb = _glb_path(config, name)
             meta = _meta_path(config, name)
             collision_manifest = _collision_manifest_path(config, name)
@@ -131,7 +156,7 @@ def make_router(config: PipelineConfig) -> APIRouter:
             entry: dict[str, Any] = {
                 "name": name,
                 "vfs_path": vfs_path,
-                "category": _classify_space(name),
+                "category": category,
                 "exported": glb.is_file(),
                 "collision_manifest_exported": collision_manifest.is_file(),
                 "particle_manifest_exported": particle_manifest.is_file(),
@@ -186,6 +211,26 @@ def make_router(config: PipelineConfig) -> APIRouter:
                     entry["export"] = json.loads(meta.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     pass
+            return entry
+
+        client_names: set[str] = set()
+        items: list[dict[str, Any]] = []
+        for vfs_path in vfs_paths:
+            name = vfs_path.split("/", 1)[1]  # strip "spaces/"
+            client_names.add(name)
+            items.append(map_entry(name, vfs_path, _classify_space(name)))
+
+        # Maps that exist only in the export workspace (an export.json with
+        # no client space): their own category, never exported or deleted
+        # from here. One without a GLB renders from its export.json height
+        # field and the optional map_scene.json.
+        for name in _workspace_only_maps(config, client_names):
+            entry = map_entry(name, None, "workspace")
+            entry["exported"] = True
+            entry["workspace"] = {
+                "glb": _glb_path(config, name).is_file(),
+                "map_scene": _map_scene_path(config, name).is_file(),
+            }
             items.append(entry)
 
         return JSONResponse(content={"ok": True, "items": items})
@@ -235,6 +280,8 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 status_code=400,
                 content={"ok": False, "error": "invalid space name"},
             )
+        if _is_workspace_only(name):
+            return _workspace_only_refusal(name)
 
         cache_dir = _space_cache_dir(config, name)
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -775,6 +822,27 @@ def make_router(config: PipelineConfig) -> APIRouter:
             filename=f"{name}.glb",
         )
 
+    # ── GET /api/maps/{name}/files/{rel_path} ─────────────────────────
+    # Any servable file inside one map folder (height field, glTF + its
+    # buffers, map_scene.json, images). A map that exists only in the
+    # export workspace is rendered from these; the path may not leave the
+    # folder.
+    @router.get("/maps/{name}/files/{rel_path:path}")
+    def get_map_file(name: str, rel_path: str) -> Response:
+        if not _SPACE_NAME.match(name):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "invalid space name"},
+            )
+        found = _map_folder_file(config, name, rel_path)
+        if found is None:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "error": "map_file_not_found"},
+            )
+        path, media_type = found
+        return FileResponse(path=path, media_type=media_type)
+
     # ── GET /api/maps/{name}/sky-manifest ─────────────────────────────
     # Per-weather sky/IBL manifest: which weather presets have an
     # extracted equirect environment .hdr (from the engine's per-weather
@@ -1030,6 +1098,8 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 status_code=400,
                 content={"ok": False, "error": "invalid space name"},
             )
+        if _is_workspace_only(name):
+            return _workspace_only_refusal(name)
         cache_dir = _space_cache_dir(config, name)
         removed: list[str] = []
         for p in (

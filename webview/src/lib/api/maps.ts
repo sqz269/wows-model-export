@@ -6,14 +6,20 @@
 // we'd then graduate to the async jobs pattern that `extract.ts` uses.
 
 import { fetchJson } from './client';
+import type { TerrainHeightmapBlock } from '$lib/maps/workspace_map';
 
-export type MapCategory = 'battle' | 'dock' | 'ops' | 'other';
+/** `workspace`: a map folder with an export.json and no space in the
+ *  current game build (it exists only in the export workspace). */
+export type MapCategory = 'battle' | 'dock' | 'ops' | 'other' | 'workspace';
 
 export interface MapExportRecord {
   schema: 'wows_map_export/v1';
   generated_at: string;
   flags: MapExportFlags;
   glb_size: number | null;
+  /** Raw height field the map's terrain was built from (client exports and
+   *  maps that exist only in the export workspace). */
+  terrain_heightmap?: TerrainHeightmapBlock | null;
   collision_manifest_size?: number | null;
   particle_manifest_size?: number | null;
   particle_manifest?: {
@@ -95,9 +101,14 @@ export interface MapExportRecord {
 
 export interface MapListEntry {
   name: string;
-  vfs_path: string;
+  /** `spaces/<name>`; null for a map that exists only in the export workspace. */
+  vfs_path: string | null;
   category: MapCategory;
   exported: boolean;
+  /** Set on `workspace` entries: what the folder holds. Without a GLB the
+   *  viewer builds the map from export.json's height field and the optional
+   *  map_scene.json. */
+  workspace?: { glb: boolean; map_scene: boolean };
   glb_size?: number;
   collision_manifest_exported: boolean;
   collision_manifest_size?: number;
@@ -230,6 +241,13 @@ export function mapModelInstanceManifestUrl(name: string): string {
 /** URL for direct `space.bin.pointLights[]` data and animation descriptors. */
 export function mapPointLightManifestUrl(name: string): string {
   return `/api/maps/${encodeURIComponent(name)}/point-light-manifest`;
+}
+
+/** URL of one file inside a map folder (height field, glTF and its
+ *  buffers, map_scene.json). */
+export function mapFileUrl(name: string, relPath: string): string {
+  const rel = relPath.split('/').map(encodeURIComponent).join('/');
+  return `/api/maps/${encodeURIComponent(name)}/files/${rel}`;
 }
 
 /** URL for the per-weather sky/IBL manifest. */

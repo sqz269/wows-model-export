@@ -2,9 +2,16 @@
   // Maps route — Phase 1 of the maps webview.
   //
   // Two-pane layout: left = category-grouped picker (battle / dock / ops /
-  // other), right = export action panel OR a three.js GLB viewer once a
-  // map has been exported. Synchronous export per /api/maps/{name}/export
-  // (3-8s default flags); a future Phase 2 can graduate to async jobs.
+  // other / workspace), right = export action panel OR a three.js GLB viewer
+  // once a map has been exported. Synchronous export per
+  // /api/maps/{name}/export (3-8s default flags); a future Phase 2 can
+  // graduate to async jobs.
+  //
+  // `workspace` maps exist only in the export workspace (an export.json with
+  // no space in this game build). One with a GLB renders like any exported
+  // map; one without is built by lib/maps/workspace_map from its export.json
+  // height field and map_scene.json, then runs the same viewer path (water
+  // modes, terrain toggle, fog / light defaults, framing, picking).
   //
   // The renderer uses `createSceneEnvironment` with map-scale defaults
   // (2 km grid, 50 km far plane, camera elevated 800 m) — different
@@ -14,7 +21,7 @@
   // ships.
 
   import { onMount, untrack } from 'svelte';
-  import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+  import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
   import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
   import * as THREE from 'three';
 
@@ -25,11 +32,13 @@
     mapGlbUrl,
     mapCollisionManifestUrl,
     mapSkyEnvUrl,
+    mapFileUrl,
     deleteMapCache,
     type MapListEntry,
     type MapCategory,
     type MapExportFlags,
   } from '$lib/api/maps';
+  import { buildWorkspaceMapScene, type MapSceneDoc } from '$lib/maps/workspace_map';
   import { Button } from '$lib/components/ui/button';
   import { navState } from '$lib/nav_state.svelte';
   import { navigate } from '$lib/router';
@@ -37,6 +46,7 @@
   import { observeResize } from '$lib/three/resize';
   import { startRenderLoop } from '$lib/three/render_loop';
   import { disposeTree } from '$lib/three/dispose';
+  import { loadWgEnvironment, type WgEnvironment } from '$lib/three/env_ibl';
   import { EFFECT_FRAME_FROM_GLB, ParticleScene } from '$lib/three/particles';
   import type { ParticleAttachment, ParticleRecord } from '$lib/types/sidecar';
 
@@ -96,6 +106,7 @@
       dock: [],
       ops: [],
       other: [],
+      workspace: [],
     };
     for (const r of rows) out[r.category].push(r);
     return out;
@@ -338,6 +349,34 @@
       env.setFillLights(PROCEDURAL_FILL, PROCEDURAL_FILL);
       if (fogCol) env.scene.background = fogCol;
     }
+  }
+
+  /** Default sky + sun for a map that carries none (no weathers, no engine
+   *  fog): the environment library's default cube, as the ship viewer opens
+   *  with, lit the way a weather with an extracted sky is. Null (procedural
+   *  room IBL + fill lights stay) when the library is unavailable. */
+  async function applyDefaultSky(
+    env: SceneEnvironment,
+    isCurrent: () => boolean,
+  ): Promise<WgEnvironment | null> {
+    const sky = await loadWgEnvironment(env.renderer);
+    if (!sky || !isCurrent()) return sky;
+    env.setEnvironment(sky.texture);
+    env.setFillLights(WG_MAP_FILL_HEMI);
+    const sun = sky.sun;
+    if (sun && sun.yaw != null && sun.pitch != null) {
+      const color = new THREE.Color(1, 1, 1);
+      if (sun.color && sun.color.length >= 3) {
+        color.setRGB(sun.color[0], sun.color[1], sun.color[2], THREE.LinearSRGBColorSpace);
+      }
+      env.setSunLight({
+        direction: mapsSunDirection(sun.yaw, sun.pitch),
+        color,
+        intensity: WG_MAP_SUN_INTENSITY,
+      });
+    }
+    if (skyBackground) env.scene.background = sky.texture;
+    return sky;
   }
 
   // Per-instance dye application. The toolkit resolves each instance dye
@@ -1811,10 +1850,43 @@
     controls.update();
   }
 
+  // The loaded map's framing box, for the top-down view.
+  let activeFrameBox: THREE.Box3 | null = null;
+
+  /** Look straight down on the framed map with scene -Z at the top of the
+   *  screen and +X to the right (north up, east right in the map GLB frame). */
+  function viewTopDown(): void {
+    const env = activeEnv;
+    const box = activeFrameBox;
+    if (!env || !box) return;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const tanHalf = Math.tan((env.camera.fov * Math.PI) / 360);
+    const dist =
+      Math.max(size.z / (2 * tanHalf), size.x / (2 * tanHalf * Math.max(env.camera.aspect, 1e-3))) *
+      1.05;
+    env.controls.target.copy(center);
+    // A hair toward +Z keeps the orbit controls' azimuth at 0 (screen up = -Z).
+    env.camera.position.set(center.x, center.y + dist, center.z + dist * 1e-4);
+    env.camera.near = Math.max(0.1, dist / 10000);
+    env.camera.far = Math.max(env.camera.far, dist * 4);
+    env.camera.updateProjectionMatrix();
+    env.controls.update();
+  }
+
   $effect(() => {
     const container = canvasContainer;
     const sn = selected?.exported ? selected.name : null;
     if (!container || !sn) return;
+    // A map that exists only in the export workspace and has no GLB: built
+    // from its export.json height field (+ map_scene.json) instead.
+    const heightFieldMap =
+      selected?.category === 'workspace' && !selected.workspace?.glb
+        ? {
+            terrain: selected.export?.terrain_heightmap ?? null,
+            hasScene: Boolean(selected.workspace?.map_scene),
+          }
+        : null;
     let cancelled = false;
     let env: SceneEnvironment | null = null;
     let loadedRoot: THREE.Object3D | null = null;
@@ -1823,6 +1895,7 @@
     let pickPointerDown: { x: number; y: number } | null = null;
     let onPickPointerDown: ((event: PointerEvent) => void) | null = null;
     let onPickPointerUp: ((event: PointerEvent) => void) | null = null;
+    let defaultSky: WgEnvironment | null = null;
 
     void (async () => {
       viewerError = null;
@@ -1890,22 +1963,50 @@
           env.render();
         }, { maxFps: 30 });
 
-        const loader = new GLTFLoader();
-        const gltf = await loader.loadAsync(mapGlbUrl(sn));
-        if (cancelled) {
-          disposeTree(gltf.scene);
-          return;
+        let gltf: GLTF | null = null;
+        let sceneExtras: MapSceneExtras;
+        if (heightFieldMap) {
+          if (!heightFieldMap.terrain) {
+            throw new Error('export.json has no terrain_heightmap block to build the map from');
+          }
+          const mapScene = heightFieldMap.hasScene
+            ? await fetchJson<MapSceneDoc>(mapFileUrl(sn, 'map_scene.json'))
+            : null;
+          const built = await buildWorkspaceMapScene({
+            terrain: heightFieldMap.terrain,
+            scene: mapScene,
+            fileUrl: (rel) => mapFileUrl(sn, rel),
+            metresPerUnit: 1 / MAP_WORLD_UNITS_PER_METRE,
+          });
+          if (cancelled) {
+            disposeTree(built.root);
+            return;
+          }
+          if (built.modelErrors.length > 0) {
+            console.warn('[maps] models that did not load:', built.modelErrors);
+          }
+          loadedRoot = built.root;
+          // No engine extras: the bounds frame the camera; fog, sky and
+          // light take the defaults a GLB without extras gets.
+          sceneExtras = { bounds: built.bounds };
+        } else {
+          const loader = new GLTFLoader();
+          gltf = await loader.loadAsync(mapGlbUrl(sn));
+          if (cancelled) {
+            disposeTree(gltf.scene);
+            return;
+          }
+          loadedRoot = gltf.scene;
+          annotateGltfSourceNames(loadedRoot, gltf as unknown as GltfWithAssociations);
+          // Drive fog + background + camera-far from the engine's per-map
+          // params surfaced in scene.extras (see toolkit
+          // build_scene_extras). Falls back to a sensible default when the
+          // GLB predates the toolkit fix.
+          sceneExtras = (gltf.scene.userData ?? {}) as MapSceneExtras;
         }
-        loadedRoot = gltf.scene;
         dyeSwaps = [];
-        annotateGltfSourceNames(loadedRoot, gltf as unknown as GltfWithAssociations);
         env.scene.add(loadedRoot);
 
-        // Drive fog + background + camera-far from the engine's per-map
-        // params surfaced in scene.extras (see toolkit
-        // build_scene_extras). Falls back to a sensible default when the
-        // GLB predates the toolkit fix.
-        const sceneExtras = (gltf.scene.userData ?? {}) as MapSceneExtras;
         // Per-weather environment blocks (fog/sun/IBL). Reset the selector
         // to the base block on every load; the HDR cache is per map.
         loadedSpaceName = sn;
@@ -1936,6 +2037,17 @@
           env.scene.fog = new THREE.FogExp2(0x8aa4b8, 0.00015);
           engineFogDensity = null;
         }
+        // No sky of its own (no weathers, no engine fog: a map that exists
+        // only in the export workspace): the default WG sky and sun the
+        // ship viewer opens with, from the environment library.
+        if (weatherBlocks.length === 0 && !sceneExtras.fog) {
+          const sky = await applyDefaultSky(env, () => !cancelled);
+          if (cancelled) {
+            sky?.dispose();
+            return;
+          }
+          defaultSky = sky;
+        }
 
         // Apply current fixed material state + expose the root so the
         // toggle effects below can re-apply without a full reload.
@@ -1951,6 +2063,7 @@
         const { box, meshCount, landscapeCount, dyedInstances, materialOverrideInstances } =
           computeFrameBox(loadedRoot, sceneExtras);
         frameToBox(box, env.camera, env.controls);
+        activeFrameBox = box.isEmpty() ? null : box.clone();
 
         mapParticleAnchors = sceneExtras.particles ?? [];
         mapParticleStats = null;
@@ -1969,11 +2082,13 @@
             vegetationRareInstances += (child.userData?.full_instance_count as number) ?? 0;
           }
         }
-        const vegetationTintApplied = await applyVegetationTint(
-          vegetationGroup,
-          (gltf as unknown as { parser: Parameters<typeof applyVegetationTint>[1] }).parser,
-          sceneExtras,
-        );
+        const vegetationTintApplied = gltf
+          ? await applyVegetationTint(
+              vegetationGroup,
+              (gltf as unknown as { parser: Parameters<typeof applyVegetationTint>[1] }).parser,
+              sceneExtras,
+            )
+          : false;
 
         // Pre-collect LOD-cullable instances so the per-frame pass doesn't
         // re-traverse the scene tree. Must run after frameToBox and after
@@ -2000,10 +2115,12 @@
         // Apply toolkit-resolved dyes (baked tint materials referenced by
         // `dyes_resolved` extras). Swaps are recorded so the checkbox can
         // flip between dyed and base looks without a reload.
-        const dyeApply = await applyResolvedDyes(
-          loadedRoot,
-          (gltf as unknown as { parser: Parameters<typeof applyResolvedDyes>[1] }).parser,
-        );
+        const dyeApply = gltf
+          ? await applyResolvedDyes(
+              loadedRoot,
+              (gltf as unknown as { parser: Parameters<typeof applyResolvedDyes>[1] }).parser,
+            )
+          : { swaps: [], instances: 0 };
         dyeSwaps = dyeApply.swaps;
         if (!applyDyes) {
           for (const s of dyeSwaps) s.mesh.material = s.original;
@@ -2052,6 +2169,7 @@
       cancelled = true;
       collisionLoadToken += 1;
       activeRoot = null;
+      activeFrameBox = null;
       activeEnv = null;
       activeFog = null;
       engineFogDensity = null;
@@ -2089,6 +2207,7 @@
         disposeTree(loadedRoot);
       }
       env?.dispose();
+      defaultSky?.dispose();
       // Defensive: only remove our own canvas, in case anything else
       // appended into the container.
       if (env && container && env.renderer.domElement.parentElement === container) {
@@ -2281,7 +2400,7 @@
         Failed to load spaces: {loadError}
       </div>
     {:else}
-      {#each ['battle', 'dock', 'ops', 'other'] as MapCategory[] as cat (cat)}
+      {#each ['battle', 'dock', 'ops', 'other', 'workspace'] as MapCategory[] as cat (cat)}
         {#if grouped[cat].length > 0}
           <div class="text-muted-foreground/80 mt-3 mb-1 px-2 text-[10px] uppercase tracking-wider">
             {cat} ({grouped[cat].length})
@@ -2299,7 +2418,9 @@
               {#if row.exported}
                 <span
                   class="ml-auto text-[10px] text-emerald-400"
-                  title={`Exported (${formatBytes(row.glb_size)})`}>●</span
+                  title={row.category === 'workspace'
+                    ? 'In the export workspace only (no space in this game build)'
+                    : `Exported (${formatBytes(row.glb_size)})`}>●</span
                 >
               {/if}
             </button>
@@ -2319,8 +2440,25 @@
       <header class="border-border flex flex-none items-center gap-3 border-b px-4 py-2 text-sm">
         <span class="text-foreground font-semibold">{selected.name}</span>
         <span class="text-muted-foreground/60 text-xs">{selected.category}</span>
-        <span class="text-muted-foreground text-xs">{selected.vfs_path}</span>
-        {#if selected.exported}
+        <span class="text-muted-foreground text-xs"
+          >{selected.vfs_path ?? 'export workspace only'}</span
+        >
+        {#if selected.exported && selected.category === 'workspace'}
+          <!-- Exists only in the export workspace: nothing to export from
+               this game build, and its folder is not ours to delete. -->
+          <span class="text-muted-foreground ml-auto text-xs">
+            {#if selected.workspace?.glb}
+              GLB: {formatBytes(selected.glb_size)}
+            {:else if selected.export?.terrain_heightmap}
+              height field {selected.export.terrain_heightmap.width} x
+              {selected.export.terrain_heightmap.height}
+            {:else}
+              no GLB or height field
+            {/if}
+          </span>
+          <Button variant="outline" size="sm" class="text-xs" onclick={viewTopDown}>Top view</Button
+          >
+        {:else if selected.exported}
           <span class="text-muted-foreground ml-auto text-xs">
             GLB: {formatBytes(selected.glb_size)} ·
             {formatMs(selected.export?.elapsed_ms)}
@@ -2328,6 +2466,8 @@
               · collision {formatBytes(selected.collision_manifest_size)}
             {/if}
           </span>
+          <Button variant="outline" size="sm" class="text-xs" onclick={viewTopDown}>Top view</Button
+          >
           <Button
             variant="outline"
             size="sm"

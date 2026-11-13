@@ -94,6 +94,68 @@ def point_light_manifest_path(config: PipelineConfig, name: str) -> Path:
     return space_cache_dir(config, name) / "point_light_manifest.json"
 
 
+# ---- maps that exist only in the export workspace ---------------------
+#
+# A folder under ``<workspace>/maps/`` whose ``export.json`` has no space in
+# the current game build: a map exported from a space later builds removed,
+# or one another producer wrote straight into the workspace. A folder with
+# no ``<name>.glb`` is rendered from its ``export.json`` ``terrain_heightmap``
+# block plus the optional ``map_scene.json`` (MAP_SCENE_FILE): the sign that
+# maps the height field's file z to scene z and the glTF models to place.
+
+MAP_SCENE_FILE = "map_scene.json"
+
+# Files the webview may fetch from a map folder, by suffix.
+_MAP_FILE_MEDIA_TYPES = {
+    ".bin": "application/octet-stream",
+    ".glb": "model/gltf-binary",
+    ".gltf": "model/gltf+json",
+    ".hdr": "image/vnd.radiance",
+    ".jpg": "image/jpeg",
+    ".json": "application/json",
+    ".png": "image/png",
+    ".r16": "application/octet-stream",
+}
+
+
+def map_scene_path(config: PipelineConfig, name: str) -> Path:
+    return space_cache_dir(config, name) / MAP_SCENE_FILE
+
+
+def workspace_only_maps(config: PipelineConfig, client_names: set[str]) -> list[str]:
+    """Map folders with an ``export.json`` whose name is not a client space, sorted."""
+    root = maps_root(config)
+    try:
+        dirs = [p for p in root.iterdir() if p.is_dir()]
+    except OSError:
+        return []
+    return sorted(
+        p.name for p in dirs
+        if p.name not in client_names
+        and SPACE_NAME.match(p.name)
+        and (p / "export.json").is_file()
+    )
+
+
+def map_folder_file(config: PipelineConfig, name: str, rel_path: str) -> tuple[Path, str] | None:
+    """``(path, media type)`` of a file inside one map folder, or ``None`` when
+    the path leaves the folder, does not exist or has a suffix not served."""
+    parts = rel_path.split("/")
+    if not rel_path or "\\" in rel_path or any(p in ("", ".", "..") for p in parts):
+        return None
+    media_type = _MAP_FILE_MEDIA_TYPES.get(Path(parts[-1]).suffix.lower())
+    if media_type is None:
+        return None
+    root = space_cache_dir(config, name).resolve()
+    try:
+        path = root.joinpath(*parts).resolve()
+    except OSError:
+        return None
+    if root not in path.parents or not path.is_file():
+        return None
+    return path, media_type
+
+
 def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
