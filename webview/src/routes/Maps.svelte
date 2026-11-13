@@ -34,11 +34,20 @@
     mapSkyEnvUrl,
     mapFileUrl,
     deleteMapCache,
+    listMapOverlays,
     type MapListEntry,
     type MapCategory,
     type MapExportFlags,
+    type MapOverlayLayerSummary,
+    type MapOverlaySummary,
   } from '$lib/api/maps';
-  import { buildWorkspaceMapScene, type MapSceneDoc } from '$lib/maps/workspace_map';
+  import {
+    buildWorkspaceMapScene,
+    loadHeightSampler,
+    type HeightSampler,
+    type MapSceneDoc,
+  } from '$lib/maps/workspace_map';
+  import { MapOverlayRenderer, parseMapOverlay, type MapOverlayHit } from '$lib/maps/map_overlay';
   import { Button } from '$lib/components/ui/button';
   import { navState } from '$lib/nav_state.svelte';
   import { navigate } from '$lib/router';
@@ -512,6 +521,148 @@
   let collisionGroup: THREE.Group | null = null;
   let collisionLoadToken = 0;
   const MISSING_COLLISION_MANIFEST_ERROR = 'collision manifest not exported';
+
+  // Annotation overlays (map_overlay/v1, lib/maps/map_overlay): the folder's
+  // overlays/*.overlay.json, listed only when the map entry counts any, so a
+  // map without overlays loads and renders as before. Each overlay is off
+  // until ticked; its layers start at their own default visibility.
+  const overlayMapName = $derived(
+    selected?.exported && (selected.overlay_count ?? 0) > 0 ? selected.name : null,
+  );
+  let overlayItems = $state<MapOverlaySummary[]>([]);
+  let overlayOn = $state<Record<string, boolean>>({});
+  let overlayLayerOn = $state<Record<string, Record<string, boolean>>>({});
+  let overlayLabels = $state(true);
+  let overlayLoading = $state(false);
+  let overlayError = $state<string | null>(null);
+  let overlayHover = $state<MapOverlayHit | null>(null);
+  let overlayLabelHost = $state<HTMLDivElement | null>(null);
+  let overlayRenderer: MapOverlayRenderer | null = null;
+  let overlayRendererPending: Promise<MapOverlayRenderer | null> | null = null;
+  const overlayPending = new Set<string>();
+  let overlayLoadToken = 0;
+  // The loaded map's height field (workspace maps build it anyway; a GLB
+  // map's is fetched when its first overlay is shown) and its file-z sign.
+  let activeHeightAt: HeightSampler | null = null;
+  let activeHeightZSign = -1;
+
+  function overlayLayerCount(layer: MapOverlayLayerSummary): number {
+    return layer.points + layer.polylines + layer.polygons;
+  }
+
+  function setOverlayOn(file: string, on: boolean): void {
+    overlayOn = { ...overlayOn, [file]: on };
+    if (!on) overlayHover = null;
+  }
+
+  function setOverlayLayerOn(file: string, layerId: string, on: boolean): void {
+    overlayLayerOn = {
+      ...overlayLayerOn,
+      [file]: { ...(overlayLayerOn[file] ?? {}), [layerId]: on },
+    };
+    if (!on) overlayHover = null;
+  }
+
+  /** Push the toggles onto the built overlays. */
+  function applyOverlayState(): void {
+    const r = overlayRenderer;
+    if (!r) return;
+    untrack(() => {
+      for (const o of overlayItems) {
+        if (!r.has(o.file)) continue;
+        r.setOverlayVisible(o.file, overlayOn[o.file] === true);
+        for (const [id, on] of Object.entries(overlayLayerOn[o.file] ?? {})) {
+          r.setLayerVisible(o.file, id, on);
+        }
+      }
+      r.setLabelsVisible(overlayLabels);
+    });
+  }
+
+  function ensureOverlayRenderer(
+    sn: string,
+    env: SceneEnvironment,
+    root: THREE.Object3D,
+    host: HTMLElement,
+  ): Promise<MapOverlayRenderer | null> {
+    if (overlayRenderer) return Promise.resolve(overlayRenderer);
+    if (overlayRendererPending) return overlayRendererPending;
+    const token = overlayLoadToken;
+    const block = untrack(() => selected?.export?.terrain_heightmap ?? null);
+    overlayRendererPending = (async () => {
+      let heightAt = activeHeightAt;
+      if (!heightAt && block) {
+        try {
+          heightAt = await loadHeightSampler(
+            block,
+            (rel) => mapFileUrl(sn, rel),
+            activeHeightZSign,
+          );
+        } catch (err) {
+          console.warn('[maps] overlay height field unavailable; markers sit at sea level', err);
+          heightAt = null;
+        }
+      }
+      if (token !== overlayLoadToken) return null;
+      root.updateWorldMatrix(true, false);
+      const box = activeFrameBox;
+      const span = box ? Math.max(box.max.x - box.min.x, box.max.z - box.min.z) : 1000;
+      const r = new MapOverlayRenderer({
+        scene: env.scene,
+        frame: root.matrixWorld,
+        labelHost: host,
+        heightAt,
+        seaLevel: block?.sea_level ?? 0,
+        drapeStep: Math.max(span / 400, 1e-3),
+      });
+      r.setSize(host.clientWidth || 1, host.clientHeight || 1);
+      overlayRenderer = r;
+      return r;
+    })().finally(() => {
+      overlayRendererPending = null;
+    });
+    return overlayRendererPending;
+  }
+
+  async function loadOverlay(
+    sn: string,
+    file: string,
+    env: SceneEnvironment,
+    root: THREE.Object3D,
+    host: HTMLElement,
+  ): Promise<void> {
+    const token = overlayLoadToken;
+    overlayPending.add(file);
+    overlayLoading = true;
+    try {
+      const [r, raw] = await Promise.all([
+        ensureOverlayRenderer(sn, env, root, host),
+        fetchJson<unknown>(mapFileUrl(sn, file)),
+      ]);
+      if (!r || r !== overlayRenderer || token !== overlayLoadToken) return;
+      r.add(file, parseMapOverlay(raw));
+      applyOverlayState();
+    } catch (err) {
+      if (token === overlayLoadToken) {
+        overlayError = `${file}: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    } finally {
+      overlayPending.delete(file);
+      if (token === overlayLoadToken) overlayLoading = overlayPending.size > 0;
+    }
+  }
+
+  function teardownOverlays(): void {
+    overlayLoadToken += 1;
+    overlayRenderer?.dispose();
+    overlayRenderer = null;
+    overlayRendererPending = null;
+    overlayPending.clear();
+    overlayLoading = false;
+    overlayHover = null;
+    activeHeightAt = null;
+    activeHeightZSign = -1;
+  }
 
   // Live handles to the scene root + env so the showLandscape toggle
   // doesn't need to rebuild the whole scene. Set by the load effect;
@@ -1895,6 +2046,8 @@
     let pickPointerDown: { x: number; y: number } | null = null;
     let onPickPointerDown: ((event: PointerEvent) => void) | null = null;
     let onPickPointerUp: ((event: PointerEvent) => void) | null = null;
+    let onOverlayPointerMove: ((event: PointerEvent) => void) | null = null;
+    let onOverlayPointerLeave: (() => void) | null = null;
     let defaultSky: WgEnvironment | null = null;
 
     void (async () => {
@@ -1944,12 +2097,40 @@
         };
         env.renderer.domElement.addEventListener('pointerdown', onPickPointerDown);
         env.renderer.domElement.addEventListener('pointerup', onPickPointerUp);
+        // Hover over an overlay marker: its label and info.
+        onOverlayPointerMove = (event: PointerEvent) => {
+          const r = overlayRenderer;
+          if (!r || !env) {
+            if (overlayHover) overlayHover = null;
+            return;
+          }
+          const rect = env.renderer.domElement.getBoundingClientRect();
+          const hit = r.pick(
+            event.clientX - rect.left,
+            event.clientY - rect.top,
+            env.camera,
+            rect.width,
+            rect.height,
+          );
+          const cur = untrack(() => overlayHover);
+          if (hit?.x !== cur?.x || hit?.y !== cur?.y || hit?.label !== cur?.label) {
+            overlayHover = hit;
+          }
+        };
+        onOverlayPointerLeave = () => {
+          overlayHover = null;
+        };
+        env.renderer.domElement.addEventListener('pointermove', onOverlayPointerMove);
+        env.renderer.domElement.addEventListener('pointerleave', onOverlayPointerLeave);
 
         stopResize = observeResize({
           container,
           renderer: env.renderer,
           camera: env.camera,
-          onResize: (w, h) => env?.setSize(w, h),
+          onResize: (w, h) => {
+            env?.setSize(w, h);
+            overlayRenderer?.setSize(w, h);
+          },
         });
 
         stopLoop = startRenderLoop(() => {
@@ -1961,6 +2142,7 @@
           syncMapParticleSunLighting(env);
           mapParticleScene?.tick();
           env.render();
+          overlayRenderer?.update(env.renderer, env.camera);
         }, { maxFps: 30 });
 
         let gltf: GLTF | null = null;
@@ -1986,6 +2168,8 @@
             console.warn('[maps] models that did not load:', built.modelErrors);
           }
           loadedRoot = built.root;
+          activeHeightAt = built.heightAt;
+          activeHeightZSign = mapScene?.terrain_heightmap_z === 1 ? 1 : -1;
           // No engine extras: the bounds frame the camera; fog, sky and
           // light take the defaults a GLB without extras gets.
           sceneExtras = { bounds: built.bounds };
@@ -2168,6 +2352,13 @@
     return () => {
       cancelled = true;
       collisionLoadToken += 1;
+      teardownOverlays();
+      if (env && onOverlayPointerMove) {
+        env.renderer.domElement.removeEventListener('pointermove', onOverlayPointerMove);
+      }
+      if (env && onOverlayPointerLeave) {
+        env.renderer.domElement.removeEventListener('pointerleave', onOverlayPointerLeave);
+      }
       activeRoot = null;
       activeFrameBox = null;
       activeEnv = null;
@@ -2331,6 +2522,57 @@
     const sn = selected?.exported ? selected.name : null;
     const hasManifest = Boolean(selected?.collision_manifest_exported);
     syncCollisionOverlay(show, env, sn, hasManifest);
+  });
+
+  // The overlay list of the selected map (only when its entry counts any).
+  $effect(() => {
+    const sn = overlayMapName;
+    overlayItems = [];
+    overlayOn = {};
+    overlayLayerOn = {};
+    overlayError = null;
+    overlayHover = null;
+    if (!sn) return;
+    let cancelled = false;
+    listMapOverlays(sn)
+      .then((resp) => {
+        if (cancelled) return;
+        const layerOn: Record<string, Record<string, boolean>> = {};
+        for (const o of resp.items) {
+          layerOn[o.file] = Object.fromEntries((o.layers ?? []).map((l) => [l.id, l.visible]));
+        }
+        overlayLayerOn = layerOn;
+        overlayItems = resp.items;
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) overlayError = err instanceof Error ? err.message : String(err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  // Build the overlays that are ticked and apply every toggle. Nothing is
+  // built until the first overlay is shown.
+  $effect(() => {
+    const env = activeEnv;
+    const root = activeRoot;
+    const host = overlayLabelHost;
+    const sn = overlayMapName;
+    const wanted = overlayItems
+      .filter((o) => overlayOn[o.file] === true && !o.error)
+      .map((o) => o.file);
+    for (const o of overlayItems) void Object.values(overlayLayerOn[o.file] ?? {});
+    void overlayLabels;
+    if (!env || !root || !host || !sn) return;
+    untrack(() => {
+      for (const file of wanted) {
+        if (!overlayRenderer?.has(file) && !overlayPending.has(file)) {
+          void loadOverlay(sn, file, env, root, host);
+        }
+      }
+      applyOverlayState();
+    });
   });
 
   // Live fog-density slider — re-scales the engine density into the
@@ -2691,6 +2933,29 @@
                 </span>
               </label>
             {/if}
+            {#each overlayItems as ov (ov.file)}
+              <label
+                class="flex items-center gap-1.5"
+                title={ov.error ?? ov.description ?? `Annotation overlay ${ov.file}`}
+              >
+                <input
+                  type="checkbox"
+                  disabled={Boolean(ov.error)}
+                  checked={overlayOn[ov.file] === true}
+                  onchange={(event) =>
+                    setOverlayOn(ov.file, (event.currentTarget as HTMLInputElement).checked)}
+                />
+                <span class={ov.error ? 'text-destructive' : ''}
+                  >Overlay: {ov.title ?? ov.name}</span
+                >
+              </label>
+            {/each}
+            {#if overlayLoading}
+              <span class="text-muted-foreground/70">loading overlay…</span>
+            {/if}
+            {#if overlayError}
+              <span class="text-destructive" title={overlayError}>overlay unavailable</span>
+            {/if}
             {#if collisionLoading}
               <span class="text-muted-foreground/70">loading collision…</span>
             {/if}
@@ -2879,6 +3144,63 @@
         {/if}
         <div class="relative flex flex-1 min-h-0 min-w-0">
           <div bind:this={canvasContainer} class="flex-1 cursor-crosshair"></div>
+          {#if overlayItems.length > 0}
+            <div
+              bind:this={overlayLabelHost}
+              class="pointer-events-none absolute inset-0 overflow-hidden"
+            ></div>
+          {/if}
+          {#if overlayItems.some((o) => overlayOn[o.file] === true && o.layers)}
+            <div
+              class="bg-background/85 border-border absolute left-2 top-2 z-10 max-h-[70%] w-64 overflow-y-auto rounded border p-2 text-xs"
+            >
+              <label class="flex items-center gap-1.5">
+                <input type="checkbox" bind:checked={overlayLabels} />
+                <span>Labels</span>
+              </label>
+              {#each overlayItems.filter((o) => overlayOn[o.file] === true && o.layers) as ov (ov.file)}
+                <div
+                  class="text-muted-foreground/80 mb-0.5 mt-1.5 truncate text-[10px] uppercase tracking-wider"
+                  title={ov.description ?? ov.file}
+                >
+                  {ov.title ?? ov.name}
+                </div>
+                {#each ov.layers ?? [] as layer (layer.id)}
+                  <label class="flex items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      checked={overlayLayerOn[ov.file]?.[layer.id] ?? layer.visible}
+                      onchange={(event) =>
+                        setOverlayLayerOn(
+                          ov.file,
+                          layer.id,
+                          (event.currentTarget as HTMLInputElement).checked,
+                        )}
+                    />
+                    <span
+                      class="inline-block h-2.5 w-2.5 flex-none rounded-sm"
+                      style:background={layer.color ?? '#ffffff'}
+                    ></span>
+                    <span class="truncate" title={layer.title}>{layer.title}</span>
+                    <span class="text-muted-foreground/70 ml-auto">{overlayLayerCount(layer)}</span>
+                  </label>
+                {/each}
+              {/each}
+            </div>
+          {/if}
+          {#if overlayHover}
+            <div
+              class="bg-background/90 border-border pointer-events-none absolute z-20 max-w-80 rounded border px-2 py-1 text-[11px]"
+              style:left="{overlayHover.x + 14}px"
+              style:top="{overlayHover.y + 10}px"
+            >
+              <div class="font-medium">{overlayHover.label ?? overlayHover.layerTitle}</div>
+              {#if overlayHover.info}
+                <div class="text-muted-foreground whitespace-pre-line">{overlayHover.info}</div>
+              {/if}
+              <div class="text-muted-foreground/70">{overlayHover.layerTitle}</div>
+            </div>
+          {/if}
           {#if viewerLoading}
             <div
               class="text-muted-foreground absolute inset-0 flex items-center justify-center bg-background/40 text-sm"

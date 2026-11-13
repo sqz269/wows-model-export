@@ -67,7 +67,13 @@ export interface WorkspaceMapScene {
   modelErrors: string[];
   /** Height-field samples skipped per mesh vertex (1 = full resolution). */
   terrainStride: number;
+  /** The height field at a scene-frame (x, z), in the root's frame. */
+  heightAt: HeightSampler;
 }
+
+/** Height of a height field at a scene-frame (x, z), bilinear between
+ *  samples; null outside its bounds. */
+export type HeightSampler = (x: number, z: number) => number | null;
 
 /** Height-field mesh resolution cap, in quads per side. */
 export const WORKSPACE_TERRAIN_MAX_SEGMENTS = 1024;
@@ -130,7 +136,57 @@ export async function buildWorkspaceMapScene(opts: BuildOptions): Promise<Worksp
       modelErrors.push(`${models[i].file}: ${String(r.reason)}`);
     }
   }
-  return { root, bounds, modelCount, modelErrors, terrainStride: stride };
+  return {
+    root,
+    bounds,
+    modelCount,
+    modelErrors,
+    terrainStride: stride,
+    heightAt: createHeightSampler(terrain, samples, zSign),
+  };
+}
+
+/** Fetch an export.json `terrain_heightmap` block's samples and sample them.
+ *  `zSign` is the sign from file z to scene z (-1 for a client map export). */
+export async function loadHeightSampler(
+  terrain: TerrainHeightmapBlock,
+  fileUrl: (relPath: string) => string,
+  zSign: number,
+): Promise<HeightSampler> {
+  const resp = await fetch(fileUrl(terrain.file));
+  if (!resp.ok) throw new Error(`height field ${terrain.file}: HTTP ${resp.status}`);
+  const samples = decodeU16le(await resp.arrayBuffer(), terrain.width * terrain.height);
+  return createHeightSampler(terrain, samples, zSign);
+}
+
+/** Bilinear sampler over decoded u16 samples, in the block's height units. */
+export function createHeightSampler(
+  t: TerrainHeightmapBlock,
+  samples: Uint16Array,
+  zSign: number,
+): HeightSampler {
+  const W = t.width;
+  const H = t.height;
+  const b = t.bounds;
+  const hScale = (t.max_height - t.min_height) / 65535;
+  const rowFromMax = t.row0 === 'max_z';
+  const spanX = b.max_x - b.min_x;
+  const spanZ = b.max_z - b.min_z;
+  return (x: number, z: number) => {
+    if (W < 2 || H < 2 || !(spanX > 0) || !(spanZ > 0)) return null;
+    const fileZ = zSign > 0 ? z : -z;
+    const fc = ((x - b.min_x) / spanX) * (W - 1);
+    const fr = ((rowFromMax ? b.max_z - fileZ : fileZ - b.min_z) / spanZ) * (H - 1);
+    if (!(fc >= 0 && fc <= W - 1 && fr >= 0 && fr <= H - 1)) return null;
+    const c0 = Math.min(Math.floor(fc), W - 2);
+    const r0 = Math.min(Math.floor(fr), H - 2);
+    const tc = fc - c0;
+    const tr = fr - r0;
+    const i = r0 * W + c0;
+    const top = samples[i] * (1 - tc) + samples[i + 1] * tc;
+    const bottom = samples[i + W] * (1 - tc) + samples[i + W + 1] * tc;
+    return t.min_height + (top * (1 - tr) + bottom * tr) * hScale;
+  };
 }
 
 function decodeU16le(buf: ArrayBuffer, count: number): Uint16Array {

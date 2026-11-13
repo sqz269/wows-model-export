@@ -20,6 +20,9 @@ The workspace layout is::
                                         the terrain_heightmap block that
                                         consumers use to register the
                                         heightfield without opening the GLB)
+        overlays/*.overlay.json       - optional annotations other producers
+                                        write (map_overlay/v1); never written
+                                        or removed by the export
 
 :func:`run_export` is the ``wows-export-map`` CLI backend - one space
 end-to-end, soft per-manifest failures recorded as ``*_error`` keys in
@@ -154,6 +157,89 @@ def map_folder_file(config: PipelineConfig, name: str, rel_path: str) -> tuple[P
     if root not in path.parents or not path.is_file():
         return None
     return path, media_type
+
+
+# ---- overlays ----------------------------------------------------------
+#
+# Optional annotations over a map, written by any producer into
+# ``<map folder>/overlays/<name>.overlay.json`` (schema ``map_overlay/v1``,
+# reference/schemas/MAP_OVERLAY.md): layers of points, polylines and polygons
+# in the map's scene frame. The map export never writes or removes them.
+
+OVERLAY_DIR = "overlays"
+OVERLAY_SUFFIX = ".overlay.json"
+OVERLAY_SCHEMA = "map_overlay/v1"
+
+
+def overlay_files(config: PipelineConfig, name: str) -> list[Path]:
+    """The overlay documents of one map folder, sorted by file name."""
+    folder = space_cache_dir(config, name) / OVERLAY_DIR
+    try:
+        found = [p for p in folder.iterdir() if p.is_file()]
+    except OSError:
+        return []
+    return sorted(
+        (p for p in found
+         if p.name.endswith(OVERLAY_SUFFIX)
+         and SPACE_NAME.match(p.name[: -len(OVERLAY_SUFFIX)])),
+        key=lambda p: p.name,
+    )
+
+
+def _overlay_layer_summary(layer: Any) -> dict[str, Any] | None:
+    if not isinstance(layer, dict) or not isinstance(layer.get("id"), str):
+        return None
+
+    def count(key: str) -> int:
+        items = layer.get(key)
+        return len(items) if isinstance(items, list) else 0
+
+    return {
+        "id": layer["id"],
+        "title": layer.get("title") if isinstance(layer.get("title"), str) else layer["id"],
+        "visible": layer.get("visible", True) is not False,
+        "color": layer.get("color") if isinstance(layer.get("color"), str) else None,
+        "points": count("points"),
+        "polylines": count("polylines"),
+        "polygons": count("polygons"),
+    }
+
+
+def list_map_overlays(config: PipelineConfig, name: str) -> list[dict[str, Any]]:
+    """One summary per overlay document of a map folder: its file (relative to
+    the folder), title, description and layers with their item counts. A file
+    that does not parse, or is not ``map_overlay/v1``, is listed with an
+    ``error`` and no layers."""
+    out: list[dict[str, Any]] = []
+    for path in overlay_files(config, name):
+        entry: dict[str, Any] = {
+            "name": path.name[: -len(OVERLAY_SUFFIX)],
+            "file": f"{OVERLAY_DIR}/{path.name}",
+        }
+        try:
+            entry["size"] = path.stat().st_size
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as err:
+            entry["error"] = f"{type(err).__name__}: {err}"
+            out.append(entry)
+            continue
+        if not isinstance(doc, dict) or doc.get("schema") != OVERLAY_SCHEMA:
+            entry["error"] = f"not a {OVERLAY_SCHEMA} document"
+            out.append(entry)
+            continue
+        title = doc.get("title")
+        entry["title"] = title if isinstance(title, str) and title else entry["name"]
+        if isinstance(doc.get("description"), str):
+            entry["description"] = doc["description"]
+        layers = doc.get("layers") if isinstance(doc.get("layers"), list) else []
+        summaries: list[dict[str, Any]] = []
+        for s in map(_overlay_layer_summary, layers):
+            # A layer without an id, or repeating one, is skipped (the viewer does the same).
+            if s is not None and all(s["id"] != t["id"] for t in summaries):
+                summaries.append(s)
+        entry["layers"] = summaries
+        out.append(entry)
+    return out
 
 
 def now_iso() -> str:

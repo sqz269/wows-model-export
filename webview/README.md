@@ -229,6 +229,30 @@ picking):
   gets the environment library's default sky cube and sun, the ones the
   ship viewer opens with. The camera frames the height field's bounds.
 
+### Overlays
+
+Any map folder may hold annotation overlays that another producer wrote:
+`overlays/<name>.overlay.json`, schema `map_overlay/v1`, specified in
+`reference/schemas/MAP_OVERLAY.md`. Each is a title and layers of points
+(position, heading, label, colour, symbol, hollow), polylines and
+polygons in the map's scene frame (+X east, -Z north, export units).
+
+- `GET /api/maps` gives each entry an `overlay_count`; only a map that has
+  overlays calls `GET /api/maps/<name>/overlays` (title and layers with
+  item counts per file) and fetches a document, through the files route,
+  when its toggle is ticked. A map without overlays makes no extra request
+  and renders as before.
+- The toolbar shows one `Overlay: <title>` checkbox per file (off by
+  default). A ticked overlay opens a panel over the canvas with a `Labels`
+  toggle and one checkbox per layer.
+- `src/lib/maps/map_overlay.ts` draws it after the map, without the depth
+  test: markers (one `THREE.Points` per layer, symbol, outline and heading
+  arrow drawn in the fragment shader at a constant screen size; the arrow
+  follows the heading as projected on screen), outlines as
+  `LineSegments2` laid on the surface (height field or sea, whichever is
+  higher), and labels as HTML over the canvas (`CSS2DRenderer`). Hovering
+  a marker shows its label and `info`.
+
 ## Adding a new feature
 
 1. **Pure / data-shaped logic** → `src/lib/`. Add a new module under

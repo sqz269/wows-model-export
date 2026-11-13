@@ -124,6 +124,8 @@ export interface MapListEntry {
   model_instance_manifest_size?: number;
   point_light_manifest_exported: boolean;
   point_light_manifest_size?: number;
+  /** Annotation overlays in the folder (`overlays/*.overlay.json`). */
+  overlay_count?: number;
   export?: MapExportRecord;
 }
 
@@ -248,6 +250,41 @@ export function mapPointLightManifestUrl(name: string): string {
 export function mapFileUrl(name: string, relPath: string): string {
   const rel = relPath.split('/').map(encodeURIComponent).join('/');
   return `/api/maps/${encodeURIComponent(name)}/files/${rel}`;
+}
+
+/** One layer of an overlay, as the overlay list summarises it. */
+export interface MapOverlayLayerSummary {
+  id: string;
+  title: string;
+  /** The layer's default visibility. */
+  visible: boolean;
+  color: string | null;
+  points: number;
+  polylines: number;
+  polygons: number;
+}
+
+/** One `overlays/<name>.overlay.json` of a map folder (map_overlay/v1). */
+export interface MapOverlaySummary {
+  name: string;
+  /** Path relative to the map folder (fetch it with `mapFileUrl`). */
+  file: string;
+  size?: number;
+  title?: string;
+  description?: string;
+  layers?: MapOverlayLayerSummary[];
+  /** Set when the file does not parse or is not map_overlay/v1. */
+  error?: string;
+}
+
+export interface MapOverlayListResponse {
+  ok: true;
+  items: MapOverlaySummary[];
+}
+
+/** The annotation overlays of one map folder. */
+export async function listMapOverlays(name: string): Promise<MapOverlayListResponse> {
+  return fetchJson<MapOverlayListResponse>(`/api/maps/${encodeURIComponent(name)}/overlays`);
 }
 
 /** URL for the per-weather sky/IBL manifest. */

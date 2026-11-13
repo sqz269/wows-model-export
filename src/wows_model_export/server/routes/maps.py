@@ -1,6 +1,6 @@
 """Map / dock / operations-space endpoints for the webview.
 
-Three routes:
+Main routes (the sidecar manifests and the files route are further down):
 
   ``GET  /api/maps``                 — list all available spaces (battle
                                         maps, docks, ops scenarios)
@@ -8,6 +8,8 @@ Three routes:
                                         under <workspace>/maps/<name>/
   ``GET  /api/maps/{name}/glb``      — serve the cached GLB (404 if not
                                         yet exported)
+  ``GET  /api/maps/{name}/overlays`` — the folder's annotation overlays
+                                        (overlays/*.overlay.json)
 
 This is Phase 1 of the maps webview — sync export, no job system. A
 modest battle map exports in 3-8 seconds on the release-build toolkit
@@ -58,11 +60,13 @@ from ...maps_export import (
     maps_root as _maps_root,
     collision_manifest_path as _collision_manifest_path,
     glb_path as _glb_path,
+    list_map_overlays as _list_map_overlays,
     map_folder_file as _map_folder_file,
     map_scene_path as _map_scene_path,
     meta_path as _meta_path,
     model_instance_manifest_path as _model_instance_manifest_path,
     now_iso as _now_iso,
+    overlay_files as _overlay_files,
     particle_manifest_path as _particle_manifest_path,
     point_light_manifest_path as _point_light_manifest_path,
     primary_scene_extras as _primary_scene_extras,
@@ -165,6 +169,10 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 "user_object_manifest_exported": user_object_manifest.is_file(),
                 "model_instance_manifest_exported": model_instance_manifest.is_file(),
                 "point_light_manifest_exported": point_light_manifest.is_file(),
+                # Annotation overlays another producer wrote into the folder
+                # (overlays/*.overlay.json); GET /api/maps/<name>/overlays
+                # lists them.
+                "overlay_count": len(_overlay_files(config, name)),
             }
             if glb.is_file():
                 try:
@@ -842,6 +850,20 @@ def make_router(config: PipelineConfig) -> APIRouter:
             )
         path, media_type = found
         return FileResponse(path=path, media_type=media_type)
+
+    # ── GET /api/maps/{name}/overlays ─────────────────────────────────
+    # The optional annotation overlays of one map folder
+    # (overlays/<name>.overlay.json, map_overlay/v1): file, title and the
+    # layers with their item counts. The documents themselves are fetched
+    # through the files route.
+    @router.get("/maps/{name}/overlays")
+    def get_map_overlays(name: str) -> JSONResponse:
+        if not _SPACE_NAME.match(name):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "invalid space name"},
+            )
+        return JSONResponse(content={"ok": True, "items": _list_map_overlays(config, name)})
 
     # ── GET /api/maps/{name}/sky-manifest ─────────────────────────────
     # Per-weather sky/IBL manifest: which weather presets have an
