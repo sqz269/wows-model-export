@@ -23,6 +23,12 @@
 // Tint. `assets[].tint` x `layers[].tint` (linear RGB) multiplies the base
 // colour of the asset's materials in that layer.
 //
+// Ground. A layer with `stands_on` (the id of a `replace` layer) stands on
+// that layer's models. While that layer is hidden, each of its records is
+// moved by its value in `instances.ground_dy_file` (f32 per record, scene
+// units), which stands it on the map models the replace layer stands in for;
+// so every instance stays on the ground that is drawn.
+//
 // No Svelte imports: the Maps route owns the lifecycle.
 
 import * as THREE from 'three';
@@ -86,13 +92,16 @@ export interface MapDressingLayer {
   replaces?: string[];
   /** Linear RGB multiplier of the base colour of every asset in the layer. */
   tint?: number[];
+  /** Id of a `replace` layer whose models these instances stand on; while
+   *  it is hidden the records move by `instances.ground_dy_file`. */
+  stands_on?: string;
 }
 
 export interface MapDressingDoc {
   schema: string;
   title?: string;
   description?: string;
-  instances?: { file: string; record?: string };
+  instances?: { file: string; record?: string; ground_dy_file?: string };
   assets?: MapDressingAsset[];
   layers?: MapDressingLayer[];
 }
@@ -135,11 +144,20 @@ interface BuiltGroup {
   levels: LodLevel[];
   /** Instances now in each level. */
   inLevel: number[];
+  /** Per instance, the change in y onto the replaced map models (scene
+   *  units), or null. */
+  dy: Float32Array | null;
+  /** True while the instances stand on the replaced map models (dy applied). */
+  lowered: boolean;
+  /** Matrices changed since the instanced meshes were last written. */
+  dirty: boolean;
 }
 
 interface BuiltLayer {
   group: THREE.Group;
   replaces: string[];
+  /** Id of the replace layer these instances stand on, or null. */
+  standsOn: string | null;
   instances: number;
   triangles: number;
   groups: BuiltGroup[];
@@ -204,6 +222,8 @@ export class MapDressingRenderer {
   /** Map nodes a replace layer hid, so they come back when it hides. */
   private readonly hiddenByDressing = new Set<THREE.Object3D>();
   private lastCamera: THREE.Vector3 | null = null;
+  /** A group's matrices changed (ground switch) and await update(). */
+  private dirty = false;
 
   constructor(parent: THREE.Object3D) {
     this.parent = parent;
@@ -266,6 +286,21 @@ export class MapDressingRenderer {
       if (!resp.ok) throw new Error(`${doc.instances.file}: HTTP ${resp.status}`);
       records = new Float32Array(await resp.arrayBuffer());
     }
+    // Ground offsets, when a layer stands on a replace layer of this document.
+    const replaceIds = new Set(layers.filter((l) => l?.kind === 'replace').map((l) => l.id));
+    let groundDy: Float32Array | null = null;
+    if (
+      records &&
+      doc.instances?.ground_dy_file &&
+      layers.some((l) => l?.stands_on && replaceIds.has(l.stands_on))
+    ) {
+      const resp = await fetch(url(doc.instances.ground_dy_file));
+      if (!resp.ok) throw new Error(`${doc.instances.ground_dy_file}: HTTP ${resp.status}`);
+      groundDy = new Float32Array(await resp.arrayBuffer());
+      if (groundDy.length * RECORD_FLOATS !== records.length) {
+        throw new Error(`${doc.instances.ground_dy_file}: not one value per record`);
+      }
+    }
 
     // Each asset once, whatever the number of groups that use it.
     const gltfs: GLTF[] = [];
@@ -299,6 +334,8 @@ export class MapDressingRenderer {
       let instances = 0;
       let triangles = 0;
       const builtGroups: BuiltGroup[] = [];
+      const standsOn =
+        layer.stands_on && replaceIds.has(layer.stands_on) && groundDy ? layer.stands_on : null;
       if (layer.kind === 'replace') {
         for (const m of layer.models ?? []) {
           const g = await loader.loadAsync(url(m.file));
@@ -393,6 +430,12 @@ export class MapDressingRenderer {
             matrices,
             levels,
             inLevel: levels.map(() => 0),
+            dy:
+              standsOn && groundDy
+                ? groundDy.slice(first / RECORD_FLOATS, first / RECORD_FLOATS + grp.count)
+                : null,
+            lowered: false,
+            dirty: false,
           };
           bg.inLevel[0] = grp.count;
           // Until the first update every instance draws at the first level.
@@ -406,6 +449,7 @@ export class MapDressingRenderer {
       builtLayers.set(layer.id, {
         group,
         replaces: layer.replaces ?? [],
+        standsOn,
         instances,
         triangles,
         groups: builtGroups,
@@ -423,16 +467,23 @@ export class MapDressingRenderer {
    *  camera (world position) selects. Cheap when the camera has not moved;
    *  returns true when any instance changed level. */
   update(cameraWorld: THREE.Vector3, force = false): boolean {
-    const cam = this.parent.worldToLocal(cameraWorld.clone());
-    if (!force && this.lastCamera && this.lastCamera.distanceToSquared(cam) < 1e-4) return false;
-    this.lastCamera = cam;
+    const local = this.parent.worldToLocal(cameraWorld.clone());
+    const moved =
+      force || !this.lastCamera || this.lastCamera.distanceToSquared(local) >= 1e-4;
+    if (!moved && !this.dirty) return false;
+    if (moved) this.lastCamera = local;
+    const cam = this.lastCamera ?? local;
+    this.dirty = false;
     let changed = false;
     const inst = new THREE.Matrix4();
     const out = new THREE.Matrix4();
     for (const d of this.built.values()) {
       for (const l of d.layers.values()) {
         for (const g of l.groups) {
-          if (g.levels.length === 1 && g.levels[0].maxDist2 === Infinity) continue;
+          const lod = !(g.levels.length === 1 && g.levels[0].maxDist2 === Infinity);
+          if (!(lod && moved) && !g.dirty) continue;
+          if (g.dirty) changed = true;
+          g.dirty = false;
           const n = g.levels.length;
           const fill = new Array<number>(n).fill(0);
           for (let i = 0; i < g.count; i++) {
@@ -521,6 +572,11 @@ export class MapDressingRenderer {
         const on = this.layerOn.get(file)?.get(id) !== false;
         l.group.visible = on;
         if (shown && on) for (const r of l.replaces) replaced.add(r);
+        // Stand on the replaced map models while the layer underneath hides.
+        if (l.standsOn) {
+          const lower = this.layerOn.get(file)?.get(l.standsOn) === false;
+          for (const g of l.groups) if (g.dy && g.lowered !== lower) this.shiftGround(g, lower);
+        }
       }
     }
     for (const o of this.hiddenByDressing) o.visible = true;
@@ -533,6 +589,21 @@ export class MapDressingRenderer {
         this.hiddenByDressing.add(child);
       }
     }
+  }
+
+  /** Move a group's instances onto (``lower``) or off the replaced map
+   *  models by its ground offsets; update() rewrites the instanced meshes. */
+  private shiftGround(g: BuiltGroup, lower: boolean): void {
+    if (!g.dy) return;
+    const sign = lower ? 1 : -1;
+    for (let i = 0; i < g.count; i++) {
+      const d = sign * g.dy[i];
+      g.positions[i * 3 + 1] += d;
+      g.matrices[i * 16 + 13] += d;
+    }
+    g.lowered = lower;
+    g.dirty = true;
+    this.dirty = true;
   }
 
   dispose(): void {
