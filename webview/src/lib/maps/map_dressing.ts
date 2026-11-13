@@ -390,6 +390,15 @@ export class MapDressingRenderer {
             if (node && Number.isFinite(max)) levelRoots.push({ root: node, max: max * unit });
           }
           if (levelRoots.length === 0) levelRoots.push({ root: scene, max: Infinity });
+          // Ground offsets (scene units) that shiftGround() applies while the
+          // layer these records stand on is hidden; their largest size widens
+          // the bounds below so culling holds the records in both places.
+          const dy =
+            standsOn && groundDy
+              ? groundDy.slice(first / RECORD_FLOATS, first / RECORD_FLOATS + grp.count)
+              : null;
+          let dyReach = 0;
+          if (dy) for (let i = 0; i < dy.length; i++) dyReach = Math.max(dyReach, Math.abs(dy[i]));
           const levels: LodLevel[] = [];
           const out = new THREE.Matrix4();
           for (const lr of levelRoots) {
@@ -414,6 +423,15 @@ export class MapDressingRenderer {
               im.instanceMatrix.needsUpdate = true;
               im.computeBoundingSphere();
               im.computeBoundingBox();
+              // three.js frustum-culls an InstancedMesh by these bounds, which
+              // are not recomputed when shiftGround() moves the records in y.
+              if (dyReach > 0) {
+                if (im.boundingSphere) im.boundingSphere.radius += dyReach;
+                if (im.boundingBox) {
+                  im.boundingBox.min.y -= dyReach;
+                  im.boundingBox.max.y += dyReach;
+                }
+              }
               // Picking thousands of instanced trees per click is slow; the
               // dressing is a look preview, so it stays out of picking.
               im.raycast = () => {};
@@ -430,10 +448,7 @@ export class MapDressingRenderer {
             matrices,
             levels,
             inLevel: levels.map(() => 0),
-            dy:
-              standsOn && groundDy
-                ? groundDy.slice(first / RECORD_FLOATS, first / RECORD_FLOATS + grp.count)
-                : null,
+            dy,
             lowered: false,
             dirty: false,
           };
