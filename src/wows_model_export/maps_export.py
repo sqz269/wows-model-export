@@ -242,6 +242,93 @@ def list_map_overlays(config: PipelineConfig, name: str) -> list[dict[str, Any]]
     return out
 
 
+# ---- dressings ---------------------------------------------------------
+#
+# Optional extra model instances over a map, written by any producer into
+# ``<map folder>/dressing/<name>.dressing.json`` (schema ``map_dressing/v1``,
+# reference/schemas/MAP_DRESSING.md): assets (glTF / GLB files in the folder),
+# layers of instance groups in a binary record file, and layers that replace
+# map_scene.json models with others. The map export never writes or removes them.
+
+DRESSING_DIR = "dressing"
+DRESSING_SUFFIX = ".dressing.json"
+DRESSING_SCHEMA = "map_dressing/v1"
+
+
+def dressing_files(config: PipelineConfig, name: str) -> list[Path]:
+    """The dressing documents of one map folder, sorted by file name."""
+    folder = space_cache_dir(config, name) / DRESSING_DIR
+    try:
+        found = [p for p in folder.iterdir() if p.is_file()]
+    except OSError:
+        return []
+    return sorted(
+        (p for p in found
+         if p.name.endswith(DRESSING_SUFFIX)
+         and SPACE_NAME.match(p.name[: -len(DRESSING_SUFFIX)])),
+        key=lambda p: p.name,
+    )
+
+
+def _dressing_layer_summary(layer: Any) -> dict[str, Any] | None:
+    if not isinstance(layer, dict) or not isinstance(layer.get("id"), str):
+        return None
+    groups = layer.get("groups") if isinstance(layer.get("groups"), list) else []
+    models = layer.get("models") if isinstance(layer.get("models"), list) else []
+    replaces = layer.get("replaces") if isinstance(layer.get("replaces"), list) else []
+    return {
+        "id": layer["id"],
+        "title": layer.get("title") if isinstance(layer.get("title"), str) else layer["id"],
+        "kind": layer.get("kind") if isinstance(layer.get("kind"), str) else "scatter",
+        "visible": layer.get("visible", True) is not False,
+        "instances": sum(int(g.get("count", 0)) for g in groups if isinstance(g, dict)),
+        "triangles": sum(int(g.get("triangles", 0)) for g in groups if isinstance(g, dict)),
+        "groups": len(groups),
+        "models": len(models),
+        "replaces": [r for r in replaces if isinstance(r, str)],
+        "placed_by": layer.get("placed_by") if isinstance(layer.get("placed_by"), str) else None,
+    }
+
+
+def list_map_dressings(config: PipelineConfig, name: str) -> list[dict[str, Any]]:
+    """One summary per dressing document of a map folder: its file (relative
+    to the folder), title, description, asset count and layers with their
+    instance and triangle counts. A file that does not parse, or is not
+    ``map_dressing/v1``, is listed with an ``error`` and no layers."""
+    out: list[dict[str, Any]] = []
+    for path in dressing_files(config, name):
+        entry: dict[str, Any] = {
+            "name": path.name[: -len(DRESSING_SUFFIX)],
+            "file": f"{DRESSING_DIR}/{path.name}",
+        }
+        try:
+            entry["size"] = path.stat().st_size
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as err:
+            entry["error"] = f"{type(err).__name__}: {err}"
+            out.append(entry)
+            continue
+        if not isinstance(doc, dict) or doc.get("schema") != DRESSING_SCHEMA:
+            entry["error"] = f"not a {DRESSING_SCHEMA} document"
+            out.append(entry)
+            continue
+        title = doc.get("title")
+        entry["title"] = title if isinstance(title, str) and title else entry["name"]
+        if isinstance(doc.get("description"), str):
+            entry["description"] = doc["description"]
+        assets = doc.get("assets") if isinstance(doc.get("assets"), list) else []
+        entry["asset_count"] = len(assets)
+        layers = doc.get("layers") if isinstance(doc.get("layers"), list) else []
+        summaries: list[dict[str, Any]] = []
+        for s in map(_dressing_layer_summary, layers):
+            # A layer without an id, or repeating one, is skipped (the viewer does the same).
+            if s is not None and all(s["id"] != t["id"] for t in summaries):
+                summaries.append(s)
+        entry["layers"] = summaries
+        out.append(entry)
+    return out
+
+
 def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 

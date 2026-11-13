@@ -260,6 +260,29 @@ polygons in the map's scene frame (+X east, -Z north, export units).
   higher), and labels as HTML over the canvas (`CSS2DRenderer`). Hovering
   a marker shows its label and `info`.
 
+### Dressings
+
+Any map folder may hold dressings that another producer wrote: extra model
+instances (vegetation, rocks, buildings) and models that stand in for some
+of the map's own, as `dressing/<name>.dressing.json`, schema
+`map_dressing/v1`, specified in `reference/schemas/MAP_DRESSING.md`, with
+its instance record file and glTF / GLB assets beside it.
+
+- `GET /api/maps` gives each entry a `dressing_count`; only a map that has
+  dressings calls `GET /api/maps/<name>/dressings` (title, asset count and
+  layers with instance and triangle counts per file). The document, its
+  record file and the assets are fetched through the files route when its
+  toggle is ticked. A map without dressings makes no extra request and
+  renders as before.
+- The toolbar shows one `Dressing: <title>` checkbox per file (off by
+  default). A ticked dressing opens a panel over the canvas (top right)
+  with one checkbox per layer and the instances and triangles shown.
+- `src/lib/maps/map_dressing.ts` adds it under the map root (so the
+  sea-level shift applies): one `THREE.InstancedMesh` per asset mesh and
+  group, placed from the 32-byte records (`T(p) R(q) S(s × unit_scale)`).
+  A `replace` layer loads its models at their matrices and hides the map
+  models it names while it shows. Dressing meshes are left out of picking.
+
 ## Adding a new feature
 
 1. **Pure / data-shaped logic** → `src/lib/`. Add a new module under

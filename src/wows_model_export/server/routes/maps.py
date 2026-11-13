@@ -10,6 +10,8 @@ Main routes (the sidecar manifests and the files route are further down):
                                         yet exported)
   ``GET  /api/maps/{name}/overlays`` — the folder's annotation overlays
                                         (overlays/*.overlay.json)
+  ``GET  /api/maps/{name}/dressings`` — the folder's dressings
+                                        (dressing/*.dressing.json)
 
 This is Phase 1 of the maps webview — sync export, no job system. A
 modest battle map exports in 3-8 seconds on the release-build toolkit
@@ -60,6 +62,8 @@ from ...maps_export import (
     maps_root as _maps_root,
     collision_manifest_path as _collision_manifest_path,
     glb_path as _glb_path,
+    dressing_files as _dressing_files,
+    list_map_dressings as _list_map_dressings,
     list_map_overlays as _list_map_overlays,
     map_folder_file as _map_folder_file,
     map_scene_path as _map_scene_path,
@@ -173,6 +177,10 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 # (overlays/*.overlay.json); GET /api/maps/<name>/overlays
                 # lists them.
                 "overlay_count": len(_overlay_files(config, name)),
+                # Dressings another producer wrote into the folder
+                # (dressing/*.dressing.json); GET /api/maps/<name>/dressings
+                # lists them.
+                "dressing_count": len(_dressing_files(config, name)),
             }
             if glb.is_file():
                 try:
@@ -864,6 +872,20 @@ def make_router(config: PipelineConfig) -> APIRouter:
                 content={"ok": False, "error": "invalid space name"},
             )
         return JSONResponse(content={"ok": True, "items": _list_map_overlays(config, name)})
+
+    # ── GET /api/maps/{name}/dressings ────────────────────────────────
+    # The optional dressings of one map folder (dressing/<name>.dressing.json,
+    # map_dressing/v1): file, title, asset count and the layers with their
+    # instance and triangle counts. The documents, their instance records and
+    # assets are fetched through the files route.
+    @router.get("/maps/{name}/dressings")
+    def get_map_dressings(name: str) -> JSONResponse:
+        if not _SPACE_NAME.match(name):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "invalid space name"},
+            )
+        return JSONResponse(content={"ok": True, "items": _list_map_dressings(config, name)})
 
     # ── GET /api/maps/{name}/sky-manifest ─────────────────────────────
     # Per-weather sky/IBL manifest: which weather presets have an

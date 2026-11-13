@@ -126,6 +126,8 @@ export interface MapListEntry {
   point_light_manifest_size?: number;
   /** Annotation overlays in the folder (`overlays/*.overlay.json`). */
   overlay_count?: number;
+  /** Dressings in the folder (`dressing/*.dressing.json`). */
+  dressing_count?: number;
   export?: MapExportRecord;
 }
 
@@ -285,6 +287,47 @@ export interface MapOverlayListResponse {
 /** The annotation overlays of one map folder. */
 export async function listMapOverlays(name: string): Promise<MapOverlayListResponse> {
   return fetchJson<MapOverlayListResponse>(`/api/maps/${encodeURIComponent(name)}/overlays`);
+}
+
+/** One layer of a dressing, as the dressing list summarises it. */
+export interface MapDressingLayerSummary {
+  id: string;
+  title: string;
+  /** 'scatter' | 'set_piece' (instance groups) or 'replace' (models that
+   *  stand in for map_scene.json models). */
+  kind: string;
+  /** The layer's default visibility. */
+  visible: boolean;
+  instances: number;
+  triangles: number;
+  groups: number;
+  models: number;
+  replaces: string[];
+  placed_by: string | null;
+}
+
+/** One `dressing/<name>.dressing.json` of a map folder (map_dressing/v1). */
+export interface MapDressingSummary {
+  name: string;
+  /** Path relative to the map folder (fetch it with `mapFileUrl`). */
+  file: string;
+  size?: number;
+  title?: string;
+  description?: string;
+  asset_count?: number;
+  layers?: MapDressingLayerSummary[];
+  /** Set when the file does not parse or is not map_dressing/v1. */
+  error?: string;
+}
+
+export interface MapDressingListResponse {
+  ok: true;
+  items: MapDressingSummary[];
+}
+
+/** The dressings of one map folder. */
+export async function listMapDressings(name: string): Promise<MapDressingListResponse> {
+  return fetchJson<MapDressingListResponse>(`/api/maps/${encodeURIComponent(name)}/dressings`);
 }
 
 /** URL for the per-weather sky/IBL manifest. */

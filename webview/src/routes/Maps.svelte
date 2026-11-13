@@ -35,11 +35,13 @@
     mapFileUrl,
     deleteMapCache,
     listMapOverlays,
+    listMapDressings,
     type MapListEntry,
     type MapCategory,
     type MapExportFlags,
     type MapOverlayLayerSummary,
     type MapOverlaySummary,
+    type MapDressingSummary,
   } from '$lib/api/maps';
   import {
     buildWorkspaceMapScene,
@@ -48,6 +50,11 @@
     type MapSceneDoc,
   } from '$lib/maps/workspace_map';
   import { MapOverlayRenderer, parseMapOverlay, type MapOverlayHit } from '$lib/maps/map_overlay';
+  import {
+    MapDressingRenderer,
+    parseMapDressing,
+    type MapDressingStats,
+  } from '$lib/maps/map_dressing';
   import { Button } from '$lib/components/ui/button';
   import { navState } from '$lib/nav_state.svelte';
   import { navigate } from '$lib/router';
@@ -650,6 +657,79 @@
       overlayPending.delete(file);
       if (token === overlayLoadToken) overlayLoading = overlayPending.size > 0;
     }
+  }
+
+  // Dressings (map_dressing/v1, lib/maps/map_dressing): the folder's
+  // dressing/*.dressing.json, listed only when the map entry counts any. Each
+  // dressing is off until ticked; its layers start at their own default
+  // visibility. A shown 'replace' layer hides the map_scene.json models it
+  // stands in for.
+  const dressingMapName = $derived(
+    selected?.exported && (selected.dressing_count ?? 0) > 0 ? selected.name : null,
+  );
+  let dressingItems = $state<MapDressingSummary[]>([]);
+  let dressingOn = $state<Record<string, boolean>>({});
+  let dressingLayerOn = $state<Record<string, Record<string, boolean>>>({});
+  let dressingLoading = $state(false);
+  let dressingError = $state<string | null>(null);
+  let dressingStats = $state<MapDressingStats | null>(null);
+  let dressingRenderer: MapDressingRenderer | null = null;
+  const dressingPending = new Set<string>();
+  let dressingLoadToken = 0;
+
+  function setDressingOn(file: string, on: boolean): void {
+    dressingOn = { ...dressingOn, [file]: on };
+  }
+
+  function setDressingLayerOn(file: string, layerId: string, on: boolean): void {
+    dressingLayerOn = {
+      ...dressingLayerOn,
+      [file]: { ...(dressingLayerOn[file] ?? {}), [layerId]: on },
+    };
+  }
+
+  /** Push the toggles onto the built dressings. */
+  function applyDressingState(): void {
+    const r = dressingRenderer;
+    if (!r) return;
+    for (const d of dressingItems) {
+      r.setVisible(d.file, dressingOn[d.file] === true);
+      for (const [id, on] of Object.entries(dressingLayerOn[d.file] ?? {})) {
+        r.setLayerVisible(d.file, id, on);
+      }
+    }
+    dressingStats = r.stats();
+  }
+
+  async function loadDressing(sn: string, file: string, root: THREE.Object3D): Promise<void> {
+    const token = dressingLoadToken;
+    dressingPending.add(file);
+    dressingLoading = true;
+    try {
+      if (!dressingRenderer) dressingRenderer = new MapDressingRenderer(root);
+      const r = dressingRenderer;
+      const raw = await fetchJson<unknown>(mapFileUrl(sn, file));
+      if (token !== dressingLoadToken || r !== dressingRenderer) return;
+      await r.add(file, parseMapDressing(raw), (rel) => mapFileUrl(sn, rel));
+      if (token !== dressingLoadToken || r !== dressingRenderer) return;
+      applyDressingState();
+    } catch (err) {
+      if (token === dressingLoadToken) {
+        dressingError = `${file}: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    } finally {
+      dressingPending.delete(file);
+      if (token === dressingLoadToken) dressingLoading = dressingPending.size > 0;
+    }
+  }
+
+  function teardownDressings(): void {
+    dressingLoadToken += 1;
+    dressingRenderer?.dispose();
+    dressingRenderer = null;
+    dressingPending.clear();
+    dressingLoading = false;
+    dressingStats = null;
   }
 
   function teardownOverlays(): void {
@@ -2353,6 +2433,7 @@
       cancelled = true;
       collisionLoadToken += 1;
       teardownOverlays();
+      teardownDressings();
       if (env && onOverlayPointerMove) {
         env.renderer.domElement.removeEventListener('pointermove', onOverlayPointerMove);
       }
@@ -2572,6 +2653,54 @@
         }
       }
       applyOverlayState();
+    });
+  });
+
+  // The dressing list of the selected map (only when its entry counts any).
+  $effect(() => {
+    const sn = dressingMapName;
+    dressingItems = [];
+    dressingOn = {};
+    dressingLayerOn = {};
+    dressingError = null;
+    if (!sn) return;
+    let cancelled = false;
+    listMapDressings(sn)
+      .then((resp) => {
+        if (cancelled) return;
+        const layerOn: Record<string, Record<string, boolean>> = {};
+        for (const d of resp.items) {
+          layerOn[d.file] = Object.fromEntries((d.layers ?? []).map((l) => [l.id, l.visible]));
+        }
+        dressingLayerOn = layerOn;
+        dressingItems = resp.items;
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) dressingError = err instanceof Error ? err.message : String(err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  // Build the dressings that are ticked and apply every toggle. Nothing is
+  // fetched until the first dressing is shown.
+  $effect(() => {
+    const root = activeRoot;
+    const sn = dressingMapName;
+    const wanted = dressingItems
+      .filter((d) => dressingOn[d.file] === true && !d.error)
+      .map((d) => d.file);
+    for (const d of dressingItems) void Object.values(dressingLayerOn[d.file] ?? {});
+    void dressingOn;
+    if (!root || !sn) return;
+    untrack(() => {
+      for (const file of wanted) {
+        if (!dressingRenderer?.has(file) && !dressingPending.has(file)) {
+          void loadDressing(sn, file, root);
+        }
+      }
+      applyDressingState();
     });
   });
 
@@ -2950,6 +3079,29 @@
                 >
               </label>
             {/each}
+            {#each dressingItems as dr (dr.file)}
+              <label
+                class="flex items-center gap-1.5"
+                title={dr.error ?? dr.description ?? `Dressing ${dr.file}`}
+              >
+                <input
+                  type="checkbox"
+                  disabled={Boolean(dr.error)}
+                  checked={dressingOn[dr.file] === true}
+                  onchange={(event) =>
+                    setDressingOn(dr.file, (event.currentTarget as HTMLInputElement).checked)}
+                />
+                <span class={dr.error ? 'text-destructive' : ''}
+                  >Dressing: {dr.title ?? dr.name}</span
+                >
+              </label>
+            {/each}
+            {#if dressingLoading}
+              <span class="text-muted-foreground/70">loading dressing…</span>
+            {/if}
+            {#if dressingError}
+              <span class="text-destructive" title={dressingError}>dressing unavailable</span>
+            {/if}
             {#if overlayLoading}
               <span class="text-muted-foreground/70">loading overlay…</span>
             {/if}
@@ -3183,6 +3335,46 @@
                     ></span>
                     <span class="truncate" title={layer.title}>{layer.title}</span>
                     <span class="text-muted-foreground/70 ml-auto">{overlayLayerCount(layer)}</span>
+                  </label>
+                {/each}
+              {/each}
+            </div>
+          {/if}
+          {#if dressingItems.some((d) => dressingOn[d.file] === true && d.layers)}
+            <div
+              class="bg-background/85 border-border absolute right-2 top-2 z-10 max-h-[70%] w-72 overflow-y-auto rounded border p-2 text-xs"
+            >
+              {#if dressingStats}
+                <div class="text-muted-foreground/80 text-[10px]">
+                  shown: {dressingStats.instances.toLocaleString()} instances ·
+                  {(dressingStats.triangles / 1e6).toFixed(1)} M triangles
+                </div>
+              {/if}
+              {#each dressingItems.filter((d) => dressingOn[d.file] === true && d.layers) as dr (dr.file)}
+                <div
+                  class="text-muted-foreground/80 mb-0.5 mt-1.5 truncate text-[10px] uppercase tracking-wider"
+                  title={dr.description ?? dr.file}
+                >
+                  {dr.title ?? dr.name}
+                </div>
+                {#each dr.layers ?? [] as layer (layer.id)}
+                  <label class="flex items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      checked={dressingLayerOn[dr.file]?.[layer.id] ?? layer.visible}
+                      onchange={(event) =>
+                        setDressingLayerOn(
+                          dr.file,
+                          layer.id,
+                          (event.currentTarget as HTMLInputElement).checked,
+                        )}
+                    />
+                    <span class="truncate" title={layer.title}>{layer.title}</span>
+                    <span class="text-muted-foreground/70 ml-auto">
+                      {layer.kind === 'replace'
+                        ? `${layer.models} model${layer.models === 1 ? '' : 's'}`
+                        : layer.instances.toLocaleString()}
+                    </span>
                   </label>
                 {/each}
               {/each}
