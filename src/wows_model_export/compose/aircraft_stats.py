@@ -196,6 +196,54 @@ def _torpedo(proj: dict) -> dict[str, Any]:
     }
 
 
+#: Ordnance kinds whose projectile is a shell in the hit pipeline (it strikes
+#: armour and detonates as a gun shell does), and so carries a ``shell`` block.
+SHELL_KINDS = ("bomb", "skip_bomb", "rocket")
+
+#: A ship sidecar's ``ballistics.shells`` field <- the GameParams projectile
+#: field, in the order and units that entry uses.
+_SHELL_FIELDS: tuple[tuple[str, str], ...] = (
+    ("ammo_type", "ammoType"),
+    ("mass_kg", "bulletMass"),
+    ("muzzle_velocity_mps", "bulletSpeed"),
+    ("air_drag_coefficient", "bulletAirDrag"),
+    ("krupp", "bulletKrupp"),
+    ("cap", "bulletCap"),
+    ("cap_normalize_max_deg", "bulletCapNormalizeMaxAngle"),
+    ("fuze_arming_threshold_mm", "bulletDetonatorThreshold"),
+    ("fuze_delay_s", "bulletDetonator"),
+    ("ricochet_min_deg", "bulletRicochetAt"),
+    ("ricochet_always_deg", "bulletAlwaysRicochetAt"),
+    ("alpha_damage", "alphaDamage"),
+    ("alpha_piercing_he_mm", "alphaPiercingHE"),
+    ("alpha_piercing_cs_mm", "alphaPiercingCS"),
+    ("burn_probability", "burnProb"),
+)
+
+
+def _shell(proj: dict) -> dict[str, Any]:
+    """A dropped or fired shell-like projectile's terminal stats (bombs,
+    skip bombs, rockets), in the shape and units of a ship sidecar's
+    ``ballistics.shells`` entry, so a consumer resolves its hit with the same
+    armour pipeline as a gun shell: ``ammo_type``, ``caliber_mm``
+    (``bulletDiametr`` x 1000), ``mass_kg``, ``muzzle_velocity_mps``
+    (``bulletSpeed``: the projectile's speed at the target, which the client
+    uses for its penetration), the drag, Krupp, cap and normalisation, the
+    fuze and ricochet angles, ``alpha_damage``, the HE and SAP penetration
+    and ``burn_probability`` (``burnProb``, -0.5 for none). Fields
+    GameParams lacks are left out."""
+    out: dict[str, Any] = {}
+    for key, field in _SHELL_FIELDS:
+        v = proj.get(field)
+        if v is None:
+            continue
+        out[key] = bool(v) if key == "cap" else (v if key == "ammo_type" else _num(v))
+    cal = _num(proj.get("bulletDiametr"))
+    if cal is not None:
+        out["caliber_mm"] = _r(cal * 1000.0)
+    return out
+
+
 def _custom_rack(entry: dict, projectile: str | None) -> str | None:
     """The rack render set ``customProjRenderSets`` names for the entry's own
     projectile (most entries list only ``stub`` placeholders)."""
@@ -266,6 +314,8 @@ def plane_stats(key: str, entry: dict, gp: dict[str, Any]) -> tuple[dict, list[s
     }
     if kind == "torpedo" and proj is not None:
         ordnance["torpedo"] = _torpedo(proj)
+    if kind in SHELL_KINDS and proj is not None:
+        ordnance["shell"] = _shell(proj)
 
     block: dict[str, Any] = {
         "airframe": airframe_of(entry),
@@ -555,6 +605,12 @@ def validate_stats(library_root: Path) -> list[str]:
                 problems.append(f"{k}: kind torpedo without a torpedo block (speed and range)")
         elif torp is not None:
             problems.append(f"{k}: a torpedo block with kind {kind}")
+        shell = o.get("shell")
+        if kind in SHELL_KINDS and not is_external(e):
+            if not isinstance(shell, dict) or not (shell.get("muzzle_velocity_mps") or 0) > 0                     or not (shell.get("mass_kg") or 0) > 0 or not (shell.get("caliber_mm") or 0) > 0:
+                problems.append(f"{k}: kind {kind} without a shell block (speed, mass and calibre)")
+        elif shell is not None and kind not in SHELL_KINDS:
+            problems.append(f"{k}: a shell block with kind {kind}")
         disp = o.get("dispersion")
         want_model = "torpedo_fan" if kind == "torpedo" else "ellipse"
         if not disp or disp.get("model") != want_model:
@@ -631,6 +687,7 @@ __all__ = [
     "NATIVE_SOURCE",
     "ORDNANCE_KIND",
     "STATS_FILE",
+    "SHELL_KINDS",
     "STATS_SCHEMA",
     "airframe_of",
     "build_aircraft_stats",
