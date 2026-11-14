@@ -11,8 +11,13 @@
 // the map root, so the root's sea-level shift applies to it too.
 //
 // Paths in the document are relative to the dressing file's folder and stay
-// inside the map folder, except an asset's `workspace_uri`: a shared library
-// asset (libraries/...) relative to the workspace root, fetched through /repo.
+// inside the map folder, except an asset's `workspace_uri`: a shared model
+// (a library under libraries/, or another folder of shared models) relative
+// to the workspace root and inside it, fetched through /repo.
+//
+// Hidden nodes. An asset's `hidden_nodes` names nodes of its glTF (by their
+// name in the file) that are not drawn, each with its subtree: another state
+// of the same model, or collision and helper geometry.
 //
 // LODs. An asset with `lods` draws, per instance, only the node whose range
 // holds the camera's distance to the instance (distances in the asset's
@@ -51,13 +56,17 @@ export interface MapDressingAsset {
   id: string;
   /** glTF / GLB, relative to the dressing file's folder. */
   uri?: string;
-  /** Shared asset: a glTF / GLB relative to the workspace root (starts with
-   *  `libraries/`). Used instead of `uri` when present. */
+  /** Shared asset: a glTF / GLB relative to the workspace root, inside it
+   *  (a library under `libraries/`, or another folder of shared models).
+   *  Used instead of `uri` when present. */
   workspace_uri?: string;
   /** Asset units -> scene units (1 for an asset already in scene units). */
   unit_scale?: number;
   /** Levels of detail, nearest first. */
   lods?: MapDressingLod[];
+  /** Names of nodes of the asset's glTF that are not drawn, with their
+   *  subtrees (another state of the model, collision or helper geometry). */
+  hidden_nodes?: string[];
   /** Linear RGB multiplier of the asset's base colour. */
   tint?: number[];
   category?: string;
@@ -178,20 +187,47 @@ export interface MapDressingStats {
   lodInstances: number[];
 }
 
-/** Workspace-relative path of a shared asset, or null when it leaves
- *  `libraries/`. */
+/** Workspace-relative path of a shared asset, or null when it is absolute or
+ *  leaves the workspace. */
 function workspaceRel(path: string): string | null {
-  const parts = path.replace(/\\/g, '/').split('/').filter((p) => p !== '' && p !== '.');
-  if (parts.length < 2 || parts[0] !== 'libraries' || parts.includes('..')) return null;
+  const norm = path.replace(/\\/g, '/');
+  if (norm.startsWith('/') || /^[A-Za-z]:/.test(norm)) return null;
+  const parts = norm.split('/').filter((p) => p !== '' && p !== '.');
+  if (parts.length < 1 || parts.includes('..')) return null;
   return parts.join('/');
 }
 
+/** The objects of a loaded glTF whose node is named (in the file) in
+ *  `names`; matched through the loader's node associations, since three.js
+ *  rewrites node names (it drops ':' and '.' and makes repeats unique). */
+function namedNodes(g: GLTF, names: string[] | undefined): Set<THREE.Object3D> {
+  const out = new Set<THREE.Object3D>();
+  if (!Array.isArray(names) || names.length === 0) return out;
+  const want = new Set(names);
+  const nodes = (g.parser.json as { nodes?: { name?: string }[] }).nodes ?? [];
+  g.scene.traverse((o) => {
+    const idx = g.parser.associations.get(o)?.nodes;
+    if (idx !== undefined && want.has(nodes[idx]?.name ?? '')) out.add(o);
+  });
+  return out;
+}
+
+/** True when `o` or one of its ancestors is in `hidden`. */
+function underHidden(o: THREE.Object3D, hidden: Set<THREE.Object3D>): boolean {
+  for (let p: THREE.Object3D | null = o; p; p = p.parent) if (hidden.has(p)) return true;
+  return false;
+}
+
 function tintOf(...tints: (number[] | undefined)[]): THREE.Color | null {
-  let r = 1, g = 1, b = 1;
+  let r = 1,
+    g = 1,
+    b = 1;
   let any = false;
   for (const t of tints) {
     if (!Array.isArray(t) || t.length < 3) continue;
-    r *= Number(t[0]); g *= Number(t[1]); b *= Number(t[2]);
+    r *= Number(t[0]);
+    g *= Number(t[1]);
+    b *= Number(t[2]);
     any = true;
   }
   if (!any || (r === 1 && g === 1 && b === 1)) return null;
@@ -247,7 +283,7 @@ export class MapDressingRenderer {
     const assetUrl = (a: MapDressingAsset): string => {
       if (a.workspace_uri && workspaceUrl) {
         const rel = workspaceRel(a.workspace_uri);
-        if (!rel) throw new Error(`asset ${a.id}: workspace_uri must stay under libraries/`);
+        if (!rel) throw new Error(`asset ${a.id}: workspace_uri must stay inside the workspace`);
         return workspaceUrl(rel);
       }
       if (!a.uri) throw new Error(`asset ${a.id}: no uri`);
@@ -304,8 +340,13 @@ export class MapDressingRenderer {
 
     // Each asset once, whatever the number of groups that use it.
     const gltfs: GLTF[] = [];
-    const assetScenes = new Map<string, Promise<THREE.Object3D>>();
-    const assetScene = (id: string): Promise<THREE.Object3D> => {
+    const assetScenes = new Map<
+      string,
+      Promise<{ scene: THREE.Object3D; hidden: Set<THREE.Object3D> }>
+    >();
+    const assetScene = (
+      id: string,
+    ): Promise<{ scene: THREE.Object3D; hidden: Set<THREE.Object3D> }> => {
       let p = assetScenes.get(id);
       if (!p) {
         const a = assets.get(id);
@@ -313,7 +354,7 @@ export class MapDressingRenderer {
         p = loader.loadAsync(assetUrl(a)).then((g) => {
           gltfs.push(g);
           g.scene.updateMatrixWorld(true);
-          return g.scene;
+          return { scene: g.scene, hidden: namedNodes(g, a.hidden_nodes) };
         });
         assetScenes.set(id, p);
       }
@@ -357,7 +398,7 @@ export class MapDressingRenderer {
         for (const grp of layer.groups ?? []) {
           const a = assets.get(grp.asset);
           if (!a || !(grp.count > 0)) continue;
-          const scene = await assetScene(grp.asset);
+          const { scene, hidden } = await assetScene(grp.asset);
           const first = grp.byte_offset / 4;
           if (first + grp.count * RECORD_FLOATS > records.length) {
             throw new Error(`group ${layer.id}/${grp.asset} runs past the instance file`);
@@ -385,7 +426,8 @@ export class MapDressingRenderer {
           // Levels: the asset's LOD nodes, or the whole asset as one level.
           const levelRoots: { root: THREE.Object3D; max: number }[] = [];
           for (const l of Array.isArray(a.lods) ? a.lods : []) {
-            const node = l && typeof l.node === 'string' ? scene.getObjectByName(l.node) : undefined;
+            const node =
+              l && typeof l.node === 'string' ? scene.getObjectByName(l.node) : undefined;
             const max = Number(l?.max_distance);
             if (node && Number.isFinite(max)) levelRoots.push({ root: node, max: max * unit });
           }
@@ -406,6 +448,7 @@ export class MapDressingRenderer {
             lr.root.traverse((o) => {
               const mesh = o as THREE.Mesh;
               if (!mesh.isMesh) return;
+              if (hidden.size > 0 && underHidden(mesh, hidden)) return;
               const local = mesh.matrixWorld.clone();
               const mat = Array.isArray(mesh.material)
                 ? mesh.material.map((m) => tintMaterial(m, tint))
@@ -454,7 +497,8 @@ export class MapDressingRenderer {
           };
           bg.inLevel[0] = grp.count;
           // Until the first update every instance draws at the first level.
-          for (let li = 1; li < levels.length; li++) for (const m of levels[li].meshes) m.im.count = 0;
+          for (let li = 1; li < levels.length; li++)
+            for (const m of levels[li].meshes) m.im.count = 0;
           builtGroups.push(bg);
           triangles += levels[0].triangles * grp.count;
           instances += grp.count;
@@ -483,8 +527,7 @@ export class MapDressingRenderer {
    *  returns true when any instance changed level. */
   update(cameraWorld: THREE.Vector3, force = false): boolean {
     const local = this.parent.worldToLocal(cameraWorld.clone());
-    const moved =
-      force || !this.lastCamera || this.lastCamera.distanceToSquared(local) >= 1e-4;
+    const moved = force || !this.lastCamera || this.lastCamera.distanceToSquared(local) >= 1e-4;
     if (!moved && !this.dirty) return false;
     if (moved) this.lastCamera = local;
     const cam = this.lastCamera ?? local;
