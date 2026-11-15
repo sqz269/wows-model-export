@@ -21,6 +21,11 @@ Passes (``PASSES``):
 * ``ship_class`` — ``ship.class`` re-derived from the main battery's caliber
   (:func:`.scaffold_ship.ship_class_pass`). Owns ``ship``. Skipped for a
   ship whose ``build_deps.json`` records a ``class_override``.
+* ``effects`` — the weapon-bound particle rows: ``effects.by_hull`` for every
+  hull, the top-level weapon rows from the rendered hull (event-weapon mount
+  rows included), ``effects.laser_beam``, and the same rows in every exterior
+  ``effects`` payload with its substitutions (:func:`.scaffold_ship.effects_pass`).
+  Hull and AA-aura rows are kept. Owns ``effects`` and ``exteriors``.
 """
 from __future__ import annotations
 
@@ -35,6 +40,7 @@ from ..resolve import sidecar
 from ..toolkit.gameparams import ensure_dump as _ensure_gameparams_dump
 from .scaffold_ship import (
     air_defense_pass,
+    effects_pass,
     hull_mounts_pass,
     ship_class_pass,
     torpedo_profiles_pass,
@@ -46,6 +52,7 @@ PASSES: dict[str, tuple[tuple[str, ...], Callable[[dict[str, Any], dict[str, Any
     "torpedoes": (("ballistics",), torpedo_profiles_pass),
     "hull_mounts": (("hulls",), hull_mounts_pass),
     "ship_class": (("ship",), ship_class_pass),
+    "effects": (("effects", "exteriors"), effects_pass),
 }
 
 

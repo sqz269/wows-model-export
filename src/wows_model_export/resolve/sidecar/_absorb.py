@@ -1318,6 +1318,7 @@ def absorb_gameparams_effects(
     doc: dict[str, Any],
     *,
     attachments: list[dict[str, Any]],
+    by_hull: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Stamp per-ship particle attachments into ``doc.effects``.
 
@@ -1328,16 +1329,30 @@ def absorb_gameparams_effects(
     :mod:`wows_model_export.compose.library_particles`); consumers
     join by ``particle_path``.
 
+    ``by_hull`` maps each ``hulls`` key to that hull's weapon-bound rows
+    (sources in ``WEAPON_EFFECT_SOURCES``), written as
+    ``effects.by_hull.<H>.attachments``. ``effects.laser_beam`` (the client's
+    beam length law) is added when any row is a ``laserMainEffect``.
+
     **Replace-by-section semantics.** Re-running the absorb overwrites
     the previous ``effects`` block. Particle data is fully
     toolkit/assets.bin-derived, so hand-edits don't belong here.
     """
     if not attachments:
         return doc
+    from ..gameparams_autofill import laser_beam_constants
+
     effects_block: dict[str, Any] = {
         "source": {"generated_at": _now_iso()},
         "attachments": attachments,
     }
+    if by_hull:
+        effects_block["by_hull"] = {
+            name: {"attachments": rows} for name, rows in by_hull.items()
+        }
+    all_rows = [*attachments, *(r for rows in (by_hull or {}).values() for r in rows)]
+    if any(r.get("group") == "laserMainEffect" for r in all_rows):
+        effects_block["laser_beam"] = laser_beam_constants()
     # Strip any existing effects block first so removed entries (e.g.
     # ship that no longer ships fire4) don't linger.
     new_doc = _deepcopy_jsonish(doc)

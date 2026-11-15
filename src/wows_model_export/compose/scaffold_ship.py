@@ -330,6 +330,7 @@ def _collect_exteriors_block(
             _gp_read.get_exterior(ext_id) or {}, _hull_key or "",
             exterior_id=ext_id, variant_hull=ext_id in model_dirs,
             skel_ext_json=candidates,
+            base_by_hull=effects_by_hull_rows(doc),
         )
 
     block = _exterior_unify.collect_exteriors_for_vehicle(
@@ -2120,7 +2121,17 @@ def _absorb_gameparams_passes(
                         )
             except Exception as e:
                 _warn(warnings, f"gameparams effects: library build failed ({e})")
-            doc = sidecar.absorb_gameparams_effects(doc, attachments=attachments)
+            # Weapon-bound rows per hull; the top level carries the rendered
+            # hull's, as the placements do (pass 3).
+            by_hull = effects_by_hull(doc, ship_dict)
+            shown_rows = _rendered_weapon_effects(doc, ship_dict, by_hull)
+            if shown_rows is not None:
+                attachments = _gp_autofill.replace_weapon_effect_rows(
+                    attachments, shown_rows,
+                )
+            doc = sidecar.absorb_gameparams_effects(
+                doc, attachments=attachments, by_hull=by_hull,
+            )
     except Exception as e:
         _warn(warnings, f"gameparams effects failed ({e})")
 
@@ -2235,6 +2246,88 @@ def hull_components(doc: dict[str, Any], ship_dict: dict[str, Any], hull: str | 
     if hull and hull != variants.get("active_hull"):
         choice = "stock" if hull == variants.get("stock_hull") else hull
     return _gp_autofill.resolve_components(ship_dict, hull_choice=choice)
+
+
+def effects_by_hull_rows(doc: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """``doc.effects.by_hull`` as hull -> rows (empty when absent)."""
+    by_hull = (doc.get("effects") or {}).get("by_hull") or {}
+    return {
+        name: entry.get("attachments") or []
+        for name, entry in by_hull.items()
+        if isinstance(entry, dict)
+    }
+
+
+def effects_by_hull(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Every ``hulls`` entry's weapon-bound effect rows (mount rows of guns and
+    event weapons, then the munition rows of their ammo), each from that
+    hull's own components (:func:`hull_components`). Empty when the sidecar
+    has fewer than two hulls: the top-level rows then cover the only hull."""
+    hulls = doc.get("hulls")
+    if not isinstance(hulls, dict) or len(hulls) < 2:
+        return {}
+    return {
+        name: _gp_autofill.collect_hull_weapon_effects(
+            ship_dict, hull_components(doc, ship_dict, name),
+        )
+        for name, entry in hulls.items()
+        if isinstance(entry, dict)
+    }
+
+
+def _rendered_weapon_effects(
+    doc: dict[str, Any], ship_dict: dict[str, Any],
+    by_hull: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]] | None:
+    """The rendered hull's weapon-bound rows (``by_hull`` entry, else resolved
+    for a single-hull sidecar); ``None`` when the sidecar names no hull, so the
+    caller keeps the rows it collected."""
+    shown = rendered_hull_name(doc)
+    if not isinstance(shown, str) or shown not in (doc.get("hulls") or {}):
+        return None
+    if shown in by_hull:
+        return by_hull[shown]
+    return _gp_autofill.collect_hull_weapon_effects(
+        ship_dict, hull_components(doc, ship_dict, shown),
+    )
+
+
+def effects_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str, Any]:
+    """Re-derive the weapon-bound effect rows of an existing sidecar.
+
+    ``effects.by_hull`` for every hull, the top-level weapon rows from the
+    rendered hull (:func:`rendered_hull_name`), ``effects.laser_beam``; the
+    hull, ``aa_aura`` and map rows stay as they are (their EP positions came
+    from the export's skel_ext). Every exterior that carries an ``effects``
+    payload gets the same weapon rows with its weapon-path substitutions
+    applied (:func:`..resolve.exterior_effects.substitute_weapon_rows`), its
+    own rows otherwise kept.
+    """
+    from ..resolve.exterior_effects import exterior_weapon_effects
+
+    effects = doc.get("effects")
+    if not isinstance(effects, dict) or not effects.get("attachments"):
+        return doc
+    by_hull = effects_by_hull(doc, ship_dict)
+    attachments = effects["attachments"]
+    shown_rows = _rendered_weapon_effects(doc, ship_dict, by_hull)
+    if shown_rows is not None:
+        attachments = _gp_autofill.replace_weapon_effect_rows(attachments, shown_rows)
+    new = sidecar.absorb_gameparams_effects(doc, attachments=attachments, by_hull=by_hull)
+    exteriors = new.get("exteriors")
+    if isinstance(exteriors, list):
+        records = []
+        for rec in exteriors:
+            payload = rec.get("effects") if isinstance(rec, dict) else None
+            if not isinstance(payload, dict) or not isinstance(payload.get("attachments"), list):
+                records.append(rec)
+                continue
+            exterior = _gp_read.get_exterior(rec.get("exterior_id") or "") or {}
+            records.append({**rec, "effects": exterior_weapon_effects(
+                payload, exterior, attachments, by_hull,
+            )})
+        new = {**new, "exteriors": records}
+    return new
 
 
 def hull_mounts_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str, Any]:

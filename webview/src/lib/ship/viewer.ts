@@ -60,6 +60,16 @@ import { classifyHullScene, type ClassifiedHull } from './classify_hull';
 import { defaultSeamStates } from './visibility';
 import { exteriorParticleAttachments } from './exterior_effects';
 import {
+  DEFAULT_LASER_BEAM_LAW,
+  LASER_BEAM_GROUPS,
+  LASER_HIT_GROUP,
+  LASER_PREVIEW_RANGE_M,
+  SHIP_METRES_PER_BW,
+  laserBeamChannels,
+  laserPreviewHitRow,
+  muzzleAnchorMode,
+} from './event_weapon_fx';
+import {
   applyAttachedMatrix,
   applyPlacementMatrix,
   tagAndIndexInstance,
@@ -339,10 +349,37 @@ const SHIP_PARTICLE_SOURCE_ORDER = new Map<string, number>([
   ['artillery', 1],
   ['atba', 2],
   ['airDefense', 3],
-  ['aa_aura', 4],
-  ['munition', 5],
-  ['map', 6],
+  ['phaserLasers', 4],
+  ['chargeLasers', 5],
+  ['axisLaser', 6],
+  ['waves', 7],
+  ['missiles', 8],
+  ['aa_aura', 9],
+  ['munition', 10],
+  ['map', 11],
 ]);
+
+/** A laser beam drawn by the ship view's firing preview: the beam start and
+ *  beam end proxies are re-aimed every frame from the muzzle marker. */
+interface LaserBeamRig {
+  muzzle: THREE.Object3D;
+  start: THREE.Object3D;
+  end: THREE.Object3D | null;
+  /** Beam and targeting rows drawn from `start` (their channel 0 follows the
+   *  beam length). */
+  beams: ParticleAttachment[];
+  lengthBw: number;
+}
+
+const laserMuzzleWorld = new THREE.Vector3();
+const laserMuzzleQuat = new THREE.Quaternion();
+const laserForward = new THREE.Vector3();
+const laserTarget = new THREE.Vector3();
+const laserDir = new THREE.Vector3();
+const laserBeamQuat = new THREE.Quaternion();
+const laserParentQuat = new THREE.Quaternion();
+/** Engine-frame +Z as seen through EFFECT_FRAME_SCALE_FROM_GLB (z mirrored). */
+const EFFECT_FORWARD_IN_GLB = new THREE.Vector3(0, 0, -1);
 
 // Screen-space distortion blend modes (heat-haze / water-deform): they refract
 // the scene-color snapshot rather than painting a sprite, so with no ocean
@@ -760,6 +797,10 @@ export class ShipViewer {
   /** Proxies for position-only hull `EP_` rows, parented under shipRoot so
    *  they ride the hull transform exactly like GLB-node anchors do. */
   private particleAnchorRoot: THREE.Group;
+  /** Firing-preview beams of the laser mounts (see expandParticleAttachments). */
+  private laserBeamRigs: LaserBeamRig[] = [];
+  /** Loop key of a consumer-made row (a beam-end hit loops with its beam). */
+  private particleEventKeyOverride = new WeakMap<ParticleAttachment, string>();
 
   // Texture pipeline
   private textures: TextureManager;
@@ -1979,7 +2020,7 @@ export class ShipViewer {
 
   /** Effective exterior selection, also used by the VFX node overlay. */
   getActiveParticleAttachments(): readonly ParticleAttachment[] {
-    return exteriorParticleAttachments(this.sidecar, this.activeExteriorId);
+    return exteriorParticleAttachments(this.sidecar, this.activeExteriorId, this.shownHullName);
   }
 
   getShipParticlesVisible(): boolean {
@@ -2024,7 +2065,7 @@ export class ShipViewer {
     if (this.particleBuildPromise) await this.particleBuildPromise;
     if (!this.particleScene || !this.particleLayerEnabled) return this.particleStats;
     if (on) {
-      const handles = this.particleHandles.filter((h) => shipParticleEventKey(h.attachment) === key);
+      const handles = this.particleHandles.filter((h) => this.particleEventKey(h.attachment) === key);
       for (const h of handles) this.particleScene.restartAttachment(h);
       this.updateParticleAttachmentTransforms();
     }
@@ -3107,13 +3148,20 @@ export class ShipViewer {
     const attachments = [...this.getActiveParticleAttachments()];
     const renderable = attachments.filter((a) => this.canAnchorParticleAttachment(a));
     const unanchored = attachments.length - renderable.length;
-    const paths = [...new Set(renderable.map((a) => a.particle_path).filter(Boolean))].sort();
+    // Laser beams also draw their ammo's hit at the beam end (a munition row,
+    // unanchored by itself), so its record is fetched with the rest.
+    const hitPaths = renderable
+      .filter((a) => a.group === 'laserMainEffect')
+      .map((a) => laserPreviewHitRow(a, attachments)?.particle_path);
+    const paths = [
+      ...new Set([...renderable.map((a) => a.particle_path), ...hitPaths].filter(Boolean)),
+    ].sort() as string[];
     const result = await fetchParticleRecords(paths, { concurrency: 8 });
     if (token !== this.particleBuildToken) return this.particleStats;
 
     this.disposeParticleLayer({ preserveEnabled: true, preserveToken: true });
     this.particleHasWaterDistortion = recordsHaveWaterDistortion(result.records);
-    const expanded = this.expandParticleAttachments(renderable);
+    const expanded = this.expandParticleAttachments(renderable, attachments);
     const scene = new ParticleScene(this.env.renderer);
     scene.root.name = 'ShipParticleEffects';
     scene.setSortCamera(this.env.camera);
@@ -3149,6 +3197,8 @@ export class ShipViewer {
       if (typeof inten === 'number' && Number.isFinite(inten)) {
         scene.setAttachmentIntensityValues(h, [inten]);
       }
+      const rig = this.laserBeamRigs.find((r) => r.beams.includes(h.attachment));
+      if (rig) scene.setAttachmentIntensityValues(h, laserBeamChannels(rig.lengthBw, this.laserBeamLaw()));
       scene.setAttachmentActive(h, false);
     }
     scene.root.visible = this.particleLayerEnabled;
@@ -3207,6 +3257,7 @@ export class ShipViewer {
     this.particleHandles = [];
     this.particleAnchorObjects.clear();
     this.particleAnchorRoot.clear();
+    this.laserBeamRigs = [];
     this.particleAnchorMotion.clear();
     this.particleAttachmentAnchors = new WeakMap<ParticleAttachment, THREE.Object3D>();
     this.particleEventOptions = [];
@@ -3308,7 +3359,7 @@ export class ShipViewer {
       if (this.isAmbientParticleAttachment(h.attachment)) continue;
       const source = h.attachment.source ?? 'hull';
       const group = h.attachment.group ?? '';
-      const key = shipParticleEventKey(h.attachment);
+      const key = this.particleEventKey(h.attachment);
       const existing =
         byKey.get(key) ??
         ({
@@ -3340,7 +3391,7 @@ export class ShipViewer {
     if (!this.particleScene) return 0;
     let active = 0;
     for (const h of this.particleHandles) {
-      const key = shipParticleEventKey(h.attachment);
+      const key = this.particleEventKey(h.attachment);
       const on =
         this.particleLayerEnabled &&
         (this.particleMode === 'all' ||
@@ -3374,8 +3425,14 @@ export class ShipViewer {
     return active;
   }
 
-  private expandParticleAttachments(attachments: ParticleAttachment[]): ParticleAttachment[] {
+  private expandParticleAttachments(
+    attachments: ParticleAttachment[],
+    allRows: readonly ParticleAttachment[] = attachments,
+  ): ParticleAttachment[] {
     this.particleAttachmentAnchors = new WeakMap<ParticleAttachment, THREE.Object3D>();
+    this.particleEventKeyOverride = new WeakMap<ParticleAttachment, string>();
+    this.laserBeamRigs = [];
+    const rigsByMuzzle = new Map<THREE.Object3D, LaserBeamRig>();
     const out: ParticleAttachment[] = [];
     for (const a of attachments) {
       const muzzleAnchors = this.resolveShotEffectMuzzles(a);
@@ -3388,16 +3445,53 @@ export class ShipViewer {
           ...a,
           node: `${a.node || a.source_id || 'mount'}/${anchor.name || `muzzle${i + 1}`}`,
         };
-        this.particleAttachmentAnchors.set(clone, anchor);
+        if (!LASER_BEAM_GROUPS.has(a.group)) {
+          this.particleAttachmentAnchors.set(clone, anchor);
+          out.push(clone);
+          return;
+        }
+        // Beam / targeting: drawn from the muzzle toward the preview target.
+        let rig = rigsByMuzzle.get(anchor);
+        if (!rig) {
+          rig = { muzzle: anchor, start: new THREE.Object3D(), end: null, beams: [], lengthBw: 0 };
+          rig.start.name = `laserBeam:${clone.node}`;
+          this.particleAnchorRoot.add(rig.start);
+          rigsByMuzzle.set(anchor, rig);
+          this.laserBeamRigs.push(rig);
+        }
+        rig.beams.push(clone);
+        this.particleAttachmentAnchors.set(clone, rig.start);
         out.push(clone);
+        if (a.group !== 'laserMainEffect') return;
+        const hit = laserPreviewHitRow(a, allRows);
+        if (!hit) return;
+        if (!rig.end) {
+          rig.end = new THREE.Object3D();
+          rig.end.name = `laserHit:${clone.node}`;
+          this.particleAnchorRoot.add(rig.end);
+        }
+        const hitClone: ParticleAttachment = {
+          ...hit,
+          source: a.source,
+          source_id: a.source_id,
+          group: LASER_HIT_GROUP,
+          node: `${clone.node}/hit`,
+        };
+        this.particleAttachmentAnchors.set(hitClone, rig.end);
+        this.particleEventKeyOverride.set(hitClone, shipParticleEventKey(a));
+        out.push(hitClone);
       });
     }
+    this.updateLaserBeamRigs();
     return out;
   }
 
+  /** Muzzle markers a row plays on: every `HP_gunFire<N>` for a gun salvo,
+   *  the first for laser charge / targeting / beam rows, one proxy at their
+   *  mean for a wave emitter (see event_weapon_fx.ts). */
   private resolveShotEffectMuzzles(a: ParticleAttachment): THREE.Object3D[] {
-    if (a.group !== 'shotEffect') return [];
-    if (a.source !== 'artillery' && a.source !== 'atba' && a.source !== 'airDefense') return [];
+    const mode = muzzleAnchorMode(a);
+    if (mode === 'none') return [];
     const mountRoot = this.resolveParticleAnchorObject(a);
     if (!mountRoot) return [];
 
@@ -3406,7 +3500,77 @@ export class ShipViewer {
       if (/^HP_gunFire\d+$/i.test(obj.name)) muzzles.push(obj);
     });
     muzzles.sort((aObj, bObj) => muzzleIndex(aObj.name) - muzzleIndex(bObj.name));
+    if (mode === 'first') return muzzles.slice(0, 1);
+    if (mode === 'mean' && muzzles.length > 0) {
+      // WaveGunShooter.shoot: one effect at the markers' mean position, yaw
+      // only; the mount root carries the turret's yaw.
+      mountRoot.updateWorldMatrix(true, true);
+      const mean = new THREE.Vector3();
+      const p = new THREE.Vector3();
+      for (const m of muzzles) mean.add(m.getWorldPosition(p));
+      mean.divideScalar(muzzles.length);
+      let proxy = mountRoot.children.find((c) => c.name === 'HP_gunFireMean');
+      if (!proxy) {
+        proxy = new THREE.Object3D();
+        proxy.name = 'HP_gunFireMean';
+        mountRoot.add(proxy);
+      }
+      proxy.position.copy(mountRoot.worldToLocal(mean));
+      return [proxy];
+    }
     return muzzles;
+  }
+
+  private particleEventKey(a: ParticleAttachment): string {
+    return this.particleEventKeyOverride.get(a) ?? shipParticleEventKey(a);
+  }
+
+  private laserBeamLaw() {
+    return this.sidecar?.effects?.laser_beam ?? DEFAULT_LASER_BEAM_LAW;
+  }
+
+  /** Re-aim every preview beam: start at the muzzle marker, end on the sea
+   *  LASER_PREVIEW_RANGE_M ahead along the barrel's heading; the effect
+   *  frame's +Z runs along the beam (createLaserEffect's lookAt) and the hit
+   *  at the end shares that frame (createLaserHitEffect). */
+  private updateLaserBeamRigs(): void {
+    if (this.laserBeamRigs.length === 0) return;
+    this.shipRoot.updateMatrixWorld(false);
+    const parent = this.particleAnchorRoot;
+    parent.getWorldQuaternion(laserParentQuat).invert();
+    const law = this.laserBeamLaw();
+    for (const rig of this.laserBeamRigs) {
+      rig.muzzle.getWorldPosition(laserMuzzleWorld);
+      rig.muzzle.getWorldQuaternion(laserMuzzleQuat);
+      laserForward.copy(EFFECT_FORWARD_IN_GLB).applyQuaternion(laserMuzzleQuat);
+      laserForward.y = 0;
+      if (laserForward.lengthSq() < 1e-8) laserForward.set(0, 0, 1);
+      laserForward.normalize();
+      laserTarget.copy(laserMuzzleWorld).addScaledVector(laserForward, LASER_PREVIEW_RANGE_M);
+      laserTarget.y = 0;
+      laserDir.subVectors(laserTarget, laserMuzzleWorld);
+      const lengthM = laserDir.length();
+      laserDir.normalize();
+      laserBeamQuat.setFromUnitVectors(EFFECT_FORWARD_IN_GLB, laserDir);
+      const local = laserParentQuat.clone().multiply(laserBeamQuat);
+      rig.start.position.copy(parent.worldToLocal(laserMuzzleWorld.clone()));
+      rig.start.quaternion.copy(local);
+      if (rig.end) {
+        rig.end.position.copy(parent.worldToLocal(laserTarget.clone()));
+        rig.end.quaternion.copy(local);
+      }
+      const lengthBw = lengthM / SHIP_METRES_PER_BW;
+      if (Math.abs(lengthBw - rig.lengthBw) > 1e-3) {
+        rig.lengthBw = lengthBw;
+        if (this.particleScene) {
+          for (const h of this.particleHandles) {
+            if (rig.beams.includes(h.attachment)) {
+              this.particleScene.setAttachmentIntensityValues(h, laserBeamChannels(lengthBw, law));
+            }
+          }
+        }
+      }
+    }
   }
 
   private resolveParticleAnchor(a: ParticleAttachment): THREE.Vector3 | null {
@@ -3434,6 +3598,7 @@ export class ShipViewer {
 
   private updateParticleAttachmentTransforms(): void {
     if (!this.particleLayerEnabled || this.particleAnchorObjects.size === 0) return;
+    this.updateLaserBeamRigs();
     this.shipRoot.updateMatrixWorld(false);
     const nowMs = performance.now();
     for (const [handle, obj] of this.particleAnchorObjects) {

@@ -715,6 +715,11 @@ export interface ParticleRecord {
  *                    mounts in the band.
  *  - `munition`    : per-Projectile shell-impact / projectile-destroyed
  *                    / tracer XML refs (one ammo prototype per source_id).
+ *  - `phaserLasers` / `chargeLasers` / `axisLaser` : event laser mounts
+ *                    (charge / targeting effects at the first muzzle, the
+ *                    beam `laserMainEffect`, damage states).
+ *  - `waves`       : event wave emitters (`shotEffect` at the mean muzzle).
+ *  - `missiles`    : missile launchers (`shotEffect` per launch cell).
  *  - `map`         : map-authored `space.bin.particles[]` emitter anchor.
  *
  * Older sidecars (pre-source taxonomy) omit `source`; the consumer
@@ -727,7 +732,26 @@ export type ParticleSource =
   | 'airDefense'
   | 'aa_aura'
   | 'munition'
+  | 'phaserLasers'
+  | 'chargeLasers'
+  | 'axisLaser'
+  | 'waves'
+  | 'missiles'
   | 'map';
+
+/** Sources bound to a hull's weapon mounts and their ammo: the rows
+ *  `effects.by_hull.<hull>` replaces when that hull is shown. */
+export const WEAPON_PARTICLE_SOURCES: ReadonlySet<string> = new Set([
+  'artillery',
+  'atba',
+  'airDefense',
+  'phaserLasers',
+  'chargeLasers',
+  'axisLaser',
+  'waves',
+  'missiles',
+  'munition',
+]);
 
 export interface ParticleAttachment {
   /**
@@ -794,11 +818,48 @@ export interface ParticleAttachment {
    *  - munition: ammo ID (`PAPA014_Shell_406mm_AP_AP_Mk_8`).
    */
   source_id?: string;
+  /** Laser rows: the client's laser class (`charge` / `axis` / `phaser` /
+   *  `impulse`, the mount's `shootingMechanic`). */
+  laser_kind?: string;
+  /** `laserMainEffect` rows: the ammo whose beam this is (its munition rows
+   *  hold the hit effects, picked by hit type). */
+  ammo_id?: string;
+  /** Seconds after the effect starts when the client stops its emission
+   *  (live particles finish): charge effects, laser beams. */
+  stop_after_s?: number;
+  /** `laserTargetingEffect`: killed (not stopped) when the gun fires. */
+  kill_on_shot?: boolean;
+}
+
+/** The client's laser beam law (`effects.laser_beam`, present when a row is a
+ *  `laserMainEffect`): channel `length_channel` = 0 at or below
+ *  `min_length_bw`, `max_intensity` at `max_length_bw`, linear between; the
+ *  beam length is in BigWorld units (ship metres / 15). Phaser and impulse
+ *  beams (`friendly_kinds`) also set `friendly_channel` to
+ *  `friendly_intensity` when the target is friendly; `enemy_intensity` is
+ *  what the client's continuous-beam update writes for any other target. */
+export interface LaserBeamLaw {
+  length_unit: 'bw';
+  min_length_bw: number;
+  max_length_bw: number;
+  max_intensity: number;
+  length_channel: number;
+  friendly_channel: number;
+  friendly_intensity: number;
+  enemy_intensity: number;
+  friendly_kinds: string[];
 }
 
 export interface SidecarEffects {
   source?: { generated_at?: string };
   attachments: ParticleAttachment[];
+  /** Each hull's weapon-bound rows (sources in WEAPON_PARTICLE_SOURCES),
+   *  present when the sidecar has two or more hulls. Showing hull H, a
+   *  consumer replaces the weapon-bound rows of `attachments` with
+   *  `by_hull[H].attachments`. An exterior payload with weapon
+   *  substitutions carries its own `by_hull`. */
+  by_hull?: Record<string, { attachments: ParticleAttachment[] }>;
+  laser_beam?: LaserBeamLaw;
   // particles field removed in schema v4 — Effect records now live in
   // the shared `library/particles/records.json` artefact. Consumers
   // join by `attachment.particle_path`.

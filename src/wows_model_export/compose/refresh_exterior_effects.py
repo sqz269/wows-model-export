@@ -5,8 +5,8 @@ preserved. Missing variant EP caches leave explicit name-only attachments.
 """
 from __future__ import annotations
 
-import json
 import copy
+import json
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,7 @@ from ..read.gameparams import get_exterior, get_ship
 from ..resolve.exterior_effects import resolve_exterior_effects
 from ..resolve.exterior_unify import build_exterior_record, default_exterior_record
 from ..resolve.gameparams_autofill import resolve_components, resolve_variant_model_dir
+from .scaffold_ship import effects_by_hull_rows
 
 
 def apply_loaded_exterior_effects(
@@ -30,6 +31,7 @@ def apply_loaded_exterior_effects(
         (doc.get("effects") or {}).get("attachments") or [], exterior, hull_key,
         exterior_id=exterior_id, variant_hull=True,
         skel_ext_json=next(models_dir.glob("*_skel_ext.json"), None),
+        base_by_hull=effects_by_hull_rows(doc),
     )
     out = copy.deepcopy(doc)
     records = out.setdefault("exteriors", [])
@@ -89,6 +91,7 @@ def refresh_exterior_effects(sidecar_path: Path, vehicle_id: str) -> dict[str, A
         effects = resolve_exterior_effects(
             (doc.get("effects") or {}).get("attachments") or [], ext, hull_key,
             exterior_id=ext_id, variant_hull=bool(variant_dir), skel_ext_json=candidates,
+            base_by_hull=effects_by_hull_rows(doc),
         )
         if effects is None:
             if ext_id in by_id:

@@ -2277,6 +2277,79 @@ _FX_MAX_NUMBER_INTENSITY_MODIFIER = 2.5
 # tracer, not the muzzle particle).
 _FX_CALIBER_SCALED_GROUPS = frozenset({"artillery", "atba"})
 
+# Event weapons (build 13533378 client: ``m979f9c73.Lasers``,
+# ``m979f9c73.Waves.WaveGunShooter``, ``m979f9c73.Missiles.ClientMissilesGun``,
+# ``ClientShots.ClientShooterEffects``; reference/engine/wows_event_weapon_effects.md).
+# Each family plays only some of its mount's effect slots, so each gets its
+# own list instead of _GUN_EFFECT_SLOTS:
+# - Lasers shoot with shotType 'LaserShot' (not ARTILLERY: purging and lens
+#   blanked, no reload boost), and no laser class spawns the shooter's
+#   shotEffect (charge / pulse shooters only switch the charge sound,
+#   PhaserLasers.shootGun skips the shooter). The gun model's damage states
+#   come from ArtilleryGun (LaserGun subclasses it). Charge and axis lasers
+#   play gunChargeEffect on the first muzzle; only charge lasers aim a
+#   laserTargetingEffect; PhaserLasers reads neither although GameParams
+#   carries both. The beam is the ammo's laserMainEffect (own rows below).
+# - Waves: WaveGunShooter.shoot plays shotEffect (skin override applied) at
+#   the mean of the gun's HP_gunFire markers, yaw only. WaveGun is an
+#   ArtilleryGun (damage states).
+# - Missiles: ClientMissilesGun.use plays shotEffect on the launch cell's
+#   shoot node, no intensity, no skin override; shotEffectCap is never read
+#   by the missile client. ArtilleryGun damage states.
+_DAMAGE_EFFECT_SLOTS: tuple[str, ...] = ("brokenEffect", "damagedEffect")
+_EVENT_MOUNT_EFFECT_SLOTS: dict[str, tuple[str, ...]] = {
+    "phaserLasers": _DAMAGE_EFFECT_SLOTS,
+    "chargeLasers": ("gunChargeEffect", "laserTargetingEffect", *_DAMAGE_EFFECT_SLOTS),
+    "axisLaser": ("gunChargeEffect", *_DAMAGE_EFFECT_SLOTS),
+    "waves": ("shotEffect", *_DAMAGE_EFFECT_SLOTS),
+    "missiles": ("shotEffect", *_DAMAGE_EFFECT_SLOTS),
+}
+# Laser component key -> the client's laser class (LASER_KIND by the mount's
+# shootingMechanic, which the client asserts against the class).
+_LASER_KIND_BY_COMPONENT: dict[str, str] = {
+    "phaserLasers": "phaser", "chargeLasers": "charge", "axisLaser": "axis",
+}
+# Client constants (m979f9c73.Lasers, build 13533378). Lengths are BigWorld
+# units (MAX/MIN_LASER_EFFECT_LENGTH = 20000 / 200 ship metres x SHIP_TO_BW,
+# SHIP_TO_BW = 1/15).
+LASER_MAX_EFFECT_LENGTH_BW = 20000.0 / 15.0
+LASER_MIN_EFFECT_LENGTH_BW = 200.0 / 15.0
+LASER_MAX_INTENSITY_PARAM = 10.0
+LASER_CHARGE_EFFECT_OFFSET_S = -0.5
+LASER_AXIS_EFFECT_OFFSET_S = -1.25
+LASER_COMMON_PULSE_LENGTH_S = 0.2
+LASER_LONG_PULSE_LENGTH_S = 0.5
+LASER_FRIENDLY_INTENSITY = 6.0
+LASER_ENEMY_INTENSITY = 0.0
+
+
+def laser_length_to_intensity(length_bw: float) -> float:
+    """``laserLengthToIntensityParam``: a beam of ``length_bw`` BigWorld units
+    -> the beam / targeting effect's channel-0 value (0 at or below the
+    minimum length, 10 at the maximum)."""
+    length = min(max(float(length_bw), 0.0), LASER_MAX_EFFECT_LENGTH_BW)
+    if length <= LASER_MIN_EFFECT_LENGTH_BW:
+        return 0.0
+    return (
+        (length - LASER_MIN_EFFECT_LENGTH_BW) * LASER_MAX_INTENSITY_PARAM
+        / (LASER_MAX_EFFECT_LENGTH_BW - LASER_MIN_EFFECT_LENGTH_BW)
+    )
+
+
+def laser_beam_constants() -> dict[str, Any]:
+    """The client's laser-beam law, for ``effects.laser_beam``."""
+    return {
+        "length_unit": "bw",
+        "min_length_bw": round(LASER_MIN_EFFECT_LENGTH_BW, 6),
+        "max_length_bw": round(LASER_MAX_EFFECT_LENGTH_BW, 6),
+        "max_intensity": LASER_MAX_INTENSITY_PARAM,
+        "length_channel": 0,
+        "friendly_channel": 1,
+        "friendly_intensity": LASER_FRIENDLY_INTENSITY,
+        "enemy_intensity": LASER_ENEMY_INTENSITY,
+        "friendly_kinds": ["impulse", "phaser"],
+    }
+
 
 def _clampf(v: float, lo: float, hi: float) -> float:
     return lo if v < lo else hi if v > hi else v
@@ -2414,7 +2487,8 @@ def collect_gun_effects(
     components: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Per-gun particle attachments (muzzle blast + gun-damage / purge /
-    reload / lens).
+    reload / lens), then the event weapons' mount rows
+    (:func:`collect_event_weapon_effects`).
 
     Walks ``artillery`` / ``atba`` / ``airDefense`` HP_* mounts (node-list
     mounts arrive expanded per hardpoint by :func:`resolve_components`). The
@@ -2453,6 +2527,90 @@ def collect_gun_effects(
                     # Only the muzzle blast is caliber-scaled at runtime.
                     intensity=shot_intensity if slot == "shotEffect" else None,
                 )
+    out.extend(collect_event_weapon_effects(ship, components))
+    return out
+
+
+def collect_event_weapon_effects(
+    ship: dict[str, Any],
+    components: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Mount rows of the event weapons: lasers, wave emitters, missile launchers.
+
+    Per mount, the slots :data:`_EVENT_MOUNT_EFFECT_SLOTS` lists for its
+    family (the ones the client plays), with ``source`` = the component key.
+    Laser rows also carry ``laser_kind`` (``charge`` / ``axis`` / ``phaser``
+    / ``impulse``, the client class, from the mount's ``shootingMechanic``) and, on the timed slots, ``stop_after_s``:
+    seconds after the effect starts when the client calls
+    ``EffectManager.stop`` (emission ends, live particles finish) —
+    ``gunChargeEffect`` max(chargeTime - 0.5, 0) on charge lasers and
+    chargeTime - 1.25 on the axis laser. ``laserTargetingEffect`` has
+    ``kill_on_shot`` (``EffectManager.kill`` when the gun fires).
+
+    The beam is one ``laserMainEffect`` row per ammo in the mount's
+    ``ammoList`` (``ammo_id``): the client draws it from the gun's first
+    ``HP_gunFire`` (charge lasers; the other kinds start at the server's beam
+    start) to the beam end, frame +Z along the beam, channel 0 =
+    :func:`laser_length_to_intensity` of the length, stopped after 0.5 s
+    (charge) or 0.2 s (the others). The hit at the beam end is the ammo's
+    munition row picked by hit type (``createLaserHitEffect``).
+    """
+    if components is None:
+        components = resolve_components(ship, hull_choice="upgraded")
+    out: list[dict[str, Any]] = []
+    for grp_key, slots in _EVENT_MOUNT_EFFECT_SLOTS.items():
+        group = components.get(grp_key)
+        if not isinstance(group, dict):
+            continue
+        component_kind = _LASER_KIND_BY_COMPONENT.get(grp_key)
+        for hp_name in sorted(group.keys()):
+            if not isinstance(hp_name, str) or not hp_name.startswith("HP_"):
+                continue
+            mount = group[hp_name]
+            if not isinstance(mount, dict):
+                continue
+            kind = None
+            if component_kind is not None:
+                mech = mount.get("shootingMechanic")
+                kind = mech if isinstance(mech, str) and mech else component_kind
+            charge_time = _safe_float(mount.get("chargeTime"))
+            first = len(out)
+            for slot in slots:
+                _emit_particle(
+                    out,
+                    source=grp_key, source_id=hp_name,
+                    group=slot, node=hp_name,
+                    particle=mount.get(slot),
+                )
+            if kind is not None:
+                for row in out[first:]:
+                    row["laser_kind"] = kind
+                    if row["group"] == "gunChargeEffect" and charge_time is not None:
+                        offset = (
+                            LASER_AXIS_EFFECT_OFFSET_S if kind == "axis"
+                            else LASER_CHARGE_EFFECT_OFFSET_S
+                        )
+                        row["stop_after_s"] = round(max(charge_time + offset, 0.0), 4)
+                    elif row["group"] == "laserTargetingEffect":
+                        row["kill_on_shot"] = True
+                pulse = (
+                    LASER_LONG_PULSE_LENGTH_S if kind == "charge"
+                    else LASER_COMMON_PULSE_LENGTH_S
+                )
+                for aid in mount.get("ammoList") or []:
+                    ammo_id = str(aid)
+                    proj = get_projectile(ammo_id) if ammo_id else None
+                    if not isinstance(proj, dict):
+                        continue
+                    before = len(out)
+                    _emit_particle(
+                        out,
+                        source=grp_key, source_id=hp_name,
+                        group="laserMainEffect", node=hp_name,
+                        particle=proj.get("laserMainEffect"),
+                    )
+                    for row in out[before:]:
+                        row.update(ammo_id=ammo_id, laser_kind=kind, stop_after_s=pulse)
     return out
 
 
@@ -2567,6 +2725,46 @@ def collect_munition_effects(
                 particle=proj.get(slot),
             )
     return out
+
+
+#: Attachment ``source`` values bound to a hull's weapon mounts and their ammo:
+#: the rows ``effects.by_hull.<H>`` holds for each hull.
+WEAPON_EFFECT_SOURCES: frozenset[str] = frozenset({
+    "artillery", "atba", "airDefense", *_EVENT_MOUNT_EFFECT_SLOTS, "munition",
+})
+
+
+def collect_hull_weapon_effects(
+    ship: dict[str, Any],
+    components: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """The weapon-bound rows of one hull: mount rows (guns, event weapons)
+    then munition rows, in :func:`collect_all_particle_attachments` order.
+    Every row's ``source`` is in :data:`WEAPON_EFFECT_SOURCES`."""
+    return [*collect_gun_effects(ship, components),
+            *collect_munition_effects(ship, components)]
+
+
+def replace_weapon_effect_rows(
+    attachments: list[dict[str, Any]],
+    weapon_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """``attachments`` with its weapon-bound rows replaced by ``weapon_rows``,
+    keeping :func:`collect_all_particle_attachments` order: hull rows, mount
+    rows, ``aa_aura`` rows, munition rows (any other source after them)."""
+    def bucket(row: dict[str, Any]) -> int:
+        source = row.get("source", "hull")
+        if source == "hull":
+            return 0
+        if source == "aa_aura":
+            return 2
+        if source == "munition":
+            return 3
+        return 1 if source in WEAPON_EFFECT_SOURCES else 4
+
+    kept = [r for r in attachments if r.get("source", "hull") not in WEAPON_EFFECT_SOURCES]
+    rows = [*kept, *weapon_rows]
+    return sorted(rows, key=bucket)  # stable: keeps the order inside a bucket
 
 
 def collect_all_particle_attachments(

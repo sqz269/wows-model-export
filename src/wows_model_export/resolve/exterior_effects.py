@@ -13,6 +13,12 @@ from typing import Any
 from .gameparams_autofill import resolve_hull_effect_positions
 
 _SHOOTER_GROUPS = {"shotEffect", "lensEffect", "purgingEffect", "reloadBoostEffect"}
+# Mount sources whose shooter passes these groups through Peculiarities.getEffect:
+# ClientShooterEffects (guns) and WaveGunShooter (wave emitters, shotEffect
+# only). Laser charge / targeting / beam effects and the missile launch
+# effect are played directly (build 13533378), so they are never substituted.
+_SHOOTER_SOURCES = {"artillery", "atba", "airDefense"}
+_WAVE_SHOOTER_GROUPS = {"shotEffect"}
 # Ammo attributes the client passes through Peculiarities.getEffect: every
 # createEffect pick (impacts, incl. the depth-charge waterHitEffect) and the
 # shell tracer. Known divergence: the torpedo client (ClientTorpedoes.Torpedo,
@@ -36,8 +42,14 @@ def resolve_exterior_effects(
     base_attachments: list[dict[str, Any]], exterior: dict[str, Any],
     hull_key: str, *, exterior_id: str = "", themed_enabled: bool = True,
     variant_hull: bool = False, skel_ext_json: Path | None = None,
+    base_by_hull: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any] | None:
     """None inherits base; an emitted attachments list replaces it in full.
+
+    With ``base_by_hull`` (``effects.by_hull`` as hull -> rows) and weapon
+    substitutions, the payload also carries ``by_hull``: each hull's weapon
+    rows with the substitutions applied. Without substitutions consumers use
+    ``effects.by_hull`` unchanged.
 
     Unresolved EP nodes remain name-only, never guessed at the ship origin.
     A swapped hull cannot reuse positions from the original model.
@@ -80,18 +92,75 @@ def resolve_exterior_effects(
                 for key in ("position", "rotation", "matrix"):
                     if key in original:
                         row[key] = copy.deepcopy(original[key])
-        elif ((row.get("source") in {"artillery", "atba", "airDefense"}
-               and row.get("group") in _SHOOTER_GROUPS)
-              or (row.get("source") == "munition" and row.get("group") in _MUNITION_GROUPS)):
+        elif _is_substituted(row):
             path = row.get("particle_path")
             row["particle_path"] = substitutions.get(path, path)
     rows = [r for r in rows if r.get("particle_path")
             and r["particle_path"] != "particles/Empty_FX.xml"]
     resolve_hull_effect_positions(rows, skel_ext_json)
-    return {
+    payload: dict[str, Any] = {
         "source": {"exterior_id": exterior_id, "hull_key": hull_key,
                    "peculiarity": exterior.get("peculiarity"),
                    "requires_peculiarity_enabled": True,
                    "hull_table_replaced": replace_hull},
         "attachments": rows,
     }
+    if substitutions and base_by_hull:
+        payload["by_hull"] = {
+            name: {"attachments": substitute_weapon_rows(hull_rows, substitutions)}
+            for name, hull_rows in base_by_hull.items()
+        }
+    return payload
+
+
+def _is_substituted(row: dict[str, Any]) -> bool:
+    """True for a row whose path the client passes through
+    ``Peculiarities.getEffect`` (the firing ship's skin override)."""
+    source, group = row.get("source"), row.get("group")
+    return ((source in _SHOOTER_SOURCES and group in _SHOOTER_GROUPS)
+            or (source == "waves" and group in _WAVE_SHOOTER_GROUPS)
+            or (source == "munition" and group in _MUNITION_GROUPS))
+
+
+def substitute_weapon_rows(
+    rows: list[dict[str, Any]], substitutions: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Copies of weapon-bound ``rows`` with the exterior's
+    ``peculiarityEffects`` applied once to the substituted slots; a row
+    whose path becomes ``Empty_FX.xml`` is dropped."""
+    out = []
+    for row in copy.deepcopy(rows):
+        if _is_substituted(row):
+            path = row.get("particle_path")
+            row["particle_path"] = substitutions.get(path, path)
+        if row.get("particle_path") and row["particle_path"] != "particles/Empty_FX.xml":
+            out.append(row)
+    return out
+
+
+def exterior_weapon_effects(
+    payload: dict[str, Any], exterior: dict[str, Any],
+    base_attachments: list[dict[str, Any]],
+    base_by_hull: dict[str, list[dict[str, Any]]] | None,
+) -> dict[str, Any]:
+    """An existing exterior ``effects`` payload with its weapon-bound rows
+    re-derived from ``base_attachments`` (and ``by_hull`` from
+    ``base_by_hull``), the exterior's substitutions applied; its other rows
+    (hull groups with their resolved positions) are kept."""
+    from .gameparams_autofill import WEAPON_EFFECT_SOURCES, replace_weapon_effect_rows
+
+    substitutions = exterior.get("peculiarityEffects") or {}
+    if not isinstance(substitutions, dict):
+        substitutions = {}
+    weapon = [r for r in base_attachments
+              if r.get("source", "hull") in WEAPON_EFFECT_SOURCES]
+    out = {k: v for k, v in payload.items() if k != "by_hull"}
+    out["attachments"] = replace_weapon_effect_rows(
+        payload.get("attachments") or [], substitute_weapon_rows(weapon, substitutions),
+    )
+    if substitutions and base_by_hull:
+        out["by_hull"] = {
+            name: {"attachments": substitute_weapon_rows(rows, substitutions)}
+            for name, rows in base_by_hull.items()
+        }
+    return out
