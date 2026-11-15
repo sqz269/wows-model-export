@@ -2121,8 +2121,8 @@ def _absorb_gameparams_passes(
                         )
             except Exception as e:
                 _warn(warnings, f"gameparams effects: library build failed ({e})")
-            # Weapon-bound rows per hull; the top level carries the rendered
-            # hull's, as the placements do (pass 3).
+            # Weapon-bound rows per hull, for the mounts and ammo each hull
+            # places; the top level carries the rendered hull's (pass 3).
             by_hull = effects_by_hull(doc, ship_dict)
             shown_rows = _rendered_weapon_effects(doc, ship_dict, by_hull)
             if shown_rows is not None:
@@ -2258,18 +2258,47 @@ def effects_by_hull_rows(doc: dict[str, Any]) -> dict[str, list[dict[str, Any]]]
     }
 
 
+def _placements(container: dict[str, Any]) -> list[dict[str, Any]]:
+    """The placement entries of a sidecar or ``hulls.<H>`` snapshot, in
+    :data:`sidecar.PLACEMENT_SECTIONS` order."""
+    return [
+        item
+        for section in sidecar.PLACEMENT_SECTIONS
+        for item in container.get(section) or []
+        if isinstance(item, dict)
+    ]
+
+
+def hull_weapon_effects(
+    doc: dict[str, Any], ship_dict: dict[str, Any], hull: str,
+    container: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """The weapon-bound effect rows of ``hull`` for the mounts ``container``
+    places (``hulls.<hull>``, or the top level for its rendered hull).
+
+    The components are the hull's (:func:`hull_components`), with each placed
+    mount taken from the component the placement fields come from (the slot
+    component that holds the placed model, pass 3/3b) and its ammo from the
+    placement's ``ammo_ids``
+    (:func:`gameparams_autofill.collect_placed_weapon_effects`). So gun rows
+    carry the muzzle intensity of the mount on screen and the munition rows
+    cover exactly the ammo the placements fire.
+    """
+    return _gp_autofill.collect_placed_weapon_effects(
+        ship_dict, hull_components(doc, ship_dict, hull), _placements(container),
+    )
+
+
 def effects_by_hull(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """Every ``hulls`` entry's weapon-bound effect rows (mount rows of guns and
-    event weapons, then the munition rows of their ammo), each from that
-    hull's own components (:func:`hull_components`). Empty when the sidecar
+    event weapons, then the munition rows of their ammo), each for the mounts
+    that hull places (:func:`hull_weapon_effects`). Empty when the sidecar
     has fewer than two hulls: the top-level rows then cover the only hull."""
     hulls = doc.get("hulls")
     if not isinstance(hulls, dict) or len(hulls) < 2:
         return {}
     return {
-        name: _gp_autofill.collect_hull_weapon_effects(
-            ship_dict, hull_components(doc, ship_dict, name),
-        )
+        name: hull_weapon_effects(doc, ship_dict, name, entry)
         for name, entry in hulls.items()
         if isinstance(entry, dict)
     }
@@ -2279,17 +2308,15 @@ def _rendered_weapon_effects(
     doc: dict[str, Any], ship_dict: dict[str, Any],
     by_hull: dict[str, list[dict[str, Any]]],
 ) -> list[dict[str, Any]] | None:
-    """The rendered hull's weapon-bound rows (``by_hull`` entry, else resolved
-    for a single-hull sidecar); ``None`` when the sidecar names no hull, so the
-    caller keeps the rows it collected."""
+    """The rendered hull's weapon-bound rows (``by_hull`` entry, else built
+    from the top-level placements for a single-hull sidecar); ``None`` when the
+    sidecar names no hull, so the caller keeps the rows it collected."""
     shown = rendered_hull_name(doc)
     if not isinstance(shown, str) or shown not in (doc.get("hulls") or {}):
         return None
     if shown in by_hull:
         return by_hull[shown]
-    return _gp_autofill.collect_hull_weapon_effects(
-        ship_dict, hull_components(doc, ship_dict, shown),
-    )
+    return hull_weapon_effects(doc, ship_dict, shown, doc)
 
 
 def effects_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str, Any]:

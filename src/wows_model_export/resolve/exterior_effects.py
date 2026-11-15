@@ -10,6 +10,7 @@ import copy
 from pathlib import Path
 from typing import Any
 
+from ..read.gameparams import get_projectile
 from .gameparams_autofill import resolve_hull_effect_positions
 
 _SHOOTER_GROUPS = {"shotEffect", "lensEffect", "purgingEffect", "reloadBoostEffect"}
@@ -36,6 +37,11 @@ _MUNITION_GROUPS = {
         "projOverPenetrationExitEffect", "projRicochetEffect",
     ) for axis in ("Horizontal", "Vertical")),
 }
+# Ammo species whose effects the client plays without Peculiarities.getEffect
+# (build 13533378): laser hits (createLaserHitEffect) and missile hits and
+# flight (ClientMissile). Their munition rows keep the base paths even when an
+# exterior substitutes the same path for shells.
+_UNSUBSTITUTED_AMMO_SPECIES = frozenset({"Laser", "Missile"})
 
 
 def resolve_exterior_effects(
@@ -113,13 +119,25 @@ def resolve_exterior_effects(
     return payload
 
 
+def _ammo_species(ammo_id: Any) -> str | None:
+    """The GameParams ``typeinfo.species`` of a munition row's ammo
+    (``Artillery``, ``Torpedo``, ``Laser``, ``Missile``, ...); ``None`` when
+    the ammo is not in the cache."""
+    proj = get_projectile(ammo_id) if isinstance(ammo_id, str) and ammo_id else None
+    species = ((proj or {}).get("typeinfo") or {}).get("species")
+    return species if isinstance(species, str) else None
+
+
 def _is_substituted(row: dict[str, Any]) -> bool:
     """True for a row whose path the client passes through
-    ``Peculiarities.getEffect`` (the firing ship's skin override)."""
+    ``Peculiarities.getEffect`` (the firing ship's skin override). Munition
+    rows of laser and missile ammo never are (:data:`_UNSUBSTITUTED_AMMO_SPECIES`)."""
     source, group = row.get("source"), row.get("group")
+    if source == "munition":
+        return (group in _MUNITION_GROUPS
+                and _ammo_species(row.get("source_id")) not in _UNSUBSTITUTED_AMMO_SPECIES)
     return ((source in _SHOOTER_SOURCES and group in _SHOOTER_GROUPS)
-            or (source == "waves" and group in _WAVE_SHOOTER_GROUPS)
-            or (source == "munition" and group in _MUNITION_GROUPS))
+            or (source == "waves" and group in _WAVE_SHOOTER_GROUPS))
 
 
 def substitute_weapon_rows(

@@ -1252,24 +1252,24 @@ def _ship_wcs(ship: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def autofill_for_placement(
+def placed_group(
     ship: dict[str, Any],
     components: dict[str, Any],
     hp_name: str,
     asset_id: str | None,
-) -> dict[str, Any]:
-    """:func:`autofill_for_hp` for the component that holds the placed asset.
+) -> tuple[str | None, dict[str, Any] | None]:
+    """The component group that holds the placed mount at ``hp_name``.
 
-    A slot can list several components (Mogami's hulls list
-    ``artillery: [AB1_Artillery, AB2_Artillery]``, 155 mm and 203 mm guns),
-    and the export places the hull module's first one while
-    :func:`resolve_components` follows the standalone module's chain
-    (``AB2_Artillery`` for the upgraded hull). When the mount
-    ``components`` holds at ``hp_name`` is not ``asset_id`` (the placed
-    model's stem), the fields come from the component listed for the same
-    slot (in any ``ShipUpgradeInfo`` module) whose mount at ``hp_name`` is
-    that model, so they describe the mount on screen. Falls back to
-    ``components`` when no listed component holds it.
+    Returns ``(group_key, group)``: the first :data:`_AUTOFILL_GROUPS` key
+    whose ``components`` group has ``hp_name``, and that group, or, when its
+    mount there is not ``asset_id`` (the placed model's stem), the component
+    listed for the same slot (in any ``ShipUpgradeInfo`` module, node-list
+    mounts expanded) whose mount at ``hp_name`` is that model. A slot can list
+    several components (Mogami's hulls list ``artillery: [AB1_Artillery,
+    AB2_Artillery]``, 155 mm and 203 mm guns), and the export places the hull
+    module's first one while :func:`resolve_components` follows the standalone
+    module's chain. When both hold the placed model, ``components`` wins.
+    ``(None, None)`` when no group has ``hp_name``.
     """
     group_key = next(
         (
@@ -1279,13 +1279,14 @@ def autofill_for_placement(
         ),
         None,
     )
-    if group_key is None or not asset_id:
-        return autofill_for_hp(components, hp_name)
-    if _path_to_stem(components[group_key][hp_name].get("model")) == asset_id:
-        return autofill_for_hp(components, hp_name)
+    if group_key is None:
+        return None, None
+    own = components[group_key]
+    if not asset_id or _path_to_stem(own[hp_name].get("model")) == asset_id:
+        return group_key, own
     sui = ship.get("ShipUpgradeInfo") if isinstance(ship, dict) else None
     if not isinstance(sui, dict):
-        return autofill_for_hp(components, hp_name)
+        return group_key, own
     wcs = _ship_wcs(ship)
     seen: set[str] = set()
     for name in sorted(sui):
@@ -1298,8 +1299,66 @@ def autofill_for_placement(
             alt = expand_node_list_mounts(ship.get(cid), wcs, component_key=group_key)
             mount = alt.get(hp_name) if isinstance(alt, dict) else None
             if isinstance(mount, dict) and _path_to_stem(mount.get("model")) == asset_id:
-                return autofill_for_hp({**components, group_key: alt}, hp_name)
-    return autofill_for_hp(components, hp_name)
+                return group_key, alt
+    return group_key, own
+
+
+def autofill_for_placement(
+    ship: dict[str, Any],
+    components: dict[str, Any],
+    hp_name: str,
+    asset_id: str | None,
+) -> dict[str, Any]:
+    """:func:`autofill_for_hp` for the component that holds the placed asset
+    (:func:`placed_group`), so the fields describe the mount on screen. Falls
+    back to ``components`` when no listed component holds it."""
+    group_key, group = placed_group(ship, components, hp_name, asset_id)
+    if group_key is None or group is components.get(group_key):
+        return autofill_for_hp(components, hp_name)
+    return autofill_for_hp({**components, group_key: group}, hp_name)
+
+
+def placed_components(
+    ship: dict[str, Any],
+    components: dict[str, Any],
+    placements: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    """``components`` with every placed mount taken from the component the
+    placement autofill reads (:func:`placed_group`), so rows built from it
+    describe the mounts on screen.
+
+    Each placement (``hp_name``, ``asset_id``, optional ``ammo_ids``; the
+    first one per hardpoint counts, as in the autofill passes) swaps its
+    hardpoint's mount for the placed component's. A placement that lists
+    ``ammo_ids`` also sets its mount's ``ammoList`` to them: the export's
+    ammo pick (the hull module's first listed component) can differ from the
+    component a shared model resolves to (Kagero's B_Hull lists two torpedo
+    components on one launcher model), and the ammo a placement names is the
+    ammo a consumer fires from it. Hardpoints with no placement keep their
+    mount. The input is not modified.
+    """
+    out = dict(components)
+    copied: set[str] = set()
+    seen: set[str] = set()
+    for item in placements:
+        hp = item.get("hp_name") if isinstance(item, dict) else None
+        if not isinstance(hp, str) or hp in seen:
+            continue
+        seen.add(hp)
+        group_key, group = placed_group(ship, components, hp, item.get("asset_id"))
+        if group_key is None or not isinstance(group, dict):
+            continue
+        mount = group.get(hp)
+        if not isinstance(mount, dict):
+            continue
+        ammo = item.get("ammo_ids")
+        if isinstance(ammo, list) and ammo:
+            mount = {**mount, "ammoList": [str(a) for a in ammo]}
+        if group_key not in copied:
+            out[group_key] = dict(out[group_key])
+            copied.add(group_key)
+        out[group_key][hp] = mount
+    return out
 
 
 def _dead_zones(v: Any) -> list[list[float]] | None:
@@ -2657,6 +2716,27 @@ def collect_aa_aura_effects(
     return out
 
 
+def _component_ammo_ids(components: dict[str, Any]) -> list[str]:
+    """Every ammo id the weapon mounts of ``components`` list
+    (:data:`_MUNITION_COMPONENT_GROUPS`, hardpoints sorted), first-seen order."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for grp_key in _MUNITION_COMPONENT_GROUPS:
+        group = components.get(grp_key)
+        if not isinstance(group, dict):
+            continue
+        for hp_name in sorted(group.keys()):
+            mount = group[hp_name]
+            if not isinstance(mount, dict):
+                continue
+            for aid in mount.get("ammoList") or []:
+                s = str(aid)
+                if s and s not in seen:
+                    seen.add(s)
+                    ordered.append(s)
+    return ordered
+
+
 def collect_munition_effects(
     ship: dict[str, Any],
     components: dict[str, Any] | None = None,
@@ -2693,22 +2773,7 @@ def collect_munition_effects(
         # carries waterHitEffect / enemyHitSurfaceEffect /
         # enemyHitUnderwaterEffect. Same components as the placement autofill,
         # so the rows key on the ammo the mounts list.
-        seen: set[str] = set()
-        ordered: list[str] = []
-        for grp_key in _MUNITION_COMPONENT_GROUPS:
-            group = components.get(grp_key)
-            if not isinstance(group, dict):
-                continue
-            for hp_name in sorted(group.keys()):
-                mount = group[hp_name]
-                if not isinstance(mount, dict):
-                    continue
-                for aid in mount.get("ammoList") or []:
-                    s = str(aid)
-                    if s and s not in seen:
-                        seen.add(s)
-                        ordered.append(s)
-        ammo_ids = ordered
+        ammo_ids = _component_ammo_ids(components)
 
     out: list[dict[str, Any]] = []
     for ammo_id in ammo_ids:
@@ -2743,6 +2808,34 @@ def collect_hull_weapon_effects(
     Every row's ``source`` is in :data:`WEAPON_EFFECT_SOURCES`."""
     return [*collect_gun_effects(ship, components),
             *collect_munition_effects(ship, components)]
+
+
+def collect_placed_weapon_effects(
+    ship: dict[str, Any],
+    components: dict[str, Any],
+    placements: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """:func:`collect_hull_weapon_effects` for the mounts a hull places.
+
+    The mounts come from :func:`placed_components` (the component that holds
+    each placed model, the one the placement autofill reads; the ammo each
+    placement lists), so gun rows carry the placed mount's muzzle intensity
+    and the munition rows cover exactly the ammo the placements fire, plus the
+    ammo of unplaced weapon mounts (depth charges). A placement's ammo that no
+    mount carries is appended, so every placed ammo id has its rows.
+    """
+    placements = [p for p in placements if isinstance(p, dict)]
+    placed = placed_components(ship, components, placements)
+    ammo_ids = _component_ammo_ids(placed)
+    seen = set(ammo_ids)
+    for item in placements:
+        for aid in item.get("ammo_ids") or []:
+            s = str(aid)
+            if s and s not in seen:
+                seen.add(s)
+                ammo_ids.append(s)
+    return [*collect_gun_effects(ship, placed),
+            *collect_munition_effects(ship, placed, ammo_ids=ammo_ids)]
 
 
 def replace_weapon_effect_rows(
@@ -3380,6 +3473,9 @@ __all__ = [
     "ship_metadata_extras",
     "autofill_for_hp",
     "autofill_for_placement",
+    "placed_group",
+    "placed_components",
+    "collect_placed_weapon_effects",
     "torpedo_profile_extras",
     "shell_visual_extras",
     "shell_effects_extras",
