@@ -1090,6 +1090,55 @@ def absorb_gameparams_mounts(
     return merge_preserving(doc, update)
 
 
+def absorb_gameparams_hull_mounts(
+    doc: dict[str, Any],
+    autofill_by_hull: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    """Stamp GameParams-derived gameplay fields onto the placements of each
+    ``hulls.<H>`` snapshot.
+
+    ``autofill_by_hull`` maps a hull name to ``{hp_name: fields}``, the
+    fields :func:`gameparams_autofill.autofill_for_hp` returns for that hull's
+    own components (``misc_filter``, ``yaw_range_deg`` / ``elev_range_deg`` /
+    dead zones, reload, barrels, ``display_name``, ``hit_location``, ...) —
+    the same fields the top-level placements carry for the rendered hull
+    (:func:`absorb_gameparams_mounts`). GameParams values overwrite the
+    entry's fields of the same name; every other field is kept. Hulls and
+    hardpoints missing from the map are left as they are.
+
+    Returns a new doc; ``doc`` is not mutated.
+    """
+    hulls = doc.get("hulls")
+    if not isinstance(hulls, dict) or not autofill_by_hull:
+        return doc
+    new_hulls: dict[str, Any] = dict(hulls)
+    changed = False
+    for hull_name, by_hp in autofill_by_hull.items():
+        entry = hulls.get(hull_name)
+        if not isinstance(entry, dict) or not by_hp:
+            continue
+        new_entry = dict(entry)
+        for section in PLACEMENT_SECTIONS:
+            items = entry.get(section)
+            if not isinstance(items, list):
+                continue
+            new_items: list[Any] = []
+            for item in items:
+                hp = item.get("hp_name") if isinstance(item, dict) else None
+                fields = by_hp.get(hp) if isinstance(hp, str) else None
+                if fields:
+                    item = {**item, **_deepcopy_jsonish(fields)}
+                    changed = True
+                new_items.append(item)
+            new_entry[section] = new_items
+        new_hulls[hull_name] = new_entry
+    if not changed:
+        return doc
+    out = dict(doc)
+    out["hulls"] = new_hulls
+    return out
+
+
 def absorb_gameparams_armor(
     doc: dict[str, Any],
     *,

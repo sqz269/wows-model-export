@@ -15,6 +15,12 @@ Passes (``PASSES``):
   (:func:`.scaffold_ship.torpedo_profiles_pass`; added for ``flat_damage``,
   the flat term of a torpedo hit's damage). It owns the ``ballistics``
   section and changes only its ``torpedoes`` entries.
+* ``hull_mounts`` — the per-placement GameParams fields (``misc_filter``,
+  arcs, reload, ...) on every ``hulls.<H>`` snapshot, from that hull's
+  components (:func:`.scaffold_ship.hull_mounts_pass`). Owns ``hulls``.
+* ``ship_class`` — ``ship.class`` re-derived from the main battery's caliber
+  (:func:`.scaffold_ship.ship_class_pass`). Owns ``ship``. Skipped for a
+  ship whose ``build_deps.json`` records a ``class_override``.
 """
 from __future__ import annotations
 
@@ -27,13 +33,36 @@ from ..config import PipelineConfig
 from ..read import gameparams as _gp_read
 from ..resolve import sidecar
 from ..toolkit.gameparams import ensure_dump as _ensure_gameparams_dump
-from .scaffold_ship import air_defense_pass, torpedo_profiles_pass
+from .scaffold_ship import (
+    air_defense_pass,
+    hull_mounts_pass,
+    ship_class_pass,
+    torpedo_profiles_pass,
+)
 
 #: Pass name → (the sidecar sections it owns, ``fn(doc, ship_dict) -> doc``).
 PASSES: dict[str, tuple[tuple[str, ...], Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]]] = {
     "air_defense": (("air_defense",), air_defense_pass),
     "torpedoes": (("ballistics",), torpedo_profiles_pass),
+    "hull_mounts": (("hulls",), hull_mounts_pass),
+    "ship_class": (("ship",), ship_class_pass),
 }
+
+
+def _class_override(ship_dir: Path) -> str | None:
+    """The ``class_override`` the ship's last export was made with, read from
+    its ``build_deps.json`` (``reexport.class_override``); ``None`` if none."""
+    path = ship_dir / "build_deps.json"
+    if not path.is_file():
+        return None
+    try:
+        import json
+
+        reexport = json.loads(path.read_text(encoding="utf-8")).get("reexport") or {}
+    except (OSError, ValueError):
+        return None
+    value = reexport.get("class_override") if isinstance(reexport, dict) else None
+    return value if isinstance(value, str) and value else None
 
 
 @dataclass
@@ -93,6 +122,9 @@ def refresh_sidecar(
     for name in passes:
         sections, fn = PASSES[name]
         owned.update(sections)
+        if name == "ship_class" and _class_override(path.parent):
+            # A hand-typed class wins over the caliber rule.
+            continue
         new = fn(new, ship_dict)
     # Keep the old stamp on a section that came back equal.
     for key in owned:

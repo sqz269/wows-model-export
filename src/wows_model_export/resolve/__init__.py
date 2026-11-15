@@ -105,6 +105,7 @@ from .camo import (
 # gameparams_autofill — sidecar payload synthesis
 from .gameparams_autofill import (
     autofill_for_hp,
+    autofill_for_placement,
     class_from_caliber,
     classify_splash_boxes,
     collect_barbettes,
@@ -236,6 +237,7 @@ __all__ = [
     "TILE_BROADCAST_CATEGORIES",
     # gameparams_autofill
     "autofill_for_hp",
+    "autofill_for_placement",
     "class_from_caliber",
     "classify_splash_boxes",
     "collect_barbettes",

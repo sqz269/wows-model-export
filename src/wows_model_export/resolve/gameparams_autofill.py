@@ -527,6 +527,23 @@ _COMPONENT_KEYS: tuple[str, ...] = (
     # turrets ride the main-battery hardpoints, missile launchers their own.
     "phaserLasers",
     "missiles",
+    # Halloween 2020 weapons (France / Oland H2020 ``_PrimaryWeapons``):
+    # charge and axis lasers (species Main) and wave emitters (species
+    # Torpedo), node-list mounts on the main-battery hardpoints.
+    "chargeLasers",
+    "axisLaser",
+    "waves",
+)
+
+#: Laser component keys: ArtilleryGun subclasses, so their mounts carry the
+#: gun fields (arcs, reload, barrels) like a main-battery gun.
+_LASER_COMPONENT_KEYS: tuple[str, ...] = ("phaserLasers", "chargeLasers", "axisLaser")
+
+#: Every weapon component key whose mounts hold a model, armor and ammo: the
+#: ordinary batteries plus the event-ship weapon families.
+_WEAPON_COMPONENT_KEYS: tuple[str, ...] = (
+    "artillery", "atba", "airDefense", "torpedoes",
+    *_LASER_COMPONENT_KEYS, "waves", "missiles",
 )
 
 #: ucTypes of the per-branch weapon modules on event ships with selectable
@@ -542,6 +559,11 @@ _BRANCH_WEAPON_UCTYPES: tuple[str, ...] = ("_PrimaryWeapons", "_SecondaryWeapons
 _WCS_NODE_BUCKETS: dict[str, str] = {
     "artillery":    "ArtilleryNodes",
     "phaserLasers": "ArtilleryNodes",
+    # France / Oland H2020 list their laser and wave hardpoints
+    # (``HP_XGM_1`` / ``HP_XGS_1``) under ArtilleryNodes.
+    "chargeLasers": "ArtilleryNodes",
+    "axisLaser":    "ArtilleryNodes",
+    "waves":        "ArtilleryNodes",
     "atba":         "ATBANodes",
     "torpedoes":    "TorpedoNodes",
     "missiles":     "MissileNodes",
@@ -1143,11 +1165,7 @@ def autofill_for_hp(
     # Finders / Radars / AirArmament) holds either HP_-keyed mount dicts plus
     # group-level scalars (for guns; e.g. AB1_Artillery.maxDist), or a flat
     # mount-only dict (Directors). Walk both shapes.
-    for group_key in (
-        "artillery", "atba", "airDefense", "torpedoes",
-        "directors", "finders", "radars", "airArmament",
-        "phaserLasers", "missiles",
-    ):
+    for group_key in _AUTOFILL_GROUPS:
         group = components.get(group_key)
         if not isinstance(group, dict):
             continue
@@ -1182,13 +1200,16 @@ def autofill_for_hp(
         if isinstance(mf, list):
             out["misc_filter"] = [str(s) for s in mf]
 
-        if group_key in ("artillery", "atba", "phaserLasers"):
+        if group_key in ("artillery", "atba", *_LASER_COMPONENT_KEYS):
             # Laser turrets are ArtilleryGun subclasses (same arc / reload /
             # barrel fields on the main-battery hardpoints).
             _fill_gun_fields(mount, group, out)
         elif group_key == "airDefense":
             _fill_aa_fields(mount, out)
-        elif group_key == "torpedoes":
+        elif group_key in ("torpedoes", "waves"):
+            # Wave emitters are species Torpedo (they sit in the torpedoes
+            # placement section): tube count, reload, traverse arc and
+            # rate, shoot sector, as for a torpedo launcher.
             _fill_torpedo_fields(mount, out)
         # directors / finders / radars / airArmament / missiles:
         # display_name + miscFilter only.
@@ -1207,6 +1228,78 @@ def autofill_for_hp(
                 break
         return out
     return {}
+
+
+#: The component groups :func:`autofill_for_hp` walks, in its order.
+_AUTOFILL_GROUPS: tuple[str, ...] = (
+    "artillery", "atba", "airDefense", "torpedoes",
+    "directors", "finders", "radars", "airArmament",
+    *_LASER_COMPONENT_KEYS, "waves", "missiles",
+)
+
+
+def _ship_wcs(ship: dict[str, Any]) -> dict[str, Any] | None:
+    """The ship's weapon-control-system component (node-list mounts' per-node
+    records), from the first ``ShipUpgradeInfo`` module that names one."""
+    sui = ship.get("ShipUpgradeInfo") if isinstance(ship, dict) else None
+    if not isinstance(sui, dict):
+        return None
+    for name in sorted(sui):
+        comps = sui[name].get("components") if isinstance(sui[name], dict) else None
+        ids = comps.get("wcs") if isinstance(comps, dict) else None
+        if isinstance(ids, list) and ids and isinstance(ship.get(ids[0]), dict):
+            return ship[ids[0]]
+    return None
+
+
+def autofill_for_placement(
+    ship: dict[str, Any],
+    components: dict[str, Any],
+    hp_name: str,
+    asset_id: str | None,
+) -> dict[str, Any]:
+    """:func:`autofill_for_hp` for the component that holds the placed asset.
+
+    A slot can list several components (Mogami's hulls list
+    ``artillery: [AB1_Artillery, AB2_Artillery]``, 155 mm and 203 mm guns),
+    and the export places the hull module's first one while
+    :func:`resolve_components` follows the standalone module's chain
+    (``AB2_Artillery`` for the upgraded hull). When the mount
+    ``components`` holds at ``hp_name`` is not ``asset_id`` (the placed
+    model's stem), the fields come from the component listed for the same
+    slot (in any ``ShipUpgradeInfo`` module) whose mount at ``hp_name`` is
+    that model, so they describe the mount on screen. Falls back to
+    ``components`` when no listed component holds it.
+    """
+    group_key = next(
+        (
+            g for g in _AUTOFILL_GROUPS
+            if isinstance(components.get(g), dict)
+            and isinstance(components[g].get(hp_name), dict)
+        ),
+        None,
+    )
+    if group_key is None or not asset_id:
+        return autofill_for_hp(components, hp_name)
+    if _path_to_stem(components[group_key][hp_name].get("model")) == asset_id:
+        return autofill_for_hp(components, hp_name)
+    sui = ship.get("ShipUpgradeInfo") if isinstance(ship, dict) else None
+    if not isinstance(sui, dict):
+        return autofill_for_hp(components, hp_name)
+    wcs = _ship_wcs(ship)
+    seen: set[str] = set()
+    for name in sorted(sui):
+        comps = sui[name].get("components") if isinstance(sui[name], dict) else None
+        ids = comps.get(group_key) if isinstance(comps, dict) else None
+        for cid in ids if isinstance(ids, list) else []:
+            if not isinstance(cid, str) or cid in seen:
+                continue
+            seen.add(cid)
+            alt = expand_node_list_mounts(ship.get(cid), wcs, component_key=group_key)
+            mount = alt.get(hp_name) if isinstance(alt, dict) else None
+            if isinstance(mount, dict) and _path_to_stem(mount.get("model")) == asset_id:
+                return autofill_for_hp({**components, group_key: alt}, hp_name)
+    return autofill_for_hp(components, hp_name)
 
 
 def _dead_zones(v: Any) -> list[list[float]] | None:
@@ -2264,8 +2357,7 @@ _MUNITION_LIST_SLOTS: tuple[str, ...] = (
 # Weapon components whose mounts list ammo (``HP_*`` -> ``ammoList``) for the
 # munition scan.
 _MUNITION_COMPONENT_GROUPS: tuple[str, ...] = (
-    "artillery", "atba", "airDefense", "torpedoes", "depthCharges",
-    "phaserLasers", "missiles",
+    *_WEAPON_COMPONENT_KEYS, "depthCharges",
 )
 
 
@@ -2698,9 +2790,8 @@ def classify_splash_boxes(
 
     # --- per-mount hit-locations (turret barbettes etc.)
     for group_key in (
-        "artillery", "atba", "airDefense", "torpedoes",
+        *_WEAPON_COMPONENT_KEYS,
         "directors", "finders", "radars", "airArmament",
-        "phaserLasers", "missiles",
     ):
         group = components.get(group_key) if components else None
         if not isinstance(group, dict):
@@ -2848,9 +2939,7 @@ def collect_mount_armor(
     to match the existing ``materials_table`` convention.
     """
     out: dict[str, dict[str, float]] = {}
-    for group_key in (
-        "artillery", "atba", "airDefense", "torpedoes", "phaserLasers", "missiles",
-    ):
+    for group_key in _WEAPON_COMPONENT_KEYS:
         group = components.get(group_key) if components else None
         if not isinstance(group, dict):
             continue
@@ -2945,30 +3034,45 @@ _CRUISER_CA_MAX_CALIBER_MM = 250.0
 
 
 def _primary_caliber_mm(components: dict[str, Any] | None) -> float | None:
-    """Return the primary HP_AGM_* mount's barrel diameter in mm, or ``None``.
+    """Return the main battery's largest barrel diameter in mm, or ``None``.
 
-    Reads ``components.artillery``'s first ``HP_AGM_*`` entry. Returns
-    ``None`` when the ship has no main battery (rare; happens on
-    submarines + missile cruisers).
+    Reads every mount of ``components.artillery`` whose
+    ``typeinfo.species`` is ``Main``, whatever its hardpoint prefix: each
+    nation names its main-battery hardpoints differently (``HP_AGM_`` US,
+    ``HP_GGM_`` Germany, ``HP_JGM_`` Japan, ``HP_RGM_`` USSR, ``HP_BGM_``
+    UK, ...), and node-list mounts (event ships) arrive expanded per
+    hardpoint by :func:`resolve_components`. A mount without ``typeinfo``
+    counts as main battery (the ``artillery`` slot only holds main guns).
+    An event hull whose main battery is a laser (the Expeditioner's laser
+    branches, ``phaserLasers`` on the main hardpoints) reads the laser
+    components' Main mounts when ``artillery`` has none. Returns ``None``
+    when the ship has no main battery (submarines, some event ships).
     """
     if not isinstance(components, dict):
         return None
-    art = components.get("artillery")
-    if not isinstance(art, dict):
-        return None
-    main_hp = next(
-        (k for k in art if isinstance(k, str) and k.startswith("HP_AGM_")),
-        None,
-    )
-    if main_hp is None:
-        return None
-    mount = art.get(main_hp)
-    if not isinstance(mount, dict):
-        return None
-    bd = _safe_float(mount.get("barrelDiameter"))
-    if bd is None or bd <= 0:
-        return None
-    return bd * 1000.0
+    for keys in (("artillery",), _LASER_COMPONENT_KEYS):
+        best: float | None = None
+        for key in keys:
+            group = components.get(key)
+            if not isinstance(group, dict):
+                continue
+            for hp, mount in group.items():
+                if not isinstance(hp, str) or not isinstance(mount, dict):
+                    continue
+                if not mount.get("model"):
+                    continue
+                typeinfo = mount.get("typeinfo")
+                species = typeinfo.get("species") if isinstance(typeinfo, dict) else None
+                if species not in (None, "Main"):
+                    continue
+                bd = _safe_float(mount.get("barrelDiameter"))
+                if bd is None or bd <= 0:
+                    continue
+                if best is None or bd > best:
+                    best = bd
+        if best is not None:
+            return best * 1000.0
+    return None
 
 
 def class_from_caliber(
@@ -3077,6 +3181,7 @@ __all__ = [
     "variants_summary",
     "ship_metadata_extras",
     "autofill_for_hp",
+    "autofill_for_placement",
     "torpedo_profile_extras",
     "shell_visual_extras",
     "shell_effects_extras",

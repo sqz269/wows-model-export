@@ -1983,6 +1983,16 @@ def _absorb_gameparams_passes(
 
     # Pass 3: per-placement gameplay autofill
     try:
+        # The fields follow the hull whose mounts the export placed
+        # (variants.rendered_hull, an exact mount match), as
+        # hulls.<rendered_hull> does in pass 3b. The best-overlap detection
+        # above resolves a tie to the active hull (Kagero's B_Hull holds all
+        # of A_Hull's mounts plus AA guns), which would stamp the upgraded
+        # modules' numbers on the stock hull's mounts.
+        mount_components = components
+        shown = (doc.get("variants") or {}).get("rendered_hull")
+        if isinstance(shown, str) and shown in (doc.get("hulls") or {}):
+            mount_components = hull_components(doc, ship_dict, shown)
         autofill_by_hp: dict[str, dict] = {}
         for section in sidecar.PLACEMENT_SECTIONS:
             for entry in doc.get(section) or []:
@@ -1991,13 +2001,23 @@ def _absorb_gameparams_passes(
                 hp = entry.get("hp_name")
                 if not isinstance(hp, str) or hp in autofill_by_hp:
                     continue
-                fields = _gp_autofill.autofill_for_hp(components, hp)
+                fields = _gp_autofill.autofill_for_placement(
+                    ship_dict, mount_components, hp, entry.get("asset_id"),
+                )
                 if fields:
                     autofill_by_hp[hp] = fields
         if autofill_by_hp:
             doc = sidecar.absorb_gameparams_mounts(doc, autofill_by_hp)
     except Exception as e:
         _warn(warnings, f"gameparams mount autofill failed ({e})")
+
+    # Pass 3b: the same per-placement fields on every hulls.<H> snapshot,
+    # each from its own hull's components (hull_components), so a consumer
+    # that equips another hull reads its arcs and miscFilter there.
+    try:
+        doc = hull_mounts_pass(doc, ship_dict)
+    except Exception as e:
+        _warn(warnings, f"gameparams per-hull mount autofill failed ({e})")
 
     # Pass 4: per-mount armor + barbettes
     try:
@@ -2215,6 +2235,61 @@ def hull_components(doc: dict[str, Any], ship_dict: dict[str, Any], hull: str | 
     if hull and hull != variants.get("active_hull"):
         choice = "stock" if hull == variants.get("stock_hull") else hull
     return _gp_autofill.resolve_components(ship_dict, hull_choice=choice)
+
+
+def hull_mounts_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str, Any]:
+    """Stamp the per-placement GameParams fields on every ``hulls.<H>`` snapshot.
+
+    Each hull's placements get :func:`gameparams_autofill.autofill_for_placement`
+    from that hull's components (:func:`hull_components`, as the top-level mount
+    pass resolves the rendered hull; the component of a slot that holds the
+    placed asset when the hull lists several): ``misc_filter``, the arcs
+    (``yaw_range_deg``, ``elev_range_deg``, dead zones), reload, barrels,
+    ``display_name``, ``hit_location``, ... So ``hulls.<rendered hull>``
+    carries the same fields as the top-level placements, and every other hull
+    its own.
+    """
+    hulls = doc.get("hulls")
+    if not isinstance(hulls, dict) or not hulls:
+        return doc
+    autofill_by_hull: dict[str, dict[str, dict[str, Any]]] = {}
+    for hull_name, entry in hulls.items():
+        if not isinstance(entry, dict):
+            continue
+        components = hull_components(doc, ship_dict, hull_name)
+        by_hp: dict[str, dict[str, Any]] = {}
+        for section in sidecar.PLACEMENT_SECTIONS:
+            for item in entry.get(section) or []:
+                hp = item.get("hp_name") if isinstance(item, dict) else None
+                if not isinstance(hp, str) or hp in by_hp:
+                    continue
+                fields = _gp_autofill.autofill_for_placement(
+                    ship_dict, components, hp, item.get("asset_id"),
+                )
+                if fields:
+                    by_hp[hp] = fields
+        if by_hp:
+            autofill_by_hull[hull_name] = by_hp
+    return sidecar.absorb_gameparams_hull_mounts(doc, autofill_by_hull)
+
+
+def ship_class_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str, Any]:
+    """Re-derive ``ship.class`` from the main battery's caliber
+    (:func:`gameparams_autofill.class_from_caliber`, the rule the scaffold
+    applies when no class override is given). Only the class changes; the
+    ``ship_key`` names every cruiser class ``Cruiser``. A ship whose species
+    the rule does not know keeps its class.
+    """
+    ship = doc.get("ship")
+    if not isinstance(ship, dict) or not isinstance(ship_dict, dict):
+        return doc
+    species = ((ship_dict.get("typeinfo") or {}).get("species") or "").strip() or None
+    cls = _gp_autofill.class_from_caliber(
+        species, _gp_autofill.resolve_components(ship_dict),
+    )
+    if not cls or cls == ship.get("class"):
+        return doc
+    return {**doc, "ship": {**ship, "class": cls}}
 
 
 def torpedo_profiles_pass(doc: dict[str, Any], ship_dict: dict[str, Any] | None = None) -> dict[str, Any]:
