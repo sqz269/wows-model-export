@@ -56,6 +56,7 @@ import {
   samplePosFromVariantVg,
   sampleRamp,
   sampleScalarVg,
+  spawnBakesExplicitAxis,
 } from './sampling';
 import type { ParticleClocks } from './sampling';
 import { particleRandom } from './random';
@@ -437,6 +438,11 @@ export class SystemRenderer {
   // angle that fx_Particle_initSpinAngle bakes from the spawn velocity.
   private spawnAxis: Float32Array;
   private readonly seedsSpawnAxis: boolean;
+  /** Detached axial billboard with a local eo: the spawn node's rotation of
+   *  eo is seeded into spawnAxis (see spawnBakesExplicitAxis). */
+  private readonly seedsEoAxis: boolean;
+  private readonly eoAxisLocal = new THREE.Vector3();
+  private readonly eoAxisTmp = new THREE.Vector3();
   private age: Float32Array; // age in seconds; -1 = empty slot
   private lifetime: Float32Array;
   private colorRGBA: Float32Array;
@@ -1000,6 +1006,8 @@ export class SystemRenderer {
     this.velGpu = new Float32Array(this.capacity * 3);
     this.spawnAxis = new Float32Array(this.capacity * 3);
     this.seedsSpawnAxis = renderer?.velocityOriented === true;
+    this.seedsEoAxis = spawnBakesExplicitAxis(this.coordinateStyle, renderer);
+    if (this.seedsEoAxis) this.eoAxisLocal.fromArray(renderer!.explicitOrientation as number[]);
     this.age = new Float32Array(this.capacity);
     this.lifetime = new Float32Array(this.capacity);
     this.ageRate = new Float32Array(this.capacity);
@@ -2146,7 +2154,7 @@ export class SystemRenderer {
     t.pos[dst3 + 0] = this.pos[src3 + 0] * this.nativeToWorld;
     t.pos[dst3 + 1] = this.pos[src3 + 1] * this.nativeToWorld;
     t.pos[dst3 + 2] = this.pos[src3 + 2] * this.nativeToWorld;
-    if (this.seedsSpawnAxis) {
+    if (this.seedsSpawnAxis || this.seedsEoAxis) {
       // Spawn-seeded unit axis (native sim+0x70) — the VS only normalizes it,
       // so no NATIVE_TO_METRES scale; a zero axis falls back to eo in the VS.
       t.vel[dst3 + 0] = this.spawnAxis[src3 + 0];
@@ -2520,6 +2528,15 @@ export class SystemRenderer {
       this.spawnAxis[slot * 3 + 0] = svx * inv;
       this.spawnAxis[slot * 3 + 1] = svy * inv;
       this.spawnAxis[slot * 3 + 2] = svz * inv;
+    }
+    if (this.seedsEoAxis) {
+      // The local eo through the spawn node into the sim frame, once.
+      const a = this.eoAxisTmp.copy(this.eoAxisLocal);
+      if (!this.spawnFrameIdentity) a.applyMatrix3(this.spawnDirectionToSim);
+      a.normalize();
+      this.spawnAxis[slot * 3 + 0] = a.x;
+      this.spawnAxis[slot * 3 + 1] = a.y;
+      this.spawnAxis[slot * 3 + 2] = a.z;
     }
     this.age[slot] = 0;
     this.spawnSerial[slot] = ++this.spawnSerialCounter;

@@ -19,6 +19,7 @@ import {
   hasNonZeroNumber,
   normalizedParticleSunColor,
   rampHasNonZeroValue,
+  spawnBakesExplicitAxis,
   systemUsesDetachedCoordinateFrame,
 } from './sampling';
 import { SystemRenderer } from './system-renderer';
@@ -430,6 +431,7 @@ export class ParticleScene {
         flipTexcoordU: r?.flipTexcoordU,
         flipTexcoordV: r?.flipTexcoordV,
         velocityOriented: r?.velocityOriented,
+        spawnBakedAxis: spawnBakesExplicitAxis(sys.general?.coordinateStyle ?? 2, r),
         billboard: r?.billboard,
         lightingAmbient: r?.lightingAmbient,
         lightingShineness: r?.lightingShineness,

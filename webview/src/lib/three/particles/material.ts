@@ -98,6 +98,10 @@ interface ParticleMaterialOptions {
    *  on a Frida hook of FUN_1406d29c0 — do NOT guess it from parse offsets
    *  (DrawRec +8 trap). */
   velocityOriented?: boolean;
+  /** The axial axis arrives per particle in the velocity attribute, seeded at
+   *  spawn from the local eo (spawnBakesExplicitAxis), as velocity-axial
+   *  systems seed it from the spawn velocity. */
+  spawnBakedAxis?: boolean;
   /** Renderer.billboard — with a nonzero eo selects the AXIAL billboard
    *  (card whose long axis = eo, yawing about it to face the camera); see
    *  uUseAxialBillboard. */
@@ -442,7 +446,10 @@ export function buildParticleMaterial(opts: ParticleMaterialOptions = {}): THREE
   // with the spawn-baked unit axis, not the live velocity — a live axis made
   // cards tumble upside-down wherever forces curve the path (gravity-bent
   // splash crowns, e.g. StarTrek_Ray_Laser_Impulse_Water sys "main_first").
-  const useVelocityAxial = opts.billboard === true && opts.velocityOriented === true ? 1 : 0;
+  const useVelocityAxial =
+    opts.billboard === true && (opts.velocityOriented === true || opts.spawnBakedAxis === true)
+      ? 1
+      : 0;
   const useAxialBillboard =
     opts.billboard === true && (opts.velocityOriented === true || hasExplicitOrientation) ? 1 : 0;
   const fixedOrientationVec =

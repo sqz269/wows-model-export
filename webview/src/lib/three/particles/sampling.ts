@@ -71,6 +71,36 @@ export function coordinateStyleUsesDetachedFrame(coord: number): boolean {
   return coord !== 3;
 }
 
+/** True for an AXIAL billboard (billboard + nonzero eo, not velocityOriented)
+ *  whose LOCAL explicit orientation lives in a detached (world-stored) system.
+ *  Native rotates a local eo by the EMITTER NODE matrix at spawn
+ *  (fx_Particle_emitUpdate, the branch after the node-yaw bake) and draws the
+ *  card about that spawn-baked orientVec (fx_Sprite_buildQuad mode 1). A
+ *  detached particle's draw matrix is the particle root, not the node, so the
+ *  axis must be seeded per particle at spawn: the laser beam RAY (cs 2, eo
+ *  (0,0,1) local) otherwise points along world +Z instead of its beam. */
+export function spawnBakesExplicitAxis(
+  coordinateStyle: number,
+  renderer:
+    | {
+        billboard?: boolean;
+        explicitOrientationLocal?: boolean;
+        velocityOriented?: boolean;
+        explicitOrientation?: readonly number[];
+      }
+    | undefined,
+): boolean {
+  const eo = renderer?.explicitOrientation;
+  return (
+    coordinateStyleUsesDetachedFrame(coordinateStyle) &&
+    renderer?.billboard === true &&
+    renderer?.explicitOrientationLocal === true &&
+    renderer?.velocityOriented !== true &&
+    Array.isArray(eo) &&
+    eo.some((v) => (v ?? 0) !== 0)
+  );
+}
+
 /** Sample a 1D ``Ramp`` curve at parameter ``t ∈ [0, 1]``. */
 export function sampleRamp(ramp: ParticleRamp | undefined, t: number, fallback = 1): number {
   if (!ramp || !ramp.points || ramp.points.length === 0) return fallback;

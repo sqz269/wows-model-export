@@ -63,6 +63,7 @@ import {
   DEFAULT_LASER_BEAM_LAW,
   LASER_BEAM_GROUPS,
   LASER_HIT_GROUP,
+  LASER_PREVIEW_FIRE_PERIOD_S,
   LASER_PREVIEW_RANGE_M,
   SHIP_METRES_PER_BW,
   laserBeamChannels,
@@ -368,7 +369,13 @@ interface LaserBeamRig {
   /** Beam and targeting rows drawn from `start` (their channel 0 follows the
    *  beam length). */
   beams: ParticleAttachment[];
+  /** Beam-end hit rows played at `end`. */
+  hits: ParticleAttachment[];
+  /** Handles of `beams` + `hits` once the layer is built. */
+  handles: ParticleAttachmentHandle[];
   lengthBw: number;
+  /** performance.now() of the last preview shot. */
+  lastFireMs: number;
 }
 
 const laserMuzzleWorld = new THREE.Vector3();
@@ -3172,9 +3179,17 @@ export class ShipViewer {
     // checkboxes (and 'all' mode) re-burst event effects continuously. Ambient
     // groups are active by default; event groups stay idle until their loop
     // checkbox is ticked (applyShipParticleActivation gates activation).
+    // Laser beams and their hits are one-shot bursts the firing preview
+    // replays on its own clock (updateLaserBeamRigs), beam and hit together.
+    const laserShotRows = new Set(this.laserBeamRigs.flatMap((r) => [...r.beams, ...r.hits]));
     const handles = scene.build(expanded, result.records, (a) => this.resolveParticleAnchor(a), {
-      loopOneShot: () => true,
+      loopOneShot: (a) => !laserShotRows.has(a),
     });
+    for (const rig of this.laserBeamRigs) {
+      rig.handles = handles.filter(
+        (h) => rig.beams.includes(h.attachment) || rig.hits.includes(h.attachment),
+      );
+    }
     this.particleScene = scene;
     this.particleHandles = handles;
     this.particleAnchorObjects.clear();
@@ -3453,7 +3468,16 @@ export class ShipViewer {
         // Beam / targeting: drawn from the muzzle toward the preview target.
         let rig = rigsByMuzzle.get(anchor);
         if (!rig) {
-          rig = { muzzle: anchor, start: new THREE.Object3D(), end: null, beams: [], lengthBw: 0 };
+          rig = {
+            muzzle: anchor,
+            start: new THREE.Object3D(),
+            end: null,
+            beams: [],
+            hits: [],
+            handles: [],
+            lengthBw: 0,
+            lastFireMs: 0,
+          };
           rig.start.name = `laserBeam:${clone.node}`;
           this.particleAnchorRoot.add(rig.start);
           rigsByMuzzle.set(anchor, rig);
@@ -3479,6 +3503,7 @@ export class ShipViewer {
         };
         this.particleAttachmentAnchors.set(hitClone, rig.end);
         this.particleEventKeyOverride.set(hitClone, shipParticleEventKey(a));
+        rig.hits.push(hitClone);
         out.push(hitClone);
       });
     }
@@ -3560,6 +3585,17 @@ export class ShipViewer {
         rig.end.quaternion.copy(local);
       }
       const lengthBw = lengthM / SHIP_METRES_PER_BW;
+      // Fire: replay beam and hit together every LASER_PREVIEW_FIRE_PERIOD_S
+      // while the beam's loop is on (the client draws one beam per shot).
+      const nowMs = performance.now();
+      if (
+        this.particleScene &&
+        rig.handles.some((h) => h.active) &&
+        nowMs - rig.lastFireMs >= LASER_PREVIEW_FIRE_PERIOD_S * 1000
+      ) {
+        rig.lastFireMs = nowMs;
+        for (const h of rig.handles) if (h.active) this.particleScene.restartAttachment(h);
+      }
       if (Math.abs(lengthBw - rig.lengthBw) > 1e-3) {
         rig.lengthBw = lengthBw;
         if (this.particleScene) {

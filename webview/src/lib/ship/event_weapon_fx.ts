@@ -54,6 +54,11 @@ export const LASER_HIT_GROUP = 'laserHit';
  *  shorter than `min_length_bw` (200 m), so the target sits well past it. */
 export const LASER_PREVIEW_RANGE_M = 900;
 
+/** Seconds between the firing preview's shots. Beam records burst once
+ *  (`maxEmittingDuration` 0, burst emitters), so the preview replays the beam
+ *  and its hit on this clock instead of the generic one-shot loop. */
+export const LASER_PREVIEW_FIRE_PERIOD_S = 3;
+
 /** Ship metres per BigWorld unit (BW_TO_SHIP). */
 export const SHIP_METRES_PER_BW = 15;
 
