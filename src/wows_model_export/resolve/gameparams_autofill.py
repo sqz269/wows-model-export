@@ -1453,6 +1453,12 @@ def torpedo_profile_extras(ammo_id: str, *, refresh: bool = False) -> dict[str, 
     See :func:`tools.ship.sidecar.make_torpedo_profile` for the field
     schema. Source mappings:
 
+    * ``flat_damage``     <- ``damage``: the flat term of a hit's damage. A
+      torpedo hit deals ``alpha_damage / 3 + flat_damage`` (the client's
+      ``ModifiersApply.getTorpedoDamage``: ``alphaDamage /
+      TORPEDO_DAMAGE_CONSTANT + damage``, the constant 3, then times the
+      shooter's ``torpedoDamageCoeff`` and ``controllableWeaponDamageCoeff``),
+      not ``alpha_damage``: Mk 15 mod 3 lists 46,600 and hits for 16,633.
     * ``speed_kts``       <- ``speed`` (knots — already in source units).
     * ``running_depth_m`` <- ``depth * 15`` (native -> metres).
     * ``arming_time_s``   <- ``armingTime`` (seconds).
@@ -1475,6 +1481,9 @@ def torpedo_profile_extras(ammo_id: str, *, refresh: bool = False) -> dict[str, 
     if proj.get("ammoType") != "torpedo":
         return {}
     out: dict[str, Any] = {}
+    flat = _safe_float(proj.get("damage"))
+    if flat is not None and flat >= 0:
+        out["flat_damage"] = flat
     speed = _safe_float(proj.get("speed"))
     if speed is not None and speed > 0:
         out["speed_kts"] = speed

@@ -547,6 +547,7 @@ _TORPEDO_PROFILE_ORDER: tuple[str, ...] = (
     "alpha_damage",
     "alpha_piercing_he_mm",
     "max_range_m",
+    "flat_damage",
     "speed_kts",
     "running_depth_m",
     "arming_time_s",

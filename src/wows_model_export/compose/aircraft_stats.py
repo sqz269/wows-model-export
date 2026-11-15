@@ -177,6 +177,8 @@ def _torpedo(proj: dict) -> dict[str, Any]:
     ``ballistics.torpedoes`` entry, so a consumer builds the air torpedo the
     way it builds a ship's: ``speed_kts`` (GameParams knots), ``max_range_m``
     (``maxDist`` BW x 30, displayed metres), ``alpha_damage``,
+    ``flat_damage`` (``damage``: a hit deals ``alpha_damage / 3 +
+    flat_damage``, the client's ``getTorpedoDamage``),
     ``arming_time_s`` (``armingTime``), ``running_depth_m`` (``depth`` x 15,
     ship-model metres), ``caliber_mm`` (``bulletDiametr`` x 1000),
     ``is_deep_water``, ``visibility_factor`` and ``flood_capable``."""
@@ -187,6 +189,7 @@ def _torpedo(proj: dict) -> dict[str, Any]:
         "speed_kts": _num(proj.get("speed")),
         "max_range_m": _r(dist * BW_TO_M) if dist is not None else None,
         "alpha_damage": _num(proj.get("alphaDamage")),
+        "flat_damage": _num(proj.get("damage")),
         "arming_time_s": _num(proj.get("armingTime")),
         "running_depth_m": _r(depth * TORPEDO_DEPTH_TO_MODEL_M) if depth is not None else None,
         "caliber_mm": _r(cal * 1000.0) if cal is not None else None,

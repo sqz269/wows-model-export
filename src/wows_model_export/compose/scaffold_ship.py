@@ -2036,20 +2036,7 @@ def _absorb_gameparams_passes(
 
     # Pass 6: per-torpedo PAPT* enrichment
     try:
-        ballistics_section = doc.get("ballistics") or {}
-        torps = (
-            ballistics_section.get("torpedoes")
-            if isinstance(ballistics_section, dict)
-            else None
-        )
-        if isinstance(torps, dict) and torps:
-            extras_by_id: dict[str, dict] = {}
-            for ammo_id in torps:
-                extras = _gp_autofill.torpedo_profile_extras(ammo_id)
-                if extras:
-                    extras_by_id[ammo_id] = extras
-            if extras_by_id:
-                doc = sidecar.absorb_gameparams_torpedoes(doc, extras_by_id)
+        doc = torpedo_profiles_pass(doc, ship_dict)
     except Exception as e:
         _warn(warnings, f"gameparams torpedo profiles failed ({e})")
 
@@ -2228,6 +2215,26 @@ def hull_components(doc: dict[str, Any], ship_dict: dict[str, Any], hull: str | 
     if hull and hull != variants.get("active_hull"):
         choice = "stock" if hull == variants.get("stock_hull") else hull
     return _gp_autofill.resolve_components(ship_dict, hull_choice=choice)
+
+
+def torpedo_profiles_pass(doc: dict[str, Any], ship_dict: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Enrich every ``doc.ballistics.torpedoes`` entry from its PAPT* GameParams
+    entry (:func:`gameparams_autofill.torpedo_profile_extras`: speed, depth,
+    fuze, the hit's flat damage term, ...). ``ship_dict`` is unused (the
+    torpedoes are looked up by ammo id); it keeps the refresh passes' shape.
+    """
+    ballistics_section = doc.get("ballistics") or {}
+    torps = ballistics_section.get("torpedoes") if isinstance(ballistics_section, dict) else None
+    if not isinstance(torps, dict) or not torps:
+        return doc
+    extras_by_id: dict[str, dict] = {}
+    for ammo_id in torps:
+        extras = _gp_autofill.torpedo_profile_extras(ammo_id)
+        if extras:
+            extras_by_id[ammo_id] = extras
+    if not extras_by_id:
+        return doc
+    return sidecar.absorb_gameparams_torpedoes(doc, extras_by_id)
 
 
 def air_defense_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str, Any]:

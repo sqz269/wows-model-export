@@ -722,6 +722,7 @@ def make_torpedo_profile(
     alpha_damage: float | None = None,
     alpha_piercing_he_mm: float | None = None,
     max_range_m: float | None = None,
+    flat_damage: float | None = None,
     speed_kts: float | None = None,
     running_depth_m: float | None = None,
     arming_time_s: float | None = None,
@@ -744,6 +745,8 @@ def make_torpedo_profile(
 
     All fields are optional. Per-field handling:
 
+    * ``flat_damage``: ``GameParams.damage``, the flat term of a hit: a hit
+      deals ``alpha_damage / 3 + flat_damage`` (``getTorpedoDamage``).
     * ``running_depth_m``: ``GameParams.depth × 15`` (WoWS native unit ≈ 15 m).
     * ``arming_time_s``: ``GameParams.armingTime`` (already in seconds).
     * ``flood_capable``: bool from ``GameParams.floodGeneration``.
@@ -764,6 +767,8 @@ def make_torpedo_profile(
         out["alpha_piercing_he_mm"] = float(alpha_piercing_he_mm)
     if max_range_m is not None:
         out["max_range_m"] = float(max_range_m)
+    if flat_damage is not None:
+        out["flat_damage"] = float(flat_damage)
     if speed_kts is not None:
         out["speed_kts"] = float(speed_kts)
     if running_depth_m is not None:

@@ -11,6 +11,10 @@ passes own.
 Passes (``PASSES``):
 
 * ``air_defense`` — the AA auras (:func:`.scaffold_ship.air_defense_pass`).
+* ``torpedoes`` — every ``ballistics.torpedoes`` entry's GameParams fields
+  (:func:`.scaffold_ship.torpedo_profiles_pass`; added for ``flat_damage``,
+  the flat term of a torpedo hit's damage). It owns the ``ballistics``
+  section and changes only its ``torpedoes`` entries.
 """
 from __future__ import annotations
 
@@ -23,11 +27,12 @@ from ..config import PipelineConfig
 from ..read import gameparams as _gp_read
 from ..resolve import sidecar
 from ..toolkit.gameparams import ensure_dump as _ensure_gameparams_dump
-from .scaffold_ship import air_defense_pass
+from .scaffold_ship import air_defense_pass, torpedo_profiles_pass
 
 #: Pass name → (the sidecar sections it owns, ``fn(doc, ship_dict) -> doc``).
 PASSES: dict[str, tuple[tuple[str, ...], Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]]] = {
     "air_defense": (("air_defense",), air_defense_pass),
+    "torpedoes": (("ballistics",), torpedo_profiles_pass),
 }
 
 
