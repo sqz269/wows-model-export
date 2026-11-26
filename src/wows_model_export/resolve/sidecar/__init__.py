@@ -33,6 +33,7 @@ from ._constants import (
 )
 
 from ._helpers import (
+    normalise_asset_subcategory,
     normalise_hitbox_token,
 )
 
@@ -81,6 +82,7 @@ from ._absorb import (
     absorb_gameparams_variants,
     absorb_gameparams_mounts,
     absorb_gameparams_hull_mounts,
+    absorb_hull_wrecks,
     extract_hull_stats,
     absorb_gameparams_armor,
     absorb_gameparams_hitbox,
@@ -120,6 +122,7 @@ __all__ = [
     'DDS_MIP_SUFFIXES',
     'SidecarSchemaError',
     'normalise_hitbox_token',
+    'normalise_asset_subcategory',
     'make_pipeline',
     'make_ship',
     'make_variants',
@@ -155,6 +158,7 @@ __all__ = [
     'absorb_gameparams_variants',
     'absorb_gameparams_mounts',
     'absorb_gameparams_hull_mounts',
+    'absorb_hull_wrecks',
     'extract_hull_stats',
     'absorb_gameparams_armor',
     'absorb_gameparams_hitbox',

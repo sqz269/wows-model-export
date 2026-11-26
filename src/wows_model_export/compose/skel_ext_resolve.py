@@ -275,6 +275,36 @@ def build_vfs_name_index(
     return index, dead_stems
 
 
+# Dead-variant stems per manifest file, keyed by its path and stamped with its
+# (mtime, size), so a pass run over many sidecars reads the manifest once and a
+# rebuilt manifest is read again.
+_dead_stems_cache: dict[str, tuple[tuple[float, int], frozenset[str]]] = {}
+_dead_stems_lock = threading.Lock()
+
+
+def vfs_dead_stems(manifest_path: Path) -> frozenset[str]:
+    """The lowercased asset ids whose ``<asset_id>_dead.geometry`` the VFS
+    manifest lists: the second value of :func:`build_vfs_name_index`, the set
+    the top-level placements' ``dead_asset_id`` follows. Empty when the
+    manifest is missing."""
+    path = Path(manifest_path)
+    try:
+        st = path.stat()
+    except OSError:
+        return frozenset()
+    key = os.path.normcase(os.path.abspath(path))
+    stamp = (st.st_mtime, st.st_size)
+    with _dead_stems_lock:
+        hit = _dead_stems_cache.get(key)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    _index, dead_stems = build_vfs_name_index(path)
+    stems = frozenset(dead_stems)
+    with _dead_stems_lock:
+        _dead_stems_cache[key] = (stamp, stems)
+    return stems
+
+
 def _load_json(path: Path) -> dict:
     with open(path, encoding="utf-8") as f:
         return json.load(f)
@@ -814,6 +844,7 @@ __all__ = [
     "resolve_decorative_placements",
     # Hull-GLB patch parsing
     "parse_hull_patches",
-    # VFS-manifest helper
+    # VFS-manifest helpers
     "build_vfs_name_index",
+    "vfs_dead_stems",
 ]

@@ -80,6 +80,7 @@ from ..toolkit import armor_json as _toolkit_armor_json
 from ..toolkit import export_ship as _toolkit_export_ship
 from ..toolkit import ingest_ship_bundle as _toolkit_ingest_ship_bundle
 from ..toolkit import ingest_ship_supported as _toolkit_ingest_ship_supported
+from ..toolkit import vfs as toolkit_vfs
 from ..toolkit.gameparams import ensure_dump as _ensure_gameparams_dump
 from ..types import OnEvent, ScaffoldResult
 from . import exterior_hull_hp as _exterior_hull_hp
@@ -2026,6 +2027,16 @@ def _absorb_gameparams_passes(
     except Exception as e:
         _warn(warnings, f"hull display names failed ({e})")
 
+    # Pass 3d: the wreck model of every hull's mounts (dead_asset_id on every
+    # hulls.<H> entry, by the top level's VFS rule), so a consumer that shows
+    # another hull finds the wreck of a mount only that hull places.
+    try:
+        doc = hull_wrecks_pass(
+            doc, ship_dict, manifest_path=toolkit_vfs.default_manifest_path(config),
+        )
+    except Exception as e:
+        _warn(warnings, f"hull wreck models failed ({e})")
+
     # Pass 4: per-mount armor + barbettes
     try:
         mount_armor = _gp_autofill.collect_mount_armor(components)
@@ -2405,6 +2416,26 @@ def hull_mounts_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str
         if by_hp:
             autofill_by_hull[hull_name] = by_hp
     return sidecar.absorb_gameparams_hull_mounts(doc, autofill_by_hull)
+
+
+def hull_wrecks_pass(
+    doc: dict[str, Any],
+    ship_dict: dict[str, Any] | None = None,
+    *,
+    manifest_path: Path | None = None,
+) -> dict[str, Any]:
+    """Name the wreck model (``dead_asset_id``) of every mount on every
+    ``hulls.<H>`` snapshot (:func:`sidecar.absorb_hull_wrecks`), by the VFS rule
+    the top-level placements follow: ``<asset_id>_dead`` when the game's file
+    system holds that geometry, else ``null``. Without it only the rendered
+    hull's mounts (the top level) named a wreck, so a consumer that shows
+    another hull had none for the mounts only that hull places. ``ship_dict``
+    is unused (the refresh passes' signature). ``manifest_path`` defaults to
+    the active build's VFS manifest; a missing manifest leaves ``doc`` as it is.
+    """
+    del ship_dict
+    path = manifest_path if manifest_path is not None else toolkit_vfs.default_manifest_path()
+    return sidecar.absorb_hull_wrecks(doc, _skel_ext_resolve.vfs_dead_stems(path))
 
 
 def hull_stats_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str, Any]:

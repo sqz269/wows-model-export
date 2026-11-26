@@ -24,7 +24,7 @@ from ._constants import (
     PLACEMENT_SECTIONS,
     SidecarSchemaError,
 )
-from ._helpers import _now_iso
+from ._helpers import _now_iso, normalise_asset_subcategory
 from ._io import _deepcopy_jsonish, merge_preserving
 from ._makers import (
     make_armor,
@@ -1166,6 +1166,59 @@ def absorb_gameparams_hull_mounts(
     return out
 
 
+def absorb_hull_wrecks(
+    doc: dict[str, Any],
+    dead_stems: set[str] | frozenset[str],
+) -> dict[str, Any]:
+    """Name the wreck model of every mount on every ``hulls.<H>`` snapshot.
+
+    Each placement entry gets ``dead_asset_id``: ``<asset_id>_dead`` when the
+    game's file system holds that geometry next to the asset (``dead_stems``:
+    the lowercased asset ids with a ``<asset_id>_dead.geometry``), else
+    ``null``. That is the rule the top-level placements follow
+    (:func:`wows_model_export.compose.skel_ext_resolve._stamp_dead_asset_id_in_place`),
+    so a hull's entry names the wreck its top-level twin names, and a mount
+    that only another hull places names its own. The entry's ``subcategory``
+    loses its empty path segments (:func:`normalise_asset_subcategory`).
+
+    An empty ``dead_stems`` (no VFS listing) leaves ``doc`` as it is rather
+    than clearing every wreck. Returns a new doc; ``doc`` is not mutated.
+    """
+    hulls = doc.get("hulls")
+    if not isinstance(hulls, dict) or not hulls or not dead_stems:
+        return doc
+    new_hulls: dict[str, Any] = dict(hulls)
+    changed = False
+    for hull_name, entry in hulls.items():
+        if not isinstance(entry, dict):
+            continue
+        new_entry = dict(entry)
+        for section in PLACEMENT_SECTIONS:
+            items = entry.get(section)
+            if not isinstance(items, list):
+                continue
+            new_items: list[Any] = []
+            for item in items:
+                if isinstance(item, dict):
+                    aid = item.get("asset_id")
+                    new_item = dict(item)
+                    if "subcategory" in new_item:
+                        new_item["subcategory"] = normalise_asset_subcategory(new_item["subcategory"])
+                    if isinstance(aid, str) and aid:
+                        new_item["dead_asset_id"] = f"{aid}_dead" if aid.lower() in dead_stems else None
+                    if new_item != item:
+                        changed = True
+                    item = new_item
+                new_items.append(item)
+            new_entry[section] = new_items
+        new_hulls[hull_name] = new_entry
+    if not changed:
+        return doc
+    out = dict(doc)
+    out["hulls"] = new_hulls
+    return out
+
+
 def absorb_gameparams_armor(
     doc: dict[str, Any],
     *,
@@ -1573,11 +1626,15 @@ def _canonicalise_placement_strings(entry: Any) -> Any:
     a shallow copy). Values like ``"Main"``, ``"AAircraft"``,
     ``"FireControl"`` become ``"main"``, ``"aaircraft"``, ``"firecontrol"``
     — matching the lowercase run-on pattern used by ``subcategory`` /
-    ``scope`` / ``category``."""
+    ``scope`` / ``category``. The ``subcategory`` loses its empty path
+    segments (:func:`normalise_asset_subcategory`: game data can spell a
+    model folder ``missilegun//<asset>``)."""
     if not isinstance(entry, dict):
         return entry
     out = dict(entry)
     sp = out.get("species")
     if isinstance(sp, str) and sp:
         out["species"] = sp.lower()
+    if "subcategory" in out:
+        out["subcategory"] = normalise_asset_subcategory(out["subcategory"])
     return out

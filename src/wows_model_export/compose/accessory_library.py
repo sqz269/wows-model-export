@@ -167,10 +167,14 @@ def _harvest_section_entries(
         category = entry.get("category")
         if not asset_id or not scope or not category:
             continue
+        # The VFS probes (the `_dead` wreck geometry) need the folder's
+        # canonical spelling: game data can write `missilegun//<asset>`.
         key = AssetKey(
             scope=scope,
             category=category,
-            subcategory=entry.get("subcategory"),
+            subcategory=resolve_sidecar.normalise_asset_subcategory(
+                entry.get("subcategory"),
+            ),
             asset_id=asset_id,
         )
         rec = records.setdefault(key, AssetRecord(key=key))

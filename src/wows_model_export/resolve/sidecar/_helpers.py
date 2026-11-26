@@ -56,6 +56,25 @@ def normalise_hitbox_token(token: str) -> str:
     return (stripped or t).lower()
 
 
+def normalise_asset_subcategory(value: Any) -> Any:
+    """Return a placement's ``subcategory`` with its empty path segments
+    dropped (``None`` when nothing is left); any other value passes through.
+
+    The subcategory is the part of the mount model's folder between
+    ``<scope>/<category>/`` and ``<asset_id>/``. Game data can spell that folder
+    with a doubled slash (build 13533378:
+    ``content/gameplay/russia/gun/missilegun//RGR2018_Uran_Launcher/RGR2018_Uran_Launcher.model``),
+    which a path split turns into ``"missilegun/"``. The game's file system
+    reads both spellings as one folder; a key built from the raw value names a
+    folder the VFS does not list, so lookups next to the model (its ``_dead``
+    wreck geometry) miss.
+    """
+    if not isinstance(value, str):
+        return value
+    parts = [p for p in value.replace("\\", "/").split("/") if p]
+    return "/".join(parts) or None
+
+
 # ---------------------------------------------------------------------------
 # Internal normalisers
 # ---------------------------------------------------------------------------

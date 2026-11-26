@@ -22,6 +22,13 @@ Passes (``PASSES``):
   hull's GameParams component (:func:`.scaffold_ship.hull_stats_pass`; added
   for the per-hull ``max_speed_kn``, ``turning_radius_m``, ``detection_km``
   and ``air_detection_km``). Owns ``hulls`` and changes only ``stats``.
+* ``hull_wrecks`` — ``dead_asset_id`` on every ``hulls.<H>`` mount, the
+  wreck model by the top-level placements' rule (``<asset_id>_dead`` when the
+  game's file system holds that geometry, else ``null``), and the entry's
+  ``subcategory`` without empty path segments
+  (:func:`.scaffold_ship.hull_wrecks_pass`; added so a mount that only a
+  non-rendered hull places names its wreck). Reads the active build's VFS
+  manifest instead of GameParams. Owns ``hulls`` and changes only those keys.
 * ``hull_names`` — ``hulls.<H>.display_name``, the hull module's in-game
   name from the game's ``global.mo`` (:func:`.scaffold_ship.hull_names_pass`;
   "Mogami (A)", "Prowler-H1"). Owns ``hulls`` and changes only that key.
@@ -55,6 +62,7 @@ from .scaffold_ship import (
     hull_mounts_pass,
     hull_names_pass,
     hull_stats_pass,
+    hull_wrecks_pass,
     modules_pass,
     ship_class_pass,
     torpedo_profiles_pass,
@@ -67,10 +75,15 @@ PASSES: dict[str, tuple[tuple[str, ...], Callable[[dict[str, Any], dict[str, Any
     "hull_mounts": (("hulls",), hull_mounts_pass),
     "hull_names": (("hulls",), hull_names_pass),
     "hull_stats": (("hulls",), hull_stats_pass),
+    "hull_wrecks": (("hulls",), hull_wrecks_pass),
     "ship_class": (("ship",), ship_class_pass),
     "effects": (("effects", "exteriors"), effects_pass),
     "modules": (("modules",), modules_pass),
 }
+
+#: Passes that read no GameParams: a refresh of only these skips loading the
+#: GameParams cache and passes an empty ship dict.
+NO_GAMEPARAMS: frozenset[str] = frozenset({"hull_wrecks"})
 
 
 def _class_override(ship_dir: Path) -> str | None:
@@ -134,12 +147,15 @@ def refresh_sidecar(
     doc = sidecar.read(path)
     ship = doc.get("ship") or {}
     ship_id = ship.get("wg_ship_full_id") or ship.get("wg_ship_id")
-    if not ship_id:
-        return RefreshResult(label, path, None, "skipped", detail="sidecar names no GameParams ship")
-    _ensure_gameparams_dump(config=config)
-    ship_dict = _gp_read.get_ship(ship_id)
-    if ship_dict is None:
-        return RefreshResult(label, path, ship_id, "skipped", detail="ship not in the GameParams cache")
+    if all(p in NO_GAMEPARAMS for p in passes):
+        ship_dict: dict[str, Any] = {}
+    else:
+        if not ship_id:
+            return RefreshResult(label, path, None, "skipped", detail="sidecar names no GameParams ship")
+        _ensure_gameparams_dump(config=config)
+        ship_dict = _gp_read.get_ship(ship_id)
+        if ship_dict is None:
+            return RefreshResult(label, path, ship_id, "skipped", detail="ship not in the GameParams cache")
 
     new = doc
     owned: set[str] = set()
@@ -174,4 +190,4 @@ def workspace_ship_labels(workspace: Path) -> list[str]:
     return sorted(p.name for p in root.iterdir() if (p / f"{p.name}.meta.json").is_file())
 
 
-__all__ = ["PASSES", "RefreshResult", "refresh_sidecar", "workspace_ship_labels"]
+__all__ = ["NO_GAMEPARAMS", "PASSES", "RefreshResult", "refresh_sidecar", "workspace_ship_labels"]

@@ -137,7 +137,8 @@ def _taxonomy(model_path: Any) -> dict[str, Any]:
     the accessory library's layout); empty for any other path."""
     if not isinstance(model_path, str):
         return {}
-    parts = model_path.replace("\\", "/").strip("/").split("/")
+    # Empty segments dropped: game data can spell a folder `missilegun//<asset>`.
+    parts = [p for p in model_path.replace("\\", "/").split("/") if p]
     if len(parts) < 5 or parts[0] != "content" or parts[1] != "gameplay":
         return {}
     inner = parts[2:-2]  # <scope>/<category>[/<subcategory>...]
