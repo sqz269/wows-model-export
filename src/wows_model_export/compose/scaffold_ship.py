@@ -2187,6 +2187,14 @@ def _absorb_gameparams_passes(
     except Exception as e:
         _warn(warnings, f"gameparams air defense failed ({e})")
 
+    # Pass 11: upgrade modules (every module with the numbers it changes on
+    # each hull it fits; per hull the fitted one). Reads the hull snapshots
+    # the passes above filled. Best-effort.
+    try:
+        doc = modules_pass(doc, ship_dict, db=_hull_name_db(config))
+    except Exception as e:
+        _warn(warnings, f"gameparams modules failed ({e})")
+
     return doc
 
 
@@ -2544,6 +2552,42 @@ def air_defense_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str
         resolve_hull=lambda name: hull_components(doc, ship_dict, name),
     )
     return sidecar.absorb_air_defense(doc, block)
+
+
+def modules_pass(
+    doc: dict[str, Any],
+    ship_dict: dict[str, Any],
+    *,
+    db: Any | None = None,
+) -> dict[str, Any]:
+    """Write ``doc.modules``: every upgrade module of the ship with the
+    numbers it changes on each hull it fits, and per hull the modules of each
+    slot it fits and the one the rest of the sidecar describes
+    (:func:`..resolve.upgrade_modules.collect_modules_block`; METADATA_SPEC
+    §11.6). Each hull resolves its components as the mount passes do
+    (:func:`hull_components`); module names come from the game's
+    ``global.mo`` (``IDS_<MODULE_ID>``: "203 mm/50 3rd Year Type No.2 in a
+    Model E3/E turret", "Type8 mod. 2", "Propulsion: 27,000 hp"), left out
+    when the catalogue is unavailable.
+    """
+    from ..resolve import upgrade_modules as _upgrade_modules
+
+    db = db if db is not None else _hull_name_db()
+
+    def name_of(module_id: str) -> str | None:
+        if db is None:
+            return None
+        name = db.get(f"IDS_{module_id.upper()}")
+        if not isinstance(name, str):
+            return None
+        return name.strip() or None
+
+    block = _upgrade_modules.collect_modules_block(
+        ship_dict, doc,
+        hull_components=lambda name: hull_components(doc, ship_dict, name),
+        display_name=name_of,
+    )
+    return sidecar.absorb_modules(doc, block)
 
 
 # ---------------------------------------------------------------------------

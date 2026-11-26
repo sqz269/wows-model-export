@@ -1449,6 +1449,30 @@ def absorb_air_defense(
     return new_doc
 
 
+def absorb_modules(
+    doc: dict[str, Any],
+    block: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Stamp the ship's upgrade modules into ``doc.modules`` (METADATA_SPEC
+    §11.6): ``entries`` (every module with the numbers it changes on each hull
+    it fits) and ``hulls`` (per hull and slot, the modules it fits and the one
+    the rest of the sidecar describes), from
+    :func:`wows_model_export.resolve.upgrade_modules.collect_modules_block`.
+    ``None`` leaves ``doc`` as it is; an empty block drops the section (a ship
+    with no module of a known slot carries none).
+
+    Replace-by-section: re-running drops stale entries.
+    """
+    if block is None:
+        return doc
+    new_doc = _deepcopy_jsonish(doc)
+    if not block:
+        new_doc.pop("modules", None)
+        return new_doc
+    new_doc["modules"] = {"source": {"generated_at": _now_iso()}, **block}
+    return new_doc
+
+
 def absorb_ballistics_json(
     doc: dict[str, Any],
     ballistics: str | Path | dict[str, Any],

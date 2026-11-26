@@ -90,6 +90,7 @@ from ._absorb import (
     absorb_death_presentation,
     absorb_air_ops,
     absorb_air_defense,
+    absorb_modules,
     absorb_ballistics_json,
 )
 
@@ -163,6 +164,7 @@ __all__ = [
     'absorb_death_presentation',
     'absorb_air_ops',
     'absorb_air_defense',
+    'absorb_modules',
     'absorb_ballistics_json',
     'new_document',
     'new_document_from_placements',

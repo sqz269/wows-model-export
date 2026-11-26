@@ -33,6 +33,10 @@ Passes (``PASSES``):
   rows included), ``effects.laser_beam``, and the same rows in every exterior
   ``effects`` payload with its substitutions (:func:`.scaffold_ship.effects_pass`).
   Hull and AA-aura rows are kept. Owns ``effects`` and ``exteriors``.
+* ``modules`` — every upgrade module with the numbers it changes on each
+  hull it fits, and per hull the modules of each slot it fits and the fitted
+  one (:func:`.scaffold_ship.modules_pass`; METADATA_SPEC §11.6). Owns
+  ``modules``.
 """
 from __future__ import annotations
 
@@ -51,6 +55,7 @@ from .scaffold_ship import (
     hull_mounts_pass,
     hull_names_pass,
     hull_stats_pass,
+    modules_pass,
     ship_class_pass,
     torpedo_profiles_pass,
 )
@@ -64,6 +69,7 @@ PASSES: dict[str, tuple[tuple[str, ...], Callable[[dict[str, Any], dict[str, Any
     "hull_stats": (("hulls",), hull_stats_pass),
     "ship_class": (("ship",), ship_class_pass),
     "effects": (("effects", "exteriors"), effects_pass),
+    "modules": (("modules",), modules_pass),
 }
 
 
