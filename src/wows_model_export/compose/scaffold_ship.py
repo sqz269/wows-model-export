@@ -2020,6 +2020,12 @@ def _absorb_gameparams_passes(
     except Exception as e:
         _warn(warnings, f"gameparams per-hull mount autofill failed ({e})")
 
+    # Pass 3c: each hull's in-game name (global.mo), for a consumer's hull picker.
+    try:
+        doc = hull_names_pass(doc, ship_dict, db=_hull_name_db(config))
+    except Exception as e:
+        _warn(warnings, f"hull display names failed ({e})")
+
     # Pass 4: per-mount armor + barbettes
     try:
         mount_armor = _gp_autofill.collect_mount_armor(components)
@@ -2391,6 +2397,66 @@ def hull_mounts_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str
         if by_hp:
             autofill_by_hull[hull_name] = by_hp
     return sidecar.absorb_gameparams_hull_mounts(doc, autofill_by_hull)
+
+
+_HULL_NAME_DB: list[Any] = []
+
+
+def _hull_name_db(config: PipelineConfig | None = None) -> Any | None:
+    """The game's localization catalogue (``global.mo``), loaded once; None
+    when the game directory is not configured or the catalogue is missing."""
+    if _HULL_NAME_DB:
+        return _HULL_NAME_DB[0]
+    try:
+        cfg = config or PipelineConfig.load()
+        db = _localization.load(game_dir=cfg.require_game_dir())
+    except Exception:
+        return None
+    _HULL_NAME_DB.append(db)
+    return db
+
+
+def hull_names_pass(
+    doc: dict[str, Any],
+    ship_dict: dict[str, Any] | None = None,
+    *,
+    db: Any | None = None,
+) -> dict[str, Any]:
+    """Stamp ``hulls.<H>.display_name``: the name the game gives the hull
+    module, ``IDS_<MODULE_ID>`` in ``global.mo`` (``PJUH621_Mogami_1935`` ->
+    "Mogami (A)", ``PXUH803_HULL_C`` -> "Prowler-H1", ``PXUH050_...`` ->
+    "Hull PSH-1"). A consumer that lets the user pick a hull lists it by this
+    name. A hull whose module has no entry keeps no ``display_name`` (any old
+    one is dropped). ``ship_dict`` is unused (the refresh passes' shape).
+    """
+    hulls = doc.get("hulls")
+    if not isinstance(hulls, dict) or not hulls:
+        return doc
+    db = db if db is not None else _hull_name_db()
+    if db is None:
+        return doc
+    new_hulls = dict(hulls)
+    changed = False
+    for hull_name, entry in hulls.items():
+        if not isinstance(entry, dict):
+            continue
+        module_id = entry.get("module_id")
+        name = db.get(f"IDS_{module_id.upper()}") if isinstance(module_id, str) and module_id else None
+        name = name.strip() if isinstance(name, str) else None
+        if (name or None) == entry.get("display_name"):
+            continue
+        rec = dict(entry)
+        if name:
+            rec["display_name"] = name
+        else:
+            rec.pop("display_name", None)
+        new_hulls[hull_name] = rec
+        changed = True
+    if not changed:
+        return doc
+    out = dict(doc)
+    out["hulls"] = new_hulls
+    return out
 
 
 def ship_class_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str, Any]:

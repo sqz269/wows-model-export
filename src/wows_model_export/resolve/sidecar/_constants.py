@@ -455,6 +455,7 @@ _VARIANTS_ORDER: tuple[str, ...] = (
 #: full GameParams stats remain in the source dump.
 _HULL_ENTRY_ORDER: tuple[str, ...] = (
     "module_id",            # PAUH802_Baltimore_1948
+    "display_name",         # "Baltimore (B)": the module's global.mo name
     "is_stock",             # bool — True iff prev == "" in ShipUpgradeInfo
     "is_active",            # bool — matches variants.active_hull
     "stats",                # dict, see _HULL_STATS_ORDER
