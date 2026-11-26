@@ -872,7 +872,9 @@ def absorb_per_hull_placements(
 
 
 def _extract_hull_stats(ship_dict: dict[str, Any], hull_name: str) -> dict[str, Any]:
-    """Pull the survival- and movement-relevant numbers from ``ship[<hull>]``.
+    """Pull the survival- and movement-relevant numbers from ``ship[<hull>]``:
+    health, rudder time, top speed, turning radius, the surface and air
+    detection ranges, the fire row and the hit-zone HPs.
 
     Hit-zone HPs come from the per-zone subdicts (``Hull`` / ``Bow`` /
     ``Ammo_1`` / ``SS`` / ``SG`` / ``St`` / ``SSC`` / ``Engine`` / etc.) —
@@ -891,6 +893,16 @@ def _extract_hull_stats(ship_dict: dict[str, Any], hull_name: str) -> dict[str, 
 
     health = hull.get("health")
     rudder = hull.get("rudderTime")
+
+    def _num(key: str) -> float | None:
+        try:
+            v = hull.get(key)
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    max_speed_kn = _num("maxSpeed")
+    max_speed_mps = round(max_speed_kn * _KNOTS_TO_MPS, 4) if max_speed_kn is not None else None
 
     fire_row: list[float | None] = [None, None, None]
     burn_nodes = hull.get("burnNodes")
@@ -922,7 +934,22 @@ def _extract_hull_stats(ship_dict: dict[str, Any], hull_name: str) -> dict[str, 
         fire_dps_pct=fire_row[1],
         fire_duration_s=fire_row[2],
         zone_hp=zone_hp or None,
+        max_speed_kn=max_speed_kn,
+        max_speed_mps=max_speed_mps,
+        turning_radius_m=_num("turningRadius"),
+        detection_km=_num("visibilityFactor"),
+        air_detection_km=_num("visibilityFactorByPlane"),
     )
+
+
+#: Knots to m/s, as ``ship.movement`` converts ``maxSpeed`` (gameparams_autofill).
+_KNOTS_TO_MPS = 1.852 / 3.6
+
+
+def extract_hull_stats(ship_dict: dict[str, Any], hull_name: str) -> dict[str, Any]:
+    """The ``hulls.<H>.stats`` block of hull ``hull_name`` from a GameParams
+    Ship entity; ``{}`` when the ship has no such hull."""
+    return _extract_hull_stats(ship_dict, hull_name)
 
 
 def alias_active_hull_to_top_level(

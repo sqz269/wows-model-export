@@ -475,10 +475,20 @@ _HULL_ENTRY_ORDER: tuple[str, ...] = (
 #: ``fire_resistance`` / ``fire_dps_pct`` / ``fire_duration_s`` are the
 #: hull's first ``burnNodes`` row (coefficient, % max HP per second, burn
 #: time in s); older sidecars carry only the coefficient, as
-#: ``burn_node_time_s``.
+#: ``burn_node_time_s``. ``max_speed_kn`` / ``max_speed_mps`` /
+#: ``turning_radius_m`` / ``detection_km`` / ``air_detection_km`` are the
+#: hull module's own speed, turn circle and detection ranges (GameParams
+#: ``maxSpeed`` / ``turningRadius`` / ``visibilityFactor`` /
+#: ``visibilityFactorByPlane``), in the units of ``ship.movement`` and
+#: ``ballistics.ranges``.
 _HULL_STATS_ORDER: tuple[str, ...] = (
     "health",
     "rudder_time_s",
+    "max_speed_kn",
+    "max_speed_mps",
+    "turning_radius_m",
+    "detection_km",
+    "air_detection_km",
     "fire_resistance",
     "fire_dps_pct",
     "fire_duration_s",

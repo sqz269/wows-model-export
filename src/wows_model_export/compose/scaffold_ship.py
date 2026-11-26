@@ -2399,6 +2399,37 @@ def hull_mounts_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str
     return sidecar.absorb_gameparams_hull_mounts(doc, autofill_by_hull)
 
 
+def hull_stats_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str, Any]:
+    """Re-derive ``hulls.<H>.stats`` for every hull from its GameParams hull
+    component (:func:`sidecar.extract_hull_stats`, the block the per-hull
+    absorb writes): health, rudder time, top speed, turning radius, the
+    detection ranges, the fire row and the hit-zone HPs. A consumer that shows
+    another hull reads that hull's numbers here (``ship.movement`` and
+    ``ballistics.ranges`` carry one hull's). A hull the ship entity does not
+    name keeps its block.
+    """
+    hulls = doc.get("hulls")
+    if not isinstance(hulls, dict) or not hulls or not isinstance(ship_dict, dict):
+        return doc
+    new_hulls = dict(hulls)
+    changed = False
+    for hull_name, entry in hulls.items():
+        if not isinstance(entry, dict):
+            continue
+        stats = sidecar.extract_hull_stats(ship_dict, hull_name)
+        if not stats or stats == entry.get("stats"):
+            continue
+        rec = dict(entry)
+        rec["stats"] = stats
+        new_hulls[hull_name] = rec
+        changed = True
+    if not changed:
+        return doc
+    out = dict(doc)
+    out["hulls"] = new_hulls
+    return out
+
+
 _HULL_NAME_DB: list[Any] = []
 
 

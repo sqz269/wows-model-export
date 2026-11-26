@@ -18,6 +18,10 @@ Passes (``PASSES``):
 * ``hull_mounts`` — the per-placement GameParams fields (``misc_filter``,
   arcs, reload, ...) on every ``hulls.<H>`` snapshot, from that hull's
   components (:func:`.scaffold_ship.hull_mounts_pass`). Owns ``hulls``.
+* ``hull_stats`` — every ``hulls.<H>.stats`` block re-derived from that
+  hull's GameParams component (:func:`.scaffold_ship.hull_stats_pass`; added
+  for the per-hull ``max_speed_kn``, ``turning_radius_m``, ``detection_km``
+  and ``air_detection_km``). Owns ``hulls`` and changes only ``stats``.
 * ``hull_names`` — ``hulls.<H>.display_name``, the hull module's in-game
   name from the game's ``global.mo`` (:func:`.scaffold_ship.hull_names_pass`;
   "Mogami (A)", "Prowler-H1"). Owns ``hulls`` and changes only that key.
@@ -46,6 +50,7 @@ from .scaffold_ship import (
     effects_pass,
     hull_mounts_pass,
     hull_names_pass,
+    hull_stats_pass,
     ship_class_pass,
     torpedo_profiles_pass,
 )
@@ -56,6 +61,7 @@ PASSES: dict[str, tuple[tuple[str, ...], Callable[[dict[str, Any], dict[str, Any
     "torpedoes": (("ballistics",), torpedo_profiles_pass),
     "hull_mounts": (("hulls",), hull_mounts_pass),
     "hull_names": (("hulls",), hull_names_pass),
+    "hull_stats": (("hulls",), hull_stats_pass),
     "ship_class": (("ship",), ship_class_pass),
     "effects": (("effects", "exteriors"), effects_pass),
 }

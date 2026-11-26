@@ -185,6 +185,11 @@ def make_hull_stats(
     fire_dps_pct: float | None = None,
     fire_duration_s: float | None = None,
     zone_hp: dict[str, float] | None = None,
+    max_speed_kn: float | None = None,
+    max_speed_mps: float | None = None,
+    turning_radius_m: float | None = None,
+    detection_km: float | None = None,
+    air_detection_km: float | None = None,
 ) -> dict[str, Any]:
     """Build the ``stats`` sub-block of a hull entry. All fields nullable.
 
@@ -193,12 +198,30 @@ def make_hull_stats(
     percentage of max HP one fire burns per second, and one fire's burn time
     in seconds. Sidecars made before these fields carried only the
     coefficient, under the name ``burn_node_time_s``.
+
+    The speed, turning and detection fields are the hull module's own values,
+    in the units of ``ship.movement`` and ``ballistics.ranges`` (which carry
+    one hull's): ``max_speed_kn`` (GameParams ``maxSpeed``) with
+    ``max_speed_mps``, ``turning_radius_m`` (``turningRadius``),
+    ``detection_km`` (``visibilityFactor``) and ``air_detection_km``
+    (``visibilityFactorByPlane``). The engine module's ``speedCoef`` is not
+    applied.
     """
     out: dict[str, Any] = {}
     if health is not None:
         out["health"] = float(health)
     if rudder_time_s is not None:
         out["rudder_time_s"] = float(rudder_time_s)
+    if max_speed_kn is not None:
+        out["max_speed_kn"] = float(max_speed_kn)
+    if max_speed_mps is not None:
+        out["max_speed_mps"] = float(max_speed_mps)
+    if turning_radius_m is not None:
+        out["turning_radius_m"] = float(turning_radius_m)
+    if detection_km is not None:
+        out["detection_km"] = float(detection_km)
+    if air_detection_km is not None:
+        out["air_detection_km"] = float(air_detection_km)
     if fire_resistance is not None:
         out["fire_resistance"] = float(fire_resistance)
     if fire_dps_pct is not None:
