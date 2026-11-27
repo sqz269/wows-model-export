@@ -2202,7 +2202,7 @@ def _absorb_gameparams_passes(
     # each hull it fits; per hull the fitted one). Reads the hull snapshots
     # the passes above filled. Best-effort.
     try:
-        doc = modules_pass(doc, ship_dict, db=_hull_name_db(config))
+        doc = modules_pass(doc, ship_dict, db=_hull_name_db(config), config=config)
     except Exception as e:
         _warn(warnings, f"gameparams modules failed ({e})")
 
@@ -2595,6 +2595,7 @@ def modules_pass(
     ship_dict: dict[str, Any],
     *,
     db: Any | None = None,
+    config: PipelineConfig | None = None,
 ) -> dict[str, Any]:
     """Write ``doc.modules``: every upgrade module of the ship with the
     numbers it changes on each hull it fits, and per hull the modules of each
@@ -2605,8 +2606,16 @@ def modules_pass(
     ``global.mo`` (``IDS_<MODULE_ID>``: "203 mm/50 3rd Year Type No.2 in a
     Model E3/E turret", "Type8 mod. 2", "Propulsion: 27,000 hp"), left out
     when the catalogue is unavailable.
+
+    A gun or torpedo module's hardpoints that the hull places no mount at
+    (Icarus' top torpedo module: ``HP_BGT_1`` / ``HP_BGT_3``) get the
+    transform the export writes for a mount there, read from the hull model's
+    node tree (:class:`.module_hardpoints.HardpointResolver`, the toolkit's
+    ``dump-bones`` over the VFS manifest of ``config``). Only such a module
+    reads the game files; a hardpoint that cannot be read keeps no transform.
     """
     from ..resolve import upgrade_modules as _upgrade_modules
+    from . import module_hardpoints as _module_hardpoints
 
     db = db if db is not None else _hull_name_db()
 
@@ -2618,10 +2627,28 @@ def modules_pass(
             return None
         return name.strip() or None
 
+    resolver: list[Any] = []
+
+    def placement(hull_component: str, hp_name: str, model_path: str) -> dict[str, Any] | None:
+        try:
+            if not resolver:
+                from .accessory_library import _load_manifest_paths
+                from ..toolkit import vfs as _vfs
+
+                resolver.append(_module_hardpoints.HardpointResolver(
+                    ship_dict,
+                    manifest_paths=_load_manifest_paths(Path(_vfs.default_manifest_path(config))),
+                    config=config,
+                ))
+            return resolver[0](hull_component, hp_name, model_path)
+        except Exception:  # noqa: BLE001 - best-effort: the record keeps no transform
+            return None
+
     block = _upgrade_modules.collect_modules_block(
         ship_dict, doc,
         hull_components=lambda name: hull_components(doc, ship_dict, name),
         display_name=name_of,
+        hardpoint_placement=placement,
     )
     return sidecar.absorb_modules(doc, block)
 

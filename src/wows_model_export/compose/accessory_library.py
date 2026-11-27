@@ -65,6 +65,10 @@ from ._step_runner import StepRunner
 
 PLACEMENT_SECTIONS = ("turrets", "secondaries", "antiair", "torpedoes", "accessories")
 
+#: The mount sections of an upgrade module's per-hull record
+#: (``modules.entries.<id>.hulls.<H>``, METADATA_SPEC §11.6).
+MODULE_MOUNT_SECTIONS = ("turrets", "torpedoes")
+
 # Placement attachments file suffix (mirrors the resolver's constant
 # without an import-time dependency on it).
 ATTACHMENTS_SUFFIX = ".attached_accessories.json"
@@ -336,6 +340,39 @@ def _harvest_exterior_decoratives(
             )
 
 
+def _harvest_module_mounts(
+    doc: dict,
+    *,
+    ship_name: str,
+    records: dict[AssetKey, AssetRecord],
+) -> None:
+    """Harvest the mount models of every gun and torpedo upgrade module
+    (``modules.entries.<id>.hulls.<H>.turrets`` / ``.torpedoes``; METADATA_SPEC
+    §11.6). A module other than a hull's fitted one can mount models that no
+    placement section names (Clemson's top battery: the twin 4-inch
+    ``AGS058_4in50_Twin_Mount`` / ``AGS129_4in50_Twin_Mount_shield``; Icarus'
+    top torpedo module: ``BGT095_21in_5tube_Torpedo_Tube``), so without this
+    walk a consumer that fits the module has no model for it. Each record
+    carries its model's own ``scope`` / ``category`` / ``subcategory`` (from
+    the GameParams model path), so no taxonomy is borrowed.
+    """
+    modules = doc.get("modules")
+    entries = modules.get("entries") if isinstance(modules, dict) else None
+    if not isinstance(entries, dict):
+        return
+    for entry in entries.values():
+        hulls = entry.get("hulls") if isinstance(entry, dict) else None
+        if not isinstance(hulls, dict):
+            continue
+        for rec in hulls.values():
+            if not isinstance(rec, dict):
+                continue
+            for section in MODULE_MOUNT_SECTIONS:
+                _harvest_section_entries(
+                    rec.get(section), ship_name=ship_name, records=records,
+                )
+
+
 def union_assets(
     sidecar_files: list[Path],
     *,
@@ -373,6 +410,10 @@ def union_assets(
                         hull_entry.get(section),
                         ship_name=ship_name, records=records,
                     )
+
+        # Upgrade modules: the mount models of every gun and torpedo module,
+        # including those no hull's placements name.
+        _harvest_module_mounts(doc, ship_name=ship_name, records=records)
 
         # Ship-exterior unification: swap-target assets referenced only by
         # exteriors[].mounts[] (never by any placement section).

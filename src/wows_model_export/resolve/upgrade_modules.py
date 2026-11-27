@@ -25,7 +25,10 @@ section (METADATA_SPEC §11.6):
       ``display_name``), ``max_dist_m`` (the battery's ``maxDist``),
       ``effects`` (the mount rows and the munition rows of its ammo) and
       ``unplaced_hp_names`` when some of its hardpoints are ones the hull
-      does not place (no transform for them in the sidecar);
+      does not place; such a record carries the ``transform`` and
+      ``parent_section`` the export writes for a mount there when the caller
+      resolves the hardpoint in the hull's model (``hardpoint_placement``),
+      else none;
     * ``_Torpedoes``: ``torpedoes`` (launcher records as above, the torpedo
       fields: tubes, reload, arcs, rotation) and ``effects`` (munition rows);
     * ``_Suo``: ``fire_control`` (``max_dist_coef``, ``sigma_count_coef``);
@@ -85,6 +88,16 @@ def _hull_modules(sui: dict[str, Any]) -> dict[str, str]:
         if isinstance(hull, list) and hull and isinstance(hull[0], str) and hull[0] not in out:
             out[hull[0]] = mid
     return out
+
+
+def _hull_component_name(sui: dict[str, Any], hull_mid: str, fallback: str) -> str:
+    """The hull component (``A_Hull``) the ``_Hull`` module ``hull_mid`` brings."""
+    mod = sui.get(hull_mid)
+    comps = mod.get("components") if isinstance(mod, dict) else None
+    for cid in (comps or {}).get("hull") or []:
+        if isinstance(cid, str) and cid:
+            return cid
+    return fallback
 
 
 def module_component_for_hull(
@@ -307,6 +320,7 @@ def collect_modules_block(
     *,
     hull_components: Callable[[str], dict[str, Any]],
     display_name: Callable[[str], str | None] | None = None,
+    hardpoint_placement: Callable[[str, str, str], dict[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     """The sidecar's ``modules`` section for ``ship`` (a GameParams Vehicle).
 
@@ -315,6 +329,14 @@ def collect_modules_block(
     components the way the mount passes do; ``display_name(module_id)`` gives
     the game's name of a module (``None`` when it has none). Empty when the
     ship lists no module of a known slot or the sidecar has no hulls.
+
+    ``hardpoint_placement(hull_component, hp_name, model_path)`` gives the
+    placement (``{"transform", "parent_section"}``) of mount model
+    ``model_path`` (its GameParams ``.model`` path) at a hardpoint of the
+    hull component's model, or ``None`` when the model holds no such node.
+    It is asked only for a module's hardpoints the hull does not place, and
+    its answer is merged into that hardpoint's record; without it those
+    records carry no transform.
     """
     sui = ship.get("ShipUpgradeInfo") if isinstance(ship, dict) else None
     hulls = doc.get("hulls") if isinstance(doc, dict) else None
@@ -359,6 +381,21 @@ def collect_modules_block(
                     unplaced = [r["hp_name"] for r in nums.get(section) or [] if r["hp_name"] not in placed_hps]
                     if unplaced:
                         nums["unplaced_hp_names"] = unplaced
+                        if hardpoint_placement is not None:
+                            # The game mounts a module's models at the module's
+                            # own hardpoints: give each the export's transform.
+                            hull_comp = _hull_component_name(sui, hull_mid, hull_name)
+                            models = {
+                                hp: m.get("model")
+                                for hp, m in _mount_items(ship[cid], SLOT_COMPONENT_KEYS[slot], wcs)
+                            }
+                            for r in nums.get(section) or []:
+                                model = models.get(r["hp_name"])
+                                if r["hp_name"] not in unplaced or not isinstance(model, str):
+                                    continue
+                                got = hardpoint_placement(hull_comp, r["hp_name"], model)
+                                if got:
+                                    r.update(got)
                 numbers[mid] = nums
                 rec = entries.get(mid)
                 if rec is None:

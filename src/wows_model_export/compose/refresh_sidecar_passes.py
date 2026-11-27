@@ -4,9 +4,10 @@ A pass added to the scaffold (``_absorb_gameparams_passes``) reaches a ship's
 sidecar only when the ship is scaffolded again, which also re-runs the toolkit
 export, the armor and ammo steps and every other pass. This module re-runs only
 the named passes on the sidecar on disk, against the GameParams cache, and
-writes the sidecar back in its canonical form. No toolkit call is made and no
-other section is rebuilt, so the sidecar changes only in the sections the
-passes own.
+writes the sidecar back in its canonical form. No other section is rebuilt,
+so the sidecar changes only in the sections the passes own. No toolkit call is
+made, except by ``modules`` for a module with hardpoints the hull places no
+mount at (it reads the hull model's node tree, below).
 
 Passes (``PASSES``):
 
@@ -44,8 +45,10 @@ Passes (``PASSES``):
   Hull and AA-aura rows are kept. Owns ``effects`` and ``exteriors``.
 * ``modules`` — every upgrade module with the numbers it changes on each
   hull it fits, and per hull the modules of each slot it fits and the fitted
-  one (:func:`.scaffold_ship.modules_pass`; METADATA_SPEC §11.6). Owns
-  ``modules``.
+  one (:func:`.scaffold_ship.modules_pass`; METADATA_SPEC §11.6). A gun or
+  torpedo module's hardpoints the hull places no mount at get the export's
+  transform from the hull model's node tree (the toolkit's ``dump-bones``,
+  against the refresh's config). Owns ``modules``.
 """
 from __future__ import annotations
 
@@ -177,6 +180,10 @@ def refresh_sidecar(
                 notes.append(f"hull_wrecks skipped: no VFS manifest at {manifest}")
                 continue
             new = fn(new, ship_dict, manifest_path=manifest)
+            continue
+        if name == "modules":
+            # The hull visuals of this refresh's config (its --build / --workspace).
+            new = fn(new, ship_dict, config=config)
             continue
         new = fn(new, ship_dict)
     detail = "; ".join(notes)
