@@ -2668,8 +2668,13 @@ def modules_pass(
     (:class:`.module_hardpoints.HardpointResolver`, the toolkit's
     ``dump-bones`` over the VFS manifest of ``config``). Only a module whose
     models differ from the placed ones reads the game files (their bones; the
-    hull's nodes only where they turn differently); a hardpoint that cannot be
-    read keeps no transform.
+    hull's nodes only where they turn differently). A hardpoint no hull visual
+    holds (a compound one) keeps no transform. When such a record cannot be
+    read at all (no VFS manifest, or an empty one; no visual of the hull model
+    in it; a toolkit call that fails), the pass raises
+    :class:`ModuleHardpointsUnreadable` naming each one and ``doc`` keeps its
+    ``modules`` section: a record written without its transform would fall
+    back to the placement's, which turns a differing model the wrong way.
     """
     from ..resolve import upgrade_modules as _upgrade_modules
     from . import module_hardpoints as _module_hardpoints
@@ -2684,23 +2689,30 @@ def modules_pass(
             return None
         return name.strip() or None
 
+    # [HardpointResolver, why the manifest is empty ("" when it is not)], made once.
     resolver: list[Any] = []
+    problems: list[str] = []
 
     def placement(
         hull_component: str, hp_name: str, model_path: str, placed_model_path: str | None,
     ) -> dict[str, Any] | None:
+        where = f"{hull_component} {hp_name} ({model_path})"
         try:
             if not resolver:
                 from .accessory_library import _load_manifest_paths
                 from ..toolkit import vfs as _vfs
 
-                resolver.append(_module_hardpoints.HardpointResolver(
-                    ship_dict,
-                    manifest_paths=_load_manifest_paths(Path(_vfs.default_manifest_path(config))),
-                    config=config,
-                ))
+                manifest = Path(_vfs.default_manifest_path(config))
+                # An empty manifest still lets two mount models' bones be compared;
+                # only a hull's nodes need it (the resolver raises then).
+                paths = _load_manifest_paths(manifest) if manifest.is_file() else set()
+                resolver.extend([
+                    _module_hardpoints.HardpointResolver(ship_dict, manifest_paths=paths, config=config),
+                    "" if paths else f" (no VFS manifest paths at {manifest})",
+                ])
             return resolver[0](hull_component, hp_name, model_path, placed_model_path)
-        except Exception:  # noqa: BLE001 - best-effort: the record keeps no transform
+        except Exception as e:  # noqa: BLE001 - reported below; the section is kept
+            problems.append(f"{where}: {e}{resolver[1] if len(resolver) > 1 else ''}")
             return None
 
     block = _upgrade_modules.collect_modules_block(
@@ -2709,7 +2721,23 @@ def modules_pass(
         display_name=name_of,
         hardpoint_placement=placement,
     )
+    if problems:
+        raise ModuleHardpointsUnreadable(problems)
     return sidecar.absorb_modules(doc, block)
+
+
+class ModuleHardpointsUnreadable(RuntimeError):
+    """:func:`modules_pass` could not read the transform of one or more module
+    records that need their own; the doc's ``modules`` section is kept.
+    ``problems`` lists each one."""
+
+    def __init__(self, problems: list[str]) -> None:
+        self.problems = list(problems)
+        shown = "; ".join(self.problems[:4])
+        more = f"; and {len(self.problems) - 4} more" if len(self.problems) > 4 else ""
+        super().__init__(
+            f"{len(self.problems)} module hardpoint(s) unreadable, the modules section is kept: {shown}{more}"
+        )
 
 
 # ---------------------------------------------------------------------------

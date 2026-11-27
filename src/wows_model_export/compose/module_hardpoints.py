@@ -27,7 +27,9 @@ hull section whose ``.visual`` holds the node (``Bow`` / ``MidFront`` /
 ``MidBack`` / ``Stern``, ``Full`` for the bare model), as for a placed mount;
 when several of the model folder's visuals hold the node, the last by name
 wins, as in the export. A hardpoint no hull visual holds (a compound one, on
-another mount) gets no transform. Asked with the placed model, the resolver
+another mount) gets no transform; a hull model with no visual in the manifest
+at all (another build's manifest, an empty one) raises ``LookupError``, since
+then no hardpoint of it can be read. Asked with the placed model, the resolver
 answers only when the two models' bones turn differently (their 3x3 rotations
 differ; no bone counts as identity); otherwise the placement's transform holds.
 """
@@ -172,7 +174,9 @@ class HardpointResolver:
 
     def hull_hardpoints(self, model_path: str) -> dict[str, tuple[list[float], str]]:
         """``HP_*`` node -> (native world matrix, section) over every visual
-        of the hull model's folder, in name order (the last holder wins)."""
+        of the hull model's folder, in name order (the last holder wins).
+        Raises ``LookupError`` when the manifest holds no visual in that
+        folder (the manifest is another build's, or empty)."""
         hit = self._hulls.get(model_path)
         if hit is not None:
             return hit
@@ -184,6 +188,8 @@ class HardpointResolver:
             for q in self._paths
             if q.endswith(".geometry") and q.rsplit("/", 1)[0] == folder
         )
+        if not stems:
+            raise LookupError(f"the VFS manifest holds no visual of {model_path}")
         out: dict[str, tuple[list[float], str]] = {}
         prefix = f"{model_dir}_"
         for stem in stems:

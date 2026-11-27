@@ -57,7 +57,9 @@ Passes (``PASSES``):
   torpedo module's hardpoints the hull places no mount at, or another model
   that turns differently, get the export's transform from the hull model's
   node tree (the toolkit's ``dump-bones``, against the refresh's config).
-  Owns ``modules``.
+  When such a record cannot be read (no VFS manifest, no visual of the hull
+  in it, a toolkit failure) the pass is skipped, the old section kept, and
+  the result says so. Owns ``modules``.
 """
 from __future__ import annotations
 
@@ -72,6 +74,7 @@ from ..resolve import sidecar
 from ..toolkit import vfs as _toolkit_vfs
 from ..toolkit.gameparams import ensure_dump as _ensure_gameparams_dump
 from .scaffold_ship import (
+    ModuleHardpointsUnreadable,
     air_defense_pass,
     effects_pass,
     hull_mounts_pass,
@@ -193,8 +196,12 @@ def refresh_sidecar(
             new = fn(new, ship_dict, manifest_path=manifest)
             continue
         if name == "modules":
-            # The hull visuals of this refresh's config (its --build / --workspace).
-            new = fn(new, ship_dict, config=config)
+            # The hull visuals of this refresh's config (its --build / --workspace). A module
+            # record whose transform cannot be read keeps the old section, and the result says so.
+            try:
+                new = fn(new, ship_dict, config=config)
+            except ModuleHardpointsUnreadable as e:
+                notes.append(f"modules skipped: {e}")
             continue
         new = fn(new, ship_dict)
     detail = "; ".join(notes)
