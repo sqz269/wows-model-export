@@ -25,10 +25,14 @@ section (METADATA_SPEC §11.6):
       ``display_name``), ``max_dist_m`` (the battery's ``maxDist``),
       ``effects`` (the mount rows and the munition rows of its ammo) and
       ``unplaced_hp_names`` when some of its hardpoints are ones the hull
-      does not place; such a record carries the ``transform`` and
-      ``parent_section`` the export writes for a mount there when the caller
-      resolves the hardpoint in the hull's model (``hardpoint_placement``),
-      else none;
+      does not place. A record carries the ``transform`` and
+      ``parent_section`` the export writes for its model at its hardpoint
+      when the hull places no mount there, or places another model whose
+      ``Rotate_Y_BlendBone`` turns differently (the placement's transform
+      strips the placed model's bone, so it would turn the module's model
+      the wrong way: 180 degrees for a Z-mirror against an identity bone),
+      as the caller resolves it (``hardpoint_placement``); else none (the
+      placement's transform holds);
     * ``_Torpedoes``: ``torpedoes`` (launcher records as above, the torpedo
       fields: tubes, reload, arcs, rotation) and ``effects`` (munition rows);
     * ``_Suo``: ``fire_control`` (``max_dist_coef``, ``sigma_count_coef``);
@@ -162,6 +166,17 @@ def _taxonomy(model_path: Any) -> dict[str, Any]:
         "category": inner[1],
         "subcategory": "/".join(inner[2:]) or None,
     }
+
+
+def _model_path_of(placement: dict[str, Any]) -> str | None:
+    """The ``.model`` path of a placement's model from its library taxonomy
+    (the inverse of :func:`_taxonomy`); ``None`` without one."""
+    asset, scope, category = placement.get("asset_id"), placement.get("scope"), placement.get("category")
+    if not (isinstance(asset, str) and isinstance(scope, str) and isinstance(category, str)):
+        return None
+    sub = placement.get("subcategory")
+    folder = "/".join(x for x in ("content/gameplay", scope, category, sub if isinstance(sub, str) else "") if x)
+    return f"{folder}/{asset}/{asset}.model"
 
 
 def _mount_record(key: str, component: dict[str, Any], hp: str, mount: dict[str, Any]) -> dict[str, Any]:
@@ -320,7 +335,7 @@ def collect_modules_block(
     *,
     hull_components: Callable[[str], dict[str, Any]],
     display_name: Callable[[str], str | None] | None = None,
-    hardpoint_placement: Callable[[str, str, str], dict[str, Any] | None] | None = None,
+    hardpoint_placement: Callable[[str, str, str, str | None], dict[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     """The sidecar's ``modules`` section for ``ship`` (a GameParams Vehicle).
 
@@ -330,13 +345,17 @@ def collect_modules_block(
     the game's name of a module (``None`` when it has none). Empty when the
     ship lists no module of a known slot or the sidecar has no hulls.
 
-    ``hardpoint_placement(hull_component, hp_name, model_path)`` gives the
-    placement (``{"transform", "parent_section"}``) of mount model
-    ``model_path`` (its GameParams ``.model`` path) at a hardpoint of the
-    hull component's model, or ``None`` when the model holds no such node.
-    It is asked only for a module's hardpoints the hull does not place, and
-    its answer is merged into that hardpoint's record; without it those
-    records carry no transform.
+    ``hardpoint_placement(hull_component, hp_name, model_path,
+    placed_model_path)`` gives the placement (``{"transform",
+    "parent_section"}``) of mount model ``model_path`` (its GameParams
+    ``.model`` path) at a hardpoint of the hull component's model, or
+    ``None``: when the model holds no such node, or when
+    ``placed_model_path`` (the model the hull places there; ``None`` for a
+    hardpoint it does not place) turns the same way, so the placement's
+    transform holds. It is asked for a module's hardpoints the hull does not
+    place and for those where the hull places another model, and its answer
+    is merged into that hardpoint's record; without it no record carries a
+    transform.
     """
     sui = ship.get("ShipUpgradeInfo") if isinstance(ship, dict) else None
     hulls = doc.get("hulls") if isinstance(doc, dict) else None
@@ -381,21 +400,31 @@ def collect_modules_block(
                     unplaced = [r["hp_name"] for r in nums.get(section) or [] if r["hp_name"] not in placed_hps]
                     if unplaced:
                         nums["unplaced_hp_names"] = unplaced
-                        if hardpoint_placement is not None:
-                            # The game mounts a module's models at the module's
-                            # own hardpoints: give each the export's transform.
-                            hull_comp = _hull_component_name(sui, hull_mid, hull_name)
-                            models = {
-                                hp: m.get("model")
-                                for hp, m in _mount_items(ship[cid], SLOT_COMPONENT_KEYS[slot], wcs)
-                            }
-                            for r in nums.get(section) or []:
-                                model = models.get(r["hp_name"])
-                                if r["hp_name"] not in unplaced or not isinstance(model, str):
-                                    continue
-                                got = hardpoint_placement(hull_comp, r["hp_name"], model)
-                                if got:
-                                    r.update(got)
+                    if hardpoint_placement is not None:
+                        # The game mounts a module's models at the module's own
+                        # hardpoints: give a record the export's transform where
+                        # the hull places nothing, or another model.
+                        hull_comp = _hull_component_name(sui, hull_mid, hull_name)
+                        models = {
+                            hp: m.get("model")
+                            for hp, m in _mount_items(ship[cid], SLOT_COMPONENT_KEYS[slot], wcs)
+                        }
+                        placed_at = {
+                            p.get("hp_name"): p for p in entry.get(section) or [] if isinstance(p, dict)
+                        }
+                        for r in nums.get(section) or []:
+                            model = models.get(r["hp_name"])
+                            if not isinstance(model, str):
+                                continue
+                            placed = placed_at.get(r["hp_name"])
+                            if placed is not None and placed.get("asset_id") == r.get("asset_id"):
+                                continue
+                            got = hardpoint_placement(
+                                hull_comp, r["hp_name"], model,
+                                None if placed is None else _model_path_of(placed),
+                            )
+                            if got:
+                                r.update(got)
                 numbers[mid] = nums
                 rec = entries.get(mid)
                 if rec is None:

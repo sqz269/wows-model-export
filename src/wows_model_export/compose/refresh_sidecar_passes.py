@@ -6,8 +6,9 @@ export, the armor and ammo steps and every other pass. This module re-runs only
 the named passes on the sidecar on disk, against the GameParams cache, and
 writes the sidecar back in its canonical form. No other section is rebuilt,
 so the sidecar changes only in the sections the passes own. No toolkit call is
-made, except by ``modules`` for a module with hardpoints the hull places no
-mount at (it reads the hull model's node tree, below).
+made, except by ``modules`` for a gun or torpedo module whose models differ
+from the hull's placed ones (it reads their bones and, where the hull places
+nothing or a model that turns differently, the hull model's node tree, below).
 
 Passes (``PASSES``):
 
@@ -46,9 +47,10 @@ Passes (``PASSES``):
 * ``modules`` — every upgrade module with the numbers it changes on each
   hull it fits, and per hull the modules of each slot it fits and the fitted
   one (:func:`.scaffold_ship.modules_pass`; METADATA_SPEC §11.6). A gun or
-  torpedo module's hardpoints the hull places no mount at get the export's
-  transform from the hull model's node tree (the toolkit's ``dump-bones``,
-  against the refresh's config). Owns ``modules``.
+  torpedo module's hardpoints the hull places no mount at, or another model
+  that turns differently, get the export's transform from the hull model's
+  node tree (the toolkit's ``dump-bones``, against the refresh's config).
+  Owns ``modules``.
 """
 from __future__ import annotations
 

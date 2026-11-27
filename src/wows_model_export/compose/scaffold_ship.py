@@ -2608,11 +2608,15 @@ def modules_pass(
     when the catalogue is unavailable.
 
     A gun or torpedo module's hardpoints that the hull places no mount at
-    (Icarus' top torpedo module: ``HP_BGT_1`` / ``HP_BGT_3``) get the
-    transform the export writes for a mount there, read from the hull model's
-    node tree (:class:`.module_hardpoints.HardpointResolver`, the toolkit's
-    ``dump-bones`` over the VFS manifest of ``config``). Only such a module
-    reads the game files; a hardpoint that cannot be read keeps no transform.
+    (Icarus' top torpedo module: ``HP_BGT_1`` / ``HP_BGT_3``), or another
+    model whose ``Rotate_Y_BlendBone`` turns differently (Mogami's 203 mm
+    twins, Clemson's shielded twin 4-inch), get the transform the export
+    writes for the module's model there, read from the hull model's node tree
+    (:class:`.module_hardpoints.HardpointResolver`, the toolkit's
+    ``dump-bones`` over the VFS manifest of ``config``). Only a module whose
+    models differ from the placed ones reads the game files (their bones; the
+    hull's nodes only where they turn differently); a hardpoint that cannot be
+    read keeps no transform.
     """
     from ..resolve import upgrade_modules as _upgrade_modules
     from . import module_hardpoints as _module_hardpoints
@@ -2629,7 +2633,9 @@ def modules_pass(
 
     resolver: list[Any] = []
 
-    def placement(hull_component: str, hp_name: str, model_path: str) -> dict[str, Any] | None:
+    def placement(
+        hull_component: str, hp_name: str, model_path: str, placed_model_path: str | None,
+    ) -> dict[str, Any] | None:
         try:
             if not resolver:
                 from .accessory_library import _load_manifest_paths
@@ -2640,7 +2646,7 @@ def modules_pass(
                     manifest_paths=_load_manifest_paths(Path(_vfs.default_manifest_path(config))),
                     config=config,
                 ))
-            return resolver[0](hull_component, hp_name, model_path)
+            return resolver[0](hull_component, hp_name, model_path, placed_model_path)
         except Exception:  # noqa: BLE001 - best-effort: the record keeps no transform
             return None
 

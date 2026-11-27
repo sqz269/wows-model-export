@@ -1,14 +1,17 @@
-"""Placements for upgrade-module mounts at hardpoints the hull does not place.
+"""Placements for upgrade-module mounts the hull's placements do not fit.
 
 A gun or torpedo module can mount at hardpoints its hull's fitted component
 leaves empty: Icarus' top torpedo module (``AB2_Torpedoes``) puts its 5-tube
 launchers at ``HP_BGT_1`` / ``HP_BGT_3`` while the stock quads sit at
 ``HP_BGT_2`` / ``HP_BGT_4``. The game builds a ship from the components its
 selected modules bring (METADATA_SPEC §11.5), so with that module fitted those
-two hardpoints carry the launchers and the stock ones carry nothing. The
-sidecar's placements have transforms only for the hardpoints the export
-placed; :class:`HardpointResolver` gives a module record at any other
-hardpoint the transform the export writes for a placed mount:
+two hardpoints carry the launchers and the stock ones carry nothing. And a
+placement's transform has the placed model's ``Rotate_Y_BlendBone`` stripped,
+so it turns another model with a different bone the wrong way (Mogami's 203 mm
+twins, a Z-mirror bone, at hardpoints whose 155 mm triples have an identity
+bone; Clemson's shielded twin 4-inch, identity, where a Z-mirrored single
+stood: 180 degrees each). :class:`HardpointResolver` gives a module record at
+such a hardpoint the transform the export writes for a placed mount:
 
     the hull's ``HP_*`` node world matrix (its local matrix composed with
     every parent's in the hull ``.visual`` that holds it) times the inverse
@@ -24,7 +27,9 @@ hull section whose ``.visual`` holds the node (``Bow`` / ``MidFront`` /
 ``MidBack`` / ``Stern``, ``Full`` for the bare model), as for a placed mount;
 when several of the model folder's visuals hold the node, the last by name
 wins, as in the export. A hardpoint no hull visual holds (a compound one, on
-another mount) gets no transform.
+another mount) gets no transform. Asked with the placed model, the resolver
+answers only when the two models' bones turn differently (their 3x3 rotations
+differ; no bone counts as identity); otherwise the placement's transform holds.
 """
 from __future__ import annotations
 
@@ -38,6 +43,10 @@ NATIVE_TO_METRES: float = 15.0
 
 #: The mount model node whose rest rotation the export strips from a mount.
 ROTATE_Y_BLEND_BONE: str = "Rotate_Y_BlendBone"
+
+#: Mount model -> its bone's local matrix, shared by every resolver of one
+#: process (a refresh over every sidecar reads each model once).
+_BONE_CACHE: dict[str, list[float] | None] = {}
 
 _IDENTITY: tuple[float, ...] = (
     1.0, 0.0, 0.0, 0.0,
@@ -127,10 +136,12 @@ def _geometry_of(model_path: str) -> str:
 
 
 class HardpointResolver:
-    """``resolver(hull_name, hp_name, model_path)`` -> ``{"transform",
-    "parent_section"}`` or ``None``: the placement of the mount model
-    ``model_path`` (its GameParams ``.model`` path) at hardpoint ``hp_name``
-    of hull component ``hull_name`` of ``ship`` (a GameParams Vehicle).
+    """``resolver(hull_name, hp_name, model_path, placed_model_path=None)`` ->
+    ``{"transform", "parent_section"}`` or ``None``: the placement of the
+    mount model ``model_path`` (its GameParams ``.model`` path) at hardpoint
+    ``hp_name`` of hull component ``hull_name`` of ``ship`` (a GameParams
+    Vehicle); ``None`` also when ``placed_model_path`` (the model the hull
+    places there) turns the same way (:meth:`turns_alike`).
 
     ``manifest_paths`` is the set of VFS file paths (no leading ``/``) the
     hull visuals are looked up in; ``fetch_bones(geometry_vfs_path)`` returns
@@ -187,14 +198,31 @@ class HardpointResolver:
     def mount_bone(self, model_path: str) -> list[float] | None:
         """The mount model's ``Rotate_Y_BlendBone`` local matrix, or ``None``."""
         if model_path not in self._bones:
-            doc = self._fetch_doc(_geometry_of(model_path))
-            self._bones[model_path] = _local_matrix(doc, ROTATE_Y_BLEND_BONE)
+            geometry = _geometry_of(model_path)
+            if self._fetch is None and geometry in _BONE_CACHE:
+                self._bones[model_path] = _BONE_CACHE[geometry]
+            else:
+                doc = self._fetch_doc(geometry)
+                self._bones[model_path] = _local_matrix(doc, ROTATE_Y_BLEND_BONE)
+                if self._fetch is None:
+                    _BONE_CACHE[geometry] = self._bones[model_path]
         return self._bones[model_path]
 
-    def __call__(self, hull_name: str, hp_name: str, model_path: str) -> dict[str, Any] | None:
+    def turns_alike(self, model_a: str, model_b: str) -> bool:
+        """Whether two mount models' ``Rotate_Y_BlendBone`` rotations are
+        equal (no bone: identity), so one placement transform fits both."""
+        a = self.mount_bone(model_a) or list(_IDENTITY)
+        b = self.mount_bone(model_b) or list(_IDENTITY)
+        return all(abs(a[i] - b[i]) < 1e-4 for i in (0, 1, 2, 4, 5, 6, 8, 9, 10))
+
+    def __call__(
+        self, hull_name: str, hp_name: str, model_path: str, placed_model_path: str | None = None,
+    ) -> dict[str, Any] | None:
         hull = self._ship.get(hull_name)
         hull_model = hull.get("model") if isinstance(hull, dict) else None
         if not isinstance(hull_model, str) or not hull_model or not isinstance(model_path, str) or not model_path:
+            return None
+        if placed_model_path and self.turns_alike(placed_model_path, model_path):
             return None
         hit = self.hull_hardpoints(hull_model).get(hp_name)
         if hit is None:
