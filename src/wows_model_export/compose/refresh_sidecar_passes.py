@@ -17,9 +17,16 @@ Passes (``PASSES``):
   (:func:`.scaffold_ship.torpedo_profiles_pass`; added for ``flat_damage``,
   the flat term of a torpedo hit's damage). It owns the ``ballistics``
   section and changes only its ``torpedoes`` entries.
+* ``mounts`` — the per-placement GameParams fields (``misc_filter``, arcs,
+  reload, ``ammo_ids``, ...) on the top-level placements, from the rendered
+  hull's components (:func:`.scaffold_ship.mounts_refresh_pass`, scaffold
+  pass 3; added so a placement's ammo comes from the component its other
+  fields come from). A mesh-swap variant folder keeps its ``misc_filter`` (the
+  variant swap's). Owns the placement sections; every field it does not write
+  is kept.
 * ``hull_mounts`` — the per-placement GameParams fields (``misc_filter``,
-  arcs, reload, ...) on every ``hulls.<H>`` snapshot, from that hull's
-  components (:func:`.scaffold_ship.hull_mounts_pass`). Owns ``hulls``.
+  arcs, reload, ``ammo_ids``, ...) on every ``hulls.<H>`` snapshot, from that
+  hull's components (:func:`.scaffold_ship.hull_mounts_pass`). Owns ``hulls``.
 * ``hull_stats`` — every ``hulls.<H>.stats`` block re-derived from that
   hull's GameParams component (:func:`.scaffold_ship.hull_stats_pass`; added
   for the per-hull ``max_speed_kn``, ``turning_radius_m``, ``detection_km``
@@ -72,6 +79,7 @@ from .scaffold_ship import (
     hull_stats_pass,
     hull_wrecks_pass,
     modules_pass,
+    mounts_refresh_pass,
     ship_class_pass,
     torpedo_profiles_pass,
 )
@@ -80,6 +88,7 @@ from .scaffold_ship import (
 PASSES: dict[str, tuple[tuple[str, ...], Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]]] = {
     "air_defense": (("air_defense",), air_defense_pass),
     "torpedoes": (("ballistics",), torpedo_profiles_pass),
+    "mounts": (sidecar.PLACEMENT_SECTIONS, mounts_refresh_pass),
     "hull_mounts": (("hulls",), hull_mounts_pass),
     "hull_names": (("hulls",), hull_names_pass),
     "hull_stats": (("hulls",), hull_stats_pass),

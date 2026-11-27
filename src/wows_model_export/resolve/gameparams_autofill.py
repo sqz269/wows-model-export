@@ -1156,7 +1156,10 @@ def autofill_for_hp(
     placement) or isn't carried by any active group.
 
     The returned dict uses sidecar field names (``caliber_mm``, etc.); a
-    caller passes it straight through ``merge_preserving``.
+    caller passes it straight through ``merge_preserving``. A mount that
+    lists ammo gets ``ammo_ids`` (its ``ammoList``) from the same component
+    as the other fields, so a placement never fires one component's ammo
+    with another's reload or caliber.
     """
     if not hp_name or not isinstance(hp_name, str):
         return {}
@@ -1214,6 +1217,19 @@ def autofill_for_hp(
         # directors / finders / radars / airArmament / missiles:
         # display_name + miscFilter only.
 
+        # The ammo the mount fires, from the same component as every other
+        # field here. The export's per-hull placements name the ammo of the
+        # hull module's first listed component, which on a slot of several
+        # options that share one model (Kagero's B_Hull lists the Type 90 and
+        # Type 93 torpedo components on one launcher; Furutaka's lists the
+        # 200 mm and 203 mm batteries on one turret model) is not the
+        # component these fields describe.
+        ammo = mount.get("ammoList")
+        if isinstance(ammo, list):
+            ammo_ids = [a for a in ammo if isinstance(a, str) and a]
+            if ammo_ids:
+                out["ammo_ids"] = ammo_ids
+
         # Per-mount damage state — HP / destructibility / crit / repair from the
         # mount's nested HitLocation* block (sibling to the arc/deadMesh fields
         # above). The block's key name varies by mount type, so probe the same
@@ -1268,7 +1284,9 @@ def placed_group(
     several components (Mogami's hulls list ``artillery: [AB1_Artillery,
     AB2_Artillery]``, 155 mm and 203 mm guns), and the export places the hull
     module's first one while :func:`resolve_components` follows the standalone
-    module's chain. When both hold the placed model, ``components`` wins.
+    module's chain. When both hold the placed model, ``components`` wins, and
+    the placement's ammo follows it with the other fields
+    (:func:`autofill_for_hp` writes ``ammo_ids``).
     ``(None, None)`` when no group has ``hp_name``.
     """
     group_key = next(
@@ -1330,12 +1348,14 @@ def placed_components(
     Each placement (``hp_name``, ``asset_id``, optional ``ammo_ids``; the
     first one per hardpoint counts, as in the autofill passes) swaps its
     hardpoint's mount for the placed component's. A placement that lists
-    ``ammo_ids`` also sets its mount's ``ammoList`` to them: the export's
-    ammo pick (the hull module's first listed component) can differ from the
-    component a shared model resolves to (Kagero's B_Hull lists two torpedo
-    components on one launcher model), and the ammo a placement names is the
-    ammo a consumer fires from it. Hardpoints with no placement keep their
-    mount. The input is not modified.
+    ``ammo_ids`` also sets its mount's ``ammoList`` to them: the ammo a
+    placement names is the ammo a consumer fires from it. Since the mount
+    autofill writes ``ammo_ids`` from the placed component (:func:`autofill_for_hp`)
+    the two agree on a refreshed sidecar; on one written before that, the
+    export's ammo pick (the hull module's first listed component) could differ
+    from the component a shared model resolves to (Kagero's B_Hull lists two
+    torpedo components on one launcher model). Hardpoints with no placement
+    keep their mount. The input is not modified.
     """
     out = dict(components)
     copied: set[str] = set()

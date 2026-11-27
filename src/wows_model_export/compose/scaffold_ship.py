@@ -1985,31 +1985,7 @@ def _absorb_gameparams_passes(
 
     # Pass 3: per-placement gameplay autofill
     try:
-        # The fields follow the hull whose mounts the export placed
-        # (variants.rendered_hull, an exact mount match), as
-        # hulls.<rendered_hull> does in pass 3b. The best-overlap detection
-        # above resolves a tie to the active hull (Kagero's B_Hull holds all
-        # of A_Hull's mounts plus AA guns), which would stamp the upgraded
-        # modules' numbers on the stock hull's mounts.
-        mount_components = components
-        shown = (doc.get("variants") or {}).get("rendered_hull")
-        if isinstance(shown, str) and shown in (doc.get("hulls") or {}):
-            mount_components = hull_components(doc, ship_dict, shown)
-        autofill_by_hp: dict[str, dict] = {}
-        for section in sidecar.PLACEMENT_SECTIONS:
-            for entry in doc.get(section) or []:
-                if not isinstance(entry, dict):
-                    continue
-                hp = entry.get("hp_name")
-                if not isinstance(hp, str) or hp in autofill_by_hp:
-                    continue
-                fields = _gp_autofill.autofill_for_placement(
-                    ship_dict, mount_components, hp, entry.get("asset_id"),
-                )
-                if fields:
-                    autofill_by_hp[hp] = fields
-        if autofill_by_hp:
-            doc = sidecar.absorb_gameparams_mounts(doc, autofill_by_hp)
+        doc = mounts_pass(doc, ship_dict, components=components)
     except Exception as e:
         _warn(warnings, f"gameparams mount autofill failed ({e})")
 
@@ -2382,6 +2358,83 @@ def effects_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str, An
     return new
 
 
+def mounts_pass(
+    doc: dict[str, Any],
+    ship_dict: dict[str, Any],
+    *,
+    components: dict[str, Any] | None = None,
+    keep_fields: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Stamp the per-placement GameParams fields on the top-level placements
+    (scaffold pass 3).
+
+    The fields follow the hull whose mounts the export placed
+    (``variants.rendered_hull``, an exact mount match), as
+    ``hulls.<rendered_hull>`` does in :func:`hull_mounts_pass`. The
+    best-overlap detection resolves a tie to the active hull (Kagero's B_Hull
+    holds all of A_Hull's mounts plus AA guns), which would stamp the upgraded
+    modules' numbers on the stock hull's mounts. A sidecar that names no
+    rendered hull among its ``hulls`` uses ``components`` (the scaffold's
+    resolve), else :func:`hull_components` of :func:`rendered_hull_name`.
+    Each placement gets :func:`gameparams_autofill.autofill_for_placement`:
+    ``misc_filter``, arcs, reload, barrels, ``ammo_ids``, ``hit_location``, ...
+    except the fields named in ``keep_fields``, which keep their values.
+    """
+    mount_components = components
+    shown = (doc.get("variants") or {}).get("rendered_hull")
+    if isinstance(shown, str) and shown in (doc.get("hulls") or {}):
+        mount_components = hull_components(doc, ship_dict, shown)
+    elif mount_components is None:
+        mount_components = hull_components(doc, ship_dict, rendered_hull_name(doc))
+    autofill_by_hp: dict[str, dict] = {}
+    for section in sidecar.PLACEMENT_SECTIONS:
+        for entry in doc.get(section) or []:
+            if not isinstance(entry, dict):
+                continue
+            hp = entry.get("hp_name")
+            if not isinstance(hp, str) or hp in autofill_by_hp:
+                continue
+            fields = _gp_autofill.autofill_for_placement(
+                ship_dict, mount_components, hp, entry.get("asset_id"),
+            )
+            for name in keep_fields:
+                fields.pop(name, None)
+            if fields:
+                autofill_by_hp[hp] = fields
+    if not autofill_by_hp:
+        return doc
+    return sidecar.absorb_gameparams_mounts(doc, autofill_by_hp)
+
+
+def mounts_refresh_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str, Any]:
+    """:func:`mounts_pass` over a sidecar already in the workspace (the
+    refresh pass ``mounts``). A mesh-swap variant folder (its ship block lists
+    ``variant_swapped_asset_ids``) keeps its placements' ``misc_filter``: the
+    scaffold's variant swap writes the variant's own after pass 3 (Azur
+    Hindenburg's AzurLane gun deck, Azur Massachusetts' renamed attachments),
+    and pass 3 alone would put the base ship's back. Each section keeps its
+    order (the merge lists the stamped entries first, which on Baltimore_1944
+    would move 27 accessories and change nothing else)."""
+    variant = bool((doc.get("ship") or {}).get("variant_swapped_asset_ids"))
+    new = mounts_pass(doc, ship_dict, keep_fields=("misc_filter",) if variant else ())
+    if new is doc:
+        return doc
+    out = dict(new)
+    for section in sidecar.PLACEMENT_SECTIONS:
+        old_items, new_items = doc.get(section), new.get(section)
+        if not isinstance(old_items, list) or not isinstance(new_items, list):
+            continue
+        rank = {
+            item.get("instance_id"): i for i, item in enumerate(old_items)
+            if isinstance(item, dict) and isinstance(item.get("instance_id"), str)
+        }
+        out[section] = sorted(
+            new_items,
+            key=lambda item: rank.get(item.get("instance_id") if isinstance(item, dict) else None, len(rank)),
+        )
+    return out
+
+
 def hull_mounts_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str, Any]:
     """Stamp the per-placement GameParams fields on every ``hulls.<H>`` snapshot.
 
@@ -2390,7 +2443,7 @@ def hull_mounts_pass(doc: dict[str, Any], ship_dict: dict[str, Any]) -> dict[str
     pass resolves the rendered hull; the component of a slot that holds the
     placed asset when the hull lists several): ``misc_filter``, the arcs
     (``yaw_range_deg``, ``elev_range_deg``, dead zones), reload, barrels,
-    ``display_name``, ``hit_location``, ... So ``hulls.<rendered hull>``
+    ``ammo_ids``, ``display_name``, ``hit_location``, ... So ``hulls.<rendered hull>``
     carries the same fields as the top-level placements, and every other hull
     its own.
     """
