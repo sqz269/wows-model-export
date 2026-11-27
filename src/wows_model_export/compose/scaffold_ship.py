@@ -2431,10 +2431,15 @@ def hull_wrecks_pass(
     hull's mounts (the top level) named a wreck, so a consumer that shows
     another hull had none for the mounts only that hull places. ``ship_dict``
     is unused (the refresh passes' signature). ``manifest_path`` defaults to
-    the active build's VFS manifest; a missing manifest leaves ``doc`` as it is.
+    the environment's build's VFS manifest; the callers that hold a config (the
+    scaffold, :func:`.refresh_sidecar_passes.refresh_sidecar`) pass their
+    build's. A missing manifest leaves ``doc`` as it is and says so on stderr.
     """
     del ship_dict
     path = manifest_path if manifest_path is not None else toolkit_vfs.default_manifest_path()
+    if not Path(path).is_file():
+        print(f"hull_wrecks_pass: no VFS manifest at {path}; the hulls are left as they are", file=sys.stderr)
+        return doc
     return sidecar.absorb_hull_wrecks(doc, _skel_ext_resolve.vfs_dead_stems(path))
 
 

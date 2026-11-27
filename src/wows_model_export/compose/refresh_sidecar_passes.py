@@ -27,8 +27,10 @@ Passes (``PASSES``):
   game's file system holds that geometry, else ``null``), and the entry's
   ``subcategory`` without empty path segments
   (:func:`.scaffold_ship.hull_wrecks_pass`; added so a mount that only a
-  non-rendered hull places names its wreck). Reads the active build's VFS
-  manifest instead of GameParams. Owns ``hulls`` and changes only those keys.
+  non-rendered hull places names its wreck). Reads the VFS manifest of the
+  refresh's config (``--build N`` / ``--workspace`` included) instead of
+  GameParams; with no manifest there the pass is skipped and the result says
+  so. Owns ``hulls`` and changes only those keys.
 * ``hull_names`` — ``hulls.<H>.display_name``, the hull module's in-game
   name from the game's ``global.mo`` (:func:`.scaffold_ship.hull_names_pass`;
   "Mogami (A)", "Prowler-H1"). Owns ``hulls`` and changes only that key.
@@ -55,6 +57,7 @@ from typing import Any
 from ..config import PipelineConfig
 from ..read import gameparams as _gp_read
 from ..resolve import sidecar
+from ..toolkit import vfs as _toolkit_vfs
 from ..toolkit.gameparams import ensure_dump as _ensure_gameparams_dump
 from .scaffold_ship import (
     air_defense_pass,
@@ -159,13 +162,24 @@ def refresh_sidecar(
 
     new = doc
     owned: set[str] = set()
+    notes: list[str] = []
     for name in passes:
         sections, fn = PASSES[name]
         owned.update(sections)
         if name == "ship_class" and _class_override(path.parent):
             # A hand-typed class wins over the caliber rule.
             continue
+        if name == "hull_wrecks":
+            # The manifest of this refresh's config (its --build / --workspace), not the
+            # environment's default; a missing one skips the pass and says so, instead of "unchanged".
+            manifest = _toolkit_vfs.default_manifest_path(config)
+            if not Path(manifest).is_file():
+                notes.append(f"hull_wrecks skipped: no VFS manifest at {manifest}")
+                continue
+            new = fn(new, ship_dict, manifest_path=manifest)
+            continue
         new = fn(new, ship_dict)
+    detail = "; ".join(notes)
     # Keep the old stamp on a section that came back equal.
     for key in owned:
         if key in doc and key in new and _strip_source(doc[key]) == _strip_source(new[key]):
@@ -175,11 +189,12 @@ def refresh_sidecar(
     if stray:
         raise ValueError(f"{label}: passes {list(passes)} changed sections they do not own: {stray}")
     if not changed:
-        return RefreshResult(label, path, ship_id, "unchanged")
+        status = "skipped" if len(notes) == len(passes) else "unchanged"
+        return RefreshResult(label, path, ship_id, status, detail=detail)
     if dry_run:
-        return RefreshResult(label, path, ship_id, "would-write", changed)
+        return RefreshResult(label, path, ship_id, "would-write", changed, detail=detail)
     sidecar.write(new, path)
-    return RefreshResult(label, path, ship_id, "written", changed)
+    return RefreshResult(label, path, ship_id, "written", changed, detail=detail)
 
 
 def workspace_ship_labels(workspace: Path) -> list[str]:
